@@ -1,0 +1,591 @@
+diff -ruN a/src/elements/text.rs b/src/elements/text.rs
+--- a/src/elements/text.rs	2026-10-02 18:00:01
++++ b/src/elements/text.rs	2026-10-02 18:00:01
+@@ -316,6 +316,13 @@
+     lines: SmallVec<[WrappedLine; 1]>,
+     line_height: Pixels,
+     wrap_width: Option<Pixels>,
++    /// ket patch: the width the text was cut to with an ellipsis, when it was.
++    ///
++    /// Part of the cache key below alongside `wrap_width`: a flex item is
++    /// measured more than once per frame, first against the whole container
++    /// and last against the slot it actually gets, and a layout cut for the
++    /// first width is wrong for the second.
++    truncate_width: Option<Pixels>,
+     size: Option<Size<Pixels>>,
+     bounds: Option<Bounds<Pixels>>,
+ }
+@@ -334,7 +341,8 @@
+             .line_height
+             .to_pixels(font_size.into(), window.rem_size());
+ 
+-        let mut runs = if let Some(runs) = runs {
++        // ket patch: no longer `mut`; each measurement clones these below.
++        let runs = if let Some(runs) = runs {
+             runs
+         } else {
+             vec![text_style.to_run(text.len())]
+@@ -370,13 +378,26 @@
+                         (None, "".into())
+                     };
+ 
++                // ket patch: the cut width is part of the cache key.
+                 if let Some(text_layout) = element_state.0.borrow().as_ref()
+-                    && text_layout.size.is_some()
++                    && let Some(size) = text_layout.size
+                     && (wrap_width.is_none() || wrap_width == text_layout.wrap_width)
++                    && (truncate_width == text_layout.truncate_width
++                        // Cut to a different width, but the cached layout fits
++                        // it whole, so cutting again would change nothing.
++                        || (text_layout.len == text.len()
++                            && truncate_width.is_none_or(|width| size.width <= width)))
+                 {
+-                    return text_layout.size.unwrap();
++                    return size;
+                 }
+ 
++                // ket patch: cut from the element's own runs every time. `truncate_line`
++                // shortens the runs it is given to fit the cut text, and this
++                // closure runs more than once per frame: shortening the shared
++                // runs left the next measurement laying out the whole text
++                // with the first cut's runs — a label drawn only as far as they
++                // reached, or a run ending inside a character, which panics.
++                let mut runs = runs.clone();
+                 let mut line_wrapper = cx.text_system().line_wrapper(text_style.font(), font_size);
+                 let text = if let Some(truncate_width) = truncate_width {
+                     line_wrapper.truncate_line(
+@@ -406,6 +427,7 @@
+                         len: 0,
+                         line_height,
+                         wrap_width,
++                        truncate_width, // ket patch
+                         size: Some(Size::default()),
+                         bounds: None,
+                     });
+@@ -424,6 +446,7 @@
+                     len,
+                     line_height,
+                     wrap_width,
++                    truncate_width, // ket patch
+                     size: Some(size),
+                     bounds: None,
+                 });
+diff -ruN a/src/platform/mac/display_link.rs b/src/platform/mac/display_link.rs
+--- a/src/platform/mac/display_link.rs	2026-10-02 18:00:01
++++ b/src/platform/mac/display_link.rs	2026-10-02 18:00:01
+@@ -14,6 +14,11 @@
+ pub struct DisplayLink {
+     display_link: Option<sys::DisplayLink>,
+     frame_requests: dispatch_source_t,
++    // ket patch: whether `start` has run more recently than `stop`. Both are
++    // now called to pause and resume frames (see `MacWindowState::
++    // pause_frames`), and the dispatch source's suspend count must stay
++    // balanced — libdispatch aborts the process on an over-resume.
++    running: bool,
+ }
+ 
+ impl DisplayLink {
+@@ -61,11 +66,16 @@
+             Ok(Self {
+                 display_link: Some(display_link),
+                 frame_requests,
++                running: false,
+             })
+         }
+     }
+ 
+     pub fn start(&mut self) -> Result<()> {
++        if self.running {
++            return Ok(());
++        }
++        self.running = true;
+         unsafe {
+             dispatch_resume(crate::dispatch_sys::dispatch_object_t {
+                 _ds: self.frame_requests,
+@@ -76,6 +86,10 @@
+     }
+ 
+     pub fn stop(&mut self) -> Result<()> {
++        if !self.running {
++            return Ok(());
++        }
++        self.running = false;
+         unsafe {
+             dispatch_suspend(crate::dispatch_sys::dispatch_object_t {
+                 _ds: self.frame_requests,
+diff -ruN a/src/platform/mac/window.rs b/src/platform/mac/window.rs
+--- a/src/platform/mac/window.rs	2026-10-02 18:00:01
++++ b/src/platform/mac/window.rs	2026-10-02 18:00:01
+@@ -47,7 +47,10 @@
+     path::PathBuf,
+     ptr::{self, NonNull},
+     rc::Rc,
+-    sync::{Arc, Weak},
++    sync::{
++        Arc, Weak,
++        atomic::{AtomicBool, Ordering},
++    },
+     time::Duration,
+ };
+ use util::ResultExt;
+@@ -392,6 +395,10 @@
+     native_view: NonNull<Object>,
+     blurred_view: Option<id>,
+     display_link: Option<DisplayLink>,
++    // ket patch: whether frame requests are paused because the window had
++    // nothing to draw. Shared with the waker, which reads it without taking
++    // this state's lock. See `PlatformWindow::pause_frames`.
++    frames_paused: Arc<AtomicBool>,
+     renderer: renderer::Renderer,
+     request_frame_callback: Option<Box<dyn FnMut(RequestFrameOptions)>>,
+     event_callback: Option<Box<dyn FnMut(PlatformInput) -> crate::DispatchEventResult>>,
+@@ -430,8 +437,6 @@
+                 return;
+             }
+ 
+-            let titlebar_height = self.titlebar_height();
+-
+             unsafe {
+                 let close_button: id = msg_send![
+                     self.native_window,
+@@ -449,32 +454,66 @@
+                 let mut close_button_frame: CGRect = msg_send![close_button, frame];
+                 let mut min_button_frame: CGRect = msg_send![min_button, frame];
+                 let mut zoom_button_frame: CGRect = msg_send![zoom_button, frame];
+-                let mut origin = point(
+-                    traffic_light_position.x,
+-                    titlebar_height
+-                        - traffic_light_position.y
+-                        - px(close_button_frame.size.height as f32),
++                let button_height = close_button_frame.size.height;
++                let button_spacing = min_button_frame.origin.x - close_button_frame.origin.x;
++
++                // ket patch: the buttons live in AppKit's title-bar container,
++                // which is only as tall as a title bar. Placed further down than
++                // that — ket centres them in a header card much taller than a
++                // title bar — they draw outside it, and a view never receives a
++                // click outside its superview's bounds, so the buttons stop
++                // working. So the container is resized to hold them where they
++                // are asked to be: tall enough to reach them, and only as wide
++                // as the three buttons, so it cannot take clicks meant for the
++                // content beside them. AppKit lays the container back out on a
++                // resize, which is why this runs on every one.
++                let x = f64::from(f32::from(traffic_light_position.x));
++                let y = f64::from(f32::from(traffic_light_position.y));
++                let titlebar_view: id = msg_send![close_button, superview];
++                let container: id = msg_send![titlebar_view, superview];
++                let window_frame = NSWindow::frame(self.native_window);
++                // Four points of slack past the last button on the right and
++                // below the row, and nothing more: the content beside and under
++                // the lights keeps its clicks.
++                const SLACK: f64 = 4.0;
++                let container_height = y + button_height + SLACK;
++                let container_width =
++                    x + button_spacing * 2.0 + zoom_button_frame.size.width + SLACK;
++                let mut container_frame: CGRect = msg_send![container, frame];
++                container_frame.size.height = container_height;
++                container_frame.size.width = container_width;
++                container_frame.origin.x = 0.0;
++                container_frame.origin.y = window_frame.size.height - container_height;
++                let _: () = msg_send![container, setFrame: container_frame];
++                let titlebar_frame = CGRect::new(
++                    &CGPoint::new(0.0, 0.0),
++                    &core_graphics::geometry::CGSize::new(container_width, container_height),
+                 );
+-                let button_spacing =
+-                    px((min_button_frame.origin.x - close_button_frame.origin.x) as f32);
++                let _: () = msg_send![titlebar_view, setFrame: titlebar_frame];
+ 
+-                close_button_frame.origin = CGPoint::new(origin.x.into(), origin.y.into());
++                // Measured from the bottom of the title-bar view, which now
++                // fills the container.
++                let origin_y = SLACK;
++                let mut origin_x = x;
++
++                close_button_frame.origin = CGPoint::new(origin_x, origin_y);
+                 let _: () = msg_send![close_button, setFrame: close_button_frame];
+-                origin.x += button_spacing;
++                origin_x += button_spacing;
+ 
+-                min_button_frame.origin = CGPoint::new(origin.x.into(), origin.y.into());
++                min_button_frame.origin = CGPoint::new(origin_x, origin_y);
+                 let _: () = msg_send![min_button, setFrame: min_button_frame];
+-                origin.x += button_spacing;
++                origin_x += button_spacing;
+ 
+-                zoom_button_frame.origin = CGPoint::new(origin.x.into(), origin.y.into());
++                zoom_button_frame.origin = CGPoint::new(origin_x, origin_y);
+                 let _: () = msg_send![zoom_button, setFrame: zoom_button_frame];
+-                origin.x += button_spacing;
+             }
+         }
+     }
+ 
+     fn start_display_link(&mut self) {
+         self.stop_display_link();
++        // ket patch: a new link starts running, so nothing is paused.
++        self.frames_paused.store(false, Ordering::Release);
+         unsafe {
+             if !self
+                 .native_window
+@@ -546,14 +585,6 @@
+         get_scale_factor(self.native_window)
+     }
+ 
+-    fn titlebar_height(&self) -> Pixels {
+-        unsafe {
+-            let frame = NSWindow::frame(self.native_window);
+-            let content_layout_rect: CGRect = msg_send![self.native_window, contentLayoutRect];
+-            px((frame.size.height - content_layout_rect.size.height) as f32)
+-        }
+-    }
+-
+     fn window_bounds(&self) -> WindowBounds {
+         if self.is_fullscreen() {
+             WindowBounds::Fullscreen(self.fullscreen_restore_bounds)
+@@ -689,6 +720,7 @@
+                 native_view: NonNull::new_unchecked(native_view),
+                 blurred_view: None,
+                 display_link: None,
++                frames_paused: Arc::new(AtomicBool::new(false)),
+                 renderer: renderer::new_renderer(
+                     renderer_context,
+                     native_window as *mut _,
+@@ -1380,6 +1412,39 @@
+         self.0.as_ref().lock().request_frame_callback = Some(callback);
+     }
+ 
++    // ket patch: see `PlatformWindow::set_traffic_light_position`.
++    fn set_traffic_light_position(&self, position: Point<Pixels>) {
++        let mut lock = self.0.lock();
++        lock.traffic_light_position = Some(position);
++        lock.move_traffic_light();
++    }
++
++    // ket patch: see `PlatformWindow::pause_frames`. Stops the display link
++    // rather than dropping it: a dropped link is leaked (see `DisplayLink`'s
++    // `Drop`), and pausing happens every time the window goes idle.
++    fn pause_frames(&self) {
++        let mut lock = self.0.lock();
++        let state = &mut *lock;
++        if let Some(link) = state.display_link.as_mut() {
++            link.stop().log_err();
++            state.frames_paused.store(true, Ordering::Release);
++        }
++    }
++
++    // ket patch: see `PlatformWindow::frame_waker`. Called on every
++    // invalidation, so the common case — frames already running — is one
++    // atomic read and no lock.
++    fn frame_waker(&self) -> Option<Rc<dyn Fn()>> {
++        let (paused, executor) = {
++            let lock = self.0.lock();
++            (lock.frames_paused.clone(), lock.executor.clone())
++        };
++        let state = Arc::downgrade(&self.0);
++        Some(Rc::new(move || {
++            resume_frames(&state, &paused, &executor);
++        }))
++    }
++
+     fn on_input(&self, callback: Box<dyn FnMut(PlatformInput) -> crate::DispatchEventResult>) {
+         self.0.as_ref().lock().event_callback = Some(callback);
+     }
+@@ -2148,6 +2213,36 @@
+         #[cfg(not(feature = "macos-blade"))]
+         lock.renderer.set_presents_with_transaction(false);
+         lock.start_display_link();
++    }
++}
++
++/// ket patch: restarts a window's paused display link.
++///
++/// If this thread already holds the window's lock — a platform callback that
++/// has not let go of it yet, calling back into the app — starting the link
++/// here would deadlock, so the restart is deferred to the main queue, which
++/// runs it once that callback has returned.
++fn resume_frames(
++    state: &Weak<Mutex<MacWindowState>>,
++    paused: &Arc<AtomicBool>,
++    executor: &ForegroundExecutor,
++) {
++    if !paused.swap(false, Ordering::AcqRel) {
++        return;
++    }
++    let Some(strong) = state.upgrade() else {
++        return;
++    };
++    let Some(mut lock) = strong.try_lock() else {
++        paused.store(true, Ordering::Release);
++        let (state, paused, retry) = (state.clone(), paused.clone(), executor.clone());
++        executor
++            .spawn(async move { resume_frames(&state, &paused, &retry) })
++            .detach();
++        return;
++    };
++    if let Some(link) = lock.display_link.as_mut() {
++        link.start().log_err();
+     }
+ }
+ 
+diff -ruN a/src/platform.rs b/src/platform.rs
+--- a/src/platform.rs	2026-10-02 18:00:01
++++ b/src/platform.rs	2026-10-02 18:00:01
+@@ -488,6 +488,19 @@
+     fn toggle_fullscreen(&self);
+     fn is_fullscreen(&self) -> bool;
+     fn on_request_frame(&self, callback: Box<dyn FnMut(RequestFrameOptions)>);
++    /// ket patch: stop asking for frames until woken by [`Self::frame_waker`].
++    /// Called once a window has had nothing to draw for a few frames in a
++    /// row. Platforms that do not implement it keep requesting frames.
++    fn pause_frames(&self) {}
++    /// ket patch: moves the traffic lights after the window has opened, for
++    /// a title bar whose height changes. Platforms without them ignore it.
++    fn set_traffic_light_position(&self, _position: Point<Pixels>) {}
++    /// ket patch: something that restarts paused frame requests, called
++    /// whenever the window is invalidated, asks for a next frame or receives
++    /// input. `None` on platforms that never pause.
++    fn frame_waker(&self) -> Option<std::rc::Rc<dyn Fn()>> {
++        None
++    }
+     fn on_input(&self, callback: Box<dyn FnMut(PlatformInput) -> DispatchEventResult>);
+     fn on_active_status_change(&self, callback: Box<dyn FnMut(bool)>);
+     fn on_hover_status_change(&self, callback: Box<dyn FnMut(bool)>);
+diff -ruN a/src/window.rs b/src/window.rs
+--- a/src/window.rs	2026-10-02 18:00:01
++++ b/src/window.rs	2026-10-02 18:00:01
+@@ -91,10 +91,57 @@
+     }
+ }
+ 
++/// ket patch: frames in a row with nothing to draw before a window stops
++/// requesting them — about 66ms on a 120Hz display. Short, because every
++/// requested frame wakes two threads; not zero, because pausing and resuming
++/// the display link is not free either and a burst of activity comes in waves.
++const IDLE_FRAMES_BEFORE_PAUSE: u32 = 8;
++
++/// ket patch: whether input is arriving fast enough to keep presenting.
++///
++/// gpui presented the unchanged frame on every refresh for a second after
++/// *any* input, so the display would not lower its refresh rate under a drag
++/// or a scroll. For typing that was a second of full-rate presents per
++/// keystroke. Zed's current gpui keeps the idea but only for input arriving at
++/// around display rate, which this follows: [`FAST_INPUTS`] events inside
++/// [`INPUT_RATE_WINDOW`] sustain presenting for [`INPUT_SUSTAIN`].
++#[derive(Default)]
++pub(crate) struct InputRate {
++    recent: std::collections::VecDeque<Instant>,
++    sustain_until: Option<Instant>,
++}
++
++const INPUT_RATE_WINDOW: Duration = Duration::from_millis(100);
++const FAST_INPUTS: usize = 6;
++const INPUT_SUSTAIN: Duration = Duration::from_secs(1);
++
++impl InputRate {
++    fn record(&mut self, now: Instant) {
++        self.recent.push_back(now);
++        while self
++            .recent
++            .front()
++            .is_some_and(|first| now.duration_since(*first) > INPUT_RATE_WINDOW)
++        {
++            self.recent.pop_front();
++        }
++        if self.recent.len() >= FAST_INPUTS {
++            self.sustain_until = Some(now + INPUT_SUSTAIN);
++        }
++    }
++
++    fn sustaining(&self, now: Instant) -> bool {
++        self.sustain_until.is_some_and(|until| now < until)
++    }
++}
++
+ struct WindowInvalidatorInner {
+     pub dirty: bool,
+     pub draw_phase: DrawPhase,
+     pub dirty_views: FxHashSet<EntityId>,
++    /// ket patch: restarts the platform's frame requests if they were paused
++    /// while the window had nothing to draw. See `PlatformWindow::pause_frames`.
++    pub waker: Option<Rc<dyn Fn()>>,
+ }
+ 
+ #[derive(Clone)]
+@@ -109,6 +156,7 @@
+                 dirty: true,
+                 draw_phase: DrawPhase::None,
+                 dirty_views: FxHashSet::default(),
++                waker: None,
+             })),
+         }
+     }
+@@ -119,18 +167,38 @@
+         if inner.draw_phase == DrawPhase::None {
+             inner.dirty = true;
+             cx.push_effect(Effect::Notify { emitter: entity });
++            drop(inner);
++            self.wake();
+             true
+         } else {
+             false
+         }
+     }
+ 
++    /// ket patch: installs what [`Self::wake`] calls.
++    pub fn set_waker(&self, waker: Rc<dyn Fn()>) {
++        self.inner.borrow_mut().waker = Some(waker);
++    }
++
++    /// ket patch: makes sure the platform is requesting frames, so that
++    /// whatever just changed gets drawn. Called outside any borrow of the
++    /// invalidator, since the waker may reach back into the window.
++    pub fn wake(&self) {
++        let waker = self.inner.borrow().waker.clone();
++        if let Some(waker) = waker {
++            waker();
++        }
++    }
++
+     pub fn is_dirty(&self) -> bool {
+         self.inner.borrow().dirty
+     }
+ 
+     pub fn set_dirty(&self, dirty: bool) {
+-        self.inner.borrow_mut().dirty = dirty
++        self.inner.borrow_mut().dirty = dirty;
++        if dirty {
++            self.wake();
++        }
+     }
+ 
+     pub fn set_phase(&self, phase: DrawPhase) {
+@@ -862,7 +930,8 @@
+     active: Rc<Cell<bool>>,
+     hovered: Rc<Cell<bool>>,
+     pub(crate) needs_present: Rc<Cell<bool>>,
+-    pub(crate) last_input_timestamp: Rc<Cell<Instant>>,
++    /// ket patch: how fast input is arriving; see [`InputRate`].
++    pub(crate) input_rate: Rc<RefCell<InputRate>>,
+     pub(crate) refreshing: bool,
+     pub(crate) activation_observers: SubscriberSet<(), AnyObserver>,
+     pub(crate) focus: Option<FocusId>,
+@@ -991,7 +1060,12 @@
+         let hovered = Rc::new(Cell::new(platform_window.is_hovered()));
+         let needs_present = Rc::new(Cell::new(false));
+         let next_frame_callbacks: Rc<RefCell<Vec<FrameCallback>>> = Default::default();
+-        let last_input_timestamp = Rc::new(Cell::new(Instant::now()));
++        let input_rate: Rc<RefCell<InputRate>> = Default::default();
++        // ket patch: frame requests pause once the window is idle; whatever
++        // invalidates it starts them again.
++        if let Some(waker) = platform_window.frame_waker() {
++            invalidator.set_waker(waker);
++        }
+ 
+         platform_window
+             .request_decorations(window_decorations.unwrap_or(WindowDecorations::Server));
+@@ -1021,9 +1095,12 @@
+             let active = active.clone();
+             let needs_present = needs_present.clone();
+             let next_frame_callbacks = next_frame_callbacks.clone();
+-            let last_input_timestamp = last_input_timestamp.clone();
++            let input_rate = input_rate.clone();
++            // ket patch: consecutive frames with nothing to do.
++            let mut idle_frames = 0u32;
+             move |request_frame_options| {
+                 let next_frame_callbacks = next_frame_callbacks.take();
++                let ran_callbacks = !next_frame_callbacks.is_empty();
+                 if !next_frame_callbacks.is_empty() {
+                     handle
+                         .update(&mut cx, |_, window, cx| {
+@@ -1034,13 +1111,31 @@
+                         .log_err();
+                 }
+ 
+-                // Keep presenting the current scene for 1 extra second since the
+-                // last input to prevent the display from underclocking the refresh rate.
++                // Keep presenting the current scene while input arrives at
++                // display rate, and for a second after, to prevent the display
++                // from underclocking the refresh rate under a drag or a scroll.
++                // ket patch: this used to follow *any* input, which made every
++                // keystroke a second of full-rate presents of an unchanged frame.
+                 let needs_present = request_frame_options.require_presentation
+                     || needs_present.get()
+-                    || (active.get()
+-                        && last_input_timestamp.get().elapsed() < Duration::from_secs(1));
++                    || (active.get() && input_rate.borrow().sustaining(Instant::now()));
+ 
++                // ket patch: a frame with nothing to draw, present or run.
++                let idle = !ran_callbacks
++                    && !needs_present
++                    && !invalidator.is_dirty()
++                    && !request_frame_options.force_render;
++                if idle {
++                    idle_frames += 1;
++                    if idle_frames == IDLE_FRAMES_BEFORE_PAUSE {
++                        handle
++                            .update(&mut cx, |_, window, _| window.platform_window.pause_frames())
++                            .log_err();
++                    }
++                } else {
++                    idle_frames = 0;
++                }
++
+                 if invalidator.is_dirty() || request_frame_options.force_render {
+                     measure("frame duration", || {
+                         handle
+@@ -1245,7 +1340,7 @@
+             active,
+             hovered,
+             needs_present,
+-            last_input_timestamp,
++            input_rate,
+             refreshing: false,
+             activation_observers: SubscriberSet::new(),
+             focus: None,
+@@ -1643,6 +1738,8 @@
+     /// Schedule the given closure to be run directly after the current frame is rendered.
+     pub fn on_next_frame(&self, callback: impl FnOnce(&mut Window, &mut App) + 'static) {
+         RefCell::borrow_mut(&self.next_frame_callbacks).push(Box::new(callback));
++        // ket patch: a next frame has to come for this to run.
++        self.invalidator.wake();
+     }
+ 
+     /// Schedule a frame to be drawn on the next animation frame.
+@@ -1694,6 +1791,13 @@
+         self.platform_window.resize(size);
+     }
+ 
++    /// ket patch: moves the traffic lights to `position`, their top-left
++    /// corner in window coordinates, for a title bar whose height changes
++    /// while the window is open. A no-op off macOS.
++    pub fn set_traffic_light_position(&self, position: Point<Pixels>) {
++        self.platform_window.set_traffic_light_position(position);
++    }
++
+     /// Returns whether or not the window is currently fullscreen
+     pub fn is_fullscreen(&self) -> bool {
+         self.platform_window.is_fullscreen()
+@@ -3579,7 +3683,21 @@
+     /// Dispatch a mouse or keyboard event on the window.
+     #[profiling::function]
+     pub fn dispatch_event(&mut self, event: PlatformInput, cx: &mut App) -> DispatchEventResult {
+-        self.last_input_timestamp.set(Instant::now());
++        // ket patch: only a scroll or a drag counts towards presenting at the
++        // display rate. Counting every event made a burst of typing — or a key
++        // held down — a second of presenting the unchanged frame on every
++        // refresh, each present blocking the main thread in `nextDrawable`
++        // while the next keystroke waited behind it.
++        let continuous = match &event {
++            PlatformInput::ScrollWheel(_) => true,
++            PlatformInput::MouseMove(event) => event.pressed_button.is_some(),
++            _ => false,
++        };
++        if continuous {
++            self.input_rate.borrow_mut().record(Instant::now());
++        }
++        // ket patch: input may need frames that were paused.
++        self.invalidator.wake();
+         // Handlers may set this to false by calling `stop_propagation`.
+         cx.propagate_event = true;
+         // Handlers may set this to true by calling `prevent_default`.

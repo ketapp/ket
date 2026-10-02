@@ -1,0 +1,778 @@
+// The phone protocol's application contract (Epic 5b.2).
+//
+// Everything here travels inside a Noise session between a phone and a ket
+// host, so the relay in between sees none of it. The Rust host and the
+// TypeScript app both generate from this one file.
+//
+// Compatibility: `major` changes break, `minor` ones add. A peer tolerates a
+// minor it does not know — proto3 ignores unknown fields — and refuses a
+// major with `ErrorCode.UNSUPPORTED_VERSION` before anything else is sent.
+//
+// 1.6 adds a worktree's figures, pairing that a person approves on the
+// desktop (PairingPending), and names every prompt: `Question.id` and
+// `Question.terminal_id`, which an `Answer` must return as `question_id` and
+// `terminal_id`. That one is not only additive — a 1.6 host refuses an
+// answer without a `question_id`, saying to update the phone, rather than
+// press keys into a prompt it cannot be sure the phone saw. Everything else
+// a 1.5 phone does still works.
+//
+// 1.7 adds GetConversation, an agent's session as a conversation; StartWork,
+// new work from a phone; GetChanges and GetDiff, reviewing a worktree;
+// MergeWorktree; GetSnippets; a worktree's subagents; and the messages
+// still queued for an agent.
+//
+// 1.8 adds the prompts that are not permissions — a question Claude asks
+// with options (`Question.asks`) and a plan it wants approved
+// (`Question.plan`) — and Respond, which answers them; and the agents the
+// desktop can start (`HostSnapshot.agents`), for StartWork to choose from.
+//
+// 1.9 adds a project's backlog: how many notes are open
+// (`ProjectSummary.backlog`), GetBacklog, EditBacklog and StartNote.
+//
+// 1.10 adds a note's priority: `BacklogNote.priority`, and
+// `EditBacklog.priority` to change it with a SAVE.
+
+syntax = "proto3";
+
+package ket.remote.v1;
+
+// One message in either direction.
+message Envelope {
+  // Protocol version of the sender. See the file header.
+  uint32 major = 1;
+  uint32 minor = 2;
+  // Set by the sender of a request; echoed by the reply. Zero for events.
+  uint64 request_id = 3;
+  // Which stream an event belongs to — a terminal, usually. Zero for none.
+  uint64 stream_id = 4;
+  // The host's epoch: bumped when the host restarts, so a phone knows every
+  // cursor it holds is void and a fresh snapshot is coming.
+  uint64 host_epoch = 5;
+  // Per-sender sequence number, for resuming.
+  uint64 seq = 6;
+  // Set on every mutation, so a retry after a reconnect cannot deliver a
+  // prompt, a keystroke, an interrupt or a permission answer twice.
+  string idempotency_key = 7;
+
+  oneof payload {
+    Hello hello = 10;
+    Welcome welcome = 11;
+    Error error = 12;
+    Ack ack = 13;
+    // Since 1.6.
+    PairingPending pairing_pending = 14;
+
+    HostSnapshot snapshot = 20;
+
+    Subscribe subscribe = 30;
+    Unsubscribe unsubscribe = 31;
+    TerminalCheckpoint checkpoint = 32;
+    TerminalChunk chunk = 33;
+    TerminalReset reset = 34;
+    TerminalClosed closed = 35;
+
+    Input input = 40;
+    Resize resize = 41;
+    Lease lease = 42;
+    Signal signal = 43;
+
+    // Since 1.1.
+    ListDevices list_devices = 50;
+    DeviceList devices = 51;
+    RevokeDevice revoke_device = 52;
+
+    // Since 1.4.
+    Answer answer = 60;
+
+    // Since 1.7.
+    GetConversation get_conversation = 70;
+    Conversation conversation = 71;
+    StartWork start_work = 72;
+    GetChanges get_changes = 73;
+    Changes changes = 74;
+    GetDiff get_diff = 75;
+    Diff diff = 76;
+    MergeWorktree merge_worktree = 77;
+    GetSnippets get_snippets = 78;
+    SnippetList snippets = 79;
+
+    // Since 1.8.
+    Respond respond = 80;
+
+    // Since 1.9.
+    GetBacklog get_backlog = 90;
+    Backlog backlog = 91;
+    EditBacklog edit_backlog = 92;
+    StartNote start_note = 93;
+  }
+}
+
+// Phone to host, first thing in a session.
+message Hello {
+  // What the phone calls itself, for the device list. Plain text.
+  string device_name = 1;
+  // The app's own version, for a person reading the device list.
+  string app_version = 2;
+  // The last host epoch and envelope sequence this phone applied, to resume
+  // from. Zero for none.
+  uint64 resume_epoch = 3;
+  uint64 resume_seq = 4;
+}
+
+// Since 1.6. Host to a phone that has just paired, in place of Welcome: the
+// pairing waits for a person to approve it on the desktop, which shows the
+// same code. Welcome follows if they do; Error (DECLINED) if they decline or
+// let it lapse. A scanned code alone no longer pairs a phone.
+message PairingPending {
+  // Six digits both sides derive from the handshake hash — the phone works
+  // them out itself; this copy is for a phone to check its own against.
+  string code = 1;
+  // How long the desktop waits for a decision.
+  uint32 timeout_seconds = 2;
+}
+
+// Host to phone, the answer to Hello.
+message Welcome {
+  string host_name = 1;
+  uint64 host_epoch = 2;
+  // Whether the host could resume from the phone's cursor. When false, a
+  // snapshot follows and every earlier cursor is void.
+  bool resumed = 3;
+}
+
+enum ErrorCode {
+  ERROR_CODE_UNSPECIFIED = 0;
+  UNAUTHORIZED = 1;
+  STALE_REQUEST = 2;
+  NOT_FOUND = 3;
+  NOT_CONTROLLER = 4;
+  BACKPRESSURE = 5;
+  UNSUPPORTED_VERSION = 6;
+  // Since 1.6. The pairing was declined on the desktop, or not approved in
+  // time.
+  DECLINED = 7;
+}
+
+message Error {
+  ErrorCode code = 1;
+  // For a person; never parsed.
+  string message = 2;
+}
+
+// A mutation was applied — or had already been, under the same idempotency
+// key, which is the same answer.
+message Ack {}
+
+// Everything a phone draws its lists from. Sent whole: after Welcome, and
+// again whenever it changes — a terminal opens or ends, an agent's state
+// moves.
+message HostSnapshot {
+  // In the order the desktop's sidebar has them. Since 1.9 every project,
+  // with something running in it or not; before, only those with a terminal.
+  repeated ProjectSummary projects = 1;
+  // Since 1.5. How much of each agent's plan is used, as the desktop's usage
+  // popover has it. Empty until a ket window has reported it.
+  repeated ProviderUsage usage = 2;
+  // Since 1.8. The agents the desktop can start, by name — "claude",
+  // "opencode" — for StartWork to choose from. Empty until a ket window has
+  // reported them.
+  repeated string agents = 3;
+  // Since 1.8. The theme the desktop is drawn in, for the phone to draw in
+  // too. Unset until a ket window has reported it; the phone keeps its own
+  // then. The desktop's to choose: a phone has no theme setting of its own.
+  Palette palette = 4;
+}
+
+// The desktop's theme, as the colours a phone draws with. Each is
+// "#rrggbb". Names follow the desktop's theme tokens.
+message Palette {
+  // Whether it is a light theme: dark ink on light grounds.
+  bool light = 1;
+  // The grounds, from the desk up: the ground between cards, a card, a well
+  // set into one, what floats over them, a row pointed at and one chosen.
+  string backdrop = 2;
+  string surface = 3;
+  string sunken = 4;
+  string elevated = 5;
+  string hover = 6;
+  string selection = 7;
+  // Hairlines: between panels, and within one.
+  string border = 8;
+  string rule = 9;
+  // The primary action's fill, and what is drawn on it.
+  string accent = 10;
+  string on_accent = 11;
+  // Ink, and the dim line.
+  string text = 12;
+  string dim = 13;
+  // The selected row's rail.
+  string marker = 14;
+  // A session's state.
+  string running = 15;
+  string attention = 16;
+  string failed = 17;
+  string merging = 18;
+  // A diff's lines.
+  string added = 19;
+  string removed = 20;
+  string modified = 21;
+  // A plan quota's ramp.
+  string quota_warm = 22;
+  string quota_hot = 23;
+  string quota_critical = 24;
+}
+
+// One agent's plan quota: provider quota, not tokens in a session.
+message ProviderUsage {
+  // "Claude", "Codex", "OpenCode".
+  string provider = 1;
+  UsageStatus status = 2;
+  // The plan's concurrent windows, empty unless FRESH or STALE.
+  repeated UsageWindow windows = 3;
+  // The plan or tier as the provider names it, or empty.
+  string plan = 4;
+  // When it was read, Unix milliseconds; zero for never.
+  uint64 fetched_at_ms = 5;
+  // Why it is UNAVAILABLE, for a person.
+  string reason = 6;
+}
+
+// Whether the numbers can be believed. A failed read is never a percentage:
+// "unavailable" and "0% used" must not look alike.
+enum UsageStatus {
+  USAGE_STATUS_UNSPECIFIED = 0;
+  // Read recently.
+  USAGE_STATUS_FRESH = 1;
+  // Real numbers, older than ket would like.
+  USAGE_STATUS_STALE = 2;
+  // No reading: never read, or the last one failed.
+  USAGE_STATUS_UNAVAILABLE = 3;
+  // The agent has no plan quota to report.
+  USAGE_STATUS_UNSUPPORTED = 4;
+}
+
+message UsageWindow {
+  // "Session", "Weekly", or the provider's own name for it.
+  string name = 1;
+  // 0 to 100.
+  float used_percent = 2;
+  // When it resets, Unix milliseconds; zero when the provider did not say.
+  uint64 resets_at_ms = 3;
+}
+
+message ProjectSummary {
+  string id = 1;
+  string name = 2;
+  repeated WorktreeSummary worktrees = 3;
+  // Since 1.3. The colour chosen for the project in ket, `#rrggbb`, or empty
+  // for ket's default.
+  string color = 4;
+  // Since 1.9. Notes in the project's backlog not started or done yet.
+  uint32 backlog = 5;
+}
+
+message WorktreeSummary {
+  string id = 1;
+  string name = 2;
+  string branch = 3;
+  // What the agent is doing, in the words ket's sidebar uses beside its mark:
+  // "thinking", "waiting on you", the tool it is running, the last thing it
+  // said. Empty when there is nothing to say.
+  string agent_state = 4;
+  repeated TerminalSummary terminals = 5;
+  // Since 1.2. What the row should be lit with — ket's activity signal,
+  // subagents included.
+  Activity activity = 6;
+  // Since 1.2. The agent whose state that is, or empty.
+  string agent = 7;
+  // Since 1.4. What the agent is waiting on a person to allow, while the
+  // worktree is ACTIVITY_BLOCKED on a permission prompt and ket knows what it
+  // asked. Unset otherwise.
+  Question question = 8;
+  // Since 1.6. Uncommitted work, as the desktop's sidebar counts it: paths
+  // changed, and lines added and removed against HEAD. All zero when clean.
+  uint32 files_changed = 9;
+  uint32 lines_added = 10;
+  uint32 lines_removed = 11;
+  // Since 1.6. Commits on the worktree's branch that its base does not have —
+  // what a merge would bring in. Zero for a repository's own checkout, and
+  // when the base cannot be found.
+  uint32 commits_ahead = 12;
+  // Since 1.6. The branch those commits are counted against. Empty for a
+  // repository's own checkout.
+  string base = 13;
+  // Since 1.7. The subagents its agents have running, oldest first — the
+  // rows ket's sidebar draws under it.
+  repeated SubagentSummary subagents = 14;
+}
+
+// Since 1.7. A subagent a worktree's agent has running.
+message SubagentSummary {
+  // The agent's own id for it.
+  string id = 1;
+  // What it was sent to do, else its kind.
+  string label = 2;
+  // Its model, where the agent says; else empty.
+  string model = 3;
+  enum State {
+    STATE_UNSPECIFIED = 0;
+    WORKING = 1;
+    // Stopped on a permission prompt, answered in its lead's session.
+    BLOCKED = 2;
+    // A teammate between turns: alive, doing nothing.
+    IDLE = 3;
+  }
+  State state = 4;
+  // When ket first heard of it, in ms since the epoch.
+  uint64 started_at_ms = 5;
+}
+
+// A permission prompt, as the agent's hook described it.
+message Question {
+  // The tool asking: "Bash", "Edit", "WebFetch".
+  string tool = 1;
+  // What it wants to do with it: the command, the file, the address. Empty
+  // when the hook said no more than the tool.
+  string subject = 2;
+  // Whether the host can answer it with the agent's own keys — see Answer.
+  // False for an agent or a prompt whose menu ket does not know; the phone
+  // then sends a person to the terminal instead.
+  bool answerable = 3;
+  // Whether the prompt offers to stop asking — ALLOW_ALWAYS is refused when
+  // it does not, rather than pressing a key that means something else.
+  bool always = 4;
+  // Since 1.6. Which prompt this is, and the terminal showing it. An Answer
+  // names both, and the host refuses it unless that terminal is still showing
+  // that very prompt — so an answer can only ever reach what the phone showed.
+  uint64 id = 5;
+  uint64 terminal_id = 6;
+  // How risky allowing it reads, when the Mac has Jev's beta risk read on and
+  // it has answered. Absent otherwise, and for a little while after the
+  // prompt first shows. It informs a person; nothing acts on it.
+  Risk risk = 7;
+  // Since 1.8. What the agent asks, when the prompt is a question in its own
+  // words (Claude's AskUserQuestion) rather than a permission: one to four,
+  // in order. Answered with Respond, not Answer; `answerable` says whether
+  // the host can take the answer.
+  repeated Asked asks = 8;
+  // Since 1.8. Whether the prompt is a plan waiting to be approved (Claude's
+  // ExitPlanMode). The plan itself is in the conversation. Answered with
+  // Respond, like `asks`.
+  bool plan = 9;
+}
+
+// Since 1.8. One question in a prompt the agent asks in its own words.
+message Asked {
+  // The question.
+  string question = 1;
+  // A short tag for it: "Scope", "Colour". May be empty.
+  string header = 2;
+  message Choice {
+    // What picking it answers.
+    string label = 1;
+    // What it means. May be empty.
+    string description = 2;
+  }
+  repeated Choice choices = 3;
+  // Whether any number of choices can be picked, rather than one.
+  bool multi_select = 4;
+}
+
+// A risk read on a permission prompt, from TypeSafe's Jev (beta).
+message Risk {
+  // "low", "medium" or "high".
+  string level = 1;
+  // How sure the model is, 0 to 1.
+  float confidence = 2;
+}
+
+// What a worktree's row is lit with: the same few states ket's sidebar
+// draws, so the phone and the desktop never disagree about what needs
+// somebody.
+enum Activity {
+  // Nothing worth lighting: no agent, one at its prompt, or one that ended
+  // uneventfully.
+  ACTIVITY_QUIET = 0;
+  // Something runs that is not known to be making progress: a build, an
+  // agent starting up.
+  ACTIVITY_RUNNING = 1;
+  // An agent is working: waiting on the model, or running a tool.
+  ACTIVITY_WORKING = 2;
+  // Git is part-way through rewriting the worktree.
+  ACTIVITY_MERGING = 3;
+  // Stopped on a permission prompt: waiting on a person.
+  ACTIVITY_BLOCKED = 4;
+  // Ended badly, recently.
+  ACTIVITY_FAILED = 5;
+}
+
+message TerminalSummary {
+  // The host's id for the terminal, stable while the host runs.
+  uint64 id = 1;
+  string title = 2;
+  // The agent it runs, or empty for a shell.
+  string agent = 3;
+  bool closed = 4;
+}
+
+// Start sending a terminal: a checkpoint, then chunks.
+message Subscribe {
+  uint64 terminal_id = 1;
+}
+
+message Unsubscribe {
+  uint64 terminal_id = 1;
+}
+
+// A terminal's screen as escape sequences that rebuild it on a fresh
+// terminal of this size. See ket-core's terminal::checkpoint. Large ones
+// arrive split across Noise messages and are reassembled before decoding.
+message TerminalCheckpoint {
+  uint64 terminal_id = 1;
+  // The terminal's output epoch and the byte it is accurate through.
+  uint64 epoch = 2;
+  uint64 through_seq = 3;
+  uint32 cols = 4;
+  uint32 rows = 5;
+  uint32 scrollback = 6;
+  bytes ansi = 7;
+}
+
+// Output after a checkpoint, in order.
+message TerminalChunk {
+  uint64 terminal_id = 1;
+  uint64 epoch = 2;
+  // The offset of the first byte.
+  uint64 seq = 3;
+  bytes bytes = 4;
+}
+
+// The phone's copy no longer applies — a resize, a clear, or it fell behind.
+// A checkpoint follows.
+message TerminalReset {
+  uint64 terminal_id = 1;
+}
+
+message TerminalClosed {
+  uint64 terminal_id = 1;
+  // Present once the program has been reaped.
+  optional uint32 exit_code = 2;
+  string signal = 3;
+}
+
+// Keystrokes. Only from the phone holding the terminal's lease.
+message Input {
+  uint64 terminal_id = 1;
+  bytes bytes = 2;
+}
+
+// Fit the terminal to the phone's screen, which a phone asks for only when
+// its person turned fitting on: by default it pans across the host's
+// columns. Since 1.5 it needs no lease — refused only while another phone
+// has control — and lasts until the phone unsubscribes or goes, when the
+// desktop's own size comes back.
+message Resize {
+  uint64 terminal_id = 1;
+  uint32 cols = 2;
+  uint32 rows = 3;
+}
+
+// Control of a terminal's input: taken, kept alive, or given back. A lease
+// lapses 30 seconds after its last renewal, and the desktop takes it back
+// with a keystroke whenever it likes.
+message Lease {
+  enum Action {
+    ACTION_UNSPECIFIED = 0;
+    ACQUIRE = 1;
+    RENEW = 2;
+    RELEASE = 3;
+  }
+  uint64 terminal_id = 1;
+  Action action = 2;
+}
+
+// Interrupt or end what is running in a terminal.
+message Signal {
+  enum Kind {
+    KIND_UNSPECIFIED = 0;
+    INTERRUPT = 1;
+    TERMINATE = 2;
+  }
+  uint64 terminal_id = 1;
+  Kind kind = 2;
+}
+
+// Answer the permission prompt in a terminal. The host presses the agent's
+// own key for the choice, and only while the terminal's worktree is still
+// waiting on a person — a prompt answered at the desktop in the meantime
+// gets NOT_FOUND rather than a stray keystroke. Needs no lease: like an
+// interrupt, it is a paired phone's to do.
+message Answer {
+  enum Choice {
+    CHOICE_UNSPECIFIED = 0;
+    ALLOW_ONCE = 1;
+    ALLOW_ALWAYS = 2;
+    DENY = 3;
+  }
+  uint64 terminal_id = 1;
+  Choice choice = 2;
+  // Since 1.6, and required: the Question.id this answers. An answer without
+  // one, or for a prompt that has since been answered or replaced, is refused.
+  uint64 question_id = 3;
+}
+
+// Since 1.8. Answer a question the agent asked in its own words, or a plan it
+// wants approved: a Question with `asks` or `plan`. The host hands the answer
+// to the agent directly rather than pressing keys, and only while that
+// terminal is still showing that very prompt — refused with NOT_FOUND
+// otherwise, as Answer is. A mutation; answered with Ack.
+message Respond {
+  uint64 terminal_id = 1;
+  // The Question.id this answers.
+  uint64 question_id = 2;
+  message Pick {
+    // Indexes into that question's choices: one, or any number when it is
+    // multi_select.
+    repeated uint32 choices = 1;
+    // What the person wrote instead of choosing. When set, it is the answer
+    // and `choices` is ignored.
+    string other = 2;
+  }
+  // For `asks`: one per question, in the same order.
+  repeated Pick picks = 3;
+  // For a plan: go ahead, or — false — keep planning with `feedback`, which
+  // a plan kept going needs.
+  bool approve = 4;
+  string feedback = 5;
+}
+
+// Since 1.7. What an agent's session in a terminal has said, as a
+// conversation rather than a screen: answered with a Conversation. Asked
+// again with the last reply's `next` for what is new since.
+message GetConversation {
+  uint64 terminal_id = 1;
+  // 0 for a first read, which returns the recent end of the session.
+  uint64 after = 2;
+}
+
+message Conversation {
+  uint64 terminal_id = 1;
+  // False when there is no conversation to read — an agent ket cannot read
+  // yet, or a terminal with no agent in it — and `reason` says which.
+  bool supported = 2;
+  string reason = 3;
+  // The agent's own session id. A different one than last time — the agent
+  // started a new session in the same terminal — starts the conversation
+  // over, as does `fresh`.
+  string session = 4;
+  // Oldest first.
+  repeated Turn turns = 5;
+  // Where to ask from next.
+  uint64 next = 6;
+  // Whether these turns replace everything before them rather than follow it.
+  bool fresh = 7;
+  // Messages sent that the agent has not read yet, oldest first: typed while
+  // it was working, waiting until it takes them in. The whole list each
+  // time, not only what is new.
+  repeated string queued = 8;
+}
+
+message Turn {
+  enum Kind {
+    KIND_UNSPECIFIED = 0;
+    // The person.
+    USER = 1;
+    // The agent's words.
+    ASSISTANT = 2;
+    // A tool it used, as one line: "$ cargo test", "Edited main.rs".
+    TOOL = 3;
+  }
+  Kind kind = 1;
+  string text = 2;
+  // For a tool, its name: "Bash", "Edit".
+  string tool = 3;
+}
+
+// Since 1.7. New work from a phone: a worktree in the project, its agent
+// started on the prompt — made by ket on the desktop the way its own dialog
+// makes one. A mutation; answered with Ack once a ket window has it, or an
+// Error when none is open.
+message StartWork {
+  string project_id = 1;
+  string prompt = 2;
+  // An agent by name — "claude", "codex" — or empty for the project's own.
+  string agent = 3;
+}
+
+// Since 1.9. A project's backlog: notes on work not started yet, kept on the
+// desktop. Answered with Backlog.
+message GetBacklog {
+  string project_id = 1;
+}
+
+message Backlog {
+  string project_id = 1;
+  // Open and done alike, newest first — the order the desktop keeps them in.
+  repeated BacklogNote notes = 2;
+}
+
+message BacklogNote {
+  string id = 1;
+  // What the list shows, and the first line the agent is told.
+  string title = 2;
+  // What the agent is told after the title.
+  string body = 3;
+  // The names of the files kept with it. They stay on the desktop; starting
+  // the note hands them to the agent there.
+  repeated string files = 4;
+  // Unix milliseconds.
+  uint64 created_ms = 5;
+  uint64 updated_ms = 6;
+  // When it was started or marked done; zero while it is open.
+  uint64 done_ms = 7;
+  // The branch it was started on. Empty while open, and when it was marked
+  // done by hand.
+  string branch = 8;
+  // Since 1.10. Unspecified from an older host, which keeps none: read it as
+  // MEDIUM.
+  BacklogPriority priority = 9;
+}
+
+// Since 1.10. How pressing a note is. The list puts the most pressing first.
+enum BacklogPriority {
+  BACKLOG_PRIORITY_UNSPECIFIED = 0;
+  BACKLOG_PRIORITY_LOW = 1;
+  BACKLOG_PRIORITY_MEDIUM = 2;
+  BACKLOG_PRIORITY_HIGH = 3;
+  BACKLOG_PRIORITY_URGENT = 4;
+}
+
+// Since 1.9. One change to one note. A mutation; answered with the Backlog as
+// it then is.
+message EditBacklog {
+  string project_id = 1;
+  // The note. Empty with SAVE, which then writes a new one at the top.
+  string note_id = 2;
+  enum Action {
+    ACTION_UNSPECIFIED = 0;
+    // Its title and body, from the fields below. Its files are left alone.
+    SAVE = 1;
+    // Done by hand, for work that happened somewhere else.
+    DONE = 2;
+    // Back among the open notes.
+    REOPEN = 3;
+    // Deleted, with its files.
+    REMOVE = 4;
+  }
+  Action action = 3;
+  // For SAVE.
+  string title = 4;
+  string body = 5;
+  // Since 1.10, for SAVE. Unspecified — what an older phone sends — leaves a
+  // note's priority as it was, and makes a new one MEDIUM.
+  BacklogPriority priority = 6;
+}
+
+// Since 1.9. Starts an open note as work, as the desktop's backlog does: a new
+// worktree named after it, its agent handed the title, the body and the
+// note's files. A mutation; answered with Ack once a ket window has it, or an
+// Error when none is open. The note is marked done once the worktree exists.
+message StartNote {
+  string project_id = 1;
+  string note_id = 2;
+}
+
+// Since 1.7. The files a worktree would bring to its base if it were merged
+// now — committed and uncommitted work since it last shared a commit with its
+// base, and new files. Answered with Changes.
+message GetChanges {
+  string worktree_id = 1;
+}
+
+message Changes {
+  string worktree_id = 1;
+  repeated FileChange files = 2;
+  // What they are measured against: the base branch, or empty for the
+  // repository's own checkout (against its last commit).
+  string base = 3;
+  // Why there is no list, when there is none.
+  string error = 4;
+}
+
+message FileChange {
+  enum Status {
+    STATUS_UNSPECIFIED = 0;
+    MODIFIED = 1;
+    ADDED = 2;
+    DELETED = 3;
+  }
+  string path = 1;
+  uint32 added = 2;
+  uint32 removed = 3;
+  Status status = 4;
+  // No line counts: a binary file.
+  bool binary = 5;
+}
+
+// Since 1.7. One changed file's diff, unified, as GetChanges measured it.
+// Only a path Changes lists is shown. Answered with Diff.
+message GetDiff {
+  string worktree_id = 1;
+  string path = 2;
+}
+
+message Diff {
+  string worktree_id = 1;
+  string path = 2;
+  string text = 3;
+  // Cut short: the diff is longer than the phone is sent.
+  bool truncated = 4;
+  string error = 5;
+}
+
+// Since 1.7. Merge a worktree into its base, as ket's Merge does — its
+// uncommitted work committed first. A mutation; answered with Ack once a
+// ket window has it, or an Error when none is open. What the merge did shows
+// in the snapshots that follow.
+message MergeWorktree {
+  string worktree_id = 1;
+}
+
+// Since 1.7. The snippets saved in ket on the desktop, for one-tap replies.
+// Answered with a SnippetList.
+message GetSnippets {}
+
+message SnippetList {
+  repeated Snippet snippets = 1;
+}
+
+message Snippet {
+  string name = 1;
+  string body = 2;
+}
+
+// The phones paired with this host. Answered with a DeviceList.
+message ListDevices {}
+
+message DeviceList {
+  repeated Device devices = 1;
+}
+
+message Device {
+  // Stable for the phone: its public key, base64url.
+  string id = 1;
+  // What it called itself when it paired. Never trusted for anything.
+  string name = 2;
+  // Unix seconds.
+  uint64 paired_at = 3;
+  // Whether this is the phone asking.
+  bool this_device = 4;
+  // Whether it is connected now.
+  bool connected = 5;
+}
+
+// Stops the host accepting a phone, and ends its session if it has one. A
+// phone may revoke itself — that is "forget this Mac". Answered with an Ack.
+message RevokeDevice {
+  string id = 1;
+}

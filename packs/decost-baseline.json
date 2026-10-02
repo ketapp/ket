@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "packId": "decost-baseline",
+  "packVersion": 1,
+  "name": "decost — baseline (measurement)",
+  "publishedAt": "2026-09-09",
+  "levels": [
+    {
+      "id": "no-reduction",
+      "label": "4 — No reduction",
+      "description": "The agent reasons and explains as much as it wants."
+    },
+    {
+      "id": "light-reduction",
+      "label": "3 — Light reduction",
+      "description": "Trims filler and restates less; reasoning stays full.",
+      "tag": "light reduction",
+      "instruction": "Reduce token usage: trim filler and avoid restating what was just said. Keep reasoning and explanations otherwise full."
+    },
+    {
+      "id": "moderate-reduction",
+      "label": "2 — Moderate reduction",
+      "description": "Shorter explanations and terser output throughout.",
+      "tag": "moderate reduction",
+      "instruction": "Reduce token usage: give shorter explanations and terser output throughout this session."
+    },
+    {
+      "id": "heavy-reduction",
+      "label": "1 — Heavy reduction",
+      "description": "Minimal narration — mostly just the result.",
+      "tag": "heavy reduction",
+      "instruction": "Reduce token usage heavily: keep narration minimal, state results and decisions directly, skip recaps and closing summaries."
+    },
+    {
+      "id": "maximum-reduction",
+      "label": "0 — Maximum reduction",
+      "description": "As terse as the agent can manage; answers only.",
+      "tag": "max reduction",
+      "instruction": "Reduce token usage to the maximum: answer as tersely as possible, with no narration and no explanation unless one is asked for."
+    }
+  ],
+  "defaultLevel": "no-reduction"
+}

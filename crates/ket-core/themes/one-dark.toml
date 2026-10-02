@@ -1,0 +1,78 @@
+# Atom's One Dark, after One Dark Pro (MIT).
+#
+# The blue-grey ground of Atom's editor with its darker tree for wells and
+# the near-black it draws edges in for the desk. Blue is the accent, cyan
+# "waiting on you", orange the `marker`, purple merges and the hunk line.
+# The ink is a step brighter than One Dark's `#abb2bf`, which the terminal
+# keeps, so a name in the sidebar reads as the thing you are looking at;
+# removed lines take a paler red so they clear the body minimum.
+
+label = "One Dark"
+appearance = "dark"
+backdrop = "#181a1f"
+surface = "#282c34"
+panel = "#282c34"
+elevated = "#353b45"
+sunken = "#21252b"
+hover = "#2f343e"
+selection = "#3e4451"
+border = "#4b5263"
+rule = "#2f343d"
+marker = "#d19a66"
+accent = "#61afef"
+accent_hover = "#8cc4f3"
+on_accent = "#181a1f"
+focus_ring = "#61afef"
+
+[text]
+primary = "#dcdfe4"
+dim = "#a3abba"
+
+[diff]
+added = "#98c379"
+removed = "#e88690"
+modified = "#e5c07b"
+context = "#a3abba"
+hunk_header = "#c678dd"
+
+[status]
+running = "#98c379"
+attention = "#56b6c2"
+failed = "#e06c75"
+merging = "#c678dd"
+
+[quota]
+warm = "#e5c07b"
+hot = "#d19a66"
+critical = "#e06c75"
+
+[terminal]
+foreground = "#abb2bf"
+background = "#282c34"
+cursor = "#528bff"
+
+[terminal.ansi]
+black = "#3f4451"
+red = "#e05561"
+green = "#8cc265"
+yellow = "#d18f52"
+blue = "#4aa5f0"
+magenta = "#c162de"
+cyan = "#42b3c2"
+white = "#d7dae0"
+bright_black = "#4f5666"
+bright_red = "#ff616e"
+bright_green = "#a5e075"
+bright_yellow = "#f0a45d"
+bright_blue = "#4dc4ff"
+bright_magenta = "#de73ff"
+bright_cyan = "#4cd1e0"
+bright_white = "#e6e6e6"
+
+[syntax]
+keyword = "#c678dd"
+string = "#98c379"
+comment = "#7f848e"
+number = "#d19a66"
+kind = "#e5c07b"
+punctuation = "#abb2bf"

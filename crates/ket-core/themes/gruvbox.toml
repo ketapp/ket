@@ -1,0 +1,78 @@
+# Gruvbox dark, after Pavel Pertsev's original (MIT/X11).
+#
+# Retro warm browns: `bg0` for the cards, `bg0_h` for the desk, `bg1` for
+# what floats. Bright yellow is the accent, orange the `marker`, the faded
+# blue "waiting on you", aqua the hunk line and purple merges. The terminal
+# keeps Gruvbox's own sixteen, faded and bright; the removed line takes a
+# red a touch lighter than `#fb4934`, which falls just short of the body
+# minimum on `bg0`.
+
+label = "Gruvbox"
+appearance = "dark"
+backdrop = "#1d2021"
+surface = "#282828"
+panel = "#282828"
+elevated = "#3c3836"
+sunken = "#32302f"
+hover = "#302d2c"
+selection = "#504945"
+border = "#665c54"
+rule = "#363230"
+marker = "#fe8019"
+accent = "#fabd2f"
+accent_hover = "#fccd5c"
+on_accent = "#282828"
+focus_ring = "#fabd2f"
+
+[text]
+primary = "#ebdbb2"
+dim = "#bdae93"
+
+[diff]
+added = "#b8bb26"
+removed = "#fc5f4d"
+modified = "#fabd2f"
+context = "#bdae93"
+hunk_header = "#8ec07c"
+
+[status]
+running = "#b8bb26"
+attention = "#83a598"
+failed = "#fb4934"
+merging = "#d3869b"
+
+[quota]
+warm = "#fabd2f"
+hot = "#fe8019"
+critical = "#fb4934"
+
+[terminal]
+foreground = "#ebdbb2"
+background = "#282828"
+cursor = "#ebdbb2"
+
+[terminal.ansi]
+black = "#282828"
+red = "#cc241d"
+green = "#98971a"
+yellow = "#d79921"
+blue = "#458588"
+magenta = "#b16286"
+cyan = "#689d6a"
+white = "#a89984"
+bright_black = "#928374"
+bright_red = "#fb4934"
+bright_green = "#b8bb26"
+bright_yellow = "#fabd2f"
+bright_blue = "#83a598"
+bright_magenta = "#d3869b"
+bright_cyan = "#8ec07c"
+bright_white = "#ebdbb2"
+
+[syntax]
+keyword = "#fb4934"
+string = "#b8bb26"
+comment = "#928374"
+number = "#d3869b"
+kind = "#fabd2f"
+punctuation = "#a89984"

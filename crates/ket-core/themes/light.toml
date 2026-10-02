@@ -1,0 +1,79 @@
+# The shipped light theme: Desk, in daylight.
+#
+# The same ladder as `dark` turned over — white cards on a cool
+# grey desk, wells a step down into it, floats pure white — with the same
+# rules: `accent` is ink rather than a hue, `marker` is the one warm
+# colour and only ever means "you are here", and the signal colours are
+# darkened until they clear the same bars on white that `dark`'s clear on
+# near-black. Neutral and slightly cool, as `dark` is; the warm paper it
+# replaces belonged to the theme before Desk.
+
+label = "Light"
+appearance = "light"
+backdrop = "#e4e7ec"
+surface = "#fafbfc"
+panel = "#fafbfc"
+elevated = "#ffffff"
+sunken = "#eef0f3"
+hover = "#f0f2f5"
+selection = "#e1e5eb"
+border = "#cdd2d9"
+rule = "#e4e7ec"
+marker = "#b45309"
+accent = "#111418"
+accent_hover = "#000000"
+on_accent = "#fafbfc"
+focus_ring = "#111418"
+
+[text]
+primary = "#111418"
+dim = "#545b66"
+
+[diff]
+added = "#15803d"
+removed = "#c81e3a"
+modified = "#a15c00"
+context = "#545b66"
+hunk_header = "#a15c00"
+
+[status]
+running = "#15803d"
+attention = "#1d5fd6"
+failed = "#c81e3a"
+merging = "#6d3fd0"
+
+[quota]
+warm = "#8a6c00"
+hot = "#b4530a"
+critical = "#c81e3a"
+
+[terminal]
+foreground = "#111418"
+background = "#fafbfc"
+cursor = "#111418"
+
+[terminal.ansi]
+black = "#1b1f24"
+red = "#c81e3a"
+green = "#15803d"
+yellow = "#9a6b00"
+blue = "#1d5fd6"
+magenta = "#8331a7"
+cyan = "#0e7490"
+white = "#d0d5dc"
+bright_black = "#5b636e"
+bright_red = "#e0445c"
+bright_green = "#22a355"
+bright_yellow = "#c28a00"
+bright_blue = "#3b7cf0"
+bright_magenta = "#a855c9"
+bright_cyan = "#1596b8"
+bright_white = "#ffffff"
+
+[syntax]
+keyword = "#111418"
+string = "#1a7f37"
+comment = "#8b939e"
+number = "#a15c00"
+kind = "#a15c00"
+punctuation = "#5d6570"

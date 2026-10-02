@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "packId": "decost-codex",
+  "packVersion": 1,
+  "name": "decost — Codex",
+  "publishedAt": "2026-09-09",
+  "levels": [
+    {
+      "id": "no-reduction",
+      "label": "4 — No reduction",
+      "description": "Nothing is changed. The control this pack is measured against."
+    },
+    {
+      "id": "light-reduction",
+      "label": "3 — Light reduction",
+      "description": "Shorter reasoning summaries. Output length unchanged.",
+      "tag": "light reduction",
+      "instruction": "Reduce token usage: trim filler and avoid restating what was just said. Keep reasoning and explanations otherwise full.",
+      "reasoningSummary": "concise"
+    },
+    {
+      "id": "moderate-reduction",
+      "label": "2 — Moderate reduction",
+      "description": "Shorter output and shorter reasoning summaries, capped rather than asked for.",
+      "tag": "moderate reduction",
+      "instruction": "Reduce token usage: give shorter explanations and terser output throughout this session.",
+      "verbosity": "medium",
+      "reasoningSummary": "concise"
+    },
+    {
+      "id": "heavy-reduction",
+      "label": "1 — Heavy reduction",
+      "description": "Low verbosity, no reasoning summaries, and compaction before the window fills.",
+      "tag": "heavy reduction",
+      "instruction": "Reduce token usage heavily: keep narration minimal, state results and decisions directly, skip recaps and closing summaries.",
+      "verbosity": "low",
+      "reasoningSummary": "none",
+      "autocompact": "150000"
+    },
+    {
+      "id": "maximum-reduction",
+      "label": "0 — Maximum reduction",
+      "description": "Low verbosity, no summaries, reduced reasoning effort, answers only.",
+      "tag": "max reduction",
+      "instruction": "Reduce token usage to the maximum: answer as tersely as possible, with no narration and no explanation unless one is asked for.",
+      "effort": "low",
+      "verbosity": "low",
+      "reasoningSummary": "none",
+      "autocompact": "150000"
+    }
+  ],
+  "defaultLevel": "no-reduction"
+}

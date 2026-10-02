@@ -1,0 +1,82 @@
+# Norton Commander blue on a black desk, in the sixteen CGA colours.
+#
+# The cards are text-mode blue and the desk between them is the black
+# a DOS screen showed wherever nothing was drawn. Cyan is the ink, the
+# `marker`, the primary button's fill and the edge of anything that
+# floats; grey is the dim line, as it was for everything that was not a
+# file name. The terminal goes back to COMMAND.COM: grey on black.
+#
+# Two of the sixteen are lifted where the originals cannot be read. Red
+# is a step paler than `#ff5555` on the blue, so a removed line clears
+# the body minimum; the terminal's dark red and dark blue are brighter
+# than CGA's, which drew them on black at barely two to one.
+
+label = "ms-dos"
+appearance = "dark"
+backdrop = "#000000"
+surface = "#0000aa"
+panel = "#0000aa"
+elevated = "#1616be"
+sunken = "#000070"
+hover = "#0c0cb2"
+selection = "#2828d4"
+border = "#55ffff"
+rule = "#5555ff"
+marker = "#55ffff"
+accent = "#00aaaa"
+accent_hover = "#55ffff"
+on_accent = "#000000"
+focus_ring = "#ffff55"
+
+[text]
+primary = "#55ffff"
+dim = "#aaaaaa"
+
+[diff]
+added = "#55ff55"
+removed = "#ff6e6e"
+modified = "#ffff55"
+context = "#aaaaaa"
+hunk_header = "#ff55ff"
+
+[status]
+running = "#55ff55"
+attention = "#ffff55"
+failed = "#ff6e6e"
+merging = "#ff55ff"
+
+[quota]
+warm = "#ffff55"
+hot = "#ffaa55"
+critical = "#ff6e6e"
+
+[terminal]
+foreground = "#aaaaaa"
+background = "#000000"
+cursor = "#ffffff"
+
+[terminal.ansi]
+black = "#000000"
+red = "#cc2222"
+green = "#00aa00"
+yellow = "#aa5500"
+blue = "#3d3dff"
+magenta = "#aa00aa"
+cyan = "#00aaaa"
+white = "#aaaaaa"
+bright_black = "#555555"
+bright_red = "#ff5555"
+bright_green = "#55ff55"
+bright_yellow = "#ffff55"
+bright_blue = "#7f7fff"
+bright_magenta = "#ff55ff"
+bright_cyan = "#55ffff"
+bright_white = "#ffffff"
+
+[syntax]
+keyword = "#ffffff"
+string = "#ffff55"
+comment = "#8f8fff"
+number = "#ff55ff"
+kind = "#55ff55"
+punctuation = "#aaaaaa"

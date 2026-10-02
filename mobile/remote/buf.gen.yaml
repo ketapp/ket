@@ -1,0 +1,11 @@
+# Generates the application contract from the one .proto file the Rust host
+# builds from too — see crates/ket-remote/proto.
+version: v2
+inputs:
+  - directory: ../../crates/ket-remote/proto
+plugins:
+  - local: protoc-gen-es
+    out: src/gen
+    opt:
+      - target=js+dts
+      - import_extension=js

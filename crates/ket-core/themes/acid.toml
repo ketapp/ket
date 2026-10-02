@@ -1,0 +1,81 @@
+# Deep green cards on a lime desk, lit with lime and yellow.
+#
+# Inverts the ladder every other theme climbs: the desk — the gutters
+# between the cards, and the status bar's ground — is the loud colour,
+# and the cards set into it are a deep, dark green. Lime is then spent
+# on everything a highlight can be: the chrome accent, keywords, the
+# cursor, "running", hairlines and the selection. Yellow is the
+# `marker`, "waiting on you", a modified line and strings; a paler step
+# of either stands in for a third state. Red is kept for failures and
+# removed lines only: a broken session has to look broken. What sits
+# straight on the desk reads it through `on-backdrop`.
+
+label = "Acid"
+appearance = "dark"
+backdrop = "#a6f000"
+surface = "#061a0b"
+panel = "#061a0b"
+elevated = "#0e2c14"
+sunken = "#0a2410"
+hover = "#0f2b14"
+selection = "#1f4d16"
+border = "#3f7a12"
+rule = "#18401a"
+marker = "#ffe600"
+accent = "#b6ff00"
+accent_hover = "#e2ff8c"
+on_accent = "#000000"
+focus_ring = "#b6ff00"
+
+[text]
+primary = "#efffd2"
+dim = "#a3d16a"
+
+[diff]
+added = "#b6ff00"
+removed = "#ff3355"
+modified = "#ffe600"
+context = "#a3d16a"
+hunk_header = "#ffe600"
+
+[status]
+running = "#b6ff00"
+attention = "#ffe600"
+failed = "#ff3355"
+merging = "#e2ff8c"
+
+[quota]
+warm = "#fff38a"
+hot = "#ffe600"
+critical = "#ff3355"
+
+[terminal]
+foreground = "#efffd2"
+background = "#061a0b"
+cursor = "#b6ff00"
+
+[terminal.ansi]
+black = "#1f4d16"
+red = "#ff3355"
+green = "#b6ff00"
+yellow = "#ffe600"
+blue = "#d4ff4d"
+magenta = "#fff38a"
+cyan = "#e2ff8c"
+white = "#dcf5a8"
+bright_black = "#5f9a2c"
+bright_red = "#ff8095"
+bright_green = "#e2ff8c"
+bright_yellow = "#fff38a"
+bright_blue = "#e6ff99"
+bright_magenta = "#fff9c2"
+bright_cyan = "#f0ffc2"
+bright_white = "#ffffff"
+
+[syntax]
+keyword = "#b6ff00"
+string = "#ffe600"
+comment = "#6ea83a"
+number = "#fff38a"
+kind = "#e2ff8c"
+punctuation = "#a3d16a"

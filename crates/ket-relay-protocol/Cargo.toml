@@ -1,0 +1,16 @@
+[package]
+name = "ket-relay-protocol"
+description = "The relay's outer frame: routing and opaque ciphertext, and nothing it could read."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# No dependencies, and in particular never `ket-remote`: the relay must not be
+# able to name, let alone decode, what it carries.
+[dependencies]
+
+[lints]
+workspace = true

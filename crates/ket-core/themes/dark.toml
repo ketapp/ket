@@ -1,0 +1,71 @@
+# The shipped dark theme. Used whenever nothing overrides it.
+
+label = "Desk"
+appearance = "dark"
+backdrop = "#020304"
+surface = "#0d0f12"
+panel = "#0d0f12"
+elevated = "#1d2127"
+sunken = "#181b21"
+hover = "#1b1f25"
+selection = "#2b3039"
+border = "#353b45"
+rule = "#20242b"
+marker = "#ff9f0a"
+accent = "#f6f7f9"
+accent_hover = "#ffffff"
+on_accent = "#0d0f12"
+focus_ring = "#f6f7f9"
+
+[text]
+primary = "#f4f5f7"
+dim = "#9ea6b0"
+
+[diff]
+added = "#34e08c"
+removed = "#ff5566"
+modified = "#ffc933"
+context = "#9ea6b0"
+hunk_header = "#ffc933"
+
+[status]
+running = "#34e08c"
+attention = "#5c9dff"
+failed = "#ff5566"
+merging = "#b594ff"
+
+[quota]
+warm = "#ffe45c"
+hot = "#ff9433"
+critical = "#ff5a4a"
+
+[terminal]
+foreground = "#eef0f3"
+background = "#0d0f12"
+cursor = "#f4f5f7"
+
+[terminal.ansi]
+black = "#2b3138"
+red = "#ff5566"
+green = "#34e08c"
+yellow = "#ffc933"
+blue = "#5c9dff"
+magenta = "#d08cff"
+cyan = "#3fd2e0"
+white = "#d8dee4"
+bright_black = "#68707e"
+bright_red = "#ff8f99"
+bright_green = "#78f0b0"
+bright_yellow = "#ffe27a"
+bright_blue = "#8ec0ff"
+bright_magenta = "#e2b0ff"
+bright_cyan = "#7ce6f0"
+bright_white = "#ffffff"
+
+[syntax]
+keyword = "#f4f5f7"
+string = "#78f0b0"
+comment = "#717a86"
+number = "#ffc933"
+kind = "#ffc933"
+punctuation = "#9ea6b0"

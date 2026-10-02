@@ -1,0 +1,22 @@
+[package]
+name = "ket-relay"
+description = "The relay between phones and ket hosts: forwards ciphertext it cannot read."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# Deliberately without `ket-remote` or `ket-core`: the relay routes frames
+# and cannot decode what is in them.
+[dependencies]
+futures.workspace = true
+ket-relay-protocol.workspace = true
+tokio = { workspace = true, features = ["net"] }
+tokio-tungstenite.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true

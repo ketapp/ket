@@ -1,0 +1,74 @@
+# `dark`, lifted into a warm umber with a coral chrome accent.
+#
+# See `acqua` for what moves and what does not; this is the
+# same change with a warmer ground and hue.
+
+label = "Coral"
+appearance = "dark"
+backdrop = "#0a0605"
+surface = "#17100d"
+panel = "#17100d"
+elevated = "#241914"
+sunken = "#201612"
+hover = "#231814"
+selection = "#3a231a"
+border = "#4a352b"
+rule = "#241914"
+marker = "#ff9f0a"
+accent = "#ff7a59"
+accent_hover = "#ff9d83"
+on_accent = "#1a0905"
+focus_ring = "#ff7a59"
+
+[text]
+primary = "#fcf1e6"
+dim = "#c4aa95"
+
+[diff]
+added = "#34e08c"
+removed = "#ff5566"
+modified = "#ffc933"
+context = "#9ea6b0"
+hunk_header = "#ffc94d"
+
+[status]
+running = "#34e08c"
+attention = "#5c9dff"
+failed = "#ff5566"
+merging = "#b594ff"
+
+[quota]
+warm = "#ffe45c"
+hot = "#ff9433"
+critical = "#ff5a4a"
+
+[terminal]
+foreground = "#fcf1e6"
+background = "#17100d"
+cursor = "#ff7a59"
+
+[terminal.ansi]
+black = "#2b3138"
+red = "#ff5566"
+green = "#34e08c"
+yellow = "#ffc933"
+blue = "#5c9dff"
+magenta = "#d08cff"
+cyan = "#3fd2e0"
+white = "#d8dee4"
+bright_black = "#68707e"
+bright_red = "#ff8f99"
+bright_green = "#78f0b0"
+bright_yellow = "#ffe27a"
+bright_blue = "#8ec0ff"
+bright_magenta = "#e2b0ff"
+bright_cyan = "#7ce6f0"
+bright_white = "#ffffff"
+
+[syntax]
+keyword = "#ff7a59"
+string = "#bcef7a"
+comment = "#937d6b"
+number = "#ffc94d"
+kind = "#ffc94d"
+punctuation = "#b09a88"

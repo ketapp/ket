@@ -1,0 +1,83 @@
+# Monokai Pro's warm charcoal and its six hues.
+#
+# The ground is Monokai Pro's editor grey, with its darker sidebar grey
+# for wells and the near-black it draws borders in for the desk. Pink
+# is keywords, failures and removed lines; yellow is strings, the
+# `marker`, the primary action and focus; green is progress, cyan types
+# and "waiting on you", purple numbers and merges, orange the hot end of
+# a quota. The terminal keeps Monokai Pro's own quirk of orange in the
+# blue slot.
+#
+# The dim grey is a step lighter than Monokai's `#939293`, which falls
+# under the body minimum on a menu or a hovered row.
+
+label = "Monokai"
+appearance = "dark"
+backdrop = "#19181a"
+surface = "#2d2a2e"
+panel = "#2d2a2e"
+elevated = "#3b383c"
+sunken = "#221f22"
+hover = "#353236"
+selection = "#4a474b"
+border = "#5b595c"
+rule = "#3d3a3e"
+marker = "#ffd866"
+accent = "#ffd866"
+accent_hover = "#ffe38f"
+on_accent = "#2d2a2e"
+focus_ring = "#ffd866"
+
+[text]
+primary = "#fcfcfa"
+dim = "#adabae"
+note = "#ffd866"
+
+[diff]
+added = "#a9dc76"
+removed = "#ff6188"
+modified = "#ffd866"
+context = "#adabae"
+hunk_header = "#ab9df2"
+
+[status]
+running = "#a9dc76"
+attention = "#78dce8"
+failed = "#ff6188"
+merging = "#ab9df2"
+
+[quota]
+warm = "#ffd866"
+hot = "#fc9867"
+critical = "#ff6188"
+
+[terminal]
+foreground = "#fcfcfa"
+background = "#2d2a2e"
+cursor = "#fcfcfa"
+
+[terminal.ansi]
+black = "#403e41"
+red = "#ff6188"
+green = "#a9dc76"
+yellow = "#ffd866"
+blue = "#fc9867"
+magenta = "#ab9df2"
+cyan = "#78dce8"
+white = "#fcfcfa"
+bright_black = "#727072"
+bright_red = "#ff6188"
+bright_green = "#a9dc76"
+bright_yellow = "#ffd866"
+bright_blue = "#fc9867"
+bright_magenta = "#ab9df2"
+bright_cyan = "#78dce8"
+bright_white = "#fcfcfa"
+
+[syntax]
+keyword = "#ff6188"
+string = "#ffd866"
+comment = "#727072"
+number = "#ab9df2"
+kind = "#78dce8"
+punctuation = "#939293"

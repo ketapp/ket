@@ -1,0 +1,70 @@
+{
+  "expo": {
+    "name": "ket",
+    "slug": "ket",
+    "version": "0.1.0",
+    "orientation": "default",
+    "icon": "./assets/images/icon.png",
+    "scheme": "ket",
+    "userInterfaceStyle": "dark",
+    "backgroundColor": "#0d0c0b",
+    "ios": {
+      "icon": "./assets/expo.icon",
+      "supportsTablet": false,
+      "bundleIdentifier": "dev.ketapp.ket",
+      "buildNumber": "1",
+      "config": {
+        "usesNonExemptEncryption": false
+      },
+      "infoPlist": {
+        "NSLocalNetworkUsageDescription": "ket connects to your Mac over your Wi-Fi to show and control the agents running on it.",
+        "NSAppTransportSecurity": {
+          "NSAllowsLocalNetworking": true
+        }
+      }
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#0d0c0b",
+        "foregroundImage": "./assets/images/android-icon-foreground.png",
+        "backgroundImage": "./assets/images/android-icon-background.png",
+        "monochromeImage": "./assets/images/android-icon-monochrome.png"
+      },
+      "predictiveBackGestureEnabled": false,
+      "permissions": [
+        "android.permission.CAMERA"
+      ],
+      "package": "dev.ketapp.ket",
+      "versionCode": 1
+    },
+    "plugins": [
+      "expo-router",
+      [
+        "expo-splash-screen",
+        {
+          "backgroundColor": "#0d0c0b",
+          "image": "./assets/images/splash-icon.png",
+          "imageWidth": 76
+        }
+      ],
+      "expo-secure-store",
+      [
+        "expo-local-authentication",
+        {
+          "faceIDPermission": "ket uses Face ID to unlock the app, so only you can reach your desktops' terminals from this phone."
+        }
+      ],
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "ket uses the camera to scan the pairing code your Mac shows.",
+          "recordAudioAndroid": false
+        }
+      ]
+    ],
+    "experiments": {
+      "typedRoutes": false,
+      "reactCompiler": true
+    }
+  }
+}

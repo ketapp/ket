@@ -1,0 +1,12 @@
+{
+  "name": "ket-checkpoint-xterm",
+  "private": true,
+  "description": "Epic 5b.0 spike: replays ket terminal checkpoints into xterm.js and compares.",
+  "type": "module",
+  "scripts": {
+    "compare": "node compare.mjs"
+  },
+  "dependencies": {
+    "@xterm/headless": "^5.5.0"
+  }
+}

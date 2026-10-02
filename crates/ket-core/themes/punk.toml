@@ -1,0 +1,78 @@
+# A near-black violet ground lit with hot pink and neon yellow.
+#
+# The one shipped theme that does not whisper. Pink is the chrome
+# accent and the keyword colour; neon yellow is the `marker` and the
+# strings; cyan carries types, hunks and "waiting on you". Unlike its
+# siblings it recolours status too — a mint `running` and a
+# traffic-cone `failed` belong to the same poster, and the meanings stay
+# where they were: green is progress, red is broken.
+
+label = "Punk"
+appearance = "dark"
+backdrop = "#060209"
+surface = "#110818"
+panel = "#110818"
+elevated = "#1f0f2c"
+sunken = "#1a0c25"
+hover = "#221030"
+selection = "#3d1248"
+border = "#4a1f5e"
+rule = "#23122f"
+marker = "#f2ff26"
+accent = "#ff2d95"
+accent_hover = "#ff5cae"
+on_accent = "#16000b"
+focus_ring = "#f2ff26"
+
+[text]
+primary = "#fff4fb"
+dim = "#c19fd4"
+
+[diff]
+added = "#39ff88"
+removed = "#ff3b5c"
+modified = "#f2ff26"
+context = "#c19fd4"
+hunk_header = "#00e5ff"
+
+[status]
+running = "#39ff88"
+attention = "#00e5ff"
+failed = "#ff3b5c"
+merging = "#b86bff"
+
+[quota]
+warm = "#f2ff26"
+hot = "#ff9f1a"
+critical = "#ff3b5c"
+
+[terminal]
+foreground = "#fff4fb"
+background = "#110818"
+cursor = "#ff2d95"
+
+[terminal.ansi]
+black = "#2b1838"
+red = "#ff3b5c"
+green = "#39ff88"
+yellow = "#f2ff26"
+blue = "#4d8dff"
+magenta = "#ff2d95"
+cyan = "#00e5ff"
+white = "#eadcf2"
+bright_black = "#735a88"
+bright_red = "#ff7590"
+bright_green = "#8cffb8"
+bright_yellow = "#f9ff8a"
+bright_blue = "#85b3ff"
+bright_magenta = "#ff7ac0"
+bright_cyan = "#70f2ff"
+bright_white = "#ffffff"
+
+[syntax]
+keyword = "#ff2d95"
+string = "#f2ff26"
+comment = "#7d6395"
+number = "#00e5ff"
+kind = "#00e5ff"
+punctuation = "#a98bbf"

@@ -1,0 +1,26 @@
+[package]
+name = "ket-remote"
+description = "The phone protocol: the encrypted application contract, Noise sessions and pairing."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+base64.workspace = true
+getrandom.workspace = true
+prost.workspace = true
+snow.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+ket-relay-protocol.workspace = true
+
+[build-dependencies]
+prost-build.workspace = true
+protox.workspace = true
+
+[lints]
+workspace = true

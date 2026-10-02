@@ -1,0 +1,24 @@
+name: Feature request
+description: Propose a focused improvement
+title: "feature: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What workflow is difficult today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe the smallest useful outcome and alternatives considered.
+    validations:
+      required: true
+  - type: textarea
+    id: security
+    attributes:
+      label: Security and compatibility
+      description: Note effects on local execution, stored data, pairing, protocol, or existing sessions.

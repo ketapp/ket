@@ -1,0 +1,79 @@
+# `dark` sunk into deep petrol water, with an azure-cyan chrome accent.
+#
+# Same five rules as `dark` — one ground, hairlines instead of slabs, no
+# gradients — with two things moved: the ground takes a blue-green tint
+# in place of `dark`'s neutral, and `accent` takes a hue instead of
+# standing in for ink. `keyword` follows `accent`, so the one place the
+# theme spends its accent on code picks up the colour too. Status
+# colours keep their meanings; only the two the accent would collide
+# with move.
+
+label = "Acqua"
+appearance = "dark"
+backdrop = "#02090b"
+surface = "#071418"
+panel = "#071418"
+elevated = "#11262c"
+sunken = "#0d2025"
+hover = "#0e2126"
+selection = "#143640"
+border = "#22505c"
+rule = "#10272d"
+marker = "#ff9f0a"
+accent = "#36c2ff"
+accent_hover = "#6fd4ff"
+on_accent = "#021018"
+focus_ring = "#36c2ff"
+
+[text]
+primary = "#e8f7fa"
+dim = "#92b5bd"
+
+[diff]
+added = "#34e08c"
+removed = "#ff5566"
+modified = "#ffc933"
+context = "#92b5bd"
+hunk_header = "#ffc25e"
+
+[status]
+running = "#34e08c"
+attention = "#8c98ff"
+failed = "#ff5566"
+merging = "#e08cff"
+
+[quota]
+warm = "#ffe45c"
+hot = "#ff9433"
+critical = "#ff5a4a"
+
+[terminal]
+foreground = "#e8f7fa"
+background = "#071418"
+cursor = "#36c2ff"
+
+[terminal.ansi]
+black = "#15313a"
+red = "#ff5566"
+green = "#34e08c"
+yellow = "#ffc933"
+blue = "#36c2ff"
+magenta = "#d08cff"
+cyan = "#3fd2e0"
+white = "#d8dee4"
+bright_black = "#5b8089"
+bright_red = "#ff8f99"
+bright_green = "#78f0b0"
+bright_yellow = "#ffe27a"
+bright_blue = "#8ad9ff"
+bright_magenta = "#e2b0ff"
+bright_cyan = "#7ce6f0"
+bright_white = "#ffffff"
+
+[syntax]
+keyword = "#36c2ff"
+string = "#7ef0b0"
+comment = "#5b8089"
+number = "#ffc25e"
+kind = "#ffc25e"
+punctuation = "#7fa3ab"

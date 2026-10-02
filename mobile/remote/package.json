@@ -1,0 +1,29 @@
+{
+  "name": "@ket/remote",
+  "private": true,
+  "description": "The phone side of the ket remote protocol (Epic 5b): Noise over the relay, the application contract, pairing.",
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "generate": "buf generate",
+    "typecheck": "tsc --noEmit",
+    "vectors": "node test/vectors.ts",
+    "test": "node test/vectors.ts && node test/protocol.ts",
+    "live": "node test/live.ts",
+    "coverage": "c8 --reports-dir coverage --reporter html --reporter text-summary --reporter lcov --include 'src/**' --exclude 'src/gen/**' --all npm test"
+  },
+  "dependencies": {
+    "@bufbuild/protobuf": "^2.15.0",
+    "@noble/ciphers": "^2.4.0",
+    "@noble/curves": "^2.4.0",
+    "@noble/hashes": "^2.4.0"
+  },
+  "devDependencies": {
+    "@bufbuild/buf": "^1.57.0",
+    "@bufbuild/protoc-gen-es": "^2.15.0",
+    "@types/node": "^24.0.0",
+    "@xterm/headless": "^5.5.0",
+    "c8": "^12.0.0",
+    "typescript": "^5.9.0"
+  }
+}

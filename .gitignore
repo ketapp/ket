@@ -1,0 +1,18 @@
+/target
+**/*.rs.bk
+.DS_Store
+
+# local runtime state, if it ever lands inside the repo during development
+/.ket/
+
+# local notes
+/PLAN.md
+
+# claude code worktrees
+/.claude/
+
+# test coverage (scripts/coverage.sh)
+/coverage/
+
+# per-checkout agent rules, not published
+CLAUDE.local.md

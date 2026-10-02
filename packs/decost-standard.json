@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 2,
+  "packId": "decost-standard",
+  "packVersion": 2,
+  "name": "decost — standard",
+  "publishedAt": "2026-09-26",
+  "levels": [
+    {
+      "id": "no-reduction",
+      "label": "4 — No reduction",
+      "description": "Nothing is changed. The control this pack is measured against."
+    },
+    {
+      "id": "light-reduction",
+      "label": "3 — Light reduction",
+      "description": "Trims filler; provider-specific settings reduce incidental output and subagent cost.",
+      "tag": "light reduction",
+      "instruction": "Reduce token usage: trim filler and avoid restating what was just said. Keep reasoning and explanations otherwise full.",
+      "claude": { "subagentModel": "haiku", "subagentCacheTtl": "1h" },
+      "codex": { "reasoningSummary": "concise" }
+    },
+    {
+      "id": "moderate-reduction",
+      "label": "2 — Moderate reduction",
+      "description": "Shorter output with cheaper Claude subagents and concise Codex summaries.",
+      "tag": "moderate reduction",
+      "instruction": "Reduce token usage: give shorter explanations and terser output throughout this session.",
+      "claude": { "subagentModel": "haiku", "subagentCacheTtl": "1h", "agentTeams": false, "crossSessionInbound": "hold" },
+      "codex": { "verbosity": "medium", "reasoningSummary": "concise" }
+    },
+    {
+      "id": "heavy-reduction",
+      "label": "1 — Heavy reduction",
+      "description": "Lower output and earlier compaction using each provider's supported controls.",
+      "tag": "heavy reduction",
+      "instruction": "Reduce token usage heavily: keep narration minimal, state results and decisions directly, skip recaps and closing summaries.",
+      "claude": { "effort": "medium", "subagentModel": "haiku", "subagentCacheTtl": "1h", "agentTeams": false, "crossSessionInbound": "hold", "autocompact": "150000" },
+      "codex": { "verbosity": "low", "reasoningSummary": "none", "autocompact": "150000" }
+    },
+    {
+      "id": "maximum-reduction",
+      "label": "0 — Maximum reduction",
+      "description": "Lowest supported effort and output, no summaries, and early compaction.",
+      "tag": "max reduction",
+      "instruction": "Reduce token usage to the maximum: answer as tersely as possible, with no narration and no explanation unless one is asked for.",
+      "claude": { "effort": "low", "subagentModel": "haiku", "subagentCacheTtl": "1h", "agentTeams": false, "crossSessionInbound": "refuse", "autocompact": "150000" },
+      "codex": { "effort": "low", "verbosity": "low", "reasoningSummary": "none", "autocompact": "150000" }
+    }
+  ],
+  "defaultLevel": "no-reduction"
+}

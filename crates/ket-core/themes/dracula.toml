@@ -1,0 +1,78 @@
+# Dracula's violet night, after draculatheme.com (MIT).
+#
+# Its purple is the accent and the keyword-adjacent hue; its orange is the
+# `marker`, the one warm thing the chrome spends; cyan is "waiting on you"
+# and the hunk line; pink merges. The grounds are Dracula's own background
+# and its darker sidebar shades. Comment blue is kept for code only: the dim
+# line is lifted to a pale lavender so it clears the body minimum on menus
+# and hovered rows, and red is a step softer so a removed line does too.
+
+label = "Dracula"
+appearance = "dark"
+backdrop = "#191a21"
+surface = "#282a36"
+panel = "#282a36"
+elevated = "#343746"
+sunken = "#21222c"
+hover = "#2f3140"
+selection = "#44475a"
+border = "#565970"
+rule = "#30323f"
+marker = "#ffb86c"
+accent = "#bd93f9"
+accent_hover = "#cfb0fb"
+on_accent = "#191a21"
+focus_ring = "#bd93f9"
+
+[text]
+primary = "#f8f8f2"
+dim = "#b4b8d4"
+
+[diff]
+added = "#50fa7b"
+removed = "#ff6e6e"
+modified = "#f1fa8c"
+context = "#b4b8d4"
+hunk_header = "#8be9fd"
+
+[status]
+running = "#50fa7b"
+attention = "#8be9fd"
+failed = "#ff6e6e"
+merging = "#ff79c6"
+
+[quota]
+warm = "#f1fa8c"
+hot = "#ffb86c"
+critical = "#ff6e6e"
+
+[terminal]
+foreground = "#f8f8f2"
+background = "#282a36"
+cursor = "#f8f8f2"
+
+[terminal.ansi]
+black = "#21222c"
+red = "#ff5555"
+green = "#50fa7b"
+yellow = "#f1fa8c"
+blue = "#bd93f9"
+magenta = "#ff79c6"
+cyan = "#8be9fd"
+white = "#f8f8f2"
+bright_black = "#6272a4"
+bright_red = "#ff6e6e"
+bright_green = "#69ff94"
+bright_yellow = "#ffffa5"
+bright_blue = "#d6acff"
+bright_magenta = "#ff92df"
+bright_cyan = "#a4ffff"
+bright_white = "#ffffff"
+
+[syntax]
+keyword = "#ff79c6"
+string = "#f1fa8c"
+comment = "#6272a4"
+number = "#bd93f9"
+kind = "#8be9fd"
+punctuation = "#f8f8f2"

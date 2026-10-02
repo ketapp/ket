@@ -1,0 +1,78 @@
+# Solarized dark, after Ethan Schoonover's palette (MIT).
+#
+# `base03` for the cards and a step below it for the desk; `base02` for
+# wells. Yellow is the accent, orange the `marker`, blue "waiting on you",
+# violet the hunk line and magenta merges. Solarized keeps its body text
+# low — `base0` — which the terminal still uses; ket's ink takes `base2`
+# and its dim line `base1`, so names and summaries clear the body minimum on
+# every ground. Red is a shade lighter in the chrome for the same reason.
+
+label = "Solarized Dark"
+appearance = "dark"
+backdrop = "#00212b"
+surface = "#002b36"
+panel = "#002b36"
+elevated = "#0a3a47"
+sunken = "#073642"
+hover = "#04323e"
+selection = "#104452"
+border = "#1d5462"
+rule = "#073642"
+marker = "#cb4b16"
+accent = "#b58900"
+accent_hover = "#c99a10"
+on_accent = "#002b36"
+focus_ring = "#b58900"
+
+[text]
+primary = "#eee8d5"
+dim = "#93a1a1"
+
+[diff]
+added = "#859900"
+removed = "#ef5b58"
+modified = "#b58900"
+context = "#93a1a1"
+hunk_header = "#6c71c4"
+
+[status]
+running = "#859900"
+attention = "#268bd2"
+failed = "#e5504d"
+merging = "#d33682"
+
+[quota]
+warm = "#b58900"
+hot = "#cb4b16"
+critical = "#e5504d"
+
+[terminal]
+foreground = "#839496"
+background = "#002b36"
+cursor = "#93a1a1"
+
+[terminal.ansi]
+black = "#073642"
+red = "#dc322f"
+green = "#859900"
+yellow = "#b58900"
+blue = "#268bd2"
+magenta = "#d33682"
+cyan = "#2aa198"
+white = "#eee8d5"
+bright_black = "#586e75"
+bright_red = "#cb4b16"
+bright_green = "#586e75"
+bright_yellow = "#657b83"
+bright_blue = "#839496"
+bright_magenta = "#6c71c4"
+bright_cyan = "#93a1a1"
+bright_white = "#fdf6e3"
+
+[syntax]
+keyword = "#859900"
+string = "#2aa198"
+comment = "#586e75"
+number = "#d33682"
+kind = "#b58900"
+punctuation = "#93a1a1"

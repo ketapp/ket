@@ -1,0 +1,111 @@
+[package]
+name = "ket-ui"
+description = "ket's native shell: a gpui window over ket-core."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# Invariant 2, enforced here rather than promised: this crate depends on
+# `ket-core` and the UI framework, and on nothing that can reach git or the
+# filesystem. There is no `gix`, no `git2`, no `walkdir`. A shell that cannot
+# name the dependency cannot reach around the API, which is the wall the HTTP
+# boundary used to provide for free in the abandoned web design.
+[dependencies]
+ket-core.workspace = true
+gpui.workspace = true
+# Diagnostics only. Neither git nor a filesystem crate, so the rule above holds.
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rodio.workspace = true
+tokio.workspace = true
+# The pairing screen's QR code — encoding only; `ui::qr` draws it. Neither git
+# nor a filesystem crate.
+qrcode.workspace = true
+# A backlog note's description, drawn as markdown by `ui::markdown`. A
+# parser only; neither git nor a filesystem crate.
+pulldown-cmark.workspace = true
+# The Android emulator tab's frames, handed to gpui as images — pixels in
+# memory only; nothing here opens a file.
+image = { version = "0.25", default-features = false }
+
+# Browser tabs are a native child view, not a bundled engine. On macOS Wry is
+# backed by WKWebView; keeping these target-specific avoids pulling Linux's GTK
+# surface into platforms where ket does not support it yet.
+[target.'cfg(target_os = "macos")'.dependencies]
+gpui-wry = "0.5.0"
+raw-window-handle = "0.6.2"
+wry = "0.53.3"
+# Moving the window from ket's own chrome. gpui marks the regions that should
+# do it — `WindowControlArea` — but its macOS backend never implemented the
+# hook, so a tab strip running to the top edge could not be exempted and a tab
+# in it could not be dragged. See `src/window_drag.rs`. Both crates are already
+# in the tree behind `wry`, so this names what was there rather than adding to
+# it, and every call but one pointer cast is a safe binding.
+#
+# `default-features = false` and five named classes, because the default is
+# every class AppKit has — which drags in seven more `objc2-*` crates to
+# compile for the sake of one pointer cast and three messages.
+objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "NSApplication",
+    "NSEvent",
+    "NSImage",
+    "NSResponder",
+    "NSView",
+    "NSWindow",
+] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "NSBundle",
+    "NSData",
+    "NSError",
+    "NSString",
+] }
+# A still of a browser pane's page, for ket's menus to draw over while the
+# live page is hidden. See `src/browser_snapshot.rs`. Already in the tree
+# behind `wry`; this names the two classes the snapshot needs.
+objc2-web-kit = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "block2",
+    "objc2-app-kit",
+    "WKWebView",
+    "WKSnapshotConfiguration",
+] }
+# Voice input in the quick prompt: Apple's Speech framework, fed from the
+# microphone through AVAudioEngine. See `src/voice.rs`. `objc2-avf-audio` and
+# `block2` are already in the tree behind `rodio`'s CoreAudio backend; the
+# Speech bindings are the one new crate, and each keeps to the classes named.
+objc2 = { version = "0.6.3", features = ["exception"] }
+# The iPhone Simulator tab: Xcode's private CoreSimulator and SimulatorKit,
+# loaded at run time from the active Xcode. See `src/ios_simulator.rs`.
+libloading = "0.8.9"
+block2 = "0.6.2"
+objc2-speech = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "block2",
+    "objc2-avf-audio",
+    "SFSpeechRecognizer",
+    "SFSpeechRecognitionRequest",
+    "SFSpeechRecognitionResult",
+    "SFSpeechRecognitionTask",
+    "SFTranscription",
+] }
+objc2-avf-audio = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "block2",
+    "AVAudioApplication",
+    "AVAudioBuffer",
+    "AVAudioEngine",
+    "AVAudioFormat",
+    "AVAudioIONode",
+    "AVAudioNode",
+    "AVAudioTime",
+    "AVAudioTypes",
+] }
+
+[lints]
+workspace = true

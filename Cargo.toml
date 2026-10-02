@@ -1,0 +1,185 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/ket-core",
+    "crates/ket-cli",
+    "crates/ket-ui",
+    "crates/ket-relay-protocol",
+    "crates/ket-remote",
+    "crates/ket-relay",
+    "crates/ket-android",
+    "crates/ket-feedback",
+]
+# Vendored third-party code — patched gpui and alacritty_terminal, see the
+# `[patch.crates-io]` block below. Not members: it is other people's code, and
+# ket's lints (no `unsafe`, `clippy --workspace -D warnings`) are ket's rules,
+# not theirs.
+exclude = ["vendor"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+license = "MIT"
+repository = "https://github.com/ketapp/ket"
+publish = false
+
+[workspace.dependencies]
+ket-android = { path = "crates/ket-android" }
+ket-core = { path = "crates/ket-core" }
+ket-relay-protocol = { path = "crates/ket-relay-protocol" }
+ket-relay = { path = "crates/ket-relay" }
+ket-remote = { path = "crates/ket-remote" }
+
+# The good transport for agents: structured tool calls and diffs as *data*,
+# instead of regex over ANSI escapes.
+agent-client-protocol = "2.1"
+# The grid. A terminal emulator is a state machine over escape sequences, and
+# writing one is a multi-year project that alacritty has already finished. It
+# owns the parse and the scrollback; ket owns the pty, the pacing, and the
+# bounds. Default features off: the only one is `serde`, and nothing serialises
+# a grid in serde's sense: checkpoints for other clients are written as ANSI
+# by `ket-core::terminal::checkpoint`, which needs the three accessors the
+# patch below adds.
+alacritty_terminal = { version = "0.26", default-features = false }
+clap = { version = "4.6", features = ["derive", "env", "string"] }
+futures = "0.3"
+# The native shell. Zed's framework is GPU-drawn and carries no browser engine
+# or JS runtime of its own. Browser tabs opt into the operating system webview
+# separately in `ket-ui`.
+gpui = "0.2"
+# Markdown, parsed for `ket-ui::ui::markdown` to draw. Already in the tree;
+# default features off, which drops the HTML writer and the CLI's getopts.
+pulldown-cmark = { version = "0.13", default-features = false }
+glob = "0.3"
+# VS Code-compatible Search-view patterns: globstar, brace alternatives and
+# character classes. Kept in core, where filesystem policy belongs.
+globset = "0.4.20"
+# Read-only git: status and ahead/behind, where a process spawn per call would
+# show up. Worktree *mutations* stay on the `git` binary — see `ket-core::git`.
+# Default features are off deliberately: the network transports, worktree
+# mutation, and archive support are all surface we do not use.
+gix = { version = "0.87", default-features = false, features = [
+    "status",
+    "revision",
+    "blob-diff",
+    "max-performance-safe",
+    "sha1",
+] }
+# Filesystem watching. Agents write into worktrees while a person has the same
+# files open in their editor, and neither side tells ket; without this, every
+# view in the shell would need a manual refresh. FSEvents on macOS, inotify on
+# Linux, both behind one API.
+notify = "8.2"
+# The fallback transport, for agents that do not speak ACP.
+portable-pty = "0.9"
+# The tweak editor's backing store: a text rope, so opening a large file and
+# editing one character does not copy the whole file on every keystroke. See
+# `ket-core::buffer`. Default features off and re-enabled explicitly per the
+# crate's own footgun warning: `cr_lines`/`unicode_lines` would make Ropey
+# treat a lone CR or a handful of Unicode separators as line breaks, which
+# would disagree with the LF-only model `buffer` normalizes every file to;
+# `simd` costs nothing to keep and the crate's docs warn that disabling
+# default features silently drops it too.
+ropey = { version = "1.6", default-features = false, features = ["simd"] }
+# File playback only. Defaults also enable recording, dithering and noise
+# generation, none of which belong in a file viewer.
+rodio = { version = "0.22.2", default-features = false, features = ["playback", "flac", "mp3", "mp4", "vorbis", "wav"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+# The phone protocol (Epic 5b.2). Protobuf, so the TypeScript app generates
+# the same types from the same file; compiled by protox, in Rust, so building
+# ket never needs a protoc binary on the machine.
+prost = "0.14"
+prost-build = "0.14"
+protox = "0.9"
+# Noise, rather than a handshake of ket's own design.
+snow = "0.10"
+# The relay's WebSockets, and the host's side of them (Epic 5b.3).
+tokio-tungstenite = "0.30"
+# `ket-feedback`'s HTTP: one JSON endpoint and a health check, over HTTP/1.
+# Already in the tree through tonic; only the server half is turned on.
+hyper = { version = "1.11", features = ["http1", "server"] }
+hyper-util = { version = "0.1.20", features = ["tokio"] }
+http-body-util = "0.1.5"
+# `ket-feedback`'s mail. SMTP because every mail host speaks it, so the
+# service is tied to no provider. rustls with ring and the operating
+# system's root certificates (rustls-native-certs), all three already in
+# the tree. Not webpki-roots, nor rustls-platform-verifier, which brings
+# webpki-root-certs: both are CDLA-Permissive-2.0, which deny.toml does not
+# allow. No connection pool: reports arrive a few a day.
+lettre = { version = "0.11.23", default-features = false, features = [
+    "builder",
+    "smtp-transport",
+    "tokio1-rustls",
+    "ring",
+    "rustls-native-certs",
+] }
+base64 = "0.22"
+# Pairing secrets and ids: the operating system's randomness, nothing seeded.
+getrandom = "0.3"
+# The pairing screen's QR code, in ket.app. Pure Rust, MIT OR Apache-2.0, and
+# with default features off it depends on nothing: the defaults are PNG, SVG
+# and PIC renderers, and the shell draws the modules itself with gpui.
+qrcode = { version = "0.14", default-features = false }
+tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
+toml = "1.1"
+# A plain GET to Ollama's local daemon, for detecting which models are
+# pulled. Default features off beyond `json`: TLS is for `https://` only,
+# and this never talks to anything but `http://127.0.0.1`.
+ureq = { version = "3.4", default-features = false, features = ["json"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Optimise every dependency in debug builds; ket's own crates stay at
+# opt-level 0 with full debug info, so stepping through and rebuilding ket is
+# unchanged.
+#
+# gpui does all of its work per frame — rebuild the element tree, lay it out
+# with taffy, re-submit and sort every primitive — and at opt-level 0 that is
+# thousands of uninlined calls and std's debug precondition checks. Sampled in
+# a debug build with the sidebar open and an agent working, the frame was
+# spread across exactly those, with no hotspot left to fix in ket: 40-50% of a
+# core. Dependencies are compiled once and cached, so this costs one slower
+# first build, not slower rebuilds.
+[profile.dev.package."*"]
+opt-level = 3
+
+[workspace.lints.rust]
+# `deny` rather than `forbid` so documented carve-outs are possible. There are
+# exactly five, all because no safe equivalent exists:
+#
+#   1. The `clonefile(2)` binding in `ket-core::cow`, which buys a measured
+#      10-19x on worktree provisioning.
+#   2. One pointer-to-reference cast in `ket-ui::window_drag`, which is how ket
+#      moves its own window. gpui's macOS backend never implemented
+#      `WindowControlArea`, so the tab strip could not be exempted from AppKit's
+#      drag band and a tab in it could not be picked up.
+#   3. `ket-ui::voice`, the quick prompt's voice input. Apple's Speech and
+#      AVAudioEngine frameworks have no safe binding: every message `objc2`
+#      generates for them is `unsafe`. Confined to that one module.
+#   4. `ket-ui::ios_simulator`, the iPhone Simulator tab on macOS. Xcode's
+#      private CoreSimulator and SimulatorKit APIs have no supported binding;
+#      the module validates signatures before confining their calls to one
+#      native-view adapter.
+#   5. `ket-ui::browser_snapshot`, the still a browser pane shows while ket's
+#      menus and popovers are over it. WebKit's snapshot call has no safe
+#      binding; the module holds that call and nothing else.
+#
+# Any other `#[allow(unsafe_code)]` should be treated as a mistake.
+unsafe_code = "deny"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+
+[patch.crates-io]
+# gpui 0.2.2 with ket's patches — see `vendor/gpui/KET-PATCH.md`
+# for what changed and why. 0.2.2 is the newest gpui on crates.io; Zed
+# develops it in its own repository and publishes rarely.
+gpui = { path = "vendor/gpui" }
+# Three read-only accessors on `Term` — the inactive screen, the scroll region
+# and the tab stops — that terminal checkpoints need and upstream keeps
+# private. Kept local by decision; see vendor/alacritty_terminal/KET-PATCH.md.
+alacritty_terminal = { path = "vendor/alacritty_terminal" }

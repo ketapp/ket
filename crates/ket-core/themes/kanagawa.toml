@@ -1,0 +1,78 @@
+# Kanagawa's wave variant, after rebelot/kanagawa.nvim (MIT) — colours
+# from Hokusai's Great Wave.
+#
+# Sumi ink for the grounds, fuji white for the ink. Crystal blue is the
+# accent, spring blue "waiting on you", surimi orange the `marker`, oni
+# violet the hunk line and merges; the selection is the theme's wave blue.
+# The dim line is a muted fuji white rather than the theme's gray, which is
+# kept for comments.
+
+label = "Kanagawa"
+appearance = "dark"
+backdrop = "#16161d"
+surface = "#1f1f28"
+panel = "#1f1f28"
+elevated = "#2a2a37"
+sunken = "#252530"
+hover = "#232330"
+selection = "#2d4f67"
+border = "#54546d"
+rule = "#2a2a37"
+marker = "#ffa066"
+accent = "#7e9cd8"
+accent_hover = "#9cb3e2"
+on_accent = "#16161d"
+focus_ring = "#7e9cd8"
+
+[text]
+primary = "#dcd7ba"
+dim = "#b0ac98"
+
+[diff]
+added = "#98bb6c"
+removed = "#e46876"
+modified = "#e6c384"
+context = "#b0ac98"
+hunk_header = "#957fb8"
+
+[status]
+running = "#98bb6c"
+attention = "#7fb4ca"
+failed = "#e46876"
+merging = "#957fb8"
+
+[quota]
+warm = "#e6c384"
+hot = "#ffa066"
+critical = "#ff5d62"
+
+[terminal]
+foreground = "#dcd7ba"
+background = "#1f1f28"
+cursor = "#c8c093"
+
+[terminal.ansi]
+black = "#16161d"
+red = "#c34043"
+green = "#76946a"
+yellow = "#c0a36e"
+blue = "#7e9cd8"
+magenta = "#957fb8"
+cyan = "#6a9589"
+white = "#c8c093"
+bright_black = "#727169"
+bright_red = "#e82424"
+bright_green = "#98bb6c"
+bright_yellow = "#e6c384"
+bright_blue = "#7fb4ca"
+bright_magenta = "#938aa9"
+bright_cyan = "#7aa89f"
+bright_white = "#dcd7ba"
+
+[syntax]
+keyword = "#957fb8"
+string = "#98bb6c"
+comment = "#727169"
+number = "#d27e99"
+kind = "#7aa89f"
+punctuation = "#9cabca"

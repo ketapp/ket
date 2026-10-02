@@ -1,0 +1,78 @@
+# Tokyo Night's night variant, after folke/tokyonight.nvim (Apache-2.0)
+# and enkia's VS Code theme (MIT).
+#
+# Deep navy with neon city light: blue is the accent, cyan "waiting on
+# you", orange the `marker`, purple the hunk line and merges. The storm
+# blue `#292e42` is what floats; the darker `#16161e` the theme draws its
+# sidebars in sets the wells. The comment grey is Tokyo Night's own and is
+# spent on code only.
+
+label = "Tokyo Night"
+appearance = "dark"
+backdrop = "#101016"
+surface = "#1a1b26"
+panel = "#1a1b26"
+elevated = "#292e42"
+sunken = "#16161e"
+hover = "#222436"
+selection = "#33394f"
+border = "#3b4261"
+rule = "#232433"
+marker = "#ff9e64"
+accent = "#7aa2f7"
+accent_hover = "#9cbbf9"
+on_accent = "#16161e"
+focus_ring = "#7aa2f7"
+
+[text]
+primary = "#c0caf5"
+dim = "#a9b1d6"
+
+[diff]
+added = "#9ece6a"
+removed = "#f7768e"
+modified = "#e0af68"
+context = "#a9b1d6"
+hunk_header = "#bb9af7"
+
+[status]
+running = "#9ece6a"
+attention = "#7dcfff"
+failed = "#f7768e"
+merging = "#bb9af7"
+
+[quota]
+warm = "#e0af68"
+hot = "#ff9e64"
+critical = "#f7768e"
+
+[terminal]
+foreground = "#c0caf5"
+background = "#1a1b26"
+cursor = "#c0caf5"
+
+[terminal.ansi]
+black = "#15161e"
+red = "#f7768e"
+green = "#9ece6a"
+yellow = "#e0af68"
+blue = "#7aa2f7"
+magenta = "#bb9af7"
+cyan = "#7dcfff"
+white = "#a9b1d6"
+bright_black = "#414868"
+bright_red = "#f7768e"
+bright_green = "#9ece6a"
+bright_yellow = "#e0af68"
+bright_blue = "#7aa2f7"
+bright_magenta = "#bb9af7"
+bright_cyan = "#7dcfff"
+bright_white = "#c0caf5"
+
+[syntax]
+keyword = "#bb9af7"
+string = "#9ece6a"
+comment = "#565f89"
+number = "#ff9e64"
+kind = "#2ac3de"
+punctuation = "#89ddff"

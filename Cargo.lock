@@ -5021,7 +5021,7 @@ version = "0.1.0"
 dependencies = [
  "agent-client-protocol",
  "alacritty_terminal",
- "base64 0.22.1",
+ "base64 0.23.1",
  "futures",
  "getrandom 0.3.4",
  "gix",
@@ -5083,7 +5083,7 @@ version = "0.1.0"
 name = "ket-remote"
 version = "0.1.0"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "getrandom 0.3.4",
  "ket-relay-protocol",
  "prost",

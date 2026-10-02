@@ -59,7 +59,7 @@ globset = "0.4.20"
 # show up. Worktree *mutations* stay on the `git` binary — see `ket-core::git`.
 # Default features are off deliberately: the network transports, worktree
 # mutation, and archive support are all surface we do not use.
-gix = { version = "0.87", default-features = false, features = [
+gix = { version = "0.88", default-features = false, features = [
     "status",
     "revision",
     "blob-diff",

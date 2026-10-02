@@ -116,7 +116,7 @@ lettre = { version = "0.11.23", default-features = false, features = [
     "ring",
     "rustls-native-certs",
 ] }
-base64 = "0.22"
+base64 = "0.23"
 # Pairing secrets and ids: the operating system's randomness, nothing seeded.
 getrandom = "0.3"
 # The pairing screen's QR code, in ket.app. Pure Rust, MIT OR Apache-2.0, and

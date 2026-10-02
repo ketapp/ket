@@ -36,7 +36,7 @@ image = { version = "0.25", default-features = false }
 # backed by WKWebView; keeping these target-specific avoids pulling Linux's GTK
 # surface into platforms where ket does not support it yet.
 [target.'cfg(target_os = "macos")'.dependencies]
-gpui-wry = "0.5.0"
+gpui-wry = "0.7.0"
 raw-window-handle = "0.6.2"
 wry = "0.53.3"
 # Moving the window from ket's own chrome. gpui marks the regions that should

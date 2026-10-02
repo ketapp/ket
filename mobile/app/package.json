@@ -6,7 +6,7 @@
     "@expo-google-fonts/geist": "^0.4.2",
     "@expo-google-fonts/geist-mono": "^0.4.3",
     "@expo-google-fonts/ibm-plex-mono": "^0.4.1",
-    "@expo/ui": "~57.0.20",
+    "@expo/ui": "~57.0.21",
     "@ket/remote": "file:../remote",
     "@xterm/addon-webgl": "^0.18.0",
     "@xterm/xterm": "^5.5.0",

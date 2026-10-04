@@ -47,6 +47,7 @@ mod fonts;
 mod frametrace;
 mod git_panel;
 mod git_watch;
+mod github;
 mod handset;
 mod header;
 mod horizon;
@@ -422,6 +423,11 @@ struct Shell {
     pub(crate) device_strip_hovered: Option<&'static str>,
     /// A project's backlog, while open.
     pub(crate) backlog: Option<crate::backlog::BacklogDialog>,
+    /// Where each project's GitHub issues were last read, and what ket is
+    /// changing on GitHub now.
+    pub(crate) issue_sync: crate::backlog::IssueSync,
+    /// The Mac's GitHub accounts, and any sign-in under way.
+    pub(crate) github: crate::github::GitHubState,
     /// The ⇧⌘A panel that takes a note for a backlog, while it is up.
     pub(crate) quick_capture: Option<crate::backlog::QuickCapture>,
     /// A worktree row's right-click menu, while it is open.
@@ -1110,6 +1116,8 @@ impl Shell {
                     capturing_device: false,
                     device_strip_hovered: None,
                     backlog: None,
+                    issue_sync: crate::backlog::IssueSync::default(),
+                    github: crate::github::GitHubState::default(),
                     quick_capture: None,
                     worktree_menu: None,
                     path_menu: None,
@@ -1250,6 +1258,8 @@ impl Shell {
             capturing_device: false,
             device_strip_hovered: None,
             backlog: None,
+            issue_sync: crate::backlog::IssueSync::default(),
+            github: crate::github::GitHubState::default(),
             quick_capture: None,
             worktree_menu: None,
             path_menu: None,

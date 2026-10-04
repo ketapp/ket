@@ -58,6 +58,7 @@ use std::time::SystemTime;
 use serde::{Deserialize, Serialize};
 
 use crate::config::write_atomically;
+use crate::github::{Issue, IssueLink, OpenIssues};
 use crate::id::{ProjectId, WorktreeId};
 use crate::project::{Project, ProjectSettings};
 use crate::store::Store;
@@ -106,6 +107,9 @@ pub struct Note {
     pub updated_ms: u64,
     /// Set once the note has been started as work, or marked done.
     pub done: Option<Done>,
+    /// The GitHub issue it is, once it has one — see [`crate::github`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub issue: Option<IssueLink>,
 }
 
 /// How pressing a note is. Ordered least to most, so the list can put the
@@ -139,6 +143,24 @@ impl Priority {
             Self::Urgent => "Urgent",
         }
     }
+}
+
+/// What one [`Backlog::sync_issues`] changed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Synced {
+    /// Notes made for issues the backlog did not have.
+    pub added: usize,
+    /// Waiting notes marked done because their issue closed.
+    pub finished: usize,
+}
+
+/// A new note for `issue`, with an id none of `taken` has.
+fn note_for(issue: &Issue, taken: &[Note]) -> Note {
+    let mut note = Note::new(taken);
+    note.title.clone_from(&issue.title);
+    note.body.clone_from(&issue.body);
+    note.issue = Some(issue.link());
+    note
 }
 
 /// When a note was done, and where it went if it was started.
@@ -225,14 +247,22 @@ impl Note {
     }
 
     /// What an agent is handed when the note is started: the title and the
-    /// description, a blank line between them, trimmed. `None` when neither
-    /// says anything, since there is then nothing to start.
+    /// description, a blank line between them, trimmed, and the issue it is
+    /// when it has one. `None` when neither says anything, since there is
+    /// then nothing to start.
     pub fn brief(&self) -> Option<String> {
         let words: Vec<&str> = [self.title.trim(), self.body.trim()]
             .into_iter()
             .filter(|part| !part.is_empty())
             .collect();
-        (!words.is_empty()).then(|| words.join("\n\n"))
+        let mut brief = (!words.is_empty()).then(|| words.join("\n\n"))?;
+        if let Some(issue) = &self.issue {
+            brief.push_str(&format!(
+                "\n\nGitHub issue #{}: {}",
+                issue.number, issue.url
+            ));
+        }
+        Some(brief)
     }
 }
 
@@ -397,6 +427,48 @@ impl Backlog {
             backlog.finish(id, done);
             Ok(())
         })
+    }
+
+    /// Links note `id` to a GitHub issue.
+    pub fn link_issue(project: &ProjectId, id: &str, issue: IssueLink) -> Result<Self> {
+        Location::of(project)?.update(|backlog| {
+            let note = backlog
+                .notes
+                .iter_mut()
+                .find(|note| note.id == id)
+                .ok_or_else(|| KetError::Conflict(format!("no backlog note {id}")))?;
+            note.issue = Some(issue);
+            note.updated_ms = now_ms();
+            Ok(())
+        })
+    }
+
+    /// Brings the backlog in step with the repository's open issues, as
+    /// they were read at `read_ms`: an issue no note has becomes a new note,
+    /// and a waiting note whose issue is no longer open is done.
+    ///
+    /// A note linked after `read_ms` is left alone — the read could not have
+    /// seen its issue. Nothing is marked done from a list that was cut
+    /// short, where a missing issue may only be one not read. Returns the
+    /// backlog and how many notes were added and finished.
+    pub fn sync_issues(
+        project: &ProjectId,
+        open: &OpenIssues,
+        read_ms: u64,
+    ) -> Result<(Self, Synced)> {
+        let at = Location::of(project)?;
+        // Tried on a copy first: this runs every few minutes, and a read
+        // that changes nothing should not rewrite the file.
+        let mut backlog = at.load()?;
+        if backlog.sync(open, read_ms) == Synced::default() {
+            return Ok((backlog, Synced::default()));
+        }
+        let mut synced = Synced::default();
+        let backlog = at.update(|backlog| {
+            synced = backlog.sync(open, read_ms);
+            Ok(())
+        })?;
+        Ok((backlog, synced))
     }
 
     /// Puts a done note back among the open ones, where its rank says.
@@ -573,6 +645,41 @@ impl Backlog {
                 self.notes.insert(0, note);
             }
         }
+    }
+
+    /// What [`Backlog::sync_issues`] does, to this copy.
+    fn sync(&mut self, open: &OpenIssues, read_ms: u64) -> Synced {
+        let mut synced = Synced::default();
+        let linked = |notes: &[Note], number: u64| {
+            notes.iter().any(|note| {
+                note.issue
+                    .as_ref()
+                    .is_some_and(|link| link.number == number)
+            })
+        };
+        // Oldest first, so each lands above the last and the newest issue
+        // ends up on top, as a newly written note does.
+        for issue in open.issues.iter().rev() {
+            if linked(&self.notes, issue.number) {
+                continue;
+            }
+            self.save(&note_for(issue, &self.notes));
+            synced.added += 1;
+        }
+        if open.complete {
+            for note in &mut self.notes {
+                let closed = note.done.is_none()
+                    && note.updated_ms <= read_ms
+                    && note.issue.as_ref().is_some_and(|link| {
+                        !open.issues.iter().any(|issue| issue.number == link.number)
+                    });
+                if closed {
+                    note.done = Some(Done::by_hand());
+                    synced.finished += 1;
+                }
+            }
+        }
+        synced
     }
 
     fn finish(&mut self, id: &str, done: Done) {

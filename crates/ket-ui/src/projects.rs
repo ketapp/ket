@@ -21,6 +21,7 @@
 
 mod add;
 mod form;
+mod github;
 mod settings;
 
 pub(crate) use add::AddProjectDialog;

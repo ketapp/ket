@@ -1,0 +1,8 @@
+#!/bin/sh
+# Turned on with `git config core.hooksPath .githooks`; see CONTRIBUTING.md.
+
+# A merge commit carries commits that were each checked on their way in.
+git rev-parse -q --verify MERGE_HEAD >/dev/null && exit 0
+
+subject=$(grep -v '^#' "$1" | grep -m1 -v '^[[:space:]]*$')
+exec "$(git rev-parse --show-toplevel)/scripts/check-commit-msg.sh" "$subject"

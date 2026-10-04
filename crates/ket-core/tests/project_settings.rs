@@ -57,6 +57,8 @@ fn settings_survive_the_process_that_wrote_them() {
                 build_dirs: None,
                 agents: Default::default(),
                 backlog_in_repo: false,
+                github_issues: false,
+                github_account: None,
             },
         )
         .unwrap();

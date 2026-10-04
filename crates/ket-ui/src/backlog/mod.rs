@@ -28,11 +28,13 @@
 
 mod capture;
 mod composer;
+mod github;
 mod list;
 mod organise;
 mod start;
 
 pub(crate) use capture::QuickCapture;
+pub(crate) use github::IssueSync;
 
 use gpui::{
     AnyElement, App, Context, Div, Entity, ExternalPaths, FocusHandle, FontWeight, KeyDownEvent,
@@ -40,6 +42,7 @@ use gpui::{
     px, relative,
 };
 use ket_core::backlog::{Backlog, Done, Note, Priority, normalised_tags, shown_order};
+use ket_core::github::CloseReason;
 use ket_core::id::ProjectId;
 use ket_core::theme::{Color, Theme};
 use ket_core::worktree::Worktree;
@@ -178,6 +181,10 @@ enum RowAction {
     /// Opens the note, where Start shows the agent, Economy and base it
     /// will use.
     StartWithOptions,
+    /// Makes the note a GitHub issue.
+    MakeIssue,
+    /// Opens the note's GitHub issue in the browser.
+    OpenIssue,
     Priority(Priority),
     Tag,
     Delete,
@@ -206,6 +213,9 @@ pub(crate) struct BacklogDialog {
     colour: Color,
     /// Whether the project keeps its backlog in its repository.
     in_repo: bool,
+    /// Whether the project follows its GitHub issues, so a note done or
+    /// deleted here closes its issue — see [`github`].
+    github: bool,
     /// What is saved, as the last read or write left it.
     notes: Vec<Note>,
     /// Why the file could not be read. Nothing is written over it then.
@@ -423,9 +433,10 @@ impl Shell {
                 Some(format!("Could not read the backlog: {error}")),
             ),
         };
-        let in_repo = ket_core::workspace::Workspace::open()
+        let settings = ket_core::workspace::Workspace::open()
             .and_then(|workspace| workspace.project_settings(project))
-            .is_ok_and(|settings| settings.backlog_in_repo);
+            .unwrap_or_default();
+        let (in_repo, github) = (settings.backlog_in_repo, settings.github_issues);
         let capture = TextInput::new("Add to the backlog\u{2026}", cx);
         self.watch_field(&capture, cx);
         capture.update(cx, |input, _| input.request_focus());
@@ -436,6 +447,7 @@ impl Shell {
             name,
             colour,
             in_repo,
+            github,
             notes,
             load_error,
             capture,
@@ -473,6 +485,9 @@ impl Shell {
             batch: 0,
         });
         self.read_start_options(project.clone(), cx);
+        if github {
+            self.sync_backlog_issues(project.clone(), true, cx);
+        }
     }
 
     /// Opens `project`'s backlog on the note `id`.
@@ -733,13 +748,14 @@ impl Shell {
         window.focus(&self.focus);
     }
 
-    /// Deletes the note `id` and its files, once Delete has asked.
-    fn delete_backlog_note(&mut self, id: &str) {
+    /// Deletes the note `id` and its files, once Delete has asked — and
+    /// closes its issue, when it is one the project follows.
+    fn delete_backlog_note(&mut self, id: &str, cx: &mut Context<Self>) {
         let Some(dialog) = self.backlog.as_mut() else {
             return;
         };
         dialog.confirming_delete = None;
-        if dialog.saved(id).is_some() {
+        if let Some(note) = dialog.saved(id).cloned() {
             match Backlog::remove(&dialog.project, id) {
                 Ok(backlog) => dialog.take(backlog),
                 Err(error) => {
@@ -747,7 +763,11 @@ impl Shell {
                     return;
                 }
             }
+            self.close_backlog_issues(&[note], CloseReason::NotPlanned, cx);
         }
+        let Some(dialog) = self.backlog.as_mut() else {
+            return;
+        };
         if dialog.cursor.as_deref() == Some(id) {
             dialog.cursor = None;
         }
@@ -910,6 +930,7 @@ impl Shell {
         let Some(dialog) = self.backlog.as_mut() else {
             return;
         };
+        let note = dialog.saved(&id).cloned();
         match Backlog::mark_done(&dialog.project, &id, Done::by_hand()) {
             Ok(backlog) => {
                 dialog.take(backlog);
@@ -920,22 +941,34 @@ impl Shell {
                 return;
             }
         }
+        self.close_backlog_issues(note.as_slice(), CloseReason::Completed, cx);
+        let Some(dialog) = self.backlog.as_mut() else {
+            return;
+        };
         if dialog.selected.as_deref() == Some(id.as_str()) {
             self.close_backlog_draft();
         }
     }
 
-    /// Puts the open done note back among the waiting ones.
-    fn reopen_backlog_note(&mut self) {
+    /// Puts the open done note back among the waiting ones — and reopens
+    /// its issue, when it was done by hand and is one the project follows.
+    fn reopen_backlog_note(&mut self, cx: &mut Context<Self>) {
         let Some(dialog) = self.backlog.as_mut() else {
             return;
         };
         let Some(id) = dialog.selected.clone() else {
             return;
         };
+        let note = dialog.saved(&id).cloned();
         match Backlog::reopen(&dialog.project, &id) {
             Ok(backlog) => dialog.take(backlog),
-            Err(error) => dialog.error = Some(error.to_string()),
+            Err(error) => {
+                dialog.error = Some(error.to_string());
+                return;
+            }
+        }
+        if let Some(note) = note {
+            self.reopen_backlog_issue(&note, cx);
         }
     }
 
@@ -1001,6 +1034,14 @@ impl Shell {
                     "Start with options\u{2026}",
                     Icon::Sliders,
                 )),
+                MenuEntry::Item(match &note.issue {
+                    Some(issue) => MenuItem::new(
+                        Pick::Row(RowAction::OpenIssue),
+                        format!("Open #{} on GitHub", issue.number),
+                    )
+                    .icon(Icon::ExternalLink),
+                    None => row(RowAction::MakeIssue, "Make a GitHub issue", Icon::GitHub),
+                }),
                 MenuEntry::Heading("Priority".into()),
             ];
             items.extend(Priority::ALL.iter().rev().map(|&priority| {
@@ -1121,6 +1162,19 @@ impl Shell {
             RowAction::Tag => {
                 self.select_backlog_note(Some(id), None, cx);
                 self.open_backlog_tag_field(cx);
+            }
+            RowAction::MakeIssue => self.make_backlog_issue(id, cx),
+            RowAction::OpenIssue => {
+                let url = self.backlog.as_ref().and_then(|dialog| {
+                    dialog
+                        .saved(&id)?
+                        .issue
+                        .as_ref()
+                        .map(|issue| issue.url.clone())
+                });
+                if let Some(url) = url {
+                    cx.open_url(&url);
+                }
             }
             RowAction::Delete => {
                 if let Some(dialog) = self.backlog.as_mut() {
@@ -1387,7 +1441,7 @@ impl Shell {
                         dialog.confirming_delete = None;
                     }
                 }
-                "enter" => self.delete_backlog_note(&id),
+                "enter" => self.delete_backlog_note(&id, cx),
                 _ => {}
             }
             return true;

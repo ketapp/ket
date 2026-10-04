@@ -80,6 +80,42 @@ Keep changes focused, update user-facing documentation, and include tests when
 behavior changes. Do not commit credentials, transcripts, local ket state, or
 generated native Expo projects.
 
+## Commit messages
+
+Every commit and pull request title is one line:
+
+```text
+type(scope): what changed (#issue)
+```
+
+```text
+feat(backlog): ⇧⌘A quotes the selection on a web page (#138)
+fix(editor): triple-click selects the line, not the line break (#142)
+chore(deps): bump tokio to 1.48
+```
+
+- `type` is one of `feat`, `fix`, `perf`, `refactor`, `docs`, `chore`, `ci`,
+  `build` or `revert`. `feat` and `fix` end with the issue they close; the
+  others may.
+- `scope` is optional: the area it touches, such as `editor`, `backlog` or
+  `phone`.
+- Start from the issue: in ket, make the backlog note a GitHub issue (or
+  switch the project to follow its issues) and Start it; outside ket,
+  `gh issue develop 142 --checkout`. Either way the branch begins `142-`,
+  and ket's `{issue}` commit template placeholder reads the number back
+  from it.
+- Pull requests are squash-merged, so the title is what lands on `main`. Put
+  `Closes #142` in the description so merging closes the issue.
+
+Turn the local check on once per clone:
+
+```sh
+git config core.hooksPath .githooks
+```
+
+CI runs the same check, `scripts/check-commit-msg.sh`, on every pull request
+title.
+
 ## Dependency policy
 
 - Commit every Rust and npm lockfile.

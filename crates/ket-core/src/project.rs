@@ -186,6 +186,18 @@ pub struct ProjectSettings {
     /// looks empty.
     #[serde(default)]
     pub backlog_in_repo: bool,
+    /// Keep this project's backlog in step with its GitHub issues: open
+    /// issues arrive as notes, and a note whose issue closes is done.
+    ///
+    /// Off by default, because a busy repository's issues would bury a
+    /// backlog that was one person's notes. Making an issue from a note
+    /// needs no switch — see [`crate::github`].
+    #[serde(default)]
+    pub github_issues: bool,
+    /// The GitHub account this project's issues are read and written as,
+    /// of those `gh` is signed in to. `None` is whichever `gh` has active.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_account: Option<String>,
 }
 
 impl Default for ProjectSettings {
@@ -202,6 +214,8 @@ impl Default for ProjectSettings {
             build_dirs: None,
             agents: BTreeMap::new(),
             backlog_in_repo: false,
+            github_issues: false,
+            github_account: None,
         }
     }
 }

@@ -49,6 +49,8 @@ impl Shell {
                 agent: None,
                 trusted: false,
                 backlog_in_repo: None,
+                github_issues: None,
+                github_account: None,
             },
             Field::Name,
             cx,

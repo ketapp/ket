@@ -30,6 +30,7 @@ pub mod event;
 pub mod feedback;
 pub mod files;
 pub mod git;
+pub mod github;
 pub mod hook;
 pub mod host;
 pub mod id;

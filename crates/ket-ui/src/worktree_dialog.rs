@@ -3,8 +3,9 @@
 //! Deliberately spare. "Run on" is absent because everything is local — a
 //! picker with one entry is a question with one answer, and asking it is
 //! worse than not asking. The name field is one field rather than four tabs:
-//! ket has no GitHub or Jira integration to resolve an issue number against,
-//! and tabs that do nothing are a promise the app does not keep.
+//! ket's one link to GitHub issues is the backlog, where a note that is an
+//! issue starts on a branch named for it, and tabs that do nothing here would
+//! be a promise the app does not keep.
 //!
 //! What is left is what a worktree actually needs: which project, what the
 //! branch is called, and which agent it is for. The project is stated in the

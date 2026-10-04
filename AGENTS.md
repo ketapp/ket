@@ -75,6 +75,14 @@ There are five documented `unsafe` carve-outs, and the reason for each is in
 the workspace manifest's lint block. Adding a sixth is a maintainer's call,
 not yours.
 
+## Commit messages
+
+One line, `type(scope): what changed (#issue)` — `fix(editor): triple-click
+selects the line (#142)`. `feat` and `fix` need the issue number; if you do not
+know it, ask rather than leaving it off or making one up. The full rules are
+under "Commit messages" in [`CONTRIBUTING.md`](CONTRIBUTING.md), and
+`scripts/check-commit-msg.sh` is what enforces them.
+
 ## Say what changed in `CHANGELOG.md`
 
 A change someone using ket would notice — something new, something that

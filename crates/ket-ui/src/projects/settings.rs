@@ -22,6 +22,9 @@ pub(crate) struct SettingsDialog {
     /// Whether the backlog was kept in the repository when the dialog
     /// opened: Save moves the notes only when the form changed it.
     pub(crate) backlog_was_in_repo: bool,
+    /// The GitHub repository the project's issues go to, as its picked
+    /// account sees it, or why there is none. `None` while it is asked.
+    pub(crate) github_repo: Option<Result<String, String>>,
 }
 
 impl Shell {
@@ -52,6 +55,8 @@ impl Shell {
                 agent: project.preferred_agent.clone(),
                 trusted: workspace.automation_trusted(id).unwrap_or(false),
                 backlog_in_repo: Some(settings.backlog_in_repo),
+                github_issues: Some(settings.github_issues),
+                github_account: Some(settings.github_account.clone()),
             },
             focus,
             cx,
@@ -63,7 +68,10 @@ impl Shell {
             root: project.root.display().to_string().into(),
             form,
             backlog_was_in_repo: settings.backlog_in_repo,
+            github_repo: None,
         });
+        // Asked every time: an account may have been added since.
+        self.read_github_accounts(cx);
     }
 
     /// Hands the dialog's drafts to core, closing on success. A refusal leaves
@@ -92,6 +100,8 @@ impl Shell {
         match saved {
             Ok(()) => {
                 self.settings = None;
+                // Switched to follow GitHub issues, it should not wait minutes.
+                self.issue_sync.forget(&id);
                 self.reload(cx);
                 // A command that points `claude` at another config directory
                 // needs ket's hooks there too, or this project's rows go dim.

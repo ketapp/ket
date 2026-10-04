@@ -1,3 +1,10 @@
+<!--
+Title: type(scope): what changed (#issue) — it becomes the commit on main.
+e.g. fix(editor): triple-click selects the line (#142)
+-->
+
+Closes #
+
 ## Outcome
 
 <!-- What changes for the user? -->

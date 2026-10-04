@@ -105,6 +105,8 @@ pub(crate) enum Section {
     Merge,
     /// Pairing phones with this Mac, and revoking them.
     Devices,
+    /// The GitHub accounts projects can file issues as.
+    GitHub,
     /// Chords.
     Keybindings,
 }
@@ -112,7 +114,7 @@ pub(crate) enum Section {
 impl Section {
     /// Every section, in the order the rail shows them: [`Section::GROUPS`]
     /// run together, which is the order the arrow keys walk.
-    pub(crate) const ALL: [Section; 10] = [
+    pub(crate) const ALL: [Section; 11] = [
         Section::Agents,
         Section::Economy,
         Section::Snippets,
@@ -123,6 +125,7 @@ impl Section {
         Section::Terminal,
         Section::Keybindings,
         Section::Devices,
+        Section::GitHub,
     ];
 
     /// The rail's two groups, each under a caption: what ket does with
@@ -147,6 +150,7 @@ impl Section {
                 Section::Terminal,
                 Section::Keybindings,
                 Section::Devices,
+                Section::GitHub,
             ],
         ),
     ];
@@ -160,6 +164,7 @@ impl Section {
             Section::Terminal => "Terminal",
             Section::Merge => "Merge",
             Section::Devices => "Devices",
+            Section::GitHub => "GitHub",
             Section::Agents => "Agents",
             Section::Economy => "Economy",
             Section::Snippets => "Snippets",
@@ -176,6 +181,7 @@ impl Section {
             Section::Terminal => Icon::Prompt,
             Section::Merge => Icon::MergeInto,
             Section::Devices => Icon::LaptopPhone,
+            Section::GitHub => Icon::GitHub,
             Section::Agents => Icon::Orbit,
             Section::Economy => Icon::Gauge,
             Section::Snippets => Icon::MessageBookmark,
@@ -200,6 +206,10 @@ impl Section {
             Section::Editor => "How ket\u{2019}s own editor draws and plays files.",
             Section::Terminal => "What a terminal pane runs, and how much it keeps.",
             Section::Keybindings => "The chords for ket\u{2019}s commands.",
+            Section::GitHub => {
+                "The GitHub accounts on this Mac. Each project picks one in its settings, for \
+                 its backlog\u{2019}s issues."
+            }
             Section::Devices => {
                 "Pair an iPhone or iPad to answer agents and watch terminals from it. Devices \
                  reach this desktop over Wi-Fi."
@@ -217,6 +227,7 @@ impl Section {
             | Section::Editor
             | Section::Terminal
             | Section::Merge
+            | Section::GitHub
             | Section::Keybindings => Frame::Rows,
         }
     }
@@ -233,7 +244,9 @@ impl Section {
             Section::Appearance => t.terminal.ansi.magenta,
             Section::Editor => t.terminal.ansi.cyan,
             Section::Devices => t.status.attention,
-            Section::General | Section::Terminal | Section::Keybindings => t.text.dim,
+            Section::GitHub | Section::General | Section::Terminal | Section::Keybindings => {
+                t.text.dim
+            }
         })
     }
 }
@@ -626,6 +639,9 @@ impl Shell {
     /// that says "Keybindings" and then opens on General has not done what it
     /// said, and leaves the reader to find the rail entry themselves.
     pub(crate) fn open_preferences_at(&mut self, section: Section, cx: &mut Context<Self>) {
+        // Read now, so the GitHub pane has its accounts by the time it is
+        // looked at.
+        self.read_github_accounts(cx);
         // One overlay at a time, as everywhere else in the shell.
         self.menu = None;
         self.project_menu = None;
@@ -1856,6 +1872,7 @@ impl Shell {
                             | Section::General
                             | Section::Editor
                             | Section::Merge
+                            | Section::GitHub
                             | Section::Devices => None,
                             Section::Appearance => Some(
                                 "Only Theme saves here — the rest of this section is still a layout.",
@@ -1886,6 +1903,7 @@ impl Shell {
             Section::Editor => self.viewer_settings(t, window, cx),
             Section::Merge => self.merge_settings(t, window, cx),
             Section::Devices => self.phone_settings(t, window, cx),
+            Section::GitHub => self.github_settings(t, cx),
             Section::Appearance => self.appearance_settings(t, window, cx),
             Section::General => self.general_settings(t, cx),
             section => rows(section, t),
@@ -3142,6 +3160,49 @@ impl Shell {
         .detach();
     }
 
+    /// The GitHub pane: each account `gh` is signed in to, with Sign out,
+    /// and the button that adds one — or installs `gh` first.
+    fn github_settings(&self, t: &Theme, cx: &mut Context<Self>) -> Vec<Entry> {
+        let signing_out = match &self.github.step {
+            crate::github::Step::SigningOut(login) => Some(login.as_str()),
+            _ => None,
+        };
+        let mut entries: Vec<Entry> = Vec::new();
+        if let crate::github::Accounts::Known(accounts) = &self.github.accounts {
+            for (index, account) in accounts.iter().enumerate() {
+                let login = account.login.clone();
+                let note = match (account.works(), account.active, account.pickable()) {
+                    (false, _, _) => {
+                        "GitHub no longer accepts this sign-in. Sign out, then add it again."
+                    }
+                    (true, _, false) => {
+                        "Signed in through an environment variable, so projects cannot pick it."
+                    }
+                    (true, true, true) => "Active: projects that pick no account use this one.",
+                    (true, false, true) => "Signed in. Projects can pick it in their settings.",
+                };
+                let out = button(("github-sign-out", index), "Sign out")
+                    .ghost()
+                    .small()
+                    .loading_if(signing_out == Some(login.as_str()), "Signing out\u{2026}")
+                    .render(t)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.sign_out_github(login.clone(), cx);
+                        cx.notify();
+                    }))
+                    .into_any_element();
+                entries.push(setting(&format!("@{}", account.login), note, out, t));
+            }
+        }
+        entries.push(Entry::setting(
+            "GitHub account sign in add install gh",
+            div()
+                .py(px(11.0))
+                .child(self.github_setup("github-setup", cx)),
+        ));
+        entries
+    }
+
     /// The Merge pane: what the sidebar's merge button writes and leaves behind.
     fn merge_settings(&self, t: &Theme, window: &mut Window, cx: &mut Context<Self>) -> Vec<Entry> {
         let Some(view) = self.preferences.as_ref() else {
@@ -4123,6 +4184,7 @@ fn rows(section: Section, t: &Theme) -> Vec<Entry> {
         | Section::Appearance
         | Section::Editor
         | Section::Merge
+        | Section::GitHub
         | Section::Devices => Vec::new(),
         Section::Terminal => vec![
             setting(

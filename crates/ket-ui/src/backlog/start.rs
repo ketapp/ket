@@ -266,7 +266,7 @@ fn note_work(
     options: Option<&StartOptions>,
 ) -> Option<NewWork> {
     let prompt = note.brief()?;
-    let branch = branch_seeded(first_words(note), "backlog", seed);
+    let branch = note_branch(first_words(note), note, seed);
     let attachments = note
         .attachments
         .iter()
@@ -284,6 +284,17 @@ fn note_work(
             note: note.id.clone(),
         },
     })
+}
+
+/// The branch starting `note` makes, named after `words`. A note that is a
+/// GitHub issue leads with its number, as `gh issue develop` names one, so
+/// the commit template's `{issue}` finds it.
+pub(super) fn note_branch(words: &str, note: &Note, seed: u64) -> String {
+    let branch = branch_seeded(words, "backlog", seed);
+    match &note.issue {
+        Some(issue) => format!("{}-{branch}", issue.number),
+        None => branch,
+    }
 }
 
 /// What a note's branch is named after: its title, else its description.
@@ -507,7 +518,9 @@ impl Shell {
         let Some(dialog) = self.backlog.as_mut() else {
             return;
         };
+        let mut finished = Vec::new();
         for id in std::mem::take(&mut dialog.picked) {
+            let note = dialog.saved(&id).cloned();
             match ket_core::backlog::Backlog::mark_done(
                 &dialog.project,
                 &id,
@@ -519,7 +532,9 @@ impl Shell {
                     break;
                 }
             }
+            finished.extend(note);
         }
+        self.close_backlog_issues(&finished, ket_core::github::CloseReason::Completed, cx);
     }
 
     /// Deletes every ticked note and its files, once Delete has asked.
@@ -531,7 +546,9 @@ impl Shell {
             return;
         };
         dialog.confirming_picked = false;
+        let mut removed = Vec::new();
         for id in std::mem::take(&mut dialog.picked) {
+            let note = dialog.saved(&id).cloned();
             match ket_core::backlog::Backlog::remove(&dialog.project, &id) {
                 Ok(backlog) => dialog.take(backlog),
                 Err(error) => {
@@ -539,10 +556,12 @@ impl Shell {
                     break;
                 }
             }
+            removed.extend(note);
             if dialog.cursor.as_deref() == Some(id.as_str()) {
                 dialog.cursor = None;
             }
         }
+        self.close_backlog_issues(&removed, ket_core::github::CloseReason::NotPlanned, cx);
     }
 
     /// Puts up the sheet that starts the ticked notes.
@@ -870,7 +889,7 @@ impl Shell {
                 // it went to and a tick where its eye was.
                 let started = note.done.as_ref().and_then(|done| done.branch.clone());
                 let branch = started.clone().unwrap_or_else(|| {
-                    branch_seeded(first_words(note), "backlog", sheet.seed + at as u64)
+                    note_branch(first_words(note), note, sheet.seed + at as u64)
                 });
                 let shown = sheet.previewing.as_deref() == Some(note.id.as_str());
                 let id = note.id.clone();

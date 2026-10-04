@@ -2324,6 +2324,7 @@ impl Shell {
         // and backlog notes a phone wrote through it.
         self.take_phone_work(cx);
         self.refresh_backlog_counts();
+        self.refresh_backlog_issues(cx);
 
         // A worktree can have several terminals now, so its foreground is the
         // busiest of them: one pane running a build is the worktree being busy,

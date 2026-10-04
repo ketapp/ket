@@ -292,6 +292,8 @@ pub(crate) enum Icon {
     BookMarked,
     /// More: the actions a row keeps behind a button rather than on it.
     Ellipsis,
+    /// GitHub: its accounts in Settings, and the one a project picks.
+    GitHub,
 }
 
 impl Icon {
@@ -389,6 +391,7 @@ impl Icon {
             Icon::Eye => "icons/eye.svg",
             Icon::Tag => "icons/tag.svg",
             Icon::BookMarked => "icons/book-marked.svg",
+            Icon::GitHub => "icons/github.svg",
         }
     }
 }
@@ -426,7 +429,7 @@ pub(crate) fn sized_icon(which: Icon, size: Pixels, colour: Rgba) -> Svg {
 pub(crate) struct Assets;
 
 /// The bytes for every path [`Icon::asset`] can return.
-const FILES: [(&str, &[u8]); 91] = [
+const FILES: [(&str, &[u8]); 92] = [
     (
         "icons/chevron-down.svg",
         include_bytes!("../../assets/icons/chevron-down.svg"),
@@ -791,6 +794,10 @@ const FILES: [(&str, &[u8]); 91] = [
         "icons/book-marked.svg",
         include_bytes!("../../assets/icons/book-marked.svg"),
     ),
+    (
+        "icons/github.svg",
+        include_bytes!("../../assets/icons/github.svg"),
+    ),
 ];
 
 impl AssetSource for Assets {
@@ -944,6 +951,7 @@ mod tests {
             Icon::Eye,
             Icon::Tag,
             Icon::BookMarked,
+            Icon::GitHub,
         ];
         assert_eq!(
             every.len(),

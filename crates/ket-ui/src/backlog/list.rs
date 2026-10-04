@@ -18,7 +18,6 @@ use crate::Shell;
 use crate::fonts::Prose;
 use crate::input::{Style, text_field, text_line};
 use crate::paint::{alpha, paint};
-use crate::phone_work::branch_seeded;
 use crate::snippets::preview;
 use crate::ui::button::{button, icon_button};
 use crate::ui::chip::{caption, removable, tag, tinted_tag};
@@ -407,7 +406,7 @@ impl Shell {
                         .small()
                         .render(t)
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            this.delete_backlog_note(&id);
+                            this.delete_backlog_note(&id, cx);
                             cx.stop_propagation();
                             cx.notify();
                         })),
@@ -620,6 +619,12 @@ impl Shell {
                                             .truncate()
                                             .child(title.clone()),
                                     )
+                                    .when_some(note.issue.as_ref(), |el, issue| {
+                                        el.child(
+                                            tag(format!("#{}", issue.number), t)
+                                                .font_family(crate::fonts::chrome()),
+                                        )
+                                    })
                                     .children(tags)
                                     .when(more > 0, |el| el.child(tag(format!("+{more}"), t))),
                             )
@@ -801,6 +806,18 @@ impl Shell {
                 })
         });
 
+        // The issue it is, which opens on GitHub.
+        let issue = note.issue.clone().map(|issue| {
+            div().flex().px(OPEN_PAD).pt(px(6.0)).child(
+                button("backlog-issue", format!("GitHub issue #{}", issue.number))
+                    .link()
+                    .small()
+                    .trailing(Icon::ExternalLink)
+                    .render(t)
+                    .on_click(move |_, _, cx| cx.open_url(&issue.url)),
+            )
+        });
+
         let chips = note.attachments.iter().enumerate().map(|(index, name)| {
             let name = name.clone();
             removable(name.clone(), t)
@@ -879,7 +896,7 @@ impl Shell {
                         .small()
                         .render(t)
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            this.delete_backlog_note(&delete);
+                            this.delete_backlog_note(&delete, cx);
                             cx.notify();
                         })),
                 )
@@ -922,7 +939,7 @@ impl Shell {
                                 .leading(Icon::RotateCcw)
                                 .render(t)
                                 .on_click(cx.listener(|this, _, _, cx| {
-                                    this.reopen_backlog_note();
+                                    this.reopen_backlog_note(cx);
                                     cx.notify();
                                 })),
                         )
@@ -971,7 +988,7 @@ impl Shell {
                         .child(
                             button("backlog-start", "Start in worktree")
                                 .leading(Icon::Play)
-                                .detail(branch_seeded(words, "backlog", dialog.branch_seed))
+                                .detail(super::start::note_branch(words, note, dialog.branch_seed))
                                 .hint("\u{21e7}\u{2318}\u{21b5}")
                                 .loading_if(dialog.starting, "Creating the worktree\u{2026}")
                                 .render(t)
@@ -1008,6 +1025,7 @@ impl Shell {
                 .child(title)
                 .children(tags)
                 .children(status)
+                .children(issue)
                 .children(body)
                 .child(files)
                 .children(options)

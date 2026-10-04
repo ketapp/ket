@@ -358,7 +358,7 @@ pub const DEFAULT_COMMIT_TEMPLATE: &str = "{branch}: uncommitted work ({files} f
 /// rendering have to agree about the set, and a settings pane that accepts
 /// `{summry}` and then silently writes it into git history is worse than one
 /// that refuses at the point of typing.
-pub const COMMIT_PLACEHOLDERS: [&str; 4] = ["branch", "base", "worktree", "files"];
+pub const COMMIT_PLACEHOLDERS: [&str; 5] = ["branch", "base", "worktree", "files", "issue"];
 
 /// Who writes the commit message the merge button uses.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -493,8 +493,16 @@ impl MergeConfig {
     /// [`Config::validate`] refuses to save one, so reaching here means a
     /// hand-edited file, and showing `{summry}` in the commit is what makes
     /// that visible.
+    ///
+    /// `{issue}` is `#142` for a branch named the way `gh issue develop` names
+    /// them, `142-fix-the-thing`, and nothing otherwise. The trailing space
+    /// that leaves behind is trimmed, so `fix: the thing {issue}` reads right
+    /// either way.
     pub fn commit_message(&self, branch: &str, base: &str, worktree: &str, files: usize) -> String {
         let files = files.to_string();
+        let issue = issue_of(branch)
+            .map(|n| format!("#{n}"))
+            .unwrap_or_default();
         let mut out = String::with_capacity(self.commit_template.len());
         let mut rest = self.commit_template.as_str();
 
@@ -512,12 +520,14 @@ impl MergeConfig {
                 "base" => out.push_str(base),
                 "worktree" => out.push_str(worktree),
                 "files" => out.push_str(&files),
+                "issue" => out.push_str(&issue),
                 _ => out.push_str(&rest[..=close]),
             }
             rest = &rest[close + 1..];
         }
 
         out.push_str(rest);
+        out.truncate(out.trim_end().len());
         out
     }
 
@@ -545,6 +555,15 @@ impl MergeConfig {
 
         unknown
     }
+}
+
+/// The issue number a branch is named for: the digits that open its last
+/// `/`-separated part, as in `142-fix-the-thing` or `me/142`.
+fn issue_of(branch: &str) -> Option<&str> {
+    let name = branch.rsplit('/').next().unwrap_or(branch);
+    let digits = name.len() - name.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    let rest = &name[digits..];
+    (digits > 0 && (rest.is_empty() || rest.starts_with('-'))).then(|| &name[..digits])
 }
 
 /// How a dependency directory is materialised into a new worktree.

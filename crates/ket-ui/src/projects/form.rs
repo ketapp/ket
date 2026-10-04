@@ -51,7 +51,7 @@ const LABEL_GAP: Pixels = px(12.0);
 /// How wide a control in the label column's rows is: the card's inside, less
 /// the labels. The agent menu opens at this width, so it lines up with the
 /// trigger it hangs from.
-fn control_width() -> Pixels {
+pub(super) fn control_width() -> Pixels {
     CARD_WIDTH - CARD_PAD * 2.0 - LABEL_WIDTH - LABEL_GAP
 }
 
@@ -102,6 +102,12 @@ pub(super) struct Seed<'a> {
     /// Whether the backlog is kept in the repository. `None` for a project
     /// being added, which starts with a private one and asks nothing.
     pub(super) backlog_in_repo: Option<bool>,
+    /// Whether the backlog follows the repository's GitHub issues. `None`
+    /// for a project being added, which asks nothing about it either.
+    pub(super) github_issues: Option<bool>,
+    /// The GitHub account picked, `None` inside for the default. `None`
+    /// for a project being added.
+    pub(super) github_account: Option<Option<String>>,
 }
 
 /// Drafts of every field a project dialog edits, until it is confirmed.
@@ -147,6 +153,16 @@ pub(crate) struct ProjectForm {
     /// Where the backlog is to be kept: in the repository or privately.
     /// `None` while the form asks nothing about it — see [`Seed`].
     pub(super) backlog_in_repo: Option<bool>,
+    /// Draft of the GitHub issues switch. `None` while the form asks nothing
+    /// about it.
+    pub(super) github_issues: Option<bool>,
+    /// Draft of the GitHub account: `None` inside for the default, and
+    /// `None` while the form asks nothing about it.
+    pub(super) github_account: Option<Option<String>>,
+    /// The account dropdown, while it is open.
+    pub(super) github_menu: Option<OpenMenu<usize>>,
+    /// The accounts that dropdown lists, in its order after "Default".
+    pub(super) github_logins: Vec<String>,
     /// Why the last confirm was refused, if it was.
     pub(super) error: Option<SharedString>,
 }
@@ -190,6 +206,10 @@ impl ProjectForm {
             hide_discovered: seed.settings.hide_discovered_worktrees,
             trust_automation: seed.trusted,
             backlog_in_repo: seed.backlog_in_repo,
+            github_issues: seed.github_issues,
+            github_account: seed.github_account,
+            github_menu: None,
+            github_logins: Vec::new(),
             error: None,
         }
     }
@@ -285,6 +305,8 @@ impl ProjectForm {
             icon: self.icon.read(cx).text(),
             hide_discovered: self.hide_discovered,
             trust_automation: self.trust_automation,
+            github_issues: self.github_issues,
+            github_account: self.github_account.clone(),
             base: self.base.read(cx).text(),
             agent: self.agent.clone(),
             // The whole line goes in as the command: it is shell text, typed
@@ -307,6 +329,10 @@ pub(super) struct Drafts {
     icon: String,
     hide_discovered: bool,
     trust_automation: bool,
+    /// `None` when the form did not ask, which keeps what is stored.
+    github_issues: Option<bool>,
+    /// The same.
+    github_account: Option<Option<String>>,
     base: String,
     agent: Option<String>,
     /// Each configured agent's command line, as typed.
@@ -360,6 +386,8 @@ impl Drafts {
             build_dirs,
             agents,
             backlog_in_repo: existing.backlog_in_repo,
+            github_issues: self.github_issues.unwrap_or(existing.github_issues),
+            github_account: self.github_account.unwrap_or(existing.github_account),
         };
         workspace.set_project_settings(id, settings)?;
         workspace.set_default_base(id, &self.base)?;
@@ -481,7 +509,7 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> FormKey {
-        if self.form_agent_menu_key(event) {
+        if self.form_agent_menu_key(event) || self.form_github_menu_key(event, cx) {
             return FormKey::Handled;
         }
 
@@ -548,6 +576,7 @@ impl Shell {
             return;
         }
         form.palette_open = false;
+        form.github_menu = None;
 
         let Some(form) = self.project_form() else {
             return;
@@ -677,6 +706,7 @@ impl Shell {
                 if let Some(form) = this.project_form_mut() {
                     form.palette_open = !form.palette_open;
                     form.agent_menu = None;
+                    form.github_menu = None;
                     let hidden = !form.palette_open
                         && [&form.icon, &form.hex]
                             .into_iter()
@@ -832,6 +862,10 @@ impl Shell {
         rows.extend(
             form.backlog_in_repo
                 .map(|in_repo| labelled("Backlog", self.form_backlog(in_repo, cx), t)),
+        );
+        rows.extend(
+            form.github_issues
+                .map(|on| labelled("GitHub", self.form_github(on, cx), t)),
         );
         rows.extend(
             form.error
@@ -1052,6 +1086,41 @@ impl Shell {
             .justify_center()
             .child(div().flex().child(choice))
             .child(caption(note, t))
+            .into_any_element()
+    }
+
+    /// The switch that keeps the backlog in step with GitHub issues, and
+    /// what that means, under it.
+    fn form_github(&self, on: bool, cx: &mut Context<Self>) -> AnyElement {
+        let t = &self.theme;
+        let switch = checkbox(
+            "project-github-issues",
+            on,
+            "Sync the backlog with GitHub issues",
+            t,
+        )
+        .on_click(cx.listener(|this, _, _, cx| {
+            if let Some(form) = this.project_form_mut() {
+                form.github_issues = form.github_issues.map(|on| !on);
+            }
+            cx.notify();
+        }));
+        let note = if on {
+            "Open issues arrive as notes, and a note is done when its issue closes. \
+             Done or deleted here closes the issue."
+        } else {
+            "Notes can still be made into issues one at a time, from a note's menu."
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .flex_1()
+            .min_h(FIELD_H)
+            .justify_center()
+            .child(div().flex().child(switch))
+            .child(caption(note, t))
+            .children(self.github_line(cx))
             .into_any_element()
     }
 

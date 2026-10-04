@@ -454,8 +454,14 @@ impl Shell {
             return;
         }
 
+        // Same id is not enough: a project folder moved on disk keeps its
+        // checkout's id, and a reload hands the row the new path. Matching on
+        // the id alone left the panel reading the old one.
         let selected = self.selected_id();
-        if selected == self.explorer.worktree {
+        let moved = self
+            .selected_path()
+            .is_some_and(|path| Some(&path) != self.explorer.root.as_ref());
+        if selected == self.explorer.worktree && !moved {
             return;
         }
 

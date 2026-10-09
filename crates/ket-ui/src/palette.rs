@@ -352,6 +352,7 @@ impl Shell {
             .map(|tab| match &tab.kind {
                 TabKind::Editor(_) => "editor",
                 TabKind::Audio(_) => "audio",
+                TabKind::Image(_) => "image",
                 TabKind::Terminal(_) => "terminal",
                 TabKind::Browser(_) => "browser",
                 #[cfg(target_os = "macos")]

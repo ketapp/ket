@@ -33,13 +33,13 @@
 //! selects, a double-click selects a word, a triple-click a line, and
 //! `Shift`-click extends. Links are underlined wherever they appear —
 //! both OSC 8 hyperlinks and plain `http(s)://` text — the pointer turns
-//! to a hand over one, and a click asks whether to open it in a ket browser
-//! tab or the system's browser (`Shell::open_link_menu`); a drag that
-//! starts on one selects instead of opening. A program that asked for the
-//! mouse owns a plain click there, so `Cmd`-click reaches a link inside
-//! one. Selection
-//! state lives in `alacritty_terminal`'s own `Term::selection`, which is
-//! what makes copy a one-liner and keeps the selection anchored through
+//! to a hand over one, and a click offers to open it in a ket browser tab,
+//! open it in the system's browser, or copy its URL
+//! (`Shell::open_link_menu`); a drag that starts on one selects instead of
+//! opening. A program that asked for the mouse owns a plain click there,
+//! so `Cmd`-click reaches a link inside one. Selection state lives in
+//! `alacritty_terminal`'s own `Term::selection`, which is what makes copy
+//! a one-liner and keeps the selection anchored through
 //! scrolling and reflow.
 //!
 //! **What is deliberately not here.** No kitty keyboard protocol, so a
@@ -500,6 +500,14 @@ impl Shell {
         });
         self.terminal_keys.insert(terminal, key.clone());
 
+        // The size the pane already draws at, when it has a terminal to say.
+        // Spawned at that size, the shell starts at its real width and the
+        // host's first checkpoint is the one that gets drawn — instead of a
+        // 120×40 grid that the first layout reflows, with a SIGWINCH into a
+        // shell still reading its startup files and a second checkpoint
+        // round trip before the prompt sits where it should.
+        let size = self.pane_terminal_size(&id, pane, cx);
+
         let space = self.spaces.entry(id.clone()).or_default();
         space.open_tab_in(
             pane,
@@ -513,6 +521,13 @@ impl Shell {
         self.persist_layout();
         cx.notify();
 
+        // A plain shell has nothing to look up before it can start: its spec
+        // is built here and the pty opened straight from the background, with
+        // no trip back to this thread in between. An agent's spec waits on
+        // the settings and the session scan, which are read off this thread.
+        let shell_spec = agent
+            .is_none()
+            .then(|| self.terminal_spec(&id, cwd.clone(), None, None, None, terminal));
         let scan_cwd = cwd.clone();
         let scan_agent = agent.clone();
         let prepared = cx.background_executor().spawn(async move {
@@ -531,21 +546,35 @@ impl Shell {
             (settings, resume)
         });
         cx.spawn(async move |this: WeakEntity<Shell>, cx: &mut AsyncApp| {
-            let (settings, resume) = prepared.await;
             let agent_name = agent.as_ref().map(|agent| agent.name.clone());
-            let spec = this
-                .update(cx, |shell, _| {
-                    shell.terminal_notes.contains_key(&terminal).then(|| {
-                        shell.terminal_spec(&id, cwd, agent, resume, settings.as_ref(), terminal)
+            let spec = match shell_spec {
+                Some(spec) => Some(spec),
+                None => {
+                    let (settings, resume) = prepared.await;
+                    this.update(cx, |shell, _| {
+                        shell.terminal_notes.contains_key(&terminal).then(|| {
+                            shell.terminal_spec(
+                                &id,
+                                cwd,
+                                agent,
+                                resume,
+                                settings.as_ref(),
+                                terminal,
+                            )
+                        })
                     })
-                })
-                .ok()
-                .flatten();
+                    .ok()
+                    .flatten()
+                }
+            };
             let Some(mut spec) = spec else {
                 return;
             };
             spec.key = Some(key);
             spec.adopt = adopt;
+            if let Some(size) = size {
+                spec.size = size;
+            }
 
             let command = spec.command.clone();
             let opened = cx
@@ -557,6 +586,35 @@ impl Shell {
             });
         })
         .detach();
+    }
+
+    /// The size the terminals already in `pane` are drawn at, if it has any.
+    ///
+    /// Tabs in one pane share a size, so a terminal opened there can be
+    /// started at it rather than at the default and resized on first layout.
+    /// The active tab's geometry is asked for first: a hidden tab is not
+    /// painted, so what it remembers can predate the pane's last resize.
+    fn pane_terminal_size(
+        &self,
+        worktree: &WorktreeId,
+        pane: PaneId,
+        cx: &Context<Self>,
+    ) -> Option<ket_core::terminal::TerminalSize> {
+        self.spaces
+            .get(worktree)?
+            .pane_terminals(pane)
+            .into_iter()
+            .find_map(|id| {
+                let geometry = self
+                    .terminal_view(id)?
+                    .read(cx)
+                    .geometry
+                    .filter(Geometry::is_valid)?;
+                Some(ket_core::terminal::TerminalSize::new(
+                    u16::try_from(geometry.cols).ok()?,
+                    u16::try_from(geometry.rows).ok()?,
+                ))
+            })
     }
 
     /// Resolves the selected agent through the same catalogue as Settings.
@@ -681,6 +739,26 @@ impl Shell {
             );
             extra.extend(launch.args);
             economy_env = launch.env;
+            // The filter, like the cap: a pack proposes, a config decides.
+            match settings.and_then(|agent| agent.command_filter) {
+                Some(false) => {
+                    economy_env.remove(ket_core::filter::ENV);
+                }
+                Some(true) => {
+                    if let Ok(exe) = std::env::current_exe() {
+                        economy_env
+                            .insert(ket_core::filter::ENV.to_owned(), exe.display().to_string());
+                    }
+                }
+                None => {}
+            }
+            // Keeping what the filter trims is the reader's to ask for, and
+            // only means anything while the filter is on.
+            if settings.and_then(|agent| agent.command_archive) == Some(true)
+                && economy_env.contains_key(ket_core::filter::ENV)
+            {
+                economy_env.insert(ket_core::filter::ARCHIVE_ENV.to_owned(), "1".to_owned());
+            }
         }
 
         let mut spec = match &agent {
@@ -757,8 +835,13 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         // Closing a starting tab removes its note. If the background work wins
-        // that race later, dropping the result also drops/kills its pty.
+        // that race later, the program it started has no tab to live in, so it
+        // is ended here. Dropping it is not enough: a hosted terminal only
+        // detaches on drop, and the shell would stay running in the host.
         if !self.terminal_notes.contains_key(&id) {
+            if let Ok(term) = opened {
+                term.kill();
+            }
             return;
         }
 

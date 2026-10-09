@@ -29,6 +29,7 @@ pub mod error;
 pub mod event;
 pub mod feedback;
 pub mod files;
+pub mod filter;
 pub mod git;
 pub mod github;
 pub mod hook;

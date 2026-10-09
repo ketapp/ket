@@ -10,9 +10,9 @@ use ket_core::backlog::{Done, Note, Priority};
 
 use super::organise::{Drop, NoteDrag};
 use super::{
-    BODY_EDITOR, BODY_HEIGHT, BODY_INSET, BODY_TEXT, COMPOSER_GUTTER, OPEN_PAD, OPEN_PRIORITY,
-    OPEN_TITLE, PRIORITY_MARK, ROW_DETAIL, ROW_FIGURE, ROW_MENU, ROW_TITLE, age,
-    priority_mark_sized,
+    BODY_EDITOR, BODY_HEIGHT, BODY_TEXT, COMPOSER_GUTTER, OPEN_PAD, OPEN_PRIORITY, OPEN_TITLE,
+    OPEN_TITLE_LINE, PRIORITY_MARK, RAIL_W, ROW_DETAIL, ROW_FIGURE, ROW_MENU, ROW_TITLE, age,
+    priority_mark_sized, rail_row,
 };
 use crate::Shell;
 use crate::fonts::Prose;
@@ -21,11 +21,11 @@ use crate::paint::{alpha, paint};
 use crate::snippets::preview;
 use crate::ui::button::{button, icon_button};
 use crate::ui::chip::{caption, removable, tag, tinted_tag};
+use crate::ui::field::placeholder;
 use crate::ui::icon::{Icon, sized_icon};
 use crate::ui::markdown::markdown;
 use crate::ui::menu::dropdown;
 use crate::ui::row::{block_row, sized_row};
-use crate::ui::textarea::textarea;
 use crate::ui::toggle::check_box;
 use crate::ui::tooltip::{Side, tooltip};
 
@@ -94,21 +94,32 @@ impl Shell {
                 .into_any_element()
         };
         let t = &self.theme;
-        let area = textarea("backlog-body", body, BODY_HEIGHT).active(active);
-        let area = if empty {
-            area.placeholder(
-                "The detail: what to change, where, and how to tell it worked",
-                BODY_TEXT,
-            )
-        } else {
-            area
-        };
+        // No well of its own: it is the note's words, under its title, and
+        // the placeholder or the caret says it is there to be written in.
         Some(
-            area.render(t)
+            div()
+                .id("backlog-body")
+                .relative()
                 .flex_none()
-                .mx(BODY_INSET)
-                .mt(px(8.0))
+                .h(BODY_HEIGHT)
+                .mt(px(10.0))
+                .pl(OPEN_PAD - COMPOSER_GUTTER)
+                .pr(px(12.0))
                 .cursor_text()
+                .child(body)
+                // Over an empty description, where the typed words will
+                // start.
+                .when(empty, |el| {
+                    el.child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .left(OPEN_PAD)
+                            .text_size(BODY_TEXT)
+                            .text_color(placeholder(t))
+                            .child("The detail: what to change, where, and how to tell it worked"),
+                    )
+                })
                 .capture_any_mouse_down(cx.listener(|this, _, window, cx| {
                     if let Some(dialog) = this.backlog.as_mut() {
                         dialog.body_active = true;
@@ -695,9 +706,11 @@ impl Shell {
         .into_any_element()
     }
 
-    /// The open note, in its row's place: its title, tags, description and
-    /// files, what Start will make, and Save and Start — or, once it is
-    /// done, where it went.
+    /// The open note, in its row's place. Its words on the left — the title,
+    /// wrapped so it is read whole, the description and the files — and a
+    /// rail on the right with its priority and tags, then what Start will
+    /// make and Start itself. Along the foot: delete and Mark done, Cancel
+    /// and Save — or, once it is done, where it went.
     fn backlog_open_note(
         &self,
         note: &Note,
@@ -709,87 +722,55 @@ impl Shell {
         let input = dialog.title.as_ref()?;
         let t = &self.theme;
         let done = note.done.clone();
+        let typed = input.read(cx).text();
 
+        // A line to type in while it has the keyboard, or while it is empty —
+        // a new note's, which asks for the keyboard as it opens and only
+        // gets it once the line is drawn. Wrapped text otherwise; a press on
+        // it hands it the keyboard.
+        let editing = typed.is_empty() || input.read(cx).is_focused(window);
+        let title_text = if editing {
+            text_line(
+                input,
+                "backlog-title",
+                Style::new(t, self.caret.visible),
+                window,
+                cx,
+            )
+            .on_click(cx.listener(|this, _, _, cx| {
+                if let Some(dialog) = this.backlog.as_mut() {
+                    dialog.body_active = false;
+                }
+                cx.notify();
+            }))
+            .into_any_element()
+        } else {
+            let field = input.clone();
+            div()
+                .id("backlog-title-read")
+                .cursor_text()
+                .child(typed.clone())
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |_, _, window, cx| {
+                        window.focus(field.read(cx).focus_handle());
+                        cx.notify();
+                    }),
+                )
+                .into_any_element()
+        };
         let title = div()
-            .flex()
-            .items_center()
-            .gap(px(10.0))
             .px(OPEN_PAD)
-            .pt(px(14.0))
+            .pt(px(18.0))
             .text_size(OPEN_TITLE)
+            .line_height(OPEN_TITLE_LINE)
             .font_weight(FontWeight::SEMIBOLD)
             .text_color(paint(if done.is_some() {
                 t.text.dim
             } else {
                 t.text.primary
             }))
-            .child(
-                text_line(
-                    input,
-                    "backlog-title",
-                    Style::new(t, self.caret.visible),
-                    window,
-                    cx,
-                )
-                .on_click(cx.listener(|this, _, _, cx| {
-                    if let Some(dialog) = this.backlog.as_mut() {
-                        dialog.body_active = false;
-                    }
-                    cx.notify();
-                })),
-            )
-            .child(self.backlog_priority_picker(OPEN_PRIORITY, dialog.priority, cx));
-
-        let tags = done.is_none().then(|| {
-            let chips: Vec<_> = dialog
-                .tags
-                .iter()
-                .enumerate()
-                .map(|(index, name)| {
-                    let name = name.clone();
-                    removable(format!("#{name}"), t)
-                        .id(("backlog-tag", index))
-                        .font_family(crate::fonts::chrome())
-                        .cursor_pointer()
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.remove_backlog_tag(&name);
-                            cx.notify();
-                        }))
-                })
-                .collect();
-            let adder = match dialog.tag_input.as_ref() {
-                Some(field) => text_field(
-                    field,
-                    "backlog-tag-input",
-                    false,
-                    Style::new(t, self.caret.visible).leading(Icon::Tag),
-                    window,
-                    cx,
-                )
-                .w(px(180.0))
-                .h(px(28.0))
-                .into_any_element(),
-                None => button("backlog-tag-add", "Tag")
-                    .ghost()
-                    .small()
-                    .leading(Icon::Tag)
-                    .render(t)
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.open_backlog_tag_input(window, cx);
-                        cx.notify();
-                    }))
-                    .into_any_element(),
-            };
-            div()
-                .flex()
-                .flex_wrap()
-                .items_center()
-                .gap(px(6.0))
-                .px(OPEN_PAD)
-                .pt(px(8.0))
-                .children(chips)
-                .child(adder)
-        });
+            .child(title_text);
 
         let status = done.as_ref().map(|done| {
             div()
@@ -797,7 +778,7 @@ impl Shell {
                 .items_center()
                 .gap(px(6.0))
                 .px(OPEN_PAD)
-                .pt(px(6.0))
+                .pt(px(8.0))
                 .map(|el| match &done.branch {
                     Some(branch) => el
                         .child(tag("Started", t))
@@ -808,7 +789,7 @@ impl Shell {
 
         // The issue it is, which opens on GitHub.
         let issue = note.issue.clone().map(|issue| {
-            div().flex().px(OPEN_PAD).pt(px(6.0)).child(
+            div().flex().px(OPEN_PAD).pt(px(8.0)).child(
                 button("backlog-issue", format!("GitHub issue #{}", issue.number))
                     .link()
                     .small()
@@ -833,8 +814,9 @@ impl Shell {
             .flex_wrap()
             .items_center()
             .gap(px(6.0))
-            .px(OPEN_PAD)
+            .px(OPEN_PAD - px(9.0))
             .pt(px(10.0))
+            .pb(px(14.0))
             .children(chips)
             .child(
                 button("backlog-attach", "Attach")
@@ -854,17 +836,121 @@ impl Shell {
                 )
             });
 
-        // What Start will make, and what its agent will read — only while
-        // there is still something to start.
-        let (options, brief) = match done {
+        let words = div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_w_0()
+            .child(title)
+            .children(status)
+            .children(issue)
+            .children(body)
+            .child(div().flex_1())
+            .child(files);
+
+        let priority = rail_row(
+            "Priority",
+            self.backlog_priority_picker(OPEN_PRIORITY, dialog.priority, cx),
+            t,
+        );
+
+        let tags = done.is_none().then(|| {
+            let chips: Vec<_> = dialog
+                .tags
+                .iter()
+                .enumerate()
+                .map(|(index, name)| {
+                    let name = name.clone();
+                    removable(format!("#{name}"), t)
+                        .id(("backlog-tag", index))
+                        .font_family(crate::fonts::chrome())
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.remove_backlog_tag(&name);
+                            cx.notify();
+                        }))
+                })
+                .collect();
+            let none = chips.is_empty();
+            let adder = match dialog.tag_input.as_ref() {
+                Some(field) => text_field(
+                    field,
+                    "backlog-tag-input",
+                    false,
+                    Style::new(t, self.caret.visible).leading(Icon::Tag),
+                    window,
+                    cx,
+                )
+                .w_full()
+                .h(px(28.0))
+                .into_any_element(),
+                None if none => button("backlog-tag-add", "Add a tag")
+                    .ghost()
+                    .small()
+                    .leading(Icon::Plus)
+                    .render(t)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.open_backlog_tag_input(window, cx);
+                        cx.notify();
+                    }))
+                    .into_any_element(),
+                None => icon_button("backlog-tag-add", Icon::Plus)
+                    .bare()
+                    .small()
+                    .render(t)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.open_backlog_tag_input(window, cx);
+                        cx.notify();
+                    }))
+                    .into_any_element(),
+            };
+            rail_row(
+                "Tags",
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(6.0))
+                    .min_h(px(30.0))
+                    .children(chips)
+                    .child(adder),
+                t,
+            )
+        });
+
+        // What Start will make — only while there is still something to
+        // start — and what its agent will read.
+        let (start, brief) = match done {
             Some(_) => (None, None),
-            None => (
-                Some(self.backlog_start_options(cx)),
-                dialog
-                    .preview
-                    .then(|| self.backlog_brief(note, input.read(cx).text())),
-            ),
+            None => {
+                let words = [typed.trim(), note.body.trim()]
+                    .into_iter()
+                    .find(|part| !part.is_empty())
+                    .unwrap_or_default();
+                let branch = super::start::note_branch(words, note, dialog.branch_seed);
+                (
+                    Some(self.backlog_start_rail(note.id.clone(), branch, cx)),
+                    dialog
+                        .preview
+                        .then(|| self.backlog_brief(note, typed.clone())),
+                )
+            }
         };
+
+        let rail = div()
+            .flex()
+            .flex_col()
+            .flex_none()
+            .w(RAIL_W)
+            .gap(px(8.0))
+            .p(px(18.0))
+            .rounded_tr(crate::ui::RADIUS_LG)
+            .bg(alpha(paint(t.surface), 0.45))
+            .border_l_1()
+            .border_color(paint(t.rule))
+            .child(priority)
+            .children(tags)
+            .children(start);
 
         let delete = note.id.clone();
         let confirming = dialog.confirming_delete.as_deref() == Some(note.id.as_str());
@@ -872,8 +958,10 @@ impl Shell {
             .flex()
             .items_center()
             .gap(px(8.0))
-            .h(px(52.0))
-            .px(px(10.0));
+            .h(px(56.0))
+            .px(px(12.0))
+            .border_t_1()
+            .border_color(paint(t.rule));
         let actions = if confirming {
             actions
                 .child(caption("Delete this note and its files?", t).pl(px(6.0)))
@@ -901,31 +989,17 @@ impl Shell {
                         })),
                 )
         } else {
-            let actions = actions
-                .child(
-                    icon_button("backlog-delete", Icon::Trash)
-                        .bare()
-                        .render(t)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            if let Some(dialog) = this.backlog.as_mut() {
-                                dialog.confirming_delete = Some(delete.clone());
-                            }
-                            cx.notify();
-                        })),
-                )
-                .child(div().flex_grow())
-                .child(
-                    button(
-                        "backlog-cancel",
-                        if done.is_some() { "Close" } else { "Cancel" },
-                    )
-                    .ghost()
+            let actions = actions.child(
+                icon_button("backlog-delete", Icon::Trash)
+                    .bare()
                     .render(t)
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.cancel_backlog_note(window);
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if let Some(dialog) = this.backlog.as_mut() {
+                            dialog.confirming_delete = Some(delete.clone());
+                        }
                         cx.notify();
                     })),
-                );
+            );
             match &done {
                 Some(done) => {
                     let exists = done
@@ -934,6 +1008,16 @@ impl Shell {
                         .is_some_and(|worktree| self.position_of(worktree).is_some());
                     let started = done.worktree.is_some();
                     actions
+                        .child(div().flex_grow())
+                        .child(
+                            button("backlog-cancel", "Close")
+                                .ghost()
+                                .render(t)
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.cancel_backlog_note(window);
+                                    cx.notify();
+                                })),
+                        )
                         .child(
                             button("backlog-reopen", "Reopen")
                                 .leading(Icon::RotateCcw)
@@ -967,12 +1051,6 @@ impl Shell {
                         })
                 }
                 None => {
-                    let typed = input.read(cx).text();
-                    let words = [typed.trim(), note.body.trim()]
-                        .into_iter()
-                        .find(|part| !part.is_empty())
-                        .unwrap_or_default();
-                    let start = note.id.clone();
                     let complete = note.id.clone();
                     actions
                         .child(
@@ -985,15 +1063,13 @@ impl Shell {
                                     cx.notify();
                                 })),
                         )
+                        .child(div().flex_grow())
                         .child(
-                            button("backlog-start", "Start in worktree")
-                                .leading(Icon::Play)
-                                .detail(super::start::note_branch(words, note, dialog.branch_seed))
-                                .hint("\u{21e7}\u{2318}\u{21b5}")
-                                .loading_if(dialog.starting, "Creating the worktree\u{2026}")
+                            button("backlog-cancel", "Cancel")
+                                .ghost()
                                 .render(t)
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.start_backlog_note(start.clone(), cx);
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.cancel_backlog_note(window);
                                     cx.notify();
                                 })),
                         )
@@ -1022,14 +1098,8 @@ impl Shell {
                 .bg(paint(t.sunken))
                 .border_1()
                 .border_color(paint(t.border))
-                .child(title)
-                .children(tags)
-                .children(status)
-                .children(issue)
-                .children(body)
-                .child(files)
-                .children(options)
-                .children(brief)
+                .child(div().flex().child(words).child(rail))
+                .children(brief.map(|brief| div().pb(px(12.0)).child(brief)))
                 .child(actions)
                 .into_any_element(),
         )

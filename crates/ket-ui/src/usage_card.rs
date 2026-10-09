@@ -374,6 +374,37 @@ pub(crate) struct SessionContext {
     /// A session keeps that level, so one begun before Economy was turned on
     /// has nothing to measure however long it runs.
     pub(crate) started_at: Option<u8>,
+    /// What the session's shell commands cost it, in one line — see
+    /// [`command_line`]. `None` until a command has come back.
+    pub(crate) command: Option<String>,
+}
+
+/// What a session's shell commands cost its context, measured: the tokens
+/// their output weighed, that as a share of fresh input, and which program
+/// weighed most — with what failed and what a filter trimmed when either
+/// happened. `None` for a session that has run no command yet.
+pub(crate) fn command_line(record: &ket_core::usage::Record) -> Option<String> {
+    if record.command_calls == 0 {
+        return None;
+    }
+    let mut parts = vec![format!(
+        "Command output \u{2248}{} tokens",
+        tokens(record.command_output_tokens())
+    )];
+    if let Some(share) = record.command_output_share() {
+        parts.push(format!("{:.0}% of fresh input", share * 100.0));
+    }
+    if let Some((program, _)) = record.noisiest_program() {
+        parts.push(format!("noisiest: {program}"));
+    }
+    if record.command_failures > 0 {
+        parts.push(format!("{} failed", record.command_failures));
+    }
+    let trimmed = record.filter_saved_tokens();
+    if trimmed > 0 {
+        parts.push(format!("filter trimmed \u{2248}{}", tokens(trimmed)));
+    }
+    Some(parts.join(" \u{b7} "))
 }
 
 /// What this worktree's agent has spent, as its own API reported it.
@@ -555,6 +586,13 @@ pub(crate) fn usage_card(
                     )
                     .into_any_element(),
             );
+        }
+
+        // What the commands cost, measured rather than estimated: the one
+        // line on the card that is a count of bytes that went in, not a
+        // model of what the level kept out.
+        if let Some(line) = context.command.as_deref() {
+            rows.push(aside(line.to_owned(), t));
         }
 
         // The resume gap, in words. It was a split bar with a second dollar
@@ -1097,6 +1135,12 @@ impl Shell {
             .and_then(|session| self.usage_history.record(session))
             .map(|record| record.level);
 
+        let command = sessions
+            .current()
+            .and_then(|held| held.reading.session.as_deref())
+            .and_then(|session| self.usage_history.record(session))
+            .and_then(command_line);
+
         SessionContext {
             terminal,
             counted,
@@ -1108,6 +1152,7 @@ impl Shell {
             economy,
             level,
             started_at,
+            command,
         }
     }
 

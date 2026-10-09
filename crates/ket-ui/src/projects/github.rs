@@ -75,6 +75,7 @@ impl Shell {
                 .flex()
                 .flex_col()
                 .gap(px(6.0))
+                .min_w_0()
                 .child(self.form_github_account(cx))
                 .child(repo)
                 .into_any_element(),
@@ -118,7 +119,7 @@ impl Shell {
             )
         });
         dropdown("project-github-account-select", trigger.render(t), panel)
-            .flex_1()
+            .w_full()
             .cursor_pointer()
             .on_mouse_down(
                 MouseButton::Left,

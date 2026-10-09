@@ -24,7 +24,7 @@ estimates, not measurements.
 
 ## `decost-standard.json` — the standard pack
 
-This is the canonical schema-v2 pack. Each level has shared wording plus
+This is the canonical schema-v3 pack. Each level has shared wording plus
 explicit `claude`, `codex`, and optional `opencode` and `grok` policy blocks. ket applies
 only the block matching the worktree's agent, so Claude-only environment
 variables never leak into OpenCode and Codex never receives Claude flags.
@@ -39,6 +39,8 @@ The same wording, plus the settings whose effects are documented rather than ass
 | `crossSessionInbound` | A message from another session arrives on somebody else's schedule and lands in this one's context. `hold` shows a notice, `refuse` declines |
 | `effort` | Moves cost per prompt further than any narration change does — which is exactly why it is only at the two deepest levels, and why this pack cannot measure its own levels |
 | `autocompact: auto` | Compacting at a natural point reads a warm prefix; compacting after a long idle reads the whole history cold |
+| `outputLimit` (schema 3) | The first-party cap on *successful* command output — Claude Code's `bashOutputMaxChars`, in characters; its default is 30,000. Heavy takes 20,000, Max 12,000: a clippy run on a mid-size crate still fits inline at 20k, and 12k still holds a test summary with several failures. It never touches a failed run, which Claude Code reports whole. A reader's own `agent.output_limit` wins over it. Light and Moderate carry none: below a level that asks for it, ket keeps no opinion about the value |
+| `commandFilter: true` (schema 3) | Successful command output is filtered before the model reads it: progress and per-test pass lines go, warnings, errors and summaries stay, and the trailer says where the rest is. Only ever on a run that exited 0; a failed run is shown whole. Nothing is written to disk: the session transcript already holds the whole output. A reader who wants `ket recall` sets `agent.command_archive = true`, which keeps a copy owner-only for a day. Claude Code only for now. `agent.command_filter = false` turns it off |
 
 **Accept the tradeoff knowingly.** Because levels 1 and 0 set `effort`, they land in
 different comparison buckets from the levels above them. This pack saves more and proves
@@ -58,6 +60,7 @@ they are enforced rather than requested:
 |---|---|---|
 | `verbosity` | `low` `medium` `high` | Caps how much the model writes. Every level's `instruction` only *asks* for less; this one is the API refusing to send it |
 | `reasoningSummary` | `auto` `concise` `detailed` `none` | Reasoning summaries are output tokens like any other. `none` stops paying for them |
+| `outputLimit` (schema 3) | tokens | `tool_output_token_limit`, Codex's cap on what a tool returns; its default is 12,000 tokens. Heavy takes 5,000, Max 3,000 — the same budgets as Claude's in tokens. A reader's own `agent.output_limit` wins |
 
 Both are Codex-only and a Claude launch ignores them, so they are safe to put in any pack —
 they simply do nothing where there is nothing to do.

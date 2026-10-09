@@ -272,9 +272,28 @@ pub struct AgentConfig {
     ///
     /// Lower is not automatically cheaper. Truncating past what a task needed
     /// buys a re-run, and a re-run costs more than the lines it saved — which
-    /// is why ket has no opinion here and only carries the reader's.
+    /// is why ket has no opinion here and only carries the reader's. An
+    /// Economy level may propose one (`outputLimit` in its provider block);
+    /// a value set here wins over it.
     #[serde(default)]
     pub output_limit: Option<u32>,
+    /// Whether a successful command's output is filtered before the model
+    /// reads it, overriding the Economy level — see `crate::filter`.
+    ///
+    /// Unset means the level decides, which for every built-in level is no.
+    /// `false` turns a pack's filter off for this reader; `true` turns it on
+    /// at every level.
+    #[serde(default)]
+    pub command_filter: Option<bool>,
+    /// Whether the full output of every command the filter trims is kept on
+    /// disk for `ket recall`. Off unless `true`.
+    ///
+    /// The agent's own transcript already holds every tool result whole, so
+    /// this is a second copy — of whatever the command printed, which can be
+    /// a token or an environment — kept only for a reader who wants it
+    /// back by id. Written owner-only under the cache and swept after a day.
+    #[serde(default)]
+    pub command_archive: Option<bool>,
     /// When a session should compact its own history, overriding the agent's
     /// own threshold.
     ///
@@ -1899,6 +1918,73 @@ mod tests {
             permissions.for_tool("anything-else"),
             PermissionPolicy::Allow
         );
+    }
+
+    /// A merge config whose commit template is `template`.
+    fn template(template: &str) -> MergeConfig {
+        MergeConfig {
+            commit_template: template.to_owned(),
+            ..MergeConfig::default()
+        }
+    }
+
+    #[test]
+    fn issue_is_the_number_a_branch_is_named_for() {
+        let merge = template("{issue}");
+        assert_eq!(
+            merge.commit_message("142-fix-the-login", "main", "w", 1),
+            "#142"
+        );
+        // As a backlog note that is an issue names its branch.
+        assert_eq!(
+            merge.commit_message("142-fix-the-login-k3f9", "main", "w", 1),
+            "#142"
+        );
+        // A prefix before the last `/` is someone's naming scheme, not the issue.
+        assert_eq!(merge.commit_message("sam/142-fix", "main", "w", 1), "#142");
+        assert_eq!(merge.commit_message("sam/142", "main", "w", 1), "#142");
+    }
+
+    #[test]
+    fn issue_is_empty_for_a_branch_not_named_for_one() {
+        let merge = template("[{issue}]");
+        for branch in ["fix-the-login", "v2", "142fix", "fix-142", "142/fix", ""] {
+            assert_eq!(
+                merge.commit_message(branch, "main", "w", 1),
+                "[]",
+                "{branch}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_issue_leaves_no_trailing_space() {
+        let merge = template("fix: the thing {issue}");
+        assert_eq!(
+            merge.commit_message("fix-thing", "main", "w", 1),
+            "fix: the thing"
+        );
+        assert_eq!(
+            merge.commit_message("9-fix-thing", "main", "w", 1),
+            "fix: the thing #9"
+        );
+    }
+
+    #[test]
+    fn issue_sits_beside_the_other_placeholders() {
+        let merge = template("{branch} into {base} ({files} files) {issue}");
+        assert_eq!(
+            merge.commit_message("18-sync", "main", "w", 3),
+            "18-sync into main (3 files) #18"
+        );
+    }
+
+    #[test]
+    fn a_template_using_issue_is_valid() {
+        let mut config = Config::default();
+        config.merge.commit_template = "{branch} {issue}".to_owned();
+        config.validate().unwrap();
+        assert!(template("{issue}").unknown_placeholders().is_empty());
     }
 
     /// A unique scratch directory for one test, cleaned up by the caller.

@@ -514,3 +514,92 @@ fn the_oldest_record_is_evicted_once_the_cap_is_reached() {
     assert!(history.record("s0").is_none(), "the oldest was evicted");
     assert!(history.record("s500").is_some(), "the newest survives");
 }
+
+// ---- command output, measured ---------------------------------------------------
+
+fn output(
+    program: &str,
+    raw: u64,
+    shown: u64,
+    failed: bool,
+) -> ket_core::agent_hooks::CommandOutput {
+    ket_core::agent_hooks::CommandOutput {
+        program: program.to_owned(),
+        raw_bytes: raw,
+        shown_bytes: shown,
+        failed,
+    }
+}
+
+#[test]
+fn command_output_accumulates_by_program_and_counts_failures() {
+    let sandbox = Sandbox::new("usage-command-output");
+    let mut history = history_at(&sandbox);
+    let wt = WorktreeId::new("w1");
+    history.note_command_output("s1", &wt, 4, &output("cargo test", 4_000, 1_000, false), 1);
+    history.note_command_output("s1", &wt, 4, &output("cargo test", 4_000, 4_000, false), 2);
+    history.note_command_output("s1", &wt, 4, &output("git status", 400, 400, true), 3);
+
+    let record = history.record("s1").expect("recorded");
+    assert_eq!(record.command_calls, 3);
+    assert_eq!(record.command_failures, 1);
+    assert_eq!(record.command_output_bytes, 8_400);
+    assert_eq!(record.command_shown_bytes, 5_400);
+    assert_eq!(record.command_output_tokens(), 2_100);
+    assert_eq!(record.filter_saved_tokens(), 750);
+    assert_eq!(record.noisiest_program(), Some(("cargo test", 2_000)));
+}
+
+#[test]
+fn programs_past_the_cap_fold_under_other() {
+    let sandbox = Sandbox::new("usage-command-programs");
+    let mut history = history_at(&sandbox);
+    let wt = WorktreeId::new("w1");
+    for i in 0..ket_core::usage::PROGRAMS_KEPT + 3 {
+        history.note_command_output("s1", &wt, 4, &output(&format!("p{i}"), 10, 10, false), 1);
+    }
+    let record = history.record("s1").expect("recorded");
+    assert_eq!(
+        record.command_output_by_program.len(),
+        ket_core::usage::PROGRAMS_KEPT + 1
+    );
+    assert_eq!(record.command_output_by_program.get("other"), Some(&30));
+}
+
+#[test]
+fn the_share_of_input_is_none_without_input_and_past_the_whole() {
+    let sandbox = Sandbox::new("usage-command-share");
+    let mut history = history_at(&sandbox);
+    let wt = WorktreeId::new("w1");
+    history.note_command_output("s1", &wt, 4, &output("ls", 4_000, 4_000, false), 1);
+    // No fresh input recorded yet: nothing to divide by.
+    assert_eq!(history.record("s1").unwrap().command_output_share(), None);
+}
+
+#[test]
+fn the_rollup_counts_command_output_for_every_level_before_judging_the_level() {
+    let sandbox = Sandbox::new("usage-command-rollup");
+    let mut history = history_at(&sandbox);
+    let wt = WorktreeId::new("w1");
+    let default = ket_core::worktree::default_token_reduction();
+    // One session at the default level, one reduced; neither can be priced.
+    history.note_command_output("off", &wt, default, &output("ls", 4_000, 4_000, false), 1);
+    history.note_command_output(
+        "heavy",
+        &wt,
+        1,
+        &output("cargo test", 8_000, 2_000, false),
+        1,
+    );
+    let savings = history.savings_by_worktree(0);
+    let figures = savings.get(&wt).expect("the worktree");
+    assert_eq!(figures.unreduced, 1);
+    assert_eq!(figures.unmeasured, 1);
+    assert_eq!(figures.command_output_tokens, 3_000);
+    assert_eq!(figures.filter_saved_tokens, 1_500);
+    assert_eq!(figures.command_output_share(), None);
+    let mut total = ket_core::usage::WorktreeSavings::default();
+    total.add(figures);
+    total.add(figures);
+    assert_eq!(total.command_output_tokens, 6_000);
+}

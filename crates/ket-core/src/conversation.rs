@@ -934,7 +934,7 @@ fn tagged<'a>(text: &'a str, tag: &str) -> Option<&'a str> {
 
 /// `text` without its terminal colour codes: a local command prints for the
 /// terminal, and its escapes are noise anywhere else.
-fn strip_ansi(text: &str) -> String {
+pub(crate) fn strip_ansi(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars();
     while let Some(c) = chars.next() {

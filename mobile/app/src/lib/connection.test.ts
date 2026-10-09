@@ -91,6 +91,8 @@ beforeEach(() => {
     backgroundedAt: null,
     redialing: false,
     appState: { remove: () => {} },
+    snapshot: null,
+    starting: [],
   });
   Object.assign(conn, { host: { id: 'host' } as SavedHost, status: 'connected' });
 });
@@ -150,8 +152,16 @@ describe('HostConnection requests', () => {
       case: 'startWork',
       value: { projectId: 'project', prompt: 'fix it', agent: 'codex' },
     });
+    // The desktop took it: a row stands in for the work until it arrives.
+    expect(conn.starting).toEqual([
+      { project: 'project', prompt: 'fix it', at: expect.any(Number), before: [] },
+    ]);
     nextReply = reply({ case: 'error', value: { code: 0, message: 'ket is closed' } });
     await expect(conn.startWork('project', 'fix it')).resolves.toBe('ket is closed');
+    expect(conn.starting).toHaveLength(1);
+    // Given up on once it has taken too long to arrive.
+    jest.advanceTimersByTime(120_100);
+    expect(conn.starting).toEqual([]);
     await expect(conn.merge('tree')).resolves.toBe('ket is closed');
     nextReply = reply({ case: 'ack', value: {} });
     await expect(conn.merge('tree')).resolves.toBeNull();

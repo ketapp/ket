@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use std::sync::Arc;
 
 use ket_core::backlog::{Backlog, Done, Note, normalised_tags, repo_dir};
@@ -160,6 +160,19 @@ enum Cmd {
         /// The prompt. Use `-` to read it from stdin.
         #[arg(long, short)]
         prompt: String,
+    },
+
+    /// Run a command and print its output trimmed, the way an Economy
+    /// level's filter trims it for an agent: a successful run loses its
+    /// progress and per-test lines, a failed run is printed whole, and the
+    /// exit status is the command's own.
+    Filter(FilterArgs),
+
+    /// Print the full output of a command the filter trimmed, by the id in
+    /// its trailer.
+    Recall {
+        /// The id, or the end of it.
+        id: String,
     },
 
     /// List agent sessions across every project.
@@ -412,12 +425,32 @@ enum WorktreeCmd {
     },
 }
 
+/// The shell command `ket filter` runs, as the words after `--`.
+#[derive(Args, Debug)]
+struct FilterArgs {
+    /// Keep the full output for `ket recall`. Otherwise nothing is written.
+    #[arg(long)]
+    keep: bool,
+    /// The command, run through your login shell. Exits with its status.
+    #[arg(last = true, required = true)]
+    command: Vec<String>,
+}
+
 fn main() -> ExitCode {
     // The CLI can be the ket host too — see `ket_core::host`.
     ket_core::host::serve_if_asked();
+    // And the hook that trims a command's output — see `ket_core::filter`.
+    ket_core::filter::serve_if_asked();
 
     let cli = Cli::parse();
-    logging::init(cli.log.as_deref().unwrap_or("info"));
+    // `filter` and `recall` print for a model to read, and a stray warning
+    // on stderr would land in its context beside the command's own.
+    let quiet = matches!(cli.command, Cmd::Filter { .. } | Cmd::Recall { .. });
+    logging::init(
+        cli.log
+            .as_deref()
+            .unwrap_or(if quiet { "error" } else { "info" }),
+    );
 
     match run(cli.command) {
         Ok(()) => ExitCode::SUCCESS,
@@ -620,6 +653,18 @@ impl Cmd {
                 .maybe_text("agent", agent),
 
             Cmd::Ps { reap } => Invocation::new(if reap { "session.reap" } else { "session.list" }),
+
+            Cmd::Filter(args) => Invocation::new("shell.filter")
+                .flag("keep", args.keep)
+                .text(
+                    "command",
+                    args.command
+                        .iter()
+                        .map(|word| ket_core::shell::quote(word))
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                ),
+            Cmd::Recall { id } => Invocation::new("shell.recall").text("id", id),
         }
     }
 }
@@ -716,6 +761,44 @@ fn registry() -> Result<Registry, KetError> {
     })?;
     registry.bind("host.pair", |_, _| {
         println!("{}", ket_core::host::pairing_code()?);
+        Ok(())
+    })?;
+
+    // The filter's commands are the CLI's alone too: they print for whoever
+    // ran them, and there is nobody in a palette to print to.
+    registry.register(
+        command::Command::new(
+            "shell.filter",
+            "Run a command and print its output trimmed",
+            Category::Agent,
+        )
+        .arg(command::Arg::required("command", command::ArgKind::Text))
+        .arg(command::Arg::flag("keep")),
+    )?;
+    registry.register(
+        command::Command::new(
+            "shell.recall",
+            "Print the full output the filter trimmed",
+            Category::Agent,
+        )
+        .arg(command::Arg::required("id", command::ArgKind::Text)),
+    )?;
+    registry.bind("shell.filter", |invocation, _| {
+        let code = ket_core::filter::run(
+            invocation.require_text("command")?,
+            invocation.is_set("keep"),
+        );
+        if code == 0 {
+            Ok(())
+        } else {
+            std::process::exit(code)
+        }
+    })?;
+    registry.bind("shell.recall", |invocation, _| {
+        print!(
+            "{}",
+            ket_core::filter::recall(invocation.require_text("id")?)?
+        );
         Ok(())
     })?;
     registry.bind("host.status", |_, _| {
@@ -2100,6 +2183,10 @@ mod tests {
         &["ket", "backlog", "done", "note-1"],
         &["ket", "backlog", "reopen", "note-1"],
         &["ket", "backlog", "rm", "note-1"],
+        &["ket", "backlog", "tag", "note-1", "ui"],
+        &["ket", "backlog", "tag", "note-1", "ui", "--remove"],
+        &["ket", "backlog", "move", "note-1", "--before", "note-2"],
+        &["ket", "backlog", "store", "repo"],
         &["ket", "worktree", "add", "fix", "--base", "main"],
         &["ket", "worktree", "add", "fix", "--no-provision"],
         &["ket", "worktree", "list"],

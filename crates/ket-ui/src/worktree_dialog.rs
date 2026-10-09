@@ -124,8 +124,15 @@ fn saving_figure(level: u8) -> Option<String> {
 /// Written as the pack wrote each value, the way the launch passes them
 /// through (see `crate::terminal`).
 fn policy(level: &ket_core::worktree::TokenReduction, agent: Option<&str>) -> Vec<String> {
-    let policy = level.policy_for(agent.unwrap_or("opencode"));
+    let agent = agent.unwrap_or("opencode");
+    let policy = level.policy_for(agent);
     let worded = |value: &Option<String>, words: fn(&str) -> String| value.as_deref().map(words);
+    // The cap in the provider's own unit, the way the pack wrote it.
+    let unit = if agent.eq_ignore_ascii_case("codex") {
+        "token"
+    } else {
+        "char"
+    };
     [
         worded(&policy.model, str::to_owned),
         worded(&policy.effort, |v| format!("{v} effort")),
@@ -143,10 +150,28 @@ fn policy(level: &ket_core::worktree::TokenReduction, agent: Option<&str>) -> Ve
         }),
         worded(&policy.verbosity, |v| format!("{v} verbosity")),
         worded(&policy.reasoning_summary, |v| format!("{v} summaries")),
+        policy
+            .output_limit
+            .map(|limit| format!("{} {unit} output", short_count(limit))),
+        policy
+            .command_filter
+            .filter(|on| *on)
+            .map(|_| "filtered output".to_owned()),
     ]
     .into_iter()
     .flatten()
     .collect()
+}
+
+/// A count at tag width: `20k`, `1.5k`, `800`.
+pub(crate) fn short_count(count: u32) -> String {
+    match count {
+        0..=999 => count.to_string(),
+        1_000..=9_999 if !count.is_multiple_of(1_000) => {
+            format!("{:.1}k", f64::from(count) / 1_000.0)
+        }
+        _ => format!("{}k", count / 1_000),
+    }
 }
 
 /// Where in those rows the current level sits, so the menu opens with it

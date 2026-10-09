@@ -2,11 +2,12 @@
 //!
 //! One line at rest: a title, its `#tags`, and ↵ to add it — writing
 //! something down to come back to is what the dialog is for, and that has to
-//! stay one keystroke. ⇥ opens a description under the title, with the
-//! note's priority, its tags, files to send with it and Add, for a note worth
-//! more than a line; ⇧⇥ goes back up to the title, and Escape clears the
-//! lot. While it is open the whole composer is one well, ringed in the
-//! accent, so it reads as the thing being written in.
+//! stay one keystroke. Once a title is being typed, a line under it offers a
+//! description, and tab or a press on it opens one, with the note's tags,
+//! files to send with it and Add, for a note worth more than a line; ⇧tab
+//! goes back up to the title, and Escape clears the lot. While it is open
+//! the whole composer is one well, ringed in the accent, so it reads as the
+//! thing being written in.
 
 use std::path::PathBuf;
 
@@ -34,8 +35,8 @@ pub(super) const CAPTURE_EDITOR: &str = "backlog:capture";
 pub(super) const CAPTURE_H: Pixels = px(50.0);
 const CAPTURE_TEXT: Pixels = px(16.0);
 
-/// How tall the description is: three lines, then it scrolls.
-const DETAILS_H: Pixels = px(66.0);
+/// How tall the description is: four lines, then it scrolls.
+const DETAILS_H: Pixels = px(88.0);
 
 /// Where the title's words start, past the `+`: the description and the
 /// tool row line up under them.
@@ -252,8 +253,11 @@ impl Shell {
         )
     }
 
-    /// The composer: one line at rest, or the whole well while a note with
-    /// a description is being written.
+    /// The composer: one line at rest. While a title is being typed, a line
+    /// under it opens the description — tab, or a press on it — so the way
+    /// to say more is in sight rather than only known. With the description
+    /// open the whole well is the note being written: title, tags and
+    /// files, the description, and Add along the foot.
     pub(super) fn backlog_composer(
         &self,
         details: Option<AnyElement>,
@@ -263,13 +267,9 @@ impl Shell {
         let dialog = self.backlog.as_ref()?;
         let t = &self.theme;
         let priority = self.backlog_priority_picker(CAPTURE_PRIORITY, dialog.capture_priority, cx);
-        let Some(details) = details else {
-            let quiet = div()
-                .flex()
-                .flex_none()
-                .items_center()
-                .px(px(6.0))
-                .child(key_hint("\u{21e5}", "details", t));
+        let capture = dialog.capture.read(cx);
+        let typing = !capture.is_empty() && capture.is_focused(window);
+        if details.is_none() && !typing {
             return Some(
                 text_field(
                     &dialog.capture,
@@ -285,7 +285,6 @@ impl Shell {
                 .gap(px(12.0))
                 .rounded(COMPOSER_RADIUS)
                 .text_size(CAPTURE_TEXT)
-                .child(quiet)
                 .child(priority)
                 .on_click(cx.listener(|this, _, _, cx| {
                     if let Some(dialog) = this.backlog.as_mut() {
@@ -296,15 +295,17 @@ impl Shell {
                 }))
                 .into_any_element(),
             );
-        };
+        }
 
+        // The same line in both: the words stay where they were typed as the
+        // well grows under them.
         let title = div()
             .flex()
             .items_center()
             .gap(px(12.0))
-            .px(px(16.0))
-            .pt(px(14.0))
-            .pb(px(6.0))
+            .h(CAPTURE_H)
+            .pl(px(16.0))
+            .pr(px(10.0))
             .text_size(CAPTURE_TEXT)
             .font_weight(FontWeight::MEDIUM)
             .child(sized_icon(Icon::Plus, px(16.0), paint(t.accent)))
@@ -324,7 +325,50 @@ impl Shell {
                     }
                     cx.notify();
                 })),
-            );
+            )
+            .child(priority);
+
+        let well = div()
+            .flex()
+            .flex_col()
+            .flex_none()
+            .rounded(COMPOSER_RADIUS)
+            .bg(paint(t.sunken))
+            .border_1()
+            .border_color(alpha(paint(t.focus_ring), 0.55))
+            .child(title);
+
+        let Some(details) = details else {
+            // Taken on the press, not the click: the press is also what
+            // takes the keyboard from the title, which folds this line away
+            // before a click could land on it.
+            let open = button("backlog-capture-details", "Add a description")
+                .ghost()
+                .small()
+                .leading(Icon::Pencil)
+                .render(t)
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(|this, _, window, cx| {
+                        this.open_backlog_details(window);
+                        cx.notify();
+                    }),
+                );
+            let line = div()
+                .flex()
+                .items_center()
+                .gap(px(16.0))
+                .h(px(40.0))
+                .ml(TEXT_INSET - px(9.0))
+                .mr(px(12.0))
+                .border_t_1()
+                .border_color(alpha(paint(t.border), 0.6))
+                .child(open)
+                .child(div().flex_grow())
+                .child(key_hint("tab", "description", t))
+                .child(key_hint("\u{21b5}", "add", t));
+            return Some(well.child(line).into_any_element());
+        };
 
         let (_, tags) = split_tags(&dialog.capture.read(cx).text());
         let tag_chips: Vec<_> = tags
@@ -363,19 +407,16 @@ impl Shell {
             })
             .collect();
 
-        let tools = div()
+        // What the note carries: its tags and files, and the buttons that
+        // add them.
+        let meta = div()
             .flex()
             .flex_wrap()
             .items_center()
-            .gap(px(8.0))
-            .ml(TEXT_INSET)
-            .mr(px(10.0))
-            .mt(px(8.0))
+            .gap(px(6.0))
+            .ml(TEXT_INSET - px(9.0))
+            .mr(px(12.0))
             .mb(px(10.0))
-            .pt(px(10.0))
-            .border_t_1()
-            .border_color(alpha(paint(t.border), 0.6))
-            .child(priority)
             .children(tag_chips)
             .children(file_chips)
             .child(
@@ -399,10 +440,20 @@ impl Shell {
                         this.choose_capture_files(cx);
                         cx.notify();
                     })),
-            )
-            .child(div().flex_grow())
+            );
+
+        let foot = div()
+            .flex()
+            .items_center()
+            .gap(px(4.0))
+            .h(px(52.0))
+            .pl(TEXT_INSET - px(6.0))
+            .pr(px(10.0))
+            .mt(px(8.0))
+            .border_t_1()
+            .border_color(alpha(paint(t.border), 0.6))
             .child(
-                backlog_hint("backlog-capture-clear", "esc", "clear", t).on_click(cx.listener(
+                backlog_hint("backlog-capture-clear", "esc", "discard", t).on_click(cx.listener(
                     |this, _, _, cx| {
                         this.clear_backlog_composer(cx);
                         cx.notify();
@@ -410,9 +461,19 @@ impl Shell {
                 )),
             )
             .child(
+                backlog_hint("backlog-capture-up", "\u{21e7}tab", "title", t).on_click(
+                    cx.listener(|this, _, window, cx| {
+                        this.backlog_details_to_title(window, cx);
+                        cx.notify();
+                    }),
+                ),
+            )
+            .child(div().flex_grow())
+            .child(
                 button("backlog-capture-add", "Add")
                     .primary()
                     .small()
+                    .leading(Icon::Plus)
                     .hint("\u{2318}\u{21b5}")
                     .render(t)
                     .on_click(cx.listener(|this, _, _, cx| {
@@ -422,17 +483,9 @@ impl Shell {
             );
 
         Some(
-            div()
-                .flex()
-                .flex_col()
-                .flex_none()
-                .rounded(COMPOSER_RADIUS)
-                .bg(paint(t.sunken))
-                .border_1()
-                .border_color(alpha(paint(t.focus_ring), 0.55))
-                .child(title)
+            well.child(meta)
                 .child(details)
-                .child(tools)
+                .child(foot)
                 .into_any_element(),
         )
     }

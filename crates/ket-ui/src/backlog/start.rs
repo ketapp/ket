@@ -16,7 +16,7 @@ use ket_core::id::ProjectId;
 use ket_core::theme::Theme;
 use ket_core::workspace::Workspace;
 
-use super::{BODY_EDITOR, BODY_INSET, OPEN_PAD, PRIORITY_MARK, Pick, priority_mark_sized};
+use super::{BODY_EDITOR, BODY_INSET, PRIORITY_MARK, Pick, priority_mark_sized, rail_row};
 use crate::Shell;
 use crate::paint::{alpha, paint};
 use crate::phone_work::{NewWork, WorkOrigin, branch_seeded};
@@ -40,10 +40,9 @@ const SHEET_AGENT: &str = "backlog-sheet-agent";
 const SHEET_ECONOMY: &str = "backlog-sheet-economy";
 const SHEET_BASE: &str = "backlog-sheet-base";
 
-/// The pickers' widths in the open note: the agent's name, a level's, and a
-/// branch's, which runs longest.
+/// The agent and base menus' widths: an agent's name, and a branch's, which
+/// runs longest.
 const AGENT_W: Pixels = px(220.0);
-const ECONOMY_W: Pixels = px(170.0);
 const BASE_W: Pixels = px(220.0);
 
 /// The Economy menu's width: each level has a line saying what it changes.
@@ -622,22 +621,15 @@ impl Shell {
         self.start_work(first, cx);
     }
 
-    /// One labelled picker: `title` over `trigger`, with its menu.
+    /// One picker: `trigger`, with its menu.
     fn start_picker(
         &self,
-        title: &'static str,
         origin: &'static str,
         trigger: crate::ui::select::Select,
         cx: &mut Context<Self>,
-    ) -> gpui::Div {
-        let t = &self.theme;
+    ) -> gpui::Stateful<gpui::Div> {
         let open = self.backlog_menu_open(origin);
-        div()
-            .flex()
-            .flex_col()
-            .min_w_0()
-            .child(label(title, t))
-            .child(self.backlog_picker(origin, trigger.open(open).render(t), cx))
+        self.backlog_picker(origin, trigger.open(open).render(&self.theme), cx)
     }
 
     /// The Agent, Economy and Base pickers under `origins`, or a line saying
@@ -646,7 +638,7 @@ impl Shell {
         &self,
         origins: [&'static str; 3],
         cx: &mut Context<Self>,
-    ) -> Result<[gpui::Div; 3], AnyElement> {
+    ) -> Result<[gpui::Stateful<gpui::Div>; 3], AnyElement> {
         let t = &self.theme;
         let Some(options) = self
             .backlog
@@ -667,46 +659,94 @@ impl Shell {
             .leading(sized_icon(Icon::GitBranch, px(14.0), paint(t.text.dim)))
             .mono(crate::fonts::chrome());
         Ok([
-            self.start_picker("Agent", agent_origin, agent, cx),
-            self.start_picker("Economy", economy_origin, economy, cx),
-            self.start_picker("Base", base_origin, base, cx),
+            self.start_picker(agent_origin, agent, cx),
+            self.start_picker(economy_origin, economy, cx),
+            self.start_picker(base_origin, base, cx),
         ])
     }
 
-    /// What Start will make, in the open note: the three pickers, and the
-    /// button that shows the brief.
-    pub(super) fn backlog_start_options(&self, cx: &mut Context<Self>) -> AnyElement {
+    /// What Start will make, in the open note's rail: the three pickers,
+    /// the branch it will be on, Start, and the button that shows the brief.
+    /// `id` is the note's; `branch` the one Start would make now.
+    pub(super) fn backlog_start_rail(
+        &self,
+        id: String,
+        branch: String,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let t = &self.theme;
-        let previewing = self.backlog.as_ref().is_some_and(|dialog| dialog.preview);
-        let row = div()
-            .flex()
-            .items_end()
-            .gap(px(10.0))
-            .px(OPEN_PAD)
-            .pt(px(14.0));
-        let row = match self.start_pickers([START_AGENT, START_ECONOMY, START_BASE], cx) {
-            Ok([agent, economy, base]) => row
-                .child(agent.w(AGENT_W).flex_none())
-                .child(economy.w(ECONOMY_W).flex_none())
-                .child(base.w(BASE_W).flex_none()),
-            Err(waiting) => row.child(waiting),
+        let Some(dialog) = self.backlog.as_ref() else {
+            return div().into_any_element();
         };
-        row.child(div().flex_grow())
+        let previewing = dialog.preview;
+        let starting = dialog.starting;
+        let section = div()
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .child(div().h(px(1.0)).my(px(6.0)).bg(paint(t.rule)))
             .child(
-                button(
-                    "backlog-preview",
-                    if previewing { "Hide brief" } else { "Preview" },
-                )
-                .ghost()
-                .small()
-                .leading(Icon::Eye)
-                .render(t)
-                .on_click(cx.listener(|this, _, _, cx| {
-                    if let Some(dialog) = this.backlog.as_mut() {
-                        dialog.preview = !dialog.preview;
-                    }
-                    cx.notify();
-                })),
+                div()
+                    .mb(px(2.0))
+                    .text_size(px(12.5))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(paint(t.text.primary))
+                    .child("Start in a worktree"),
+            );
+        let section = match self.start_pickers([START_AGENT, START_ECONOMY, START_BASE], cx) {
+            Ok([agent, economy, base]) => section
+                .child(rail_row("Agent", agent, t))
+                .child(rail_row("Economy", economy, t))
+                .child(rail_row("Base", base, t)),
+            Err(waiting) => section.child(waiting),
+        };
+        section
+            .child(rail_row(
+                "Branch",
+                div()
+                    .pl(px(10.0))
+                    .truncate()
+                    .font_family(crate::fonts::chrome())
+                    .text_size(px(11.5))
+                    .text_color(paint(t.text.dim))
+                    .child(branch),
+                t,
+            ))
+            .child(
+                button("backlog-start", "Start in worktree")
+                    .leading(Icon::Play)
+                    .hint("\u{21e7}\u{2318}\u{21b5}")
+                    .loading_if(starting, "Creating the worktree\u{2026}")
+                    .render(t)
+                    .w_full()
+                    .justify_center()
+                    .mt(px(6.0))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.start_backlog_note(id.clone(), cx);
+                        cx.notify();
+                    })),
+            )
+            .child(
+                div().flex().justify_center().child(
+                    button(
+                        "backlog-preview",
+                        if previewing {
+                            "Hide the brief"
+                        } else {
+                            "Preview the brief"
+                        },
+                    )
+                    .ghost()
+                    .small()
+                    .leading(Icon::Eye)
+                    .render(t)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        if let Some(dialog) = this.backlog.as_mut() {
+                            dialog.preview = !dialog.preview;
+                        }
+                        cx.notify();
+                    })),
+                ),
             )
             .into_any_element()
     }
@@ -967,13 +1007,22 @@ impl Shell {
             })
             .collect();
 
+        let labelled = |title: &'static str, picker: gpui::Stateful<gpui::Div>| {
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_w_0()
+                .child(label(title, t))
+                .child(picker)
+        };
         let pickers = match self.start_pickers([SHEET_AGENT, SHEET_ECONOMY, SHEET_BASE], cx) {
             Ok([agent, economy, base]) => div()
                 .flex()
                 .gap(px(10.0))
-                .child(agent.flex_1())
-                .child(economy.flex_1())
-                .child(base.flex_1())
+                .child(labelled("Agent", agent))
+                .child(labelled("Economy", economy))
+                .child(labelled("Base", base))
                 .into_any_element(),
             Err(waiting) => waiting,
         };

@@ -153,9 +153,10 @@ opt-level = 3
 #   1. The `clonefile(2)` binding in `ket-core::cow`, which buys a measured
 #      10-19x on worktree provisioning.
 #   2. One pointer-to-reference cast in `ket-ui::window_drag`, which is how ket
-#      moves its own window. gpui's macOS backend never implemented
-#      `WindowControlArea`, so the tab strip could not be exempted from AppKit's
-#      drag band and a tab in it could not be picked up.
+#      reaches gpui's own view: to move its own window — gpui's macOS backend
+#      never implemented `WindowControlArea`, so the tab strip could not be
+#      exempted from AppKit's drag band and a tab in it could not be picked up
+#      — and to parent a browser tab's page in it (`ket-ui::browser_view`).
 #   3. `ket-ui::voice`, the quick prompt's voice input. Apple's Speech and
 #      AVAudioEngine frameworks have no safe binding: every message `objc2`
 #      generates for them is `unsafe`. Confined to that one module.

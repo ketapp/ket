@@ -19,7 +19,7 @@ use crate::paint::{alpha, paint};
 use crate::projects::default_color;
 use crate::ui::agent::{MARK, mark, provider};
 use crate::ui::button::{button, icon_button};
-use crate::ui::chip::{Motion, badge, readout, status_dot, tag};
+use crate::ui::chip::{BADGE, Motion, badge, readout, status_dot, tag};
 use crate::ui::group::{button_group, segment};
 use crate::ui::icon::{Icon, icon, sized_icon};
 use crate::ui::row::{BLOCK_LEAD, block_row, heading_row, row};
@@ -28,7 +28,7 @@ use ket_core::agent_hooks::{self, Listener};
 use ket_core::subagents::{Subagent, SubagentState};
 
 use crate::fonts::Prose;
-use crate::ui::{ICON_GAP, WELL_XS};
+use crate::ui::{ICON, ICON_GAP, WELL_XS};
 
 /// How often the usage history is written.
 ///
@@ -107,12 +107,13 @@ const INDENT: Pixels = px(8.0);
 /// rather than as a division of the panel.
 const COLUMN_INSET: Pixels = px(8.0);
 
-/// The room inside a tinted project group's edge, taken out of
-/// [`COLUMN_INSET`] so its rows do not move.
-const OVERRIDE_PAD: Pixels = px(3.0);
+/// How far a washed project group's ground reaches past its rows on each
+/// side, taken out of [`COLUMN_INSET`] so the rows do not move.
+const OVERRIDE_PAD: Pixels = px(4.0);
 
-/// How far a tinted mark's well reaches past the mark on each side.
-const MARK_WELL_BLEED: Pixels = px(4.0);
+/// How far a mark's well reaches past the mark's column on each side: a
+/// [`BADGE`]-wide column (20) in a [`WELL_XS`] well (24).
+const MARK_WELL_BLEED: Pixels = px(2.0);
 
 /// How far apart one project's rows sit.
 ///
@@ -820,12 +821,14 @@ fn git_operation_label(op: ket_core::status::GitOperation) -> &'static str {
 
 /// Where a worktree row's mark is centred, measured from the row's left edge.
 ///
-/// The subagent tree hangs from here. It is derived rather than stated because
-/// it is four things added up — [`BLOCK_LEAD`], the rail, the gap, half the
-/// mark — and the tree's guide landing a few pixels off the mark it claims to
-/// grow out of is exactly the detached look the tree exists to fix.
+/// The subagent tree hangs from here, and the project's badge sits on the
+/// same line above: the mark's column is a [`BADGE`] wide, so the two share
+/// a centre. It is derived rather than stated because it is things added up
+/// — [`BLOCK_LEAD`] and half the column — and the tree's guide landing a few
+/// pixels off the mark it claims to grow out of is exactly the detached look
+/// the tree exists to fix.
 fn mark_axis() -> Pixels {
-    BLOCK_LEAD + MARK / 2.0
+    BLOCK_LEAD + BADGE / 2.0
 }
 
 /// A subagent row's height: a step taller than the text needs, so each elbow
@@ -1134,8 +1137,8 @@ impl Shell {
         let line = guide(t);
         let last = subagents.len().saturating_sub(1);
         // Where the worktree's branch name starts, and so where every label
-        // does: half the mark and the row's gap past the axis.
-        let label_x = axis + MARK / 2.0 + ICON_GAP;
+        // does: half the mark's column and the row's gap past the axis.
+        let label_x = axis + BADGE / 2.0 + ICON_GAP;
         let node_x = axis + ELBOW_RUN;
         // Where the worktree's state word ends, and so where every figure
         // does: past the row's own end padding, its trailing column and the
@@ -1755,6 +1758,7 @@ impl Shell {
         // read anyway, and this is the one moment ket is already thinking about
         // these files.
         ket_core::pack::sweep_temps();
+        ket_core::filter::sweep();
 
         if let Some(pack) = ket_core::pack::load() {
             let id = pack.pack_id.clone();
@@ -2017,10 +2021,11 @@ impl Shell {
                     session,
                     WorktreeId::new(worktree),
                     report.tool_name.clone(),
+                    report.command.clone(),
                 ));
             }
         }
-        for (event, session, worktree, tool) in counted {
+        for (event, session, worktree, tool, command) in counted {
             let level = self.token_reduction_for(&worktree);
             match event {
                 agent_hooks::HookEvent::UserPrompt => self
@@ -2033,6 +2038,14 @@ impl Shell {
                     let server = tool.as_deref().and_then(agent_hooks::mcp_server);
                     self.usage_history
                         .note_tool_call(&session, &worktree, level, server, now)
+                }
+                // A command's output is measured once it has come back,
+                // which is the only time there is any to measure.
+                agent_hooks::HookEvent::PostTool | agent_hooks::HookEvent::PostToolFailure => {
+                    if let Some(output) = command.as_deref() {
+                        self.usage_history
+                            .note_command_output(&session, &worktree, level, output, now);
+                    }
                 }
                 _ => {}
             }
@@ -3021,11 +3034,14 @@ impl Shell {
                     // space under the last project is under its worktrees, not
                     // under the name at the top of them.
                     // A project launching an agent with its own command is
-                    // drawn as one tinted group, heading and rows together, so
-                    // which sessions run differently is plain from across the
-                    // room. The inset is split around the edge rather than
-                    // added to it: every row stays at the x it has in an
-                    // untinted project. See `crate::agent_override`.
+                    // drawn as one washed group, heading and rows together on
+                    // a faint tint of their own, so which sessions run
+                    // differently is plain from across the room without an
+                    // edge to draw the eye. The wash's inset is taken out of
+                    // the column's rather than added to it: every row stays at
+                    // the x it has in an unwashed project. The glyph beside
+                    // the name says what is different — see
+                    // `crate::agent_override`.
                     let launches = project.override_summary();
                     let tint = crate::agent_override::hue(t);
                     let mut rows = div()
@@ -3035,12 +3051,10 @@ impl Shell {
                         .gap(ROW_GAP)
                         .when(launches.is_none(), |el| el.px(COLUMN_INSET))
                         .when(launches.is_some(), |el| {
-                            el.mx(COLUMN_INSET - OVERRIDE_PAD - px(1.0))
+                            el.mx(COLUMN_INSET - OVERRIDE_PAD)
                                 .p(OVERRIDE_PAD)
                                 .rounded(crate::ui::RADIUS_MD)
-                                .border_1()
-                                .border_color(alpha(tint, 0.35))
-                                .bg(alpha(tint, 0.05))
+                                .bg(alpha(tint, 0.055))
                         })
                         .mb(GROUP_GAP)
                         .on_drag_move::<ProjectDrag>(cx.listener(
@@ -3083,6 +3097,11 @@ impl Shell {
                     // to mistake for decoration.
                     let backlog = self.backlog_count(project);
                     let hovered_action = self.hovered_project_action;
+                    // Built ahead of the row: it needs the context mutably,
+                    // and `tip` below holds it for the rest of the heading.
+                    let glyph = launches
+                        .is_some()
+                        .then(|| self.override_glyph(pi, project, window, cx));
                     let tip = |id: &'static str, button: Stateful<Div>, label: &'static str| {
                         crate::ui::tooltip::tooltip(
                             (id, pi),
@@ -3154,28 +3173,7 @@ impl Shell {
                             // No hover effect on the badge or the name: the
                             // heading is still under the pointer, and the
                             // caret has its own well.
-                            .child(
-                                badge(project.color, mark, t).when(launches.is_some(), |el| {
-                                    // A ring rather than a border: a border is inside
-                                    // the box and would shrink the badge, and a ring
-                                    // set off by a gap of the sidebar's own ground
-                                    // reads as worn rather than as part of the colour.
-                                    el.shadow(vec![
-                                        BoxShadow {
-                                            color: tint.into(),
-                                            offset: point(px(0.0), px(0.0)),
-                                            blur_radius: px(0.0),
-                                            spread_radius: px(3.0),
-                                        },
-                                        BoxShadow {
-                                            color: paint(t.panel).into(),
-                                            offset: point(px(0.0), px(0.0)),
-                                            blur_radius: px(0.0),
-                                            spread_radius: px(1.5),
-                                        },
-                                    ])
-                                }),
-                            )
+                            .child(badge(project.color, mark, t))
                             .child(
                                 div()
                                     .flex()
@@ -3200,17 +3198,10 @@ impl Shell {
                                             .font_weight(FontWeight::MEDIUM)
                                             .child(project.name.clone()),
                                     )
-                                    // The command itself, beside the name: the
-                                    // tint says *something* is different, and
-                                    // this says what.
-                                    .children(launches.clone().map(|launches| {
-                                        div()
-                                            .flex_none()
-                                            .font_family(crate::fonts::chrome())
-                                            .text_size(px(11.0))
-                                            .text_color(tint)
-                                            .child(launches)
-                                    }))
+                                    // The launch glyph, beside the name: the
+                                    // wash says *something* is different, and
+                                    // the card behind the glyph says what.
+                                    .children(glyph)
                                     // What is waiting in the backlog, beside the
                                     // name it is waiting on; a click opens it.
                                     // Nothing at all for an empty backlog.
@@ -3515,10 +3506,13 @@ impl Shell {
                                                     .flex_none()
                                                     .items_center()
                                                     .justify_center()
-                                                    .w(MARK)
+                                                    // As wide as the badge
+                                                    // heading the column, so
+                                                    // the two share a centre.
+                                                    .w(BADGE)
                                                     // An agent this project
                                                     // launches with its own
-                                                    // command sits in a tinted
+                                                    // command sits in a quiet
                                                     // well. Drawn behind the
                                                     // mark and outside its
                                                     // column, so the name beside
@@ -3532,9 +3526,7 @@ impl Shell {
                                                                 .left(-MARK_WELL_BLEED)
                                                                 .right(-MARK_WELL_BLEED)
                                                                 .rounded(crate::ui::RADIUS_SM)
-                                                                .bg(alpha(tint, 0.16))
-                                                                .border_1()
-                                                                .border_color(alpha(tint, 0.4)),
+                                                                .bg(paint(t.hover)),
                                                         )
                                                     })
                                                     .child(row_mark(
@@ -3859,7 +3851,11 @@ impl Shell {
 
                             rows = rows.child(
                                 row(("discovered", pi), false, t)
-                                    .ml(INDENT)
+                                    // The caret stands on the column the badge
+                                    // and the marks share, so the fold reads as
+                                    // one more row of the group rather than a
+                                    // footnote under it.
+                                    .pl(LEAD + (BADGE - ICON) / 2.0)
                                     .text_size(px(10.0))
                                     .text_color(paint(t.text.dim))
                                     .child(icon(

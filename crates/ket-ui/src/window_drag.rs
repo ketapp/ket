@@ -26,13 +26,16 @@
 //! feedback macOS gives a window being placed. Following the pointer by hand
 //! loses all three and gains nothing.
 
-/// Starts a window drag from the element under the pointer.
+/// gpui's own `NSView` for `window`: what native child views — browser
+/// tabs — are parented to, and what takes the keyboard back from them.
 ///
-/// Safe to call from any mouse-down handler: without a current event, or off
-/// macOS, it does nothing rather than failing.
+/// `None` off the main thread, or when gpui has no AppKit handle to give.
 #[cfg(target_os = "macos")]
-pub(crate) fn drag_window(window: &gpui::Window) {
-    use objc2_app_kit::{NSApplication, NSView};
+pub(crate) fn root_view(
+    window: &gpui::Window,
+) -> Option<objc2::rc::Retained<objc2_app_kit::NSView>> {
+    use objc2::Message as _;
+    use objc2_app_kit::NSView;
     use objc2_foundation::MainThreadMarker;
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
@@ -40,28 +43,45 @@ pub(crate) fn drag_window(window: &gpui::Window) {
     // `window_handle` of its own, returning its own handle type, and an
     // inherent method wins over a trait's.
     let Ok(handle) = HasWindowHandle::window_handle(window) else {
-        return;
+        return None;
     };
     let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
-        return;
+        return None;
     };
-    // gpui runs its window on the main thread, and a mouse-down handler is
-    // called from that window's event dispatch — but this asks rather than
-    // assumes, because every AppKit call below needs it to be true.
-    let Some(main) = MainThreadMarker::new() else {
-        return;
-    };
+    // gpui runs its window on the main thread, and this is called from its
+    // render and event dispatch — but it asks rather than assumes, because
+    // every AppKit call made with the view needs it to be true.
+    MainThreadMarker::new()?;
 
     // SAFETY: `ns_view` comes from gpui's own window handle, which
     // `raw-window-handle` documents as a valid, non-null pointer to the
-    // `NSView` backing this window, and which is already relied on this way to
-    // parent browser tabs — see `crate::browser`. The borrow does not outlive
-    // this function, and nothing here retains it. Every AppKit call made
-    // through it is a safe binding from `objc2-app-kit`; this cast is the only
-    // thing that cannot be expressed safely, because turning a pointer into a
-    // reference never can be.
+    // `NSView` backing this window — the same pointer Wry is handed to parent
+    // browser tabs. The borrow lasts only as long as this function; what is
+    // handed out is a retain of the view, which keeps it alive however long
+    // the caller holds it, and gpui keeps it for the window's life besides.
+    // Every AppKit call made through it is a safe binding from
+    // `objc2-app-kit`; this cast is the only thing that cannot be expressed
+    // safely, because turning a pointer into a reference never can be.
     #[allow(unsafe_code)]
     let view: &NSView = unsafe { handle.ns_view.cast().as_ref() };
+    Some(view.retain())
+}
+
+/// Starts a window drag from the element under the pointer.
+///
+/// Safe to call from any mouse-down handler: without a current event, or off
+/// macOS, it does nothing rather than failing.
+#[cfg(target_os = "macos")]
+pub(crate) fn drag_window(window: &gpui::Window) {
+    use objc2_app_kit::NSApplication;
+    use objc2_foundation::MainThreadMarker;
+
+    let Some(view) = root_view(window) else {
+        return;
+    };
+    let Some(main) = MainThreadMarker::new() else {
+        return;
+    };
 
     let Some(ns_window) = view.window() else {
         return;

@@ -5,7 +5,6 @@ import { Pressable as MockPressable, Text as MockText } from 'react-native';
 import TerminalScreen from './app/terminal/[host]/[terminal]';
 
 const mockRouter = { replace: jest.fn() };
-const mockSaveRecent = jest.fn(async (_recent: object) => {});
 const mockReset = jest.fn();
 const mockWrite = jest.fn();
 const mockSetInteractive = jest.fn();
@@ -23,7 +22,6 @@ jest.mock('@ket/remote', () => ({ Activity: { QUIET: 0, RUNNING: 1, WORKING: 2, 
 jest.mock('./lib/hosts', () => ({ useHost: () => mockConn }));
 jest.mock('./lib/store', () => ({
   getFit: jest.fn(async () => true),
-  saveRecent: (recent: object) => mockSaveRecent(recent),
 }));
 jest.mock('./components/TerminalView', () => {
   return { TerminalView: mockReact.forwardRef(function MockTerminalView(props: any, ref: any) {
@@ -82,8 +80,8 @@ afterEach(() => {
 describe('TerminalScreen', () => {
   test('subscribes, draws host output, resizes, and navigates tabs', async () => {
     const view = await render(<TerminalScreen />);
-    await waitFor(() => expect(mockConn.subscribe).toHaveBeenCalledWith(7n));
-    expect(mockSaveRecent).toHaveBeenCalledWith({ host: 'host', terminal: '7' });
+    // With what to show if the desktop refuses it.
+    await waitFor(() => expect(mockConn.subscribe).toHaveBeenCalledWith(7n, expect.any(Function)));
     expect(mockSetFit).toHaveBeenCalledWith(true);
 
     await fireEvent.press(view.getByLabelText('Terminal size'));
@@ -130,9 +128,6 @@ describe('TerminalScreen', () => {
 
     await fireEvent.press(view.getByLabelText('Let go of control'));
     expect(mockConn.releaseControl).toHaveBeenCalledWith(7n);
-    await fireEvent.press(view.getByLabelText('Full screen'));
-    expect(view.getByLabelText('Leave full screen')).toBeTruthy();
-    await fireEvent.press(view.getByLabelText('Leave full screen'));
     await view.unmount();
   });
 

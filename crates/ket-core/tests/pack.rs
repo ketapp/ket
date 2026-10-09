@@ -308,10 +308,66 @@ fn a_pack_policy_converts_field_for_field_into_an_economy_policy() {
         cross_session_inbound: Some("hold".to_owned()),
         verbosity: Some("low".to_owned()),
         reasoning_summary: Some("concise".to_owned()),
+        output_limit: None,
+        command_filter: None,
     };
     let economy: ket_core::worktree::EconomyPolicy = (&policy).into();
     assert_eq!(economy.effort.as_deref(), Some("high"));
     assert_eq!(economy.model.as_deref(), Some("opus"));
     assert_eq!(economy.agent_teams, Some(true));
     assert_eq!(economy.verbosity.as_deref(), Some("low"));
+}
+
+// ---- schema 3: the output cap and the filter ---------------------------------
+
+fn level_with_claude(block: &str) -> String {
+    format!(r#"{{"id":"l","label":"L","description":"D","claude":{{{block}}}}}"#)
+}
+
+fn schema3(levels: &str) -> String {
+    format!(
+        r#"{{"schemaVersion":3,"packId":"test-pack","packVersion":1,"levels":[{levels}],"defaultLevel":"l"}}"#
+    )
+}
+
+#[test]
+fn a_schema_3_pack_carries_the_cap_and_the_filter() {
+    let json = schema3(&level_with_claude(
+        r#""outputLimit":20000,"commandFilter":true"#,
+    ));
+    let pack = parse(json.as_bytes()).expect("parse");
+    let level = &pack.levels[0];
+    assert_eq!(level.claude.output_limit, Some(20_000));
+    assert_eq!(level.claude.command_filter, Some(true));
+    let policy = pack.levels()[0].policy_for("claude");
+    assert_eq!(policy.output_limit, Some(20_000));
+    assert_eq!(policy.command_filter, Some(true));
+}
+
+#[test]
+fn an_output_cap_below_the_floor_is_refused_with_the_floor() {
+    let json = schema3(&level_with_claude(r#""outputLimit":100"#));
+    let error = parse(json.as_bytes()).expect_err("refused").to_string();
+    assert!(error.contains("at least 4000 characters"), "{error}");
+}
+
+#[test]
+fn an_output_cap_in_a_block_without_one_is_refused() {
+    let json =
+        schema3(r#"{"id":"l","label":"L","description":"D","opencode":{"outputLimit":20000}}"#);
+    let error = parse(json.as_bytes()).expect_err("refused").to_string();
+    assert!(error.contains("opencode.outputLimit"), "{error}");
+}
+
+#[test]
+fn an_output_cap_in_a_schema_2_pack_is_still_read_by_this_ket() {
+    // A pack that forgot to say 3 is read anyway: the gate is about packs
+    // from the future, not about honesty.
+    let json = pack_json(&level_with_claude(r#""outputLimit":5000"#), "l");
+    assert_eq!(
+        parse(json.as_bytes()).expect("parse").levels[0]
+            .claude
+            .output_limit,
+        Some(5_000)
+    );
 }

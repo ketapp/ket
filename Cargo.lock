@@ -4002,17 +4002,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "gpui-wry"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "69a1691301e23b603797a8be7733fdc30d6bac6f3e0cc98ff1706ea609891866"
-dependencies = [
- "anyhow",
- "gpui",
- "wry",
-]
-
-[[package]]
 name = "gpui_collections"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5099,7 +5088,6 @@ version = "0.1.0"
 dependencies = [
  "block2",
  "gpui",
- "gpui-wry",
  "image",
  "ket-core",
  "libloading",

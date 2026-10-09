@@ -674,6 +674,22 @@ pub fn assumed_output_reduction(level: u8) -> f64 {
         .unwrap_or_default()
 }
 
+/// `part` over `whole` as a fraction, when it is one.
+fn share(part: u64, whole: u64) -> Option<f64> {
+    (whole > 0 && part <= whole).then(|| part as f64 / whole as f64)
+}
+
+/// How many programs a record names in [`Record::command_output_by_program`]
+/// before the rest are folded under `other`.
+pub const PROGRAMS_KEPT: usize = 16;
+
+/// How many bytes of a tool's output are taken as one token.
+///
+/// The usual estimate, and a floor for code and logs, which run closer to
+/// three bytes a token — so a figure built on it understates rather than
+/// overstates what a command cost.
+pub const BYTES_PER_TOKEN: u64 = 4;
+
 /// How many sessions are kept.
 ///
 /// Old enough sessions describe a version of ket, a model and a way of working
@@ -808,6 +824,34 @@ pub struct Record {
     /// sit in the prefix of every request whether or not it is ever called.
     #[serde(default)]
     pub mcp_calls: BTreeMap<String, u32>,
+    /// Shell commands the agent ran to completion, counted from `PostToolUse`
+    /// and `PostToolUseFailure` hooks for the shell tool.
+    #[serde(default)]
+    pub command_calls: u32,
+    /// How many of [`Record::command_calls`] failed.
+    #[serde(default)]
+    pub command_failures: u32,
+    /// Every byte those commands returned, as the tool returned it.
+    ///
+    /// **A measurement, where the saving is an assumption.** Command output
+    /// enters the context once as fresh input and is read again as a cache
+    /// hit on every later turn, so this is the one input class a session can
+    /// be shown to have paid for by the byte. Tokens are estimated at four
+    /// bytes each — see [`crate::agent_hooks::CommandOutput`] — and the
+    /// count only covers commands run while ket was listening, both of
+    /// which make it a floor.
+    #[serde(default)]
+    pub command_output_bytes: u64,
+    /// Every byte of that output the model actually read: the same as
+    /// [`Record::command_output_bytes`] unless the session's level filtered
+    /// it first, in which case the difference is what the filter saved.
+    #[serde(default)]
+    pub command_shown_bytes: u64,
+    /// [`Record::command_output_bytes`] by program — `cargo test`, `git
+    /// diff` — so the card can name the noisiest. Capped at
+    /// [`PROGRAMS_KEPT`] programs, the rest under `other`.
+    #[serde(default)]
+    pub command_output_by_program: BTreeMap<String, u64>,
     /// Prompts the reader sent, counted from `UserPromptSubmit` hooks.
     #[serde(default)]
     pub turns: u32,
@@ -830,6 +874,41 @@ pub struct Record {
 }
 
 impl Record {
+    /// Estimated tokens of shell-command output this session read — see
+    /// [`Record::command_output_bytes`].
+    pub fn command_output_tokens(&self) -> u64 {
+        self.command_output_bytes / BYTES_PER_TOKEN
+    }
+
+    /// Estimated tokens a level's output filter kept from the model, which
+    /// is nothing unless the session's level filtered.
+    pub fn filter_saved_tokens(&self) -> u64 {
+        self.command_output_bytes
+            .saturating_sub(self.command_shown_bytes)
+            / BYTES_PER_TOKEN
+    }
+
+    /// The program whose output weighed the most, and its estimated tokens.
+    pub fn noisiest_program(&self) -> Option<(&str, u64)> {
+        self.command_output_by_program
+            .iter()
+            .filter(|(program, _)| program.as_str() != "other")
+            .max_by_key(|(_, bytes)| **bytes)
+            .map(|(program, bytes)| (program.as_str(), bytes / BYTES_PER_TOKEN))
+    }
+
+    /// Command output as a share of the session's fresh input.
+    ///
+    /// Fresh input rather than the whole context: a tool result is paid for
+    /// as fresh input once and as a cache read on every turn after, so a
+    /// share of input plus cache reads would shrink with every turn while
+    /// the cost it describes did not. `None` with no input to divide by, and
+    /// `None` past one: the two counts are floors from two sources, and a
+    /// share over the whole is evidence they disagree, not a percentage.
+    pub fn command_output_share(&self) -> Option<f64> {
+        share(self.command_output_tokens(), self.input_tokens)
+    }
+
     /// What this session spent while ket was counting its prompts.
     ///
     /// The only cost figure that can be divided by [`Record::turns`] — see
@@ -1139,6 +1218,40 @@ impl History {
         self.dirty = true;
     }
 
+    /// Counts one finished shell command and what it returned — see
+    /// [`crate::agent_hooks::CommandOutput`].
+    pub fn note_command_output(
+        &mut self,
+        session: &str,
+        worktree: &WorktreeId,
+        level: u8,
+        output: &crate::agent_hooks::CommandOutput,
+        now_ms: u64,
+    ) {
+        let record = self.entry(session, worktree, level, now_ms);
+        record.command_calls = record.command_calls.saturating_add(1);
+        if output.failed {
+            record.command_failures = record.command_failures.saturating_add(1);
+        }
+        record.command_output_bytes = record.command_output_bytes.saturating_add(output.raw_bytes);
+        record.command_shown_bytes = record
+            .command_shown_bytes
+            .saturating_add(output.shown_bytes);
+        // A program the map has not seen takes a slot while there is one;
+        // past the cap it is folded under `other`, so the file cannot grow
+        // by one key per distinct command a long session runs.
+        let by_program = &mut record.command_output_by_program;
+        let key = if by_program.contains_key(&output.program) || by_program.len() < PROGRAMS_KEPT {
+            output.program.as_str()
+        } else {
+            "other"
+        };
+        let bytes = by_program.entry(key.to_owned()).or_default();
+        *bytes = bytes.saturating_add(output.raw_bytes);
+        record.last_seen_ms = now_ms;
+        self.dirty = true;
+    }
+
     /// The record for `session`, created if this is the first ket has heard of
     /// it, with the oldest evicted once there are too many.
     fn entry(
@@ -1181,6 +1294,11 @@ impl History {
                     billing: None,
                     effort: None,
                     mcp_calls: BTreeMap::new(),
+                    command_calls: 0,
+                    command_failures: 0,
+                    command_output_bytes: 0,
+                    command_shown_bytes: 0,
+                    command_output_by_program: BTreeMap::new(),
                     output_tokens: 0,
                     last_output_tokens: 0,
                     input_tokens: 0,
@@ -1313,6 +1431,15 @@ impl History {
                 continue;
             }
             let entry = out.entry(record.worktree.clone()).or_default();
+            // Measured for every session before the level is looked at: what
+            // commands cost is a fact about the session, not about Economy.
+            entry.input_tokens = entry.input_tokens.saturating_add(record.input_tokens);
+            entry.command_output_tokens = entry
+                .command_output_tokens
+                .saturating_add(record.command_output_tokens());
+            entry.filter_saved_tokens = entry
+                .filter_saved_tokens
+                .saturating_add(record.filter_saved_tokens());
             if record.level == default {
                 entry.unreduced += 1;
                 continue;
@@ -1352,6 +1479,16 @@ pub struct WorktreeSavings {
     pub cost_micros: i64,
     /// Estimated saving of the measured sessions, in micros. Never negative.
     pub saved_micros: i64,
+    /// Fresh input tokens across every session in the period, reduced or
+    /// not: the denominator [`Self::command_output_tokens`] is a share of.
+    pub input_tokens: u64,
+    /// Estimated tokens of shell-command output across every session in the
+    /// period — see [`Record::command_output_tokens`]. Measured, so it counts
+    /// sessions at every level, not only the reduced ones.
+    pub command_output_tokens: u64,
+    /// Of those, the estimated tokens a level's output filter kept from the
+    /// model — see [`Record::filter_saved_tokens`].
+    pub filter_saved_tokens: u64,
 }
 
 impl WorktreeSavings {
@@ -1363,6 +1500,19 @@ impl WorktreeSavings {
         self.turns += other.turns;
         self.cost_micros = self.cost_micros.saturating_add(other.cost_micros);
         self.saved_micros = self.saved_micros.saturating_add(other.saved_micros);
+        self.input_tokens = self.input_tokens.saturating_add(other.input_tokens);
+        self.command_output_tokens = self
+            .command_output_tokens
+            .saturating_add(other.command_output_tokens);
+        self.filter_saved_tokens = self
+            .filter_saved_tokens
+            .saturating_add(other.filter_saved_tokens);
+    }
+
+    /// Command output as a share of fresh input over the period, when there
+    /// is input to divide by — see [`Record::command_output_share`].
+    pub fn command_output_share(&self) -> Option<f64> {
+        share(self.command_output_tokens, self.input_tokens)
     }
 
     /// The saving as a share of what the same sessions would have cost with

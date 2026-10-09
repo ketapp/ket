@@ -64,6 +64,10 @@ impl Shell {
             self.open_audio_tab(abs_path);
             return;
         }
+        if crate::image::is_image_path(&abs_path) {
+            self.open_image_tab(abs_path, cx);
+            return;
+        }
         let Some(worktree_id) = self.selected_id() else {
             return;
         };

@@ -9,6 +9,7 @@ import { pair, toBase64Url } from '@ket/remote';
 
 import { Ping } from '../components/Ping';
 import { Bar, Button, Card, Heading, Prose, Screen, field } from '../components/ui';
+import { dropConnection } from '../lib/connection';
 import { phoneKey, saveHost } from '../lib/store';
 import { font, size, t } from '../lib/theme';
 import { versionLabel } from '../lib/version';
@@ -79,6 +80,10 @@ export default function Pair() {
         hostPublic: toBase64Url(host.hostPublic),
         pairedAt: Date.now(),
       });
+      // Pairing again with a desktop this phone already knew: the open
+      // connection still holds the old pairing and would keep dialing it
+      // until the app restarted. The next screen builds one from this.
+      dropConnection(id);
       router.replace(`/host/${id}`);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));

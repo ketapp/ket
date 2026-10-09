@@ -23,6 +23,7 @@ use ket_core::agent_hooks::{
     HookEvent, HookInstaller, HookReport, Listener, Offered, OpenCodeHooks, PermissionQuestion,
     Prompt, StatusLine, Unresolved, mcp_server, script_path,
 };
+use ket_core::agent_status::StatusStore;
 use ket_core::event::AgentState;
 use serde_json::{Value, json};
 
@@ -157,6 +158,46 @@ fn pre_tool(tool: &str, input: Value) -> Value {
         "PreToolUse",
         json!({ "tool_name": tool, "tool_input": input }),
     )
+}
+
+#[test]
+fn codex_user_input_tool_waits_until_its_answer_returns() {
+    let hooks = Hooks::new();
+    let mut status = StatusStore::new(1);
+    let known = |pane: &str| pane == "pane-1";
+
+    for (name, expected) in [
+        ("UserPromptSubmit", AgentState::Thinking),
+        ("PreToolUse", AgentState::AwaitingPermission),
+        ("PostToolUse", AgentState::Thinking),
+    ] {
+        let payload = event(
+            name,
+            json!({
+                "tool_name": "request_user_input",
+                "tool_use_id": "question-1",
+                "tool_input": { "questions": [{ "question": "Which path?" }] },
+            }),
+        );
+        let report = hooks.post(&envelope("codex", payload)).expect("reported");
+        if name == "PreToolUse" {
+            assert_eq!(report.event, HookEvent::PreTool);
+        }
+        status.report(&report, known);
+        assert_eq!(status.get("pane-1").unwrap().state, expected, "{name}");
+    }
+
+    let ordinary = hooks
+        .post(&envelope(
+            "codex",
+            pre_tool("Bash", json!({ "command": "pwd" })),
+        ))
+        .expect("reported");
+    status.report(&ordinary, known);
+    assert_eq!(
+        status.get("pane-1").unwrap().state,
+        AgentState::ExecutingTool
+    );
 }
 
 #[test]
@@ -1708,7 +1749,19 @@ fn codex_hooks_install_without_matchers_and_leave_others_alone() {
         lived_in()["hooks"]["PreToolUse"][0]
     );
     assert_eq!(commands(&document, "Stop")[0], "say done");
+    assert!(commands(&document, "Stop")[1].contains("ket-agent-hook.sh codex 2>/dev/null"));
     assert!(document["hooks"].get("FileChanged").is_none());
+
+    // Older ket entries relied on KET_AGENT_NAME, which a plain shell sets
+    // to Claude even when the person starts Codex in it. Repair them.
+    let old = document
+        .to_string()
+        .replace(" codex 2>/dev/null", " 2>/dev/null");
+    std::fs::write(&file, old).unwrap();
+    assert!(!hooks.is_installed().unwrap());
+    hooks.install(&script()).unwrap();
+    assert!(hooks.is_installed().unwrap());
+    assert_eq!(commands(&read_json(&file), "Stop")[0], "say done");
 
     hooks.remove().unwrap();
     let removed = read_json(&file);

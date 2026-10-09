@@ -29,6 +29,7 @@ jest.mock('expo-router', () => {
       canGoBack: () => mockRouter.canGoBack(),
     },
     useFocusEffect: (callback: () => void) => mockUseEffect(callback, [callback]),
+    useIsFocused: () => true,
     useLocalSearchParams: () => mockParams,
   };
 });
@@ -53,10 +54,11 @@ jest.mock('./lib/store', () => ({
   getDesktop: jest.fn(async () => 'host'),
   getCollapsed: jest.fn(async () => []),
   getFit: jest.fn(async () => false),
-  getRecent: jest.fn(async () => ({ host: 'host', terminal: '7' })),
+  getLastWork: jest.fn(async () => null),
   saveCollapsed: (host: string, projects: string[]) => mockSaveCollapsed(host, projects),
   saveDesktop: (id: string) => mockSaveDesktop(id),
   saveFit: (on: boolean) => mockSaveFit(on),
+  saveLastWork: jest.fn(async () => {}),
 }));
 jest.mock('./lib/lock', () => ({
   LOCK_AFTER: [
@@ -215,17 +217,19 @@ describe('work screens', () => {
     mockParams = { host: 'host' };
     mockHost = connection([project([])]);
     const view = await render(<NewTask />);
-    await fireEvent.changeText(view.getByPlaceholderText('Fix the login redirect, then run the tests'), '  fix it  ');
-    await fireEvent.press(view.getByText('Start'));
-    await waitFor(() => expect(mockHost?.startWork).toHaveBeenCalledWith('project', 'fix it'));
-    expect(mockRouter.back).toHaveBeenCalled();
+    await fireEvent.changeText(view.getByPlaceholderText('What should the agent do?'), '  fix it  ');
+    await fireEvent.press(view.getByText('Start task'));
+    // An empty agent is the project's own.
+    await waitFor(() => expect(mockHost?.startWork).toHaveBeenCalledWith('project', 'fix it', ''));
+    // The sheet slides away before it leaves the stack.
+    await waitFor(() => expect(mockRouter.back).toHaveBeenCalled());
     await view.unmount();
   });
 
   test('shows an answerable worktree prompt and sends answers', async () => {
     mockParams = { host: 'host', worktree: 'waiting' };
     const waiting = tree('waiting', 4, {
-      question: { id: 2n, terminalId: 7n, tool: 'Bash', subject: 'npm test', answerable: true, always: true },
+      question: { id: 2n, terminalId: 7n, tool: 'Bash', subject: 'npm test', answerable: true, always: true, asks: [], plan: false },
     });
     mockHost = connection([project([waiting])]);
     const view = await render(<Worktree />);

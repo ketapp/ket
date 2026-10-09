@@ -253,6 +253,9 @@ pub(crate) enum Icon {
     TextCursor,
     /// Terminal: a prompt and its block cursor.
     Prompt,
+    /// A project launching an agent with its own command: a prompt chevron
+    /// and the line a command is typed on. See `crate::agent_override`.
+    Launch,
     /// Merge: a worktree elbowing back into its trunk, drawn like the
     /// sidebar tree.
     MergeInto,
@@ -374,6 +377,7 @@ impl Icon {
             Icon::Swatch => "icons/swatch.svg",
             Icon::TextCursor => "icons/text-cursor.svg",
             Icon::Prompt => "icons/prompt.svg",
+            Icon::Launch => "icons/launch.svg",
             Icon::MergeInto => "icons/merge-into.svg",
             Icon::Command => "icons/command.svg",
             Icon::Camera => "icons/camera.svg",
@@ -429,7 +433,7 @@ pub(crate) fn sized_icon(which: Icon, size: Pixels, colour: Rgba) -> Svg {
 pub(crate) struct Assets;
 
 /// The bytes for every path [`Icon::asset`] can return.
-const FILES: [(&str, &[u8]); 92] = [
+const FILES: [(&str, &[u8]); 93] = [
     (
         "icons/chevron-down.svg",
         include_bytes!("../../assets/icons/chevron-down.svg"),
@@ -727,6 +731,10 @@ const FILES: [(&str, &[u8]); 92] = [
         include_bytes!("../../assets/icons/prompt.svg"),
     ),
     (
+        "icons/launch.svg",
+        include_bytes!("../../assets/icons/launch.svg"),
+    ),
+    (
         "icons/merge-into.svg",
         include_bytes!("../../assets/icons/merge-into.svg"),
     ),
@@ -934,6 +942,7 @@ mod tests {
             Icon::Swatch,
             Icon::TextCursor,
             Icon::Prompt,
+            Icon::Launch,
             Icon::MergeInto,
             Icon::Command,
             Icon::Camera,

@@ -64,6 +64,12 @@ pub(crate) fn key_hint(
 /// palette runs from pale to saturated, and one fixed foreground is
 /// unreadable on half of it. `contrast_ratio` already exists in core for the
 /// theme check, so the badge asks it the same question.
+/// A badge's side.
+///
+/// Named because the sidebar's worktree rows size their mark column to it:
+/// the badge heads the column, and the marks under it share its centre.
+pub(crate) const BADGE: Pixels = px(20.0);
+
 pub(crate) fn badge(colour: Color, label: impl Into<SharedString>, t: &Theme) -> Div {
     let on_badge = if contrast_ratio(t.surface, colour) >= contrast_ratio(t.text.primary, colour) {
         t.surface
@@ -76,7 +82,7 @@ pub(crate) fn badge(colour: Color, label: impl Into<SharedString>, t: &Theme) ->
         .flex_none()
         .items_center()
         .justify_center()
-        .size(px(20.0))
+        .size(BADGE)
         .rounded(RADIUS_SM)
         .bg(paint(colour))
         .text_size(px(11.0))

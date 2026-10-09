@@ -203,7 +203,7 @@ impl Shell {
         // comes back from the page first, so the title gets what is typed.
         let page = quote.is_none().then(|| self.active_browser_tab()).flatten();
         if let Some(id) = page {
-            self.focus_browser_parent(id, cx);
+            self.focus_browser_parent(id);
             self.quote_browser_selection(id, cx, |shell, text, address, _| {
                 if let Some(capture) = shell.quick_capture.as_mut()
                     && capture.asking_page

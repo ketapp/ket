@@ -46,7 +46,7 @@ const DIMMED: f32 = 0.55;
 ///
 /// Two characters, because three stops fitting an 18px well at a size anyone
 /// can read. Anything not listed falls through to [`neutral`].
-const KNOWN: [(&str, &str, u32); 14] = [
+const KNOWN: [(&str, &str, u32); 19] = [
     ("rs", "rs", 0xe09a56),
     ("toml", "tm", 0xa99cf7),
     ("md", "md", 0x7fb0e8),
@@ -61,6 +61,11 @@ const KNOWN: [(&str, &str, u32); 14] = [
     ("zsh", "sh", 0x9aa4ad),
     ("html", "ht", 0xe09a56),
     ("css", "cs", 0x7fb0e8),
+    ("png", "im", 0xd98cc4),
+    ("jpg", "im", 0xd98cc4),
+    ("jpeg", "im", 0xd98cc4),
+    ("gif", "im", 0xd98cc4),
+    ("webp", "im", 0xd98cc4),
 ];
 
 /// What an unrecognised file is drawn in.
@@ -215,6 +220,8 @@ mod tests {
         // `.ts` and `.tsx` are the same language wearing two suffixes.
         assert_eq!(for_name("a.ts").0, for_name("a.tsx").0);
         assert_eq!(for_name("a.yml").0, for_name("a.yaml").0);
+        // Every raster image is one kind of thing to the strip.
+        assert_eq!(for_name("a.png").0, for_name("a.jpeg").0);
     }
 
     #[test]
@@ -223,6 +230,15 @@ mod tests {
         let (letters, colour) = for_name("notes.wxyz");
         assert_eq!(letters.as_ref(), "wx");
         assert_eq!(colour, rgb(NEUTRAL));
+    }
+
+    #[test]
+    fn an_image_is_marked_as_one_rather_than_by_its_suffix() {
+        for name in ["a.png", "b.jpg", "c.jpeg", "d.gif", "e.webp"] {
+            let (letters, colour) = for_name(name);
+            assert_eq!(letters.as_ref(), "im", "{name}");
+            assert_ne!(colour, rgb(NEUTRAL), "{name}");
+        }
     }
 
     #[test]

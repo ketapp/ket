@@ -2474,6 +2474,7 @@ impl Shell {
                     writable: view.writable,
                     blink: self.caret.visible,
                     mono: self.font_family.clone(),
+                    output_limit: view.config.agent.output_limit,
                     launches: self
                         .projects
                         .iter()
@@ -3352,6 +3353,42 @@ struct AgentCardState<'a> {
     mono: gpui::SharedString,
     /// Projects that launch this agent with their own command.
     launches: Vec<ProjectLaunch>,
+    /// The reader's own output cap, when one is set in config.
+    output_limit: Option<u32>,
+}
+
+/// The output cap in force for `agent`, in a line, or `None` when nothing
+/// sets one: the reader's config first, else every Economy level that names
+/// one — "Heavy 20k · Max 12k chars".
+fn output_cap_line(agent: &str, configured: Option<u32>) -> Option<String> {
+    let unit = if agent.eq_ignore_ascii_case("codex") {
+        "tokens"
+    } else {
+        "chars"
+    };
+    if let Some(limit) = configured {
+        return Some(format!(
+            "Output cap: {} {unit} (your config)",
+            crate::worktree_dialog::short_count(limit)
+        ));
+    }
+    let levels: Vec<String> = ket_core::worktree::token_reduction_levels()
+        .iter()
+        .filter_map(|level| {
+            let limit = level.policy_for(agent).output_limit?;
+            Some(format!(
+                "{} {}",
+                level.name(),
+                crate::worktree_dialog::short_count(limit)
+            ))
+        })
+        .collect();
+    (!levels.is_empty()).then(|| {
+        format!(
+            "Output cap from Economy: {} {unit}",
+            levels.join(" \u{b7} ")
+        )
+    })
 }
 
 fn agent_card(
@@ -3370,10 +3407,12 @@ fn agent_card(
         blink,
         mono,
         launches,
+        output_limit,
     } = state;
     let tint = crate::agent_override::hue(t);
     let overridden = !launches.is_empty();
     let name = entry.name.clone();
+    let cap = output_cap_line(&name, output_limit);
     let enable_name = name.clone();
     let disable_name = name.clone();
     let reset_name = name.clone();
@@ -3498,6 +3537,10 @@ fn agent_card(
                                 }))
                                 .child(div().truncate().child(summary)),
                         )
+                        // How much command output it takes inline, when
+                        // anything has an opinion: the reader's config, or
+                        // the Economy levels that set one.
+                        .children(cap.map(|line| caption(line, t).text_size(px(11.0))))
                         // Every project that runs it differently, by name,
                         // with the line it runs.
                         .children(launches.into_iter().map(|launch| {

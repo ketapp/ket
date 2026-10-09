@@ -322,4 +322,28 @@ mod tests {
         let id = id_for(Path::new("/"));
         assert!(!id.as_str().is_empty());
     }
+
+    #[test]
+    fn settings_written_before_github_read_as_not_following_issues() {
+        let settings: ProjectSettings =
+            serde_json::from_str(r#"{"backlog_in_repo": true}"#).unwrap();
+        assert!(!settings.github_issues);
+        assert_eq!(settings.github_account, None);
+    }
+
+    #[test]
+    fn the_github_account_is_left_out_until_one_is_picked() {
+        let text = serde_json::to_string(&ProjectSettings::default()).unwrap();
+        assert!(!text.contains("github_account"), "{text}");
+
+        let picked = ProjectSettings {
+            github_issues: true,
+            github_account: Some("sam".to_owned()),
+            ..ProjectSettings::default()
+        };
+        let text = serde_json::to_string(&picked).unwrap();
+        let back: ProjectSettings = serde_json::from_str(&text).unwrap();
+        assert!(back.github_issues);
+        assert_eq!(back.github_account.as_deref(), Some("sam"));
+    }
 }

@@ -1,15 +1,18 @@
 import { beforeEach, describe, expect, jest, test } from '@jest/globals';
 import { fireEvent, render, waitFor } from '@testing-library/react-native';
+import { useEffect as mockUseEffect } from 'react';
 import { Linking } from 'react-native';
 import Session from './app/session/[host]/[terminal]';
 
 const mockRouter = { push: jest.fn() };
 const mockConfirmIdentity = jest.fn(async (_reason: string) => true);
 let mockConn: any;
+let mockParams = { host: 'host', terminal: '7' };
 
 jest.mock('expo-router', () => ({
   router: { push: (path: string) => mockRouter.push(path) },
-  useLocalSearchParams: () => ({ host: 'host', terminal: '7' }),
+  useFocusEffect: (callback: () => void) => mockUseEffect(callback, [callback]),
+  useLocalSearchParams: () => mockParams,
 }));
 jest.mock('react-native-safe-area-context', () => ({ useSafeAreaInsets: () => ({ top: 0, bottom: 0 }) }));
 jest.mock('@ket/remote', () => ({
@@ -37,6 +40,7 @@ const connection = (worktree = tree(), fields: object = {}) => ({
   type: jest.fn(async () => true),
   releaseControl: jest.fn(),
   answer: jest.fn(async () => null),
+  onChange: jest.fn(() => () => {}),
   ...fields,
 });
 
@@ -44,6 +48,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   mockConfirmIdentity.mockResolvedValue(true);
   mockConn = connection();
+  mockParams = { host: 'host', terminal: '7' };
 });
 
 describe('Session', () => {
@@ -112,6 +117,9 @@ describe('Session', () => {
     expect(mockRouter.push).toHaveBeenCalledWith('/terminal/host/7');
     await old.unmount();
 
+    // The screen keeps each conversation it has read for the app's lifetime,
+    // and shows those turns over the reason; another desktop has none kept.
+    mockParams = { host: 'other', terminal: '7' };
     mockConn = connection(tree(), {
       conversation: jest.fn(async () => ({ supported: false, reason: 'not available', fresh: false, session: '', next: 0n, queued: [], turns: [] })),
     });
@@ -119,9 +127,10 @@ describe('Session', () => {
     await waitFor(() => expect(unsupported.getByText('Not available.')).toBeTruthy());
     await unsupported.unmount();
 
+    mockParams = { host: 'host', terminal: '7' };
     mockConn = connection();
     const view = await render(<Session />);
-    const input = view.getByPlaceholderText('Message Codex…');
+    const input = view.getByPlaceholderText('Message Codex');
     await fireEvent.changeText(input, ' hello ');
     await fireEvent.press(view.getByLabelText('Send'));
     await waitFor(() => expect(mockConn.type).toHaveBeenCalledWith(7n, 'hello'));

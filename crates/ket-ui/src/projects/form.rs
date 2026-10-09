@@ -1116,6 +1116,12 @@ impl Shell {
             .flex_col()
             .gap(px(6.0))
             .flex_1()
+            // Without this the column is as wide as its longest line wants
+            // to be, and a repository error from GitHub is a long line: the
+            // column, its dropdown and the error all ran past the dialog's
+            // edge. Bounded, the error wraps and the dropdown fills the
+            // column.
+            .min_w_0()
             .min_h(FIELD_H)
             .justify_center()
             .child(div().flex().child(switch))

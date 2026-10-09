@@ -48,11 +48,18 @@ use crate::worktree::{EconomyPolicy, TokenReduction};
 
 /// The document shape this ket understands.
 ///
-/// Bumped only when the shape changes in a way an older ket could misread — a
-/// new required field, or an existing one changing meaning. Adding an optional
-/// field does not need it, because an older ket ignores what it does not know
-/// and a newer one defaults it.
-pub const SCHEMA_VERSION: u32 = 2;
+/// Bumped whenever a pack can say something an older ket could not read —
+/// and that includes a new *optional* key, because every struct below is
+/// `deny_unknown_fields`: an older ket refuses a document with a key it does
+/// not know rather than ignoring it, and would blame the pack ("unknown
+/// field") where the fault is its own age. The gate in [`parse`] turns that
+/// into the message it should be, "upgrade ket". A newer ket reads every
+/// earlier schema, since a key a pack leaves out defaults.
+///
+/// - **1**: levels with shared wording and Claude-shaped settings.
+/// - **2**: per-provider blocks (`claude`, `codex`, `opencode`, `grok`).
+/// - **3**: `outputLimit` and `commandFilter` in a provider block.
+pub const SCHEMA_VERSION: u32 = 3;
 
 /// Provider-specific launch settings in a schema-v2 pack.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -88,6 +95,17 @@ pub struct PackPolicy {
     /// Reasoning-summary mode.
     #[serde(default)]
     pub reasoning_summary: Option<String>,
+    /// How much *successful* command output the agent takes inline, in the
+    /// provider's own unit: characters for Claude Code
+    /// (`bashOutputMaxChars`), tokens for Codex (`tool_output_token_limit`).
+    /// Schema 3. The reader's `agent.output_limit` still wins over it.
+    #[serde(default)]
+    pub output_limit: Option<u32>,
+    /// Whether a successful command's output is filtered before the model
+    /// reads it — see `crate::filter`. Schema 3; Claude Code only, accepted
+    /// and ignored in the other blocks.
+    #[serde(default)]
+    pub command_filter: Option<bool>,
 }
 
 impl From<&PackPolicy> for EconomyPolicy {
@@ -103,6 +121,8 @@ impl From<&PackPolicy> for EconomyPolicy {
             cross_session_inbound: policy.cross_session_inbound.clone(),
             verbosity: policy.verbosity.clone(),
             reasoning_summary: policy.reasoning_summary.clone(),
+            output_limit: policy.output_limit,
+            command_filter: policy.command_filter,
         }
     }
 }
@@ -354,17 +374,57 @@ pub fn parse(bytes: &[u8]) -> Result<Pack> {
             level.cross_session_inbound.as_deref(),
             level.autocompact.as_deref(),
         )?;
-        for policy in [&level.claude, &level.codex, &level.opencode, &level.grok] {
+        for (provider, policy) in [
+            ("claude", &level.claude),
+            ("codex", &level.codex),
+            ("opencode", &level.opencode),
+            ("grok", &level.grok),
+        ] {
             validate_policy(
                 policy.verbosity.as_deref(),
                 policy.reasoning_summary.as_deref(),
                 policy.cross_session_inbound.as_deref(),
                 policy.autocompact.as_deref(),
             )?;
+            validate_output_limit(provider, policy.output_limit)?;
         }
     }
 
     Ok(pack)
+}
+
+/// Refuses an output cap too small to be a saving.
+///
+/// A cap that clips every `cargo check` buys a re-run, and a re-run costs
+/// more than the lines it saved — so a pack that asks for one is a broken
+/// pack rather than a strict one. The floors are in each provider's own
+/// unit: Claude Code counts characters (its default is 30,000), Codex counts
+/// tokens (its default is 12,000). The other providers carry no cap, so any
+/// value there is a typo in the wrong block.
+fn validate_output_limit(provider: &str, limit: Option<u32>) -> Result<()> {
+    let Some(limit) = limit else {
+        return Ok(());
+    };
+    let (floor, unit) = match provider {
+        "claude" => (4_000, "characters"),
+        "codex" => (1_000, "tokens"),
+        other => {
+            return Err(KetError::Config(format!(
+                "pack {other}.outputLimit is not a setting {other} has"
+            )));
+        }
+    };
+    if limit < floor {
+        return Err(KetError::Config(format!(
+            "pack {provider}.outputLimit must be at least {floor} {unit}"
+        )));
+    }
+    if limit > 1_000_000 {
+        return Err(KetError::Config(format!(
+            "pack {provider}.outputLimit must be at most 1000000 {unit}"
+        )));
+    }
+    Ok(())
 }
 
 fn validate_policy(

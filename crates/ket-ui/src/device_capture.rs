@@ -262,7 +262,7 @@ fn take(source: ShotSource) -> Result<PathBuf, String> {
             Ok(path)
         }
         #[cfg(not(target_os = "macos"))]
-        ShotSource::Iphone { .. } => Err("the iPhone Simulator runs only on a Mac".to_owned()),
+        ShotSource::Iphone { .. } => Err("the iOS Simulator runs only on a Mac".to_owned()),
         ShotSource::Android(answer) => {
             let png = answer
                 .recv_timeout(ANDROID_SHOT)

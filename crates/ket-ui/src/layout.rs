@@ -101,6 +101,16 @@ enum SavedTab {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         pinned: bool,
     },
+    /// Written as `{"kind":"image","path":"…"}`. A build older than this
+    /// variant rejects a layout that holds one, the way it would any kind it
+    /// has never seen, and falls back to that project's defaults.
+    Image {
+        path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        pinned: bool,
+    },
     /// A terminal. The fields are for the ket host, which keeps terminals
     /// running across a restart: the terminal's key with it, the agent it ran
     /// a typed title and whether it is pinned. All optional and all skipped
@@ -379,6 +389,11 @@ impl SavedTab {
                 title,
                 pinned,
             }),
+            TabKind::Image(path) => Some(Self::Image {
+                path: path.to_string(),
+                title,
+                pinned,
+            }),
             TabKind::Terminal(terminal) => {
                 let key = shell.terminal_keys.get(terminal).cloned();
                 // A tab is saved the moment it opens, before its terminal has
@@ -425,6 +440,11 @@ impl SavedTab {
                 title,
                 pinned,
             } => Some(named(title, pinned, path, TabKind::Audio)),
+            Self::Image {
+                path,
+                title,
+                pinned,
+            } => Some(named(title, pinned, path, TabKind::Image)),
             // A terminal does not survive the process that ran it, so there
             // is nothing on the other side of a restart to restore. Keeping
             // the variant means an older layout still loads; returning `None`
@@ -647,6 +667,82 @@ mod tests {
         assert_eq!(restored.next_id, 3);
         assert_eq!(restored.leaf_count(), 3);
         assert_eq!(owed, vec![PaneId(1)], "the terminal's pane wants a shell");
+    }
+
+    #[test]
+    fn an_image_tab_round_trips_and_writes_only_its_kind_and_path() {
+        let saved = SavedTab::Image {
+            path: "/repo/shot.png".to_owned(),
+            title: None,
+            pinned: false,
+        };
+        let json = serde_json::to_string(&saved).unwrap();
+        assert_eq!(json, r#"{"kind":"image","path":"/repo/shot.png"}"#);
+        let restored: SavedTab = serde_json::from_str(&json).unwrap();
+        let tab = restored.restore().unwrap();
+        assert!(matches!(&tab.kind, TabKind::Image(path) if path.as_ref() == "/repo/shot.png"));
+        assert_eq!(tab.title.as_ref(), "shot.png");
+        assert!(!tab.renamed);
+        assert!(!tab.pinned);
+    }
+
+    #[test]
+    fn a_renamed_pinned_image_tab_keeps_its_name_and_its_pin() {
+        let saved = SavedTab::Image {
+            path: "/repo/shot.png".to_owned(),
+            title: Some("cover".to_owned()),
+            pinned: true,
+        };
+        let json = serde_json::to_string(&saved).unwrap();
+        assert_eq!(
+            json,
+            r#"{"kind":"image","path":"/repo/shot.png","title":"cover","pinned":true}"#
+        );
+        let tab = serde_json::from_str::<SavedTab>(&json)
+            .unwrap()
+            .restore()
+            .unwrap();
+        assert_eq!(tab.title.as_ref(), "cover");
+        assert!(tab.renamed);
+        assert!(tab.pinned);
+    }
+
+    #[test]
+    fn an_image_tab_comes_back_after_a_restart_where_a_terminal_does_not() {
+        let saved = SavedSpace {
+            root: SavedPane::Leaf {
+                id: 0,
+                tabs: vec![
+                    SavedTab::Terminal {
+                        key: None,
+                        agent: None,
+                        title: None,
+                        pinned: false,
+                    },
+                    SavedTab::Image {
+                        path: "/repo/shot.png".to_owned(),
+                        title: None,
+                        pinned: false,
+                    },
+                ],
+                active: 1,
+            },
+            focused: 0,
+            next_id: 1,
+        };
+        let (space, _) = saved.restore().unwrap();
+        let tabs = space.all_tabs();
+        assert_eq!(tabs.len(), 1, "the terminal is dropped, the image is kept");
+        assert!(matches!(&tabs[0].kind, TabKind::Image(path) if path.as_ref() == "/repo/shot.png"));
+    }
+
+    #[test]
+    fn a_tab_kind_this_build_has_never_seen_is_rejected_rather_than_guessed() {
+        // What an older build does with an `image` tab: the whole layout is
+        // refused and that project falls back to defaults. Pinned here so a
+        // change to that behaviour is a decision rather than an accident.
+        let json = r#"{"kind":"hologram","path":"/repo/shot.hlg"}"#;
+        assert!(serde_json::from_str::<SavedTab>(json).is_err());
     }
 
     #[test]

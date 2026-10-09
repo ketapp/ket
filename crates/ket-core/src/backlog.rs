@@ -1469,4 +1469,225 @@ mod tests {
         let scratch = Scratch::new("repo-roots-missing");
         assert!(repo_roots(&scratch.path("state.json")).unwrap().is_empty());
     }
+
+    // Following GitHub issues. `sync` is what `sync_issues` does once it has
+    // the file, so these reach it directly on a backlog in memory.
+
+    fn issue(number: u64, title: &str) -> Issue {
+        Issue {
+            number,
+            title: title.to_owned(),
+            body: format!("body of {number}"),
+            url: format!("https://github.com/o/r/issues/{number}"),
+        }
+    }
+
+    fn open_issues(issues: Vec<Issue>) -> OpenIssues {
+        OpenIssues {
+            issues,
+            complete: true,
+        }
+    }
+
+    /// A waiting note linked to issue `number`, last changed at `updated_ms`.
+    fn linked(id: &str, number: u64, updated_ms: u64) -> Note {
+        Note {
+            issue: Some(IssueLink {
+                number,
+                url: format!("https://github.com/o/r/issues/{number}"),
+            }),
+            ..note(id, &format!("note for {number}"), updated_ms)
+        }
+    }
+
+    fn open_titles(backlog: &Backlog) -> Vec<&str> {
+        backlog
+            .sorted_open()
+            .into_iter()
+            .map(|note| note.title.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn open_issues_arrive_as_notes_with_the_newest_on_top() {
+        let mut backlog = Backlog::default();
+        // `gh` lists them newest first.
+        let open = open_issues(vec![
+            issue(3, "third"),
+            issue(2, "second"),
+            issue(1, "first"),
+        ]);
+
+        let synced = backlog.sync(&open, now_ms());
+
+        assert_eq!(
+            synced,
+            Synced {
+                added: 3,
+                finished: 0
+            }
+        );
+        assert_eq!(open_titles(&backlog), ["third", "second", "first"]);
+        let three = backlog
+            .notes
+            .iter()
+            .find(|note| note.title == "third")
+            .unwrap();
+        assert_eq!(three.body, "body of 3");
+        assert_eq!(three.issue, Some(issue(3, "third").link()));
+        let mut ids: Vec<&str> = backlog.notes.iter().map(|note| note.id.as_str()).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), 3, "every new note has its own id");
+    }
+
+    #[test]
+    fn a_second_read_of_the_same_issues_changes_nothing() {
+        let mut backlog = Backlog::default();
+        let open = open_issues(vec![issue(2, "second"), issue(1, "first")]);
+        backlog.sync(&open, now_ms());
+        let before = backlog.clone();
+
+        assert_eq!(backlog.sync(&open, now_ms()), Synced::default());
+        assert_eq!(backlog, before);
+    }
+
+    #[test]
+    fn an_issue_whose_note_is_done_is_not_added_again() {
+        // Marked done here, and its issue not closed yet — or not closable.
+        let mut done = linked("a1", 5, 10);
+        done.done = Some(Done::by_hand());
+        let mut backlog = Backlog { notes: vec![done] };
+
+        let synced = backlog.sync(&open_issues(vec![issue(5, "five")]), 100);
+
+        assert_eq!(synced, Synced::default());
+        assert_eq!(backlog.notes.len(), 1);
+    }
+
+    #[test]
+    fn a_waiting_note_whose_issue_closed_is_done() {
+        let mut backlog = Backlog {
+            notes: vec![
+                linked("a1", 1, 10),
+                linked("b2", 2, 10),
+                note("c3", "mine", 10),
+            ],
+        };
+
+        let synced = backlog.sync(&open_issues(vec![issue(2, "two")]), 100);
+
+        assert_eq!(
+            synced,
+            Synced {
+                added: 0,
+                finished: 1
+            }
+        );
+        let done = |id: &str| {
+            backlog
+                .notes
+                .iter()
+                .find(|n| n.id == id)
+                .unwrap()
+                .done
+                .clone()
+        };
+        let one = done("a1").expect("issue 1 closed");
+        assert_eq!((one.worktree, one.branch), (None, None), "done by hand");
+        assert!(done("b2").is_none(), "issue 2 is still open");
+        assert!(done("c3").is_none(), "a note with no issue is left alone");
+    }
+
+    #[test]
+    fn a_list_cut_short_finishes_nothing() {
+        let mut backlog = Backlog {
+            notes: vec![linked("a1", 1, 10)],
+        };
+        let open = OpenIssues {
+            issues: vec![issue(2, "two")],
+            complete: false,
+        };
+
+        let synced = backlog.sync(&open, 100);
+
+        // The issue it had is still added; only the closing is held back.
+        assert_eq!(
+            synced,
+            Synced {
+                added: 1,
+                finished: 0
+            }
+        );
+        assert!(backlog.notes.iter().all(|note| note.done.is_none()));
+    }
+
+    #[test]
+    fn a_note_linked_after_the_read_is_left_open() {
+        // Made into an issue after the list was read: missing from it is
+        // not closed, only not seen yet.
+        let mut backlog = Backlog {
+            notes: vec![linked("a1", 9, 200)],
+        };
+
+        let synced = backlog.sync(&open_issues(Vec::new()), 100);
+
+        assert_eq!(synced, Synced::default());
+        assert!(backlog.notes[0].done.is_none());
+    }
+
+    #[test]
+    fn a_note_already_done_is_not_counted_again() {
+        let mut done = linked("a1", 1, 10);
+        done.done = Some(Done {
+            at_ms: 50,
+            worktree: None,
+            branch: Some("1-fix".to_owned()),
+        });
+        let mut backlog = Backlog {
+            notes: vec![done.clone()],
+        };
+
+        assert_eq!(
+            backlog.sync(&open_issues(Vec::new()), 100),
+            Synced::default()
+        );
+        assert_eq!(backlog.notes[0].done, done.done, "where it went is kept");
+    }
+
+    #[test]
+    fn a_brief_ends_with_the_issue_it_is() {
+        let note = Note {
+            body: "Steps to reproduce".to_owned(),
+            ..linked("a1", 142, 10)
+        };
+        assert_eq!(
+            note.brief().as_deref(),
+            Some(
+                "note for 142\n\nSteps to reproduce\n\n\
+                 GitHub issue #142: https://github.com/o/r/issues/142"
+            )
+        );
+    }
+
+    #[test]
+    fn an_issue_alone_is_not_something_to_start() {
+        let note = Note {
+            title: "  ".to_owned(),
+            ..linked("a1", 142, 10)
+        };
+        assert_eq!(note.brief(), None);
+    }
+
+    #[test]
+    fn a_note_with_no_issue_is_written_without_one_and_reads_back_the_same() {
+        let plain = note("a1", "plain", 1);
+        let text = serde_json::to_string(&plain).unwrap();
+        assert!(!text.contains("issue"), "{text}");
+        assert_eq!(serde_json::from_str::<Note>(&text).unwrap(), plain);
+
+        let linked = linked("b2", 7, 1);
+        let text = serde_json::to_string(&linked).unwrap();
+        assert_eq!(serde_json::from_str::<Note>(&text).unwrap(), linked);
+    }
 }

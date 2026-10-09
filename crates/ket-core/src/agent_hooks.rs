@@ -265,6 +265,32 @@ impl HookEvent {
     }
 }
 
+/// What one shell command's output weighed, as the agent's hook reported it.
+///
+/// The `PostToolUse` payload carries the tool's whole response, so the cost
+/// of a command's output in the context is a thing ket can count rather than
+/// assume: every byte here entered the conversation as fresh input once, and
+/// is re-read as a cache hit on every turn after. Bytes rather than tokens,
+/// because no tokenizer is shipped; `bytes / 4` is the usual estimate and a
+/// floor for code and logs, which tokenize closer to three characters each.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandOutput {
+    /// The program the command ran, with its subcommand where one names the
+    /// job — `cargo test`, `git status` — and nothing more: arguments can hold
+    /// paths and secrets, and a count keyed by them would be a count of one.
+    pub program: String,
+    /// What the tool returned, in bytes.
+    pub raw_bytes: u64,
+    /// What reached the model, in bytes: the same as [`Self::raw_bytes`]
+    /// unless the session's level filtered the output before the model read
+    /// it, in which case the hook says how much it let through.
+    pub shown_bytes: u64,
+    /// Whether the command failed — a `PostToolUseFailure` rather than a
+    /// `PostToolUse`.
+    pub failed: bool,
+}
+
 /// One report from an agent's hook.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -319,6 +345,11 @@ pub struct HookReport {
     /// this field exists to fix. Read off the command itself, whether or not
     /// there is a description to show beside it.
     pub mutating_git: bool,
+    /// What a finished shell command handed back, measured — see
+    /// [`CommandOutput`]. Only on a `PostTool` or `PostToolFailure` for the
+    /// shell tool; `None` on every other event and tool.
+    #[serde(default)]
+    pub command: Option<Box<CommandOutput>>,
     /// When ket received it.
     pub at_ms: u64,
     /// The subagent that sent it — the payload's `agent_id`, which the lead's
@@ -893,9 +924,23 @@ impl HookInstaller for CodexHooks {
         let ours: std::collections::BTreeSet<&str> = hooks
             .iter()
             .filter(|(_, entries)| {
-                entries
-                    .as_array()
-                    .is_some_and(|list| list.iter().any(is_kets))
+                entries.as_array().is_some_and(|list| {
+                    list.iter().any(|entry| {
+                        is_kets(entry)
+                            && entry
+                                .get("hooks")
+                                .and_then(|hooks| hooks.as_array())
+                                .is_some_and(|hooks| {
+                                    hooks.iter().any(|hook| {
+                                        hook.get("command")
+                                            .and_then(|command| command.as_str())
+                                            .is_some_and(|command| {
+                                                command.contains(" codex 2>/dev/null")
+                                            })
+                                    })
+                                })
+                    })
+                })
             })
             .map(|(event, _)| event.as_str())
             .collect();
@@ -928,7 +973,7 @@ impl HookInstaller for CodexHooks {
             entries.push(serde_json::json!({
                 "hooks": [{
                     "type": "command",
-                    "command": format!("/bin/sh {} 2>/dev/null || printf '{{}}\\n'", script.display()),
+                    "command": format!("/bin/sh {} codex 2>/dev/null || printf '{{}}\\n'", script.display()),
                 }]
             }));
         }
@@ -1232,13 +1277,17 @@ export default {
           tool_input: pick(output && output.args),
         });
       },
-      "tool.execute.after": async (input) => {
+      "tool.execute.after": async (input, output) => {
         if (!own(input.sessionID)) return;
+        // The output's size, never the output: how much a command cost the
+        // context is worth a number, and the body would be the post.
+        const text = output && output.output;
         report("PostToolUse", {
           session_id: input.sessionID,
           tool_use_id: input.callID,
           tool_name: TOOLS[input.tool] || input.tool,
           tool_input: pick(input.args),
+          tool_response_bytes: typeof text === "string" ? text.length : undefined,
         });
       },
     };
@@ -1881,6 +1930,14 @@ pub fn install_script() -> Result<PathBuf> {
 /// which level means what, so the table in [`crate::worktree`] stays the only
 /// copy. That field is the one place a `SessionStart` hook can talk back;
 /// every other event still gets the same inert `{}`.
+///
+/// On `PostToolUse` for the shell tool it does one more, and only when the
+/// launch set [`crate::filter::ENV`]: it hands the payload to that binary's
+/// `--filter-hook` and, if anything comes back, answers Claude Code with the
+/// replacement output instead of `{}` and tells ket how much the model will
+/// read (`shown`, in the envelope). Nothing back — no binary, a failed run,
+/// a command with no recipe — is the same `{}` as ever. See
+/// [`crate::filter`].
 const SCRIPT: &str = r#"#!/bin/sh
 # ket-agent-hook — installed by ket. Reports an agent's lifecycle back to it,
 # and on session start, tells Claude how tersely this worktree asked it to work.
@@ -1903,13 +1960,37 @@ escape() {
   printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
 }
 
+# A successful shell command's output, trimmed before the model reads it —
+# only when the launch named a ket binary to ask, and only for Claude, whose
+# PostToolUse hook can replace a tool's result. Decided before the report
+# below, so the report can say how much the model will read. Any failure
+# leaves both empty, and the output alone.
+shown=
+decision=
+if [ -n "${KET_COMMAND_FILTER:-}" ] && [ "$agent" = claude ] && [ -x "$KET_COMMAND_FILTER" ]; then
+  case "$payload" in
+    *'"hook_event_name":"PostToolUse"'*)
+      case "$payload" in
+        *'"tool_name":"Bash"'*)
+          out=$(printf '%s' "$payload" | "$KET_COMMAND_FILTER" --filter-hook 2>/dev/null) || out=
+          if [ -n "$out" ]; then
+            shown=$(printf '%s\n' "$out" | sed -n '1p')
+            decision=$(printf '%s\n' "$out" | sed '1d')
+          fi
+          ;;
+      esac
+      ;;
+  esac
+fi
+
 envelope() {
-  printf '{"agent":"%s","worktree":"%s","pane":"%s","token":"%s","version":"%s","payload":%s}' \
+  printf '{"agent":"%s","worktree":"%s","pane":"%s","token":"%s","version":"%s","shown":%s,"payload":%s}' \
     "$(escape "$agent")" \
     "$(escape "${KET_WORKTREE_ID:-}")" \
     "$(escape "${KET_PANE_KEY:-}")" \
     "$(escape "$1")" \
     "$(escape "${KET_HOOK_VERSION:-1}")" \
+    "${shown:-null}" \
     "$payload"
 }
 
@@ -2029,6 +2110,10 @@ case "$payload" in
     else
       printf '{}\n'
     fi
+    ;;
+  *'"hook_event_name":"PostToolUse"'*)
+    # The filter's answer, when there is one; the same `{}` when not.
+    if [ -n "$decision" ]; then printf '%s\n' "$decision"; else printf '{}\n'; fi
     ;;
   *)
     printf '{}\n'
@@ -2759,8 +2844,104 @@ fn decode_envelope(
         // just finished, and a row still claiming to rebase after the rebase
         // returned is the stale-state bug in the other direction.
         mutating_git: matches!(event, HookEvent::PreTool) && tool_is_mutating_git(payload),
+        command: command_output(event, payload, envelope).map(Box::new),
         at_ms: crate::now_ms(),
     })))
+}
+
+/// The measured output of a finished shell command, when the payload is one.
+///
+/// Only the foreground shell tool: a backgrounded command's result arrives
+/// through `BashOutput` in pieces, and counting the pieces and the whole
+/// would count it twice. `BashOutput` itself is left out for the same
+/// reason, so background runs are simply not measured.
+fn command_output(
+    event: HookEvent,
+    payload: &serde_json::Value,
+    envelope: &serde_json::Value,
+) -> Option<CommandOutput> {
+    if !matches!(event, HookEvent::PostTool | HookEvent::PostToolFailure) {
+        return None;
+    }
+    if payload.get("tool_name").and_then(|t| t.as_str()) != Some("Bash") {
+        return None;
+    }
+    let input = payload.get("tool_input");
+    if input
+        .and_then(|i| i.get("run_in_background"))
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+    {
+        return None;
+    }
+    let command = input
+        .and_then(|i| i.get("command"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    // Claude sends the response itself; an agent whose plugin sends only its
+    // size (OpenCode, which keeps bodies out of its posts) says so with a
+    // number instead.
+    let raw_bytes = match payload.get("tool_response") {
+        Some(response) => response_bytes(response),
+        None => payload
+            .get("tool_response_bytes")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0),
+    };
+    let shown_bytes = envelope
+        .get("shown")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(raw_bytes)
+        .min(raw_bytes);
+    Some(CommandOutput {
+        program: command_program(command),
+        raw_bytes,
+        shown_bytes,
+        failed: event == HookEvent::PostToolFailure,
+    })
+}
+
+/// How many bytes of text a tool response holds, whatever shape it came in.
+///
+/// Claude's shell tool answers with `{stdout, stderr, …}`; older payloads and
+/// other agents answer with a string. Summing every string leaf reads both,
+/// and reads a shape ket has not seen yet as the text it carries rather than
+/// as nothing.
+fn response_bytes(value: &serde_json::Value) -> u64 {
+    match value {
+        serde_json::Value::String(text) => text.len() as u64,
+        serde_json::Value::Array(items) => items.iter().map(response_bytes).sum(),
+        serde_json::Value::Object(fields) => fields.values().map(response_bytes).sum(),
+        _ => 0,
+    }
+}
+
+/// The program a command runs, with its subcommand for the tools whose
+/// subcommand is the job: `cargo test` and `cargo build` are different
+/// things to be noisy about, `cargo` is not.
+fn command_program(command: &str) -> String {
+    const WITH_SUBCOMMAND: [&str; 7] = ["cargo", "git", "npm", "pnpm", "yarn", "go", "gh"];
+    let program = program(command).to_ascii_lowercase();
+    if !WITH_SUBCOMMAND.contains(&program.as_str()) {
+        return program;
+    }
+    // The first plain word after the program: not a flag, and not a flag's
+    // value either — `git -C /x status` is a `git status`, and a path or a
+    // number is never a subcommand.
+    let subcommand = command
+        .split_whitespace()
+        .skip_while(|token| token.contains('=') || token.starts_with('('))
+        .skip(1)
+        .find(|token| {
+            !token.starts_with('-')
+                && token.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+                && token.chars().any(|c| c.is_ascii_alphabetic())
+        })
+        .map(str::to_ascii_lowercase);
+    match subcommand {
+        Some(sub) => format!("{program} {sub}"),
+        None => program,
+    }
 }
 
 /// A question or a plan's hook, to hold open — or, when it is not one ket can
@@ -3183,6 +3364,68 @@ mod tests {
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
 
+    // ---- measuring a command's output ----------------------------------------
+
+    #[test]
+    fn a_program_is_keyed_with_its_subcommand_only_where_that_names_the_job() {
+        assert_eq!(command_program("cargo test --lib foo"), "cargo test");
+        assert_eq!(command_program("git -C /x status --short"), "git status");
+        assert_eq!(
+            command_program("FOO=1 /usr/local/bin/pnpm install"),
+            "pnpm install"
+        );
+        assert_eq!(command_program("ls -la /some/secret/path"), "ls");
+        assert_eq!(command_program("git"), "git");
+    }
+
+    #[test]
+    fn response_bytes_counts_every_string_whatever_the_shape() {
+        assert_eq!(response_bytes(&serde_json::json!("abcd")), 4);
+        assert_eq!(
+            response_bytes(&serde_json::json!({"stdout": "abc", "stderr": "de", "exit_code": 0})),
+            5
+        );
+        assert_eq!(response_bytes(&serde_json::json!([{"text": "ab"}, "c"])), 3);
+    }
+
+    #[test]
+    fn a_finished_shell_command_is_measured_and_a_background_one_is_not() {
+        let payload = serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": {"command": "cargo check"},
+            "tool_response": {"stdout": "x".repeat(400), "stderr": "", "exit_code": 0},
+        });
+        let envelope = serde_json::json!({"shown": 100});
+        let output = command_output(HookEvent::PostTool, &payload, &envelope).expect("measured");
+        assert_eq!(output.program, "cargo check");
+        assert_eq!(output.raw_bytes, 400);
+        assert_eq!(output.shown_bytes, 100);
+        assert!(!output.failed);
+
+        let failed = command_output(HookEvent::PostToolFailure, &payload, &serde_json::json!({}))
+            .expect("measured");
+        assert!(failed.failed);
+        assert_eq!(failed.shown_bytes, 400);
+
+        let mut background = payload.clone();
+        background["tool_input"]["run_in_background"] = serde_json::json!(true);
+        assert!(command_output(HookEvent::PostTool, &background, &envelope).is_none());
+        assert!(command_output(HookEvent::PreTool, &payload, &envelope).is_none());
+    }
+
+    #[test]
+    fn a_plugin_that_sends_only_a_size_is_measured_by_it() {
+        let payload = serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": {"command": "ls"},
+            "tool_response_bytes": 1234,
+        });
+        let output = command_output(HookEvent::PostTool, &payload, &serde_json::json!({}))
+            .expect("measured");
+        assert_eq!(output.raw_bytes, 1234);
+        assert_eq!(output.shown_bytes, 1234);
+    }
+
     /// A home directory of the test's own, removed when it finishes.
     struct Home(PathBuf);
 
@@ -3267,6 +3510,123 @@ mod tests {
     }
 
     const PROMPT: &str = r#"{"hook_event_name":"UserPromptSubmit","session_id":"s-1"}"#;
+
+    /// A finished shell command, compact the way Claude Code sends it.
+    const COMMAND_DONE: &str = r#"{"hook_event_name":"PostToolUse","session_id":"s-1","tool_use_id":"toolu_01","tool_name":"Bash","tool_input":{"command":"cargo test"},"tool_response":{"stdout":"test a ... ok\n","stderr":"","interrupted":false}}"#;
+
+    /// A stand-in for `ket --filter-hook`: prints `answer` as the byte count
+    /// and the decision, or nothing. Executable, as the script requires.
+    fn fake_filter(home: &Home, answer: &str) -> String {
+        let path = home.0.join("fake-ket");
+        std::fs::write(&path, format!("#!/bin/sh\nprintf '%s' '{answer}'\n")).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        path.display().to_string()
+    }
+
+    const DECISION: &str = r#"{"hookSpecificOutput":{"hookEventName":"PostToolUse","updatedToolOutput":{"stdout":"1 passed"}}}"#;
+
+    #[test]
+    fn the_script_answers_with_the_filters_decision_and_reports_how_much_was_shown() {
+        let home = Home::new("filter-on");
+        let port = closed_port();
+        let filter = fake_filter(&home, &format!("8\n{DECISION}\n"));
+        let env = [
+            (PORT_ENV, port.as_str()),
+            (TOKEN_ENV, "window"),
+            (crate::filter::ENV, filter.as_str()),
+        ];
+        let printed = run(SCRIPT, &[], &home, &env, COMMAND_DONE);
+        assert_eq!(printed, format!("{DECISION}\n"));
+        let spooled = home.spool();
+        assert_eq!(spooled.len(), 1);
+        assert_eq!(spooled[0]["shown"], 8);
+    }
+
+    #[test]
+    fn without_a_filter_the_script_says_nothing_and_shown_is_null() {
+        let home = Home::new("filter-off");
+        let port = closed_port();
+        let env = [(PORT_ENV, port.as_str()), (TOKEN_ENV, "window")];
+        assert_eq!(run(SCRIPT, &[], &home, &env, COMMAND_DONE), "{}\n");
+        assert_eq!(home.spool()[0]["shown"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn a_filter_with_nothing_to_say_leaves_the_output_alone() {
+        let home = Home::new("filter-silent");
+        let port = closed_port();
+        let filter = fake_filter(&home, "");
+        let env = [
+            (PORT_ENV, port.as_str()),
+            (TOKEN_ENV, "window"),
+            (crate::filter::ENV, filter.as_str()),
+        ];
+        assert_eq!(run(SCRIPT, &[], &home, &env, COMMAND_DONE), "{}\n");
+        assert_eq!(home.spool()[0]["shown"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn the_filter_is_asked_only_for_claude_and_only_for_a_finished_shell_command() {
+        let home = Home::new("filter-scope");
+        let port = closed_port();
+        let filter = fake_filter(&home, &format!("8\n{DECISION}\n"));
+        let claude = [
+            (PORT_ENV, port.as_str()),
+            (TOKEN_ENV, "window"),
+            (crate::filter::ENV, filter.as_str()),
+        ];
+        // Another agent: the branch is Claude's hook contract.
+        let codex = [
+            (PORT_ENV, port.as_str()),
+            (TOKEN_ENV, "window"),
+            (crate::filter::ENV, filter.as_str()),
+            ("KET_AGENT_NAME", "codex"),
+        ];
+        assert_eq!(run(SCRIPT, &[], &home, &codex, COMMAND_DONE), "{}\n");
+        // Another tool, and another event, with the filter set.
+        let read = COMMAND_DONE.replace(r#""tool_name":"Bash""#, r#""tool_name":"Read""#);
+        assert_eq!(run(SCRIPT, &[], &home, &claude, &read), "{}\n");
+        let pre = COMMAND_DONE.replace("PostToolUse", "PreToolUse");
+        assert_eq!(run(SCRIPT, &[], &home, &claude, &pre), "{}\n");
+        // A binary that is not there.
+        let missing = [
+            (PORT_ENV, port.as_str()),
+            (TOKEN_ENV, "window"),
+            (crate::filter::ENV, "/nonexistent/ket"),
+        ];
+        assert_eq!(run(SCRIPT, &[], &home, &missing, COMMAND_DONE), "{}\n");
+    }
+
+    #[test]
+    fn an_envelope_carries_what_the_model_was_shown_into_the_report() {
+        let payload: serde_json::Value = serde_json::from_str(COMMAND_DONE).unwrap();
+        let envelope = serde_json::json!({
+            "agent": "claude", "worktree": "wt-1", "pane": "pane-1", "token": "t",
+            "shown": 8, "payload": payload,
+        });
+        let Some(Post::Report(report)) = decode_envelope(&envelope, false, &mut GrokTools::new())
+        else {
+            panic!("a report");
+        };
+        let command = report.command.expect("measured");
+        assert_eq!(command.program, "cargo test");
+        assert_eq!(command.raw_bytes, 14);
+        assert_eq!(command.shown_bytes, 8);
+        assert!(!command.failed);
+        // `null`, the script's word for "not filtered", means the whole
+        // thing was shown.
+        let mut plain = envelope.clone();
+        plain["shown"] = serde_json::Value::Null;
+        let Some(Post::Report(report)) = decode_envelope(&plain, false, &mut GrokTools::new())
+        else {
+            panic!("a report");
+        };
+        assert_eq!(report.command.unwrap().shown_bytes, 14);
+    }
 
     #[test]
     fn the_script_reports_to_the_port_it_was_launched_with() {
@@ -3370,6 +3730,27 @@ mod tests {
         let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode(&home.hooks().join("spool.jsonl")), 0o600);
         assert_eq!(mode(&home.hooks()), 0o700);
+    }
+
+    #[test]
+    fn codex_hook_identifies_itself_in_a_plain_terminal() {
+        let home = Home::new("codex-plain-terminal");
+        let listener = Listener::start("window".to_owned()).unwrap();
+        let port = listener.port().to_string();
+        run(
+            SCRIPT,
+            &["codex"],
+            &home,
+            &[
+                (PORT_ENV, &port),
+                (TOKEN_ENV, "window"),
+                (WORKTREE_ENV, "wt-1"),
+                (PANE_ENV, "pane-1"),
+                ("KET_AGENT_NAME", "claude"),
+            ],
+            PROMPT,
+        );
+        assert_eq!(reports(&listener, 1)[0].agent, "codex");
     }
 
     #[test]

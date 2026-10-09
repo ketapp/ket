@@ -1,16 +1,19 @@
 //! Ephemeral in-app browser tabs.
 //!
-//! macOS supplies the engine: Wry creates a `WKWebView`, while `gpui-wry`
-//! keeps the native child view aligned with the GPUI pane that owns it. Native
-//! child views always sit above GPUI's compositor, so this module explicitly
-//! hides them when a different tab or an overlay is visible.
+//! macOS supplies the engine: Wry creates a `WKWebView`, and
+//! [`crate::browser_view`] keeps it in a native child view aligned with the
+//! GPUI pane that owns it. Native child views always sit above GPUI's
+//! compositor, so this module explicitly hides them when a different tab or
+//! an overlay is visible.
 
 use gpui::{
-    AnyElement, Context, Entity, KeyDownEvent, Pixels, Point, SharedString, Window, div,
-    prelude::*, px,
+    AnyElement, ClipboardItem, Context, Entity, KeyDownEvent, Pixels, Point, SharedString, Window,
+    div, prelude::*, px,
 };
 
 use crate::Shell;
+#[cfg(target_os = "macos")]
+use crate::browser_view::NativeBrowser;
 use crate::input::{Style, TextInput, is_text, text_field};
 use crate::paint::paint;
 use crate::tabs::{PaneId, Tab, TabKind};
@@ -26,7 +29,7 @@ pub struct BrowserId(pub(crate) u64);
 pub(crate) struct BrowserHandle {
     address: Entity<TextInput>,
     #[cfg(target_os = "macos")]
-    view: Option<Entity<gpui_wry::WebView>>,
+    view: Option<std::rc::Rc<NativeBrowser>>,
     #[cfg(target_os = "macos")]
     shown: bool,
     /// The page the native view loads when it is created, for a tab opened
@@ -118,6 +121,8 @@ pub(crate) enum LinkAction {
     Ket,
     /// Whatever the system opens URLs with.
     System,
+    /// Copy the link's full URL to the clipboard.
+    Copy,
 }
 
 /// The menu a clicked terminal link opens, and what it was opened for.
@@ -134,11 +139,37 @@ const LINK_MENU_W: Pixels = px(240.0);
 /// How much of a link the menu's caption spells out before eliding the rest.
 const LINK_CAPTION_CHARS: usize = 36;
 
-/// Where a hidden page waits, in logical points from the window's corner:
-/// far enough up and left that no window is big enough to reach it — see
-/// `Shell::sync_browser_visibility`.
-#[cfg(target_os = "macos")]
-const PARKED: f64 = -100_000.0;
+impl LinkMenu {
+    fn new(uri: String, pane: PaneId, at: Point<Pixels>) -> Self {
+        let caption: String = if uri.chars().count() > LINK_CAPTION_CHARS {
+            let head: String = uri.chars().take(LINK_CAPTION_CHARS - 1).collect();
+            format!("{head}…")
+        } else {
+            uri.clone()
+        };
+        let entries = vec![
+            MenuEntry::Item(
+                MenuItem::new(LinkAction::Ket, "Open in ket Browser").icon(Icon::BrowserWindow),
+            ),
+            MenuEntry::Item(
+                MenuItem::new(LinkAction::System, "Open in Default Browser")
+                    .icon(Icon::ExternalLink),
+            ),
+            MenuEntry::Item(MenuItem::new(LinkAction::Copy, "Copy Link").icon(Icon::Copy)),
+        ];
+        Self {
+            menu: OpenMenu::new("terminal-link".into(), None, LINK_MENU_W, entries)
+                .with_header(caption)
+                .at(at),
+            uri,
+            pane,
+        }
+    }
+
+    fn clipboard_item(self) -> ClipboardItem {
+        ClipboardItem::new_string(self.uri)
+    }
+}
 
 impl Shell {
     /// Opens a fresh, private browser tab in the pane whose `+` menu was used.
@@ -174,29 +205,8 @@ impl Shell {
     /// Asks where a link clicked in a terminal should open, from a menu at
     /// the pointer.
     pub(crate) fn open_link_menu(&mut self, uri: String, pane: PaneId, at: Point<Pixels>) {
-        let caption: String = if uri.chars().count() > LINK_CAPTION_CHARS {
-            let head: String = uri.chars().take(LINK_CAPTION_CHARS - 1).collect();
-            format!("{head}…")
-        } else {
-            uri.clone()
-        };
-        let entries = vec![
-            MenuEntry::Item(
-                MenuItem::new(LinkAction::Ket, "Open in ket Browser").icon(Icon::BrowserWindow),
-            ),
-            MenuEntry::Item(
-                MenuItem::new(LinkAction::System, "Open in Default Browser")
-                    .icon(Icon::ExternalLink),
-            ),
-        ];
         self.menu = None;
-        self.link_menu = Some(LinkMenu {
-            menu: OpenMenu::new("terminal-link".into(), None, LINK_MENU_W, entries)
-                .with_header(caption)
-                .at(at),
-            uri,
-            pane,
-        });
+        self.link_menu = Some(LinkMenu::new(uri, pane, at));
     }
 
     fn run_link_action(&mut self, action: LinkAction, cx: &mut Context<Self>) {
@@ -209,6 +219,7 @@ impl Shell {
                 self.persist_layout();
             }
             LinkAction::System => cx.open_url(&open.uri),
+            LinkAction::Copy => cx.write_to_clipboard(open.clipboard_item()),
         }
         cx.notify();
     }
@@ -350,29 +361,13 @@ impl Shell {
                     continue;
                 }
                 if let Some(view) = browser.view.as_ref() {
-                    view.update(cx, |view, _| {
-                        if should_show {
-                            // Its frame comes back with this frame's layout:
-                            // gpui-wry sets it for a visible view every frame.
-                            view.show();
-                        } else {
-                            view.hide();
-                            // A hidden view still takes drops — AppKit finds
-                            // drag destinations by frame, hidden or not — so
-                            // a browser tab behind a terminal swallowed the
-                            // files dropped on it. Moved off the window it
-                            // has nothing to land on; at its own size, so
-                            // coming back is a move rather than a resize —
-                            // shrunk to nothing, WebKit redrew it from white
-                            // as a menu over it closed.
-                            let raw = view.raw();
-                            let parked = raw.bounds().map(|bounds| wry::Rect {
-                                position: wry::dpi::LogicalPosition::new(PARKED, PARKED).into(),
-                                size: bounds.size,
-                            });
-                            let _ = raw.set_bounds(parked.unwrap_or_default());
-                        }
-                    });
+                    if should_show {
+                        // Its frame comes back with this frame's layout —
+                        // see `NativeBrowser::place`.
+                        view.show();
+                    } else {
+                        view.hide();
+                    }
                 }
                 browser.shown = should_show;
             }
@@ -402,7 +397,7 @@ impl Shell {
             return;
         };
         let (tell, still) = tokio::sync::oneshot::channel();
-        crate::browser_snapshot::take(view.read(cx).raw(), move |tiff| {
+        crate::browser_snapshot::take(view.raw(), move |tiff| {
             let _ = tell.send(tiff);
         });
         let svg = cx.svg_renderer();
@@ -478,7 +473,7 @@ impl Shell {
             "enter" => self.navigate_browser(id, cx),
             "escape" => {
                 window.blur();
-                self.focus_browser_page(id, cx);
+                self.focus_browser_page(id);
             }
             // Let application shortcuts such as Cmd-W continue to the action
             // system after the field has declined them.
@@ -500,17 +495,17 @@ impl Shell {
 
         #[cfg(target_os = "macos")]
         if let Some(view) = browser.view.as_ref() {
-            if let Err(error) = view.update(cx, |view, _| view.raw().load_url(&url)) {
+            if let Err(error) = view.raw().load_url(&url) {
                 self.note = Some(format!("could not open {url}: {error}").into());
                 return;
             }
-            self.focus_browser_page(id, cx);
+            self.focus_browser_page(id);
         }
     }
 
     /// Back or forward in the page's own history. Through the page, since
     /// Wry offers no such call; at either end of the history it does nothing.
-    fn browser_history(&mut self, id: BrowserId, back: bool, cx: &mut Context<Self>) {
+    fn browser_history(&mut self, id: BrowserId, back: bool) {
         #[cfg(target_os = "macos")]
         if let Some(view) = self
             .browsers
@@ -522,11 +517,11 @@ impl Shell {
             } else {
                 "history.forward()"
             };
-            let _ = view.update(cx, |view, _| view.raw().evaluate_script(script));
+            let _ = view.raw().evaluate_script(script);
         }
 
         #[cfg(not(target_os = "macos"))]
-        let _ = (id, back, cx);
+        let _ = (id, back);
     }
 
     /// The page is at a new address: `Some` as a load reported it, `None`
@@ -544,11 +539,7 @@ impl Shell {
         }
         let url = match url {
             Some(url) => url,
-            None => match browser
-                .view
-                .as_ref()
-                .and_then(|view| view.read(cx).raw().url().ok())
-            {
+            None => match browser.view.as_ref().and_then(|view| view.raw().url().ok()) {
                 Some(url) => url,
                 None => return,
             },
@@ -562,33 +553,33 @@ impl Shell {
         cx.notify();
     }
 
-    fn reload_browser(&mut self, id: BrowserId, cx: &mut Context<Self>) {
+    fn reload_browser(&mut self, id: BrowserId) {
         #[cfg(target_os = "macos")]
         if let Some(view) = self
             .browsers
             .get(&id)
             .and_then(|browser| browser.view.as_ref())
-            && let Err(error) = view.update(cx, |view, _| view.raw().reload())
+            && let Err(error) = view.raw().reload()
         {
             self.note = Some(format!("could not reload the browser: {error}").into());
         }
 
         #[cfg(not(target_os = "macos"))]
-        let _ = (id, cx);
+        let _ = id;
     }
 
-    fn focus_browser_page(&self, id: BrowserId, cx: &gpui::App) {
+    fn focus_browser_page(&self, id: BrowserId) {
         #[cfg(target_os = "macos")]
         if let Some(view) = self
             .browsers
             .get(&id)
             .and_then(|browser| browser.view.as_ref())
         {
-            let _ = view.read(cx).raw().focus();
+            let _ = view.raw().focus();
         }
 
         #[cfg(not(target_os = "macos"))]
-        let _ = (id, cx);
+        let _ = id;
     }
 
     /// The browser tab in front, if the focused pane's active tab is one.
@@ -617,7 +608,7 @@ impl Shell {
             else {
                 return;
             };
-            let raw = view.read(cx).raw();
+            let raw = view.raw();
             let address = raw.url().unwrap_or_default();
             let (tell, told) = tokio::sync::oneshot::channel::<String>();
             // Wry's callback may be called more than once in principle; the
@@ -655,18 +646,20 @@ impl Shell {
         let _ = (id, cx, done);
     }
 
-    pub(crate) fn focus_browser_parent(&self, id: BrowserId, cx: &gpui::App) {
+    /// Takes the keyboard back from the page in browser `id`, for ket's own
+    /// chrome.
+    pub(crate) fn focus_browser_parent(&self, id: BrowserId) {
         #[cfg(target_os = "macos")]
         if let Some(view) = self
             .browsers
             .get(&id)
             .and_then(|browser| browser.view.as_ref())
         {
-            let _ = view.read(cx).raw().focus_parent();
+            view.release_keyboard();
         }
 
         #[cfg(not(target_os = "macos"))]
-        let _ = (id, cx);
+        let _ = id;
     }
 
     #[cfg(target_os = "macos")]
@@ -714,26 +707,29 @@ impl Shell {
                     .with_back_forward_navigation_gestures(true)
                     .build_as_child(&handle)
                     .map_err(|error| error.to_string())
+            })
+            .and_then(|raw| {
+                // Into a slot of its own under gpui's view — see
+                // `browser_view` for why not straight into it.
+                let root = crate::window_drag::root_view(window)
+                    .ok_or_else(|| "the window has no native view".to_owned())?;
+                let main = objc2_foundation::MainThreadMarker::new()
+                    .ok_or_else(|| "not on the main thread".to_owned())?;
+                Ok(std::rc::Rc::new(NativeBrowser::new(raw, root, main)))
             });
 
         match result {
-            Ok(raw) => {
-                // Wry may make a newly-created child first responder. Put the
-                // keyboard back before the address field asks for it below.
-                let _ = raw.focus_parent();
-                let view = cx.new(|cx| gpui_wry::WebView::new(raw, window, cx));
+            Ok(view) => {
                 let show = !self.browser_occluded()
                     && self
                         .active_browser_ids()
                         .into_iter()
                         .any(|active| active == id);
-                view.update(cx, |view, _| {
-                    if show {
-                        view.show();
-                    } else {
-                        view.hide();
-                    }
-                });
+                if show {
+                    view.show();
+                } else {
+                    view.hide();
+                }
                 // Ends when the page goes, which drops the handler's sender.
                 let watch = cx.spawn(async move |this: gpui::WeakEntity<Shell>, cx| {
                     while let Some(url) = loads.recv().await {
@@ -808,7 +804,7 @@ impl Shell {
             .border_color(paint(theme.border))
             .on_mouse_down(
                 gpui::MouseButton::Left,
-                cx.listener(move |this, _, _, cx| this.focus_browser_parent(id, cx)),
+                cx.listener(move |this, _, _, _| this.focus_browser_parent(id)),
             )
             .child(
                 icon_button(("browser-back", id.0), Icon::ArrowLeft)
@@ -816,7 +812,7 @@ impl Shell {
                     .small()
                     .render(&theme)
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.browser_history(id, true, cx);
+                        this.browser_history(id, true);
                         cx.notify();
                     })),
             )
@@ -826,7 +822,7 @@ impl Shell {
                     .small()
                     .render(&theme)
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.browser_history(id, false, cx);
+                        this.browser_history(id, false);
                         cx.notify();
                     })),
             )
@@ -836,7 +832,7 @@ impl Shell {
                     .small()
                     .render(&theme)
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.reload_browser(id, cx);
+                        this.reload_browser(id);
                         cx.notify();
                     })),
             )
@@ -865,14 +861,29 @@ impl Shell {
 
         #[cfg(target_os = "macos")]
         let body = match (view, error) {
-            // The view stays in the tree while it is hidden behind its still,
-            // so its frame keeps following the pane.
+            // The page stays in the tree while it is hidden behind its still,
+            // so its slot keeps following the pane.
             (Some(view), _) => div()
                 .relative()
                 .flex()
                 .flex_1()
                 .overflow_hidden()
-                .child(view)
+                .child({
+                    let clicked = view.clone();
+                    gpui::canvas(
+                        move |bounds, _, _| view.place(bounds),
+                        move |bounds, (), window, _| {
+                            // A click beside the page — on ket's own chrome —
+                            // takes the keyboard back from it.
+                            window.on_mouse_event(move |event: &gpui::MouseDownEvent, _, _, _| {
+                                if !bounds.contains(&event.position) {
+                                    clicked.release_keyboard();
+                                }
+                            });
+                        },
+                    )
+                    .size_full()
+                })
                 .children(still.map(|still| {
                     gpui::img(still)
                         .absolute()
@@ -950,4 +961,58 @@ fn browser_message(theme: &ket_core::theme::Theme, message: impl Into<SharedStri
         .text_color(paint(theme.text.dim))
         .child(message.into())
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{Keystroke, Modifiers, point};
+
+    fn key(name: &str) -> KeyDownEvent {
+        KeyDownEvent {
+            keystroke: Keystroke {
+                modifiers: Modifiers::default(),
+                key: name.to_owned(),
+                key_char: None,
+            },
+            is_held: false,
+        }
+    }
+
+    #[test]
+    fn copy_link_uses_full_uri_for_long_links() {
+        let url =
+            "https://example.com/a/long/path/to/a/page?query=keep-this-part#and-this-fragment";
+        let mut link = LinkMenu::new(url.to_owned(), PaneId(1), point(px(10.0), px(10.0)));
+
+        link.menu.key(&key("down"));
+        link.menu.key(&key("down"));
+        assert!(matches!(
+            link.menu.key(&key("enter")),
+            MenuKey::Run(LinkAction::Copy)
+        ));
+
+        assert_eq!(link.clipboard_item().text(), Some(url.to_owned()));
+    }
+
+    #[test]
+    fn copy_link_keeps_non_http_uris() {
+        let uri = "mailto:someone@example.com?subject=Hello%20World";
+        let mut link = LinkMenu::new(uri.to_owned(), PaneId(1), point(px(10.0), px(10.0)));
+        let typed = KeyDownEvent {
+            keystroke: Keystroke {
+                modifiers: Modifiers::default(),
+                key: "c".to_owned(),
+                key_char: Some("c".to_owned()),
+            },
+            is_held: false,
+        };
+
+        link.menu.key(&typed);
+        assert!(matches!(
+            link.menu.key(&key("enter")),
+            MenuKey::Run(LinkAction::Copy)
+        ));
+        assert_eq!(link.clipboard_item().text(), Some(uri.to_owned()));
+    }
 }

@@ -365,6 +365,7 @@ mod tests {
             tool_name: None,
             note: None,
             mutating_git: false,
+            command: None,
             at_ms,
             subagent: subagent.map(str::to_owned),
             subagent_type: None,

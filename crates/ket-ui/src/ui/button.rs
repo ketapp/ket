@@ -56,15 +56,11 @@ pub(crate) struct Button {
     variant: Variant,
     leading: Option<Icon>,
     trailing: Option<Icon>,
-    detail: Option<SharedString>,
     hint: Option<SharedString>,
     enabled: bool,
     small: bool,
     busy: Option<SharedString>,
 }
-
-/// The widest a button's [`Button::detail`] grows before it is cut short.
-const DETAIL_MAX_W: Pixels = px(180.0);
 
 /// How long the busy spinner takes to go round once.
 const SPIN: Duration = Duration::from_millis(900);
@@ -84,7 +80,6 @@ pub(crate) fn button(id: impl Into<ElementId>, label: impl Into<SharedString>) -
         variant: Variant::Secondary,
         leading: None,
         trailing: None,
-        detail: None,
         hint: None,
         enabled: true,
         small: false,
@@ -129,14 +124,6 @@ impl Button {
     /// a leading icon, since it follows the words instead of heading them.
     pub(crate) fn trailing(mut self, which: Icon) -> Self {
         self.trailing = Some(which);
-        self
-    }
-
-    /// What the action will act on, after the label in the chrome's mono —
-    /// the branch a Start will make. Quieter than the label and cut short
-    /// when long, so the verb always reads first.
-    pub(crate) fn detail(mut self, detail: impl Into<SharedString>) -> Self {
-        self.detail = Some(detail.into());
         self
     }
 
@@ -272,17 +259,6 @@ impl Button {
                             if small { px(12.0) } else { px(14.0) },
                             text,
                         )
-                    }))
-                    .children(self.detail.map(|detail| {
-                        div()
-                            .min_w_0()
-                            .max_w(DETAIL_MAX_W)
-                            .truncate()
-                            .font_family(crate::fonts::chrome())
-                            .text_size(px(11.0))
-                            .font_weight(FontWeight::NORMAL)
-                            .text_color(hint_colour)
-                            .child(detail)
                     })),
                 Some(busy) => {
                     let gap = if small { px(6.0) } else { ICON_GAP };

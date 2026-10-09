@@ -15,6 +15,9 @@ words; no internal names, no commit hashes. ket reads this file
 
 ### New
 
+- Right-click → Inspect Element in a browser tab opens Web Inspector, docked
+  inside that tab.
+- Links clicked in the terminal can now be copied from the link menu.
 - The commit message template for merging a worktree can include `{issue}`,
   which becomes `#142` on a branch named `142-…`, the way `gh issue develop`
   names them.
@@ -28,3 +31,17 @@ words; no internal names, no commit hashes. ket reads this file
   first if it needs it.
 - Each project picks which GitHub account its issues use, and its settings
   show the repository they go to.
+- Image files (PNG, JPEG, GIF, WebP, BMP, TIFF) open in their own tab, scaled
+  to fit, with their size shown underneath.
+
+### Improved
+
+- A new terminal opened beside one already in the pane starts at the pane's
+  size, so its prompt appears sooner and does not redraw once the shell is
+  up.
+- The note composer now offers a description as you type, and open notes show
+  their full title beside a separate panel for tags and worktree options.
+
+### Fixed
+
+- A worktree now shows blue “waiting” while Codex asks you a question in its terminal.

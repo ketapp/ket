@@ -23,6 +23,7 @@ fn hook_report(event: HookEvent, pane: &str, worktree: &str, at_ms: u64) -> Hook
         tool_name: None,
         note: None,
         mutating_git: false,
+        command: None,
         at_ms,
         subagent: None,
         subagent_type: None,
@@ -813,6 +814,27 @@ fn an_idle_reports_renewal_needs_the_same_agent_still_in_the_foreground() {
             mutating: false,
         }
     );
+}
+
+#[test]
+fn a_codex_question_stays_waiting_while_codex_is_in_the_foreground() {
+    let mut tracker = Tracker::new(["claude".to_owned(), "codex".to_owned()]);
+    let wt = worktree("w1");
+    tracker.observe(&wt, Some(Foreground::Running("codex".to_owned())));
+
+    let mut question = hook_report(HookEvent::PreTool, "p1", "w1", 0);
+    question.agent = "codex".to_owned();
+    question.tool_name = Some("request_user_input".to_owned());
+    tracker.report(&question, known_any);
+
+    assert_eq!(tracker.signal(&wt, 0), Signal::Blocked);
+    assert_eq!(tracker.signal(&wt, REPORT_LINGERS_MS + 1), Signal::Blocked);
+
+    let mut answer = hook_report(HookEvent::PostTool, "p1", "w1", REPORT_LINGERS_MS + 2);
+    answer.agent = "codex".to_owned();
+    answer.tool_name = Some("request_user_input".to_owned());
+    tracker.report(&answer, known_any);
+    assert_eq!(tracker.signal(&wt, REPORT_LINGERS_MS + 2), Signal::Working);
 }
 
 #[test]

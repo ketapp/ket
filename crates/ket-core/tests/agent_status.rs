@@ -19,6 +19,7 @@ fn report(event: HookEvent, pane: &str, worktree: &str, session: &str, at_ms: u6
         tool_name: None,
         note: None,
         mutating_git: false,
+        command: None,
         at_ms,
         subagent: None,
         subagent_type: None,
@@ -106,6 +107,31 @@ fn event_state_mapping_moves_the_pane_through_its_lifecycle() {
         known_any,
     );
     assert_eq!(store.get("p1").unwrap().state, AgentState::Idle);
+}
+
+#[test]
+fn codex_request_user_input_is_awaiting() {
+    let mut store = StatusStore::new(1);
+    let mut ask = report(HookEvent::PreTool, "p1", "w1", "s1", 1);
+    ask.agent = "codex".to_owned();
+    ask.tool_name = Some("request_user_input".to_owned());
+
+    store.report(&ask, known_any);
+    assert_eq!(
+        store.get("p1").unwrap().state,
+        AgentState::AwaitingPermission
+    );
+}
+
+#[test]
+fn a_similar_tool_name_does_not_mark_codex_as_awaiting() {
+    let mut store = StatusStore::new(1);
+    let mut call = report(HookEvent::PreTool, "p1", "w1", "s1", 1);
+    call.agent = "codex".to_owned();
+    call.tool_name = Some("functions.request_user_input".to_owned());
+
+    store.report(&call, known_any);
+    assert_eq!(store.get("p1").unwrap().state, AgentState::ExecutingTool);
 }
 
 #[test]

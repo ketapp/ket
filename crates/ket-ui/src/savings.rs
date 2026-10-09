@@ -591,6 +591,7 @@ impl Shell {
             .child(figure)
             .child(bar)
             .child(foot)
+            .children(command_output_line(total).map(|line| caption(line, t)))
             .into_any_element()
     }
 
@@ -886,6 +887,12 @@ impl Shell {
                         .child(spent.text_size(TOTAL).font_weight(FontWeight::SEMIBOLD))
                         .child(saved.text_size(TOTAL).font_weight(FontWeight::SEMIBOLD)),
                 )
+                .children(command_output_line(total).map(|line| {
+                    caption(line, t)
+                        .prose()
+                        .pt(px(4.0))
+                        .text_color(alpha(paint(t.text.dim), 0.8))
+                }))
         };
 
         let list = div()
@@ -1058,4 +1065,27 @@ impl Shell {
                 .into_any_element(),
         )
     }
+}
+
+/// What the period's shell commands cost, measured — the one figure in this
+/// file that is a count rather than an estimate. `None` until a command has
+/// been measured in the period.
+fn command_output_line(total: &WorktreeSavings) -> Option<String> {
+    if total.command_output_tokens == 0 {
+        return None;
+    }
+    let mut line = format!(
+        "Command output \u{2248}{} tokens",
+        crate::usage_card::tokens(total.command_output_tokens)
+    );
+    if let Some(share) = total.command_output_share() {
+        line.push_str(&format!(" \u{b7} {:.0}% of fresh input", share * 100.0));
+    }
+    if total.filter_saved_tokens > 0 {
+        line.push_str(&format!(
+            " \u{b7} filter trimmed \u{2248}{}",
+            crate::usage_card::tokens(total.filter_saved_tokens)
+        ));
+    }
+    Some(line)
 }

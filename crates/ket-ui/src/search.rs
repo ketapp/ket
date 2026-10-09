@@ -213,6 +213,7 @@ fn tab_mark(kind: &TabKind) -> Icon {
     match kind {
         TabKind::Editor(_) => Icon::Pencil,
         TabKind::Audio(_) => Icon::Layers,
+        TabKind::Image(_) => Icon::Camera,
         TabKind::Terminal(_) => Icon::Terminal,
         TabKind::Browser(_) => Icon::ExternalLink,
         #[cfg(target_os = "macos")]
@@ -989,5 +990,22 @@ impl Shell {
             // the panel this field opens.
             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_image_tab_is_marked_with_a_camera() {
+        assert_eq!(
+            tab_mark(&TabKind::Image("/repo/shot.png".into())),
+            Icon::Camera
+        );
+        assert_eq!(
+            tab_mark(&TabKind::Editor("/repo/main.rs".into())),
+            Icon::Pencil
+        );
     }
 }

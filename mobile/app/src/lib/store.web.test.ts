@@ -37,8 +37,8 @@ describe('web storage', () => {
     expect(await store.getHost('missing')).toBeNull();
     expect(await store.listHosts()).toHaveLength(1);
 
-    await store.saveRecent({ host: host.id, terminal: '2' });
-    expect(await store.getRecent()).toEqual({ host: host.id, terminal: '2' });
+    await store.saveLastWork(host.id, { project: 'project', agent: '' });
+    expect(await store.getLastWork(host.id)).toEqual({ project: 'project', agent: '' });
     await store.saveDesktop(host.id);
     expect(await store.getDesktop()).toBe(host.id);
     await store.saveCollapsed(host.id, ['project']);
@@ -56,11 +56,12 @@ describe('web storage', () => {
     await store.forgetHost(host.id);
     expect(await store.listHosts()).toEqual([]);
     expect(await store.getCollapsed(host.id)).toEqual([]);
+    expect(await store.getLastWork(host.id)).toBeNull();
   });
 
   test('returns empty defaults', async () => {
     expect(await store.listHosts()).toEqual([]);
-    expect(await store.getRecent()).toBeNull();
+    expect(await store.getLastWork('missing')).toBeNull();
     expect(await store.getDesktop()).toBeNull();
     expect(await store.getCollapsed('missing')).toEqual([]);
     expect(await store.getFit()).toBe(false);

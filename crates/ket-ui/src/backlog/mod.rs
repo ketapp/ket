@@ -9,7 +9,7 @@
 //! sends it to a new worktree, from the open note or from its row.
 //!
 //! Every note has a priority, picked beside the capture field for a new one
-//! and beside the open note's title, and drawn as a coloured mark at the
+//! and in the open note's rail, and drawn as a coloured mark at the
 //! start of its row. The waiting notes are grouped by priority, and within
 //! one they keep the order they were dragged into — see [`list`] and
 //! [`organise`]. A search and the notes' tags narrow the list.
@@ -152,19 +152,27 @@ const ROW_DETAIL: Pixels = px(13.5);
 /// A row's figures — files, age — and a done row's branch.
 const ROW_FIGURE: Pixels = px(12.0);
 
-/// The open note's title, a step over the rows' so it reads as the one being
-/// worked on.
-const OPEN_TITLE: Pixels = px(16.0);
+/// The open note's title, two steps over the rows' so it reads as the one
+/// being worked on. It wraps, so a long one is read whole.
+const OPEN_TITLE: Pixels = px(18.0);
+const OPEN_TITLE_LINE: Pixels = px(26.0);
 
 /// The open note's inset: its title, description and files all start here.
-const OPEN_PAD: Pixels = px(16.0);
+const OPEN_PAD: Pixels = px(22.0);
+
+/// The open note's right-hand column: its priority and tags, then what Start
+/// will make. Wide enough for an agent's name in a select beside its label.
+const RAIL_W: Pixels = px(300.0);
+
+/// A rail row's label column, so every select in it starts at one edge.
+const RAIL_LABEL_W: Pixels = px(68.0);
 
 /// The description's well's inset from the open note's edges: the actions
 /// row's, so the well's edge lines up over the delete button's.
 const BODY_INSET: Pixels = px(10.0);
 
 /// How tall the description is; it scrolls past this.
-const BODY_HEIGHT: Pixels = px(260.0);
+const BODY_HEIGHT: Pixels = px(220.0);
 
 /// The composer's gutter before its first character — see `ui::textarea` —
 /// which the drawn markdown stands in by too, so a click to edit does not
@@ -1312,10 +1320,16 @@ impl Shell {
         let t = &self.theme;
         let trigger = select(origin, current.name())
             .leading(priority_mark(current, t))
-            .inline()
-            .open(self.backlog_menu_open(origin))
-            .render(t);
-        self.backlog_picker(origin, trigger, cx).flex_none()
+            .open(self.backlog_menu_open(origin));
+        // The composer's sits in its line; the open note's is a field in
+        // the rail, as wide as the selects under it.
+        let trigger = if origin == CAPTURE_PRIORITY {
+            trigger.inline()
+        } else {
+            trigger
+        };
+        self.backlog_picker(origin, trigger.render(t), cx)
+            .flex_none()
     }
 
     /// Moves the arrow keys' row up or down the list. Up from the first row
@@ -1591,6 +1605,8 @@ impl Shell {
             "n" if command => {
                 window.focus(capture.read(cx).focus_handle());
             }
+            // The composer's description, from anywhere but an open note.
+            "tab" if !open && !key.modifiers.shift => self.open_backlog_details(window),
             "a" if command => self.pick_all_backlog_notes(cx),
             // The arrows' row: ⌘D done, ⌘⌫ delete, which asks first.
             "d" if command => {
@@ -1831,11 +1847,11 @@ impl Shell {
                 hints
                     .child(quiet("\u{21b5}", "next line"))
                     .child(add)
-                    .child(quiet("\u{21e7}\u{21e5}", "back to title"))
+                    .child(quiet("\u{21e7}tab", "back to title"))
             } else {
                 hints
                     .child(quiet("\u{21b5}", "add"))
-                    .child(quiet("\u{21e5}", "details"))
+                    .child(quiet("tab", "description"))
             };
             return hints.child(quiet("#", "tag")).child(div().flex_1()).child(
                 backlog_hint("backlog-hint-clear", "esc", "clear", t).on_click(cx.listener(
@@ -1937,6 +1953,17 @@ impl Shell {
             .child(div().flex_1())
             .child(close(cx))
     }
+}
+
+/// One row of the open note's rail: `label` in its column, `control` filling
+/// the rest.
+fn rail_row(label: &'static str, control: impl IntoElement, t: &Theme) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(10.0))
+        .child(caption(label, t).flex_none().w(RAIL_LABEL_W))
+        .child(div().flex_1().min_w_0().child(control))
 }
 
 /// A key hint that is also the button for what it names.

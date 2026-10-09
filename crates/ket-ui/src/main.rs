@@ -35,6 +35,8 @@ mod browser;
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code)]
 mod browser_snapshot;
+#[cfg(target_os = "macos")]
+mod browser_view;
 mod clear_build;
 mod commands;
 mod device_capture;
@@ -51,6 +53,7 @@ mod github;
 mod handset;
 mod header;
 mod horizon;
+mod image;
 mod input;
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code)]
@@ -513,6 +516,9 @@ struct Shell {
     /// The header mark's release card: where the pointer is, and whether it
     /// is open. See `crate::release`.
     pub(crate) release_hover: crate::release::ReleaseHover,
+    /// The card behind a project heading's launch glyph: which project's is
+    /// open, and where the pointer is. See `crate::agent_override`.
+    pub(crate) override_hover: crate::agent_override::OverrideHover,
     /// The worktree whose `primary` mark is under the pointer, if any. Kept
     /// apart from `hovered_ring` for the same reason the marks are apart: two
     /// things on one row, each with its own word to say, and sharing one field
@@ -687,6 +693,8 @@ struct Shell {
     pub(crate) audio: AudioEngine,
     /// Wakes the player UI only while a track is advancing.
     pub(crate) audio_tick: Option<gpui::Task<()>>,
+    /// The pictures behind open image tabs, released once their tabs close.
+    pub(crate) images: image::ImageFrames,
     /// Ephemeral in-app browser tabs. Their WKWebViews deliberately do not
     /// participate in layout persistence or share Safari's browsing data.
     pub(crate) browsers: HashMap<BrowserId, BrowserHandle>,
@@ -1138,6 +1146,7 @@ impl Shell {
                     worktree_target: None,
                     hovered_ring: None,
                     release_hover: Default::default(),
+                    override_hover: Default::default(),
                     hovered_primary: None,
                     hovered_merge: None,
                     hovered_footprint: None,
@@ -1180,6 +1189,7 @@ impl Shell {
                     editor_marks: None,
                     audio: AudioEngine::default(),
                     audio_tick: None,
+                    images: image::ImageFrames::default(),
                     browsers: HashMap::new(),
                     next_browser: 0,
                     #[cfg(target_os = "macos")]
@@ -1280,6 +1290,7 @@ impl Shell {
             worktree_target: None,
             hovered_ring: None,
             release_hover: Default::default(),
+            override_hover: Default::default(),
             hovered_primary: None,
             hovered_merge: None,
             hovered_footprint: None,
@@ -1322,6 +1333,7 @@ impl Shell {
             editor_marks: None,
             audio: AudioEngine::default(),
             audio_tick: None,
+            images: image::ImageFrames::default(),
             browsers: HashMap::new(),
             next_browser: 0,
             #[cfg(target_os = "macos")]
@@ -1490,6 +1502,9 @@ impl Render for Shell {
         #[cfg(target_os = "macos")]
         self.sync_ios_simulator_visibility(cx);
         self.sync_terminal_views(cx);
+        // Pictures whose tabs have closed since the last frame, while the
+        // window is here to free their textures.
+        self.prune_images(window, cx);
         // Before anything is built: whether the caret is in its lit phase is a
         // fact the fields read as they render.
         // The editor answers separately from `typing`: it takes keys through
@@ -2155,6 +2170,8 @@ fn main() {
     // This binary is also the ket host when started as one — see
     // `ket_core::host`. Before anything opens a window.
     ket_core::host::serve_if_asked();
+    // And the hook that trims a command's output — see `ket_core::filter`.
+    ket_core::filter::serve_if_asked();
 
     // The icons are compiled in; without an asset source `gpui` resolves every
     // `svg()` to nothing and draws blank space with no error. See `ui::icon`.

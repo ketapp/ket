@@ -36,9 +36,14 @@ image = { version = "0.25", default-features = false }
 # backed by WKWebView; keeping these target-specific avoids pulling Linux's GTK
 # surface into platforms where ket does not support it yet.
 [target.'cfg(target_os = "macos")'.dependencies]
-gpui-wry = "0.5.0"
 raw-window-handle = "0.6.2"
-wry = "0.53.3"
+# `devtools`: Inspect Element in a browser tab's context menu, in release
+# builds too — Wry has it on in debug builds regardless. On macOS it reaches
+# Web Inspector through WebKit's private `_inspector`, which Wry's docs warn
+# about; ket accepts that for a tab whose whole point is looking at a page.
+# Where the page sits so the inspector can dock inside the tab is
+# `src/browser_view.rs`.
+wry = { version = "0.53.3", features = ["devtools"] }
 # Moving the window from ket's own chrome. gpui marks the regions that should
 # do it — `WindowControlArea` — but its macOS backend never implemented the
 # hook, so a tab strip running to the top edge could not be exempted and a tab
@@ -63,6 +68,8 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = [
     "NSBundle",
     "NSData",
     "NSError",
+    # The frames `src/browser_view.rs` places a browser tab's slot with.
+    "NSGeometry",
     "NSString",
 ] }
 # A still of a browser pane's page, for ket's menus to draw over while the

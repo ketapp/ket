@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, jest, test } from '@jest/globals';
 import { fireEvent, render, waitFor } from '@testing-library/react-native';
+import { useEffect as mockUseEffect } from 'react';
 import Devices from './app/devices/[host]';
 import DiffScreen from './app/diff/[host]/[worktree]';
 import Pair from './app/pair';
@@ -18,6 +19,7 @@ const mockConfirm = jest.fn(async (..._args: unknown[]) => true);
 
 jest.mock('expo-router', () => ({
   router: { replace: (path: string) => mockReplace(path), back: jest.fn(), canGoBack: () => true },
+  useFocusEffect: (callback: () => void) => mockUseEffect(callback, [callback]),
   useLocalSearchParams: () => mockParams,
 }));
 jest.mock('react-native-safe-area-context', () => ({ useSafeAreaInsets: () => ({ top: 0, bottom: 0 }) }));

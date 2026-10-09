@@ -98,6 +98,11 @@ pub fn create_issue(at: &Checkout, title: &str, body: &str) -> Result<IssueLink>
         &["issue", "create", "--title", title, "--body-file", "-"],
         Some(body),
     )?;
+    issue_link(&out)
+}
+
+/// The issue `gh issue create` says it made, from what it printed.
+fn issue_link(out: &str) -> Result<IssueLink> {
     // `gh issue create` prints the new issue's address and nothing else.
     let url = out
         .lines()
@@ -138,7 +143,13 @@ pub fn open_issues(at: &Checkout) -> Result<OpenIssues> {
         ],
         None,
     )?;
-    let mut issues: Vec<Issue> = serde_json::from_str(&out)
+    read_issues(&out)
+}
+
+/// The issues `gh issue list --json` printed, tidied, and whether that is
+/// all of them.
+fn read_issues(out: &str) -> Result<OpenIssues> {
+    let mut issues: Vec<Issue> = serde_json::from_str(out)
         .map_err(|e| failed(format!("could not read gh's list of issues: {e}")))?;
     for issue in &mut issues {
         // Bodies written in a browser arrive with Windows line ends.
@@ -204,11 +215,6 @@ impl Account {
 /// The accounts `gh` is signed in to on github.com, the active one first.
 /// `None` when `gh` is not installed.
 pub fn accounts() -> Result<Option<Vec<Account>>> {
-    #[derive(Deserialize)]
-    struct Status {
-        #[serde(default)]
-        hosts: std::collections::BTreeMap<String, Vec<Account>>,
-    }
     let Ok(gh) = gh() else {
         return Ok(None);
     };
@@ -234,7 +240,18 @@ pub fn accounts() -> Result<Option<Vec<Account>>> {
         }
         e => e,
     })?;
-    let status: Status = serde_json::from_str(&out)
+    read_accounts(&out).map(Some)
+}
+
+/// The github.com accounts `gh auth status --json hosts` printed, the
+/// active one first.
+fn read_accounts(out: &str) -> Result<Vec<Account>> {
+    #[derive(Deserialize)]
+    struct Status {
+        #[serde(default)]
+        hosts: std::collections::BTreeMap<String, Vec<Account>>,
+    }
+    let status: Status = serde_json::from_str(out)
         .map_err(|e| failed(format!("could not read gh's accounts: {e}")))?;
     let mut accounts: Vec<Account> = status
         .hosts
@@ -244,7 +261,7 @@ pub fn accounts() -> Result<Option<Vec<Account>>> {
         .filter(|account| !account.login.is_empty())
         .collect();
     accounts.sort_by_key(|account| !account.active);
-    Ok(Some(accounts))
+    Ok(accounts)
 }
 
 /// Signs `gh` out of `login` on github.com.
@@ -373,14 +390,8 @@ pub fn start_login() -> Result<Login> {
             }
             continue;
         };
-        if let Some(found) = line
-            .split_once("code")
-            .and_then(|(_, rest)| rest.split_whitespace().next())
-        {
-            let found = found.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-');
-            if found.len() >= 8 && found.contains('-') {
-                code = Some(found.to_owned());
-            }
+        if let Some(found) = login_code(&line) {
+            code = Some(found.to_owned());
         }
         if let Some(url) = line
             .split_whitespace()
@@ -403,6 +414,24 @@ pub fn start_login() -> Result<Login> {
         "" => "gh did not give a code to sign in with".to_owned(),
         said => said.to_owned(),
     }))
+}
+
+/// The one-time code a line of `gh auth login --web` shows, if it shows
+/// one: the first word after "code" shaped like `ABCD-1234`. gh words the
+/// line differently with and without `--clipboard` — "code (ABCD-1234)
+/// copied" against "code: ABCD-1234" — so the word right after is not
+/// always it.
+fn login_code(line: &str) -> Option<&str> {
+    let (_, rest) = line.split_once("code")?;
+    rest.split_whitespace()
+        .map(|word| word.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-'))
+        .find(|word| {
+            word.split_once('-').is_some_and(|(left, right)| {
+                [left, right]
+                    .iter()
+                    .all(|part| part.len() >= 4 && part.chars().all(|c| c.is_ascii_alphanumeric()))
+            })
+        })
 }
 
 impl Login {
@@ -605,4 +634,164 @@ fn gh() -> Result<PathBuf> {
 
 fn failed(why: String) -> KetError {
     KetError::Conflict(why)
+}
+
+#[cfg(test)]
+mod tests {
+    //! What ket reads off `gh`'s output. None of these run `gh`: each feeds
+    //! a helper the text `gh` prints.
+
+    use super::*;
+
+    #[test]
+    fn a_new_issue_is_read_off_the_address_gh_prints() {
+        let link = issue_link("https://github.com/ketapp/ket/issues/142\n").unwrap();
+        assert_eq!(
+            link,
+            IssueLink {
+                number: 142,
+                url: "https://github.com/ketapp/ket/issues/142".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn the_address_is_the_last_one_gh_prints_after_any_chatter() {
+        // `gh` may say where it is creating the issue before the address.
+        let out = "\nCreating issue in ketapp/ket\n\n  https://github.com/ketapp/ket/issues/7  \n";
+        assert_eq!(issue_link(out).unwrap().number, 7);
+    }
+
+    #[test]
+    fn output_without_an_address_or_number_is_an_error() {
+        let err = issue_link("something went sideways")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("something went sideways"), "{err}");
+        assert!(issue_link("https://github.com/ketapp/ket/issues/new").is_err());
+    }
+
+    #[test]
+    fn listed_issues_are_tidied_and_a_missing_body_is_empty() {
+        let out = r#"[
+            {"number": 3, "title": "  Fix the login \n", "body": "Steps:\r\n1. open\r\n\r\n", "url": "https://github.com/o/r/issues/3"},
+            {"number": 1, "title": "No body", "url": "https://github.com/o/r/issues/1"}
+        ]"#;
+        let open = read_issues(out).unwrap();
+        assert!(open.complete);
+        assert_eq!(open.issues.len(), 2);
+        assert_eq!(open.issues[0].title, "Fix the login");
+        assert_eq!(open.issues[0].body, "Steps:\n1. open");
+        assert_eq!(open.issues[1].body, "");
+        assert_eq!(
+            open.issues[1].link(),
+            IssueLink {
+                number: 1,
+                url: "https://github.com/o/r/issues/1".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn a_list_as_long_as_the_limit_is_not_complete() {
+        // The limit may have cut it short, so a missing issue there says
+        // nothing about whether it was closed.
+        let issues: Vec<String> = (1..=LIST_LIMIT)
+            .map(|n| format!(r#"{{"number":{n},"title":"t","body":"","url":"u"}}"#))
+            .collect();
+        let full = read_issues(&format!("[{}]", issues.join(","))).unwrap();
+        assert_eq!(full.issues.len(), LIST_LIMIT);
+        assert!(!full.complete);
+
+        let short = read_issues(&format!("[{}]", issues[1..].join(","))).unwrap();
+        assert!(short.complete);
+    }
+
+    #[test]
+    fn an_empty_list_is_complete_and_junk_is_an_error() {
+        let open = read_issues("[]").unwrap();
+        assert!(open.issues.is_empty() && open.complete);
+        assert!(read_issues("gh: not a git repository").is_err());
+    }
+
+    #[test]
+    fn accounts_are_github_com_ones_only_with_the_active_one_first() {
+        let out = r#"{"hosts": {
+            "github.com": [
+                {"login": "work", "active": false, "state": "success", "tokenSource": "keyring"},
+                {"login": "", "active": false},
+                {"login": "sam", "active": true, "state": "success", "tokenSource": "keyring"}
+            ],
+            "ghe.example.com": [
+                {"login": "corp", "active": true, "state": "success", "tokenSource": "keyring"}
+            ]
+        }}"#;
+        let logins: Vec<String> = read_accounts(out)
+            .unwrap()
+            .into_iter()
+            .map(|account| account.login)
+            .collect();
+        assert_eq!(logins, ["sam", "work"]);
+    }
+
+    #[test]
+    fn no_hosts_is_no_accounts_and_junk_is_an_error() {
+        assert!(read_accounts("{}").unwrap().is_empty());
+        assert!(read_accounts("not json").is_err());
+    }
+
+    #[test]
+    fn an_account_whose_token_github_refuses_does_not_work() {
+        let out = r#"{"hosts": {"github.com": [
+            {"login": "stale", "active": true, "state": "error", "tokenSource": "keyring"},
+            {"login": "slow", "active": false, "state": "timeout", "tokenSource": "keyring"}
+        ]}}"#;
+        let accounts = read_accounts(out).unwrap();
+        assert!(!accounts[0].works());
+        // One GitHub could not be asked about may still be fine.
+        assert!(accounts[1].works());
+    }
+
+    #[test]
+    fn an_account_from_an_environment_token_cannot_be_picked() {
+        let out = r#"{"hosts": {"github.com": [
+            {"login": "env", "active": true, "state": "success", "tokenSource": "GH_TOKEN"},
+            {"login": "kept", "active": false, "state": "success", "tokenSource": "keyring"}
+        ]}}"#;
+        let accounts = read_accounts(out).unwrap();
+        assert!(!accounts[0].pickable());
+        assert!(accounts[1].pickable());
+    }
+
+    #[test]
+    fn the_sign_in_code_is_read_off_the_clipboard_line() {
+        assert_eq!(
+            login_code("! One-time code (ABCD-1234) copied to clipboard"),
+            Some("ABCD-1234")
+        );
+    }
+
+    #[test]
+    fn the_sign_in_code_is_read_off_the_line_gh_prints_without_a_clipboard() {
+        // `gh auth login --web` without `--clipboard`, as ket runs it, says
+        // this instead.
+        assert_eq!(
+            login_code("! First copy your one-time code: ABCD-1234"),
+            Some("ABCD-1234")
+        );
+    }
+
+    #[test]
+    fn a_line_with_no_code_in_it_gives_none() {
+        assert_eq!(
+            login_code(
+                "Open this URL to continue in your web browser: https://github.com/login/device"
+            ),
+            None
+        );
+        assert_eq!(
+            login_code("! Failed to copy one-time code to clipboard"),
+            None
+        );
+    }
 }

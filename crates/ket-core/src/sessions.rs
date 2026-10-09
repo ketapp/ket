@@ -1258,7 +1258,6 @@ pub fn configured_claude_config_dir() -> Option<PathBuf> {
 /// agents write to another's — the same invisible, total failure
 /// [`claude_config_dir`] describes. Each line is one cached shell probe.
 pub fn claude_config_dirs() -> Vec<PathBuf> {
-    let mut dirs = vec![claude_config_dir()];
     let lines = crate::store::Store::open_default()
         .and_then(|store| store.load())
         .map(|state| {
@@ -1270,8 +1269,26 @@ pub fn claude_config_dirs() -> Vec<PathBuf> {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    for line in lines {
-        let dir = claude_config_dir_seen_by(&line).unwrap_or_else(|| home().join(".claude"));
+    let projects = lines
+        .iter()
+        .map(|line| claude_config_dir_seen_by(line).unwrap_or_else(|| home().join(".claude")));
+    claude_dirs_in_order(claude_config_dir(), projects, &home())
+}
+
+/// `configured` first, then each project's directory, then Claude's own
+/// default under `home`, each once.
+///
+/// The default comes last: a session started as plain `claude` — typed in a
+/// terminal rather than launched — files there whatever ket's own line says,
+/// and a phone asking for its chat would otherwise be told the transcript
+/// isn't there.
+fn claude_dirs_in_order(
+    configured: PathBuf,
+    projects: impl IntoIterator<Item = PathBuf>,
+    home: &Path,
+) -> Vec<PathBuf> {
+    let mut dirs = vec![configured];
+    for dir in projects.into_iter().chain([home.join(".claude")]) {
         if !dirs.contains(&dir) {
             dirs.push(dir);
         }
@@ -1468,4 +1485,53 @@ fn read_head(path: &Path) -> Option<String> {
         .read_to_end(&mut head)
         .ok()?;
     Some(String::from_utf8_lossy(&head).into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn claudes_default_directory_is_searched_after_the_configured_one() {
+        let dirs = claude_dirs_in_order(
+            PathBuf::from("/home/me/.claude-personal"),
+            [],
+            Path::new("/home/me"),
+        );
+        assert_eq!(
+            dirs,
+            [
+                PathBuf::from("/home/me/.claude-personal"),
+                PathBuf::from("/home/me/.claude"),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_default_directory_is_listed_once_when_it_is_the_configured_one() {
+        let dirs =
+            claude_dirs_in_order(PathBuf::from("/home/me/.claude"), [], Path::new("/home/me"));
+        assert_eq!(dirs, [PathBuf::from("/home/me/.claude")]);
+    }
+
+    #[test]
+    fn a_projects_own_directory_comes_before_the_default_and_repeats_are_dropped() {
+        let dirs = claude_dirs_in_order(
+            PathBuf::from("/home/me/.claude-personal"),
+            [
+                PathBuf::from("/home/me/.claude-work"),
+                PathBuf::from("/home/me/.claude-personal"),
+                PathBuf::from("/home/me/.claude-work"),
+            ],
+            Path::new("/home/me"),
+        );
+        assert_eq!(
+            dirs,
+            [
+                PathBuf::from("/home/me/.claude-personal"),
+                PathBuf::from("/home/me/.claude-work"),
+                PathBuf::from("/home/me/.claude"),
+            ]
+        );
+    }
 }

@@ -428,7 +428,20 @@ impl StatusStore {
             return true;
         }
 
-        let state = report.event.state();
+        // Codex asks its own questions through a tool call. Its PreToolUse
+        // means the question menu is on screen, and PostToolUse means the
+        // person answered it. Codex 0.160.0 registers this as a plain tool
+        // named `request_user_input`, which is the name its hook sends.
+        // Keep the event as PreTool for tool accounting, but show this one
+        // call as a wait rather than active work.
+        let state = if report.agent.eq_ignore_ascii_case("codex")
+            && report.event == HookEvent::PreTool
+            && report.tool_name.as_deref() == Some("request_user_input")
+        {
+            Some(AgentState::AwaitingPermission)
+        } else {
+            report.event.state()
+        };
         let entry = match self.panes.entry(pane) {
             Entry::Occupied(slot) => slot.into_mut(),
             // Nothing to say about a pane ket has never heard from.

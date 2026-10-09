@@ -107,6 +107,8 @@ struct Phone {
     runtime: SharedString,
     /// Whether this is the one used most recently.
     last_used: bool,
+    /// An iPad, drawn with the tablet mark in the picker.
+    tablet: bool,
 }
 
 #[derive(Clone)]
@@ -227,6 +229,19 @@ struct SimctlDevice {
     last_used_at: String,
 }
 
+impl SimctlDevice {
+    /// Whether the picker offers it: an installed iPhone or iPad. Watches,
+    /// TVs and Vision Pro run under the same simulator but aren't phones
+    /// or tablets the tab knows how to drive.
+    fn listed(&self) -> bool {
+        self.is_available && (self.device_type_identifier.contains("iPhone") || self.is_ipad())
+    }
+
+    fn is_ipad(&self) -> bool {
+        self.device_type_identifier.contains("iPad")
+    }
+}
+
 impl Shell {
     /// Opens or focuses the one simulator tab allowed in this process.
     pub(crate) fn open_ios_simulator_tab_in(&mut self, pane: PaneId, cx: &mut Context<Self>) {
@@ -254,7 +269,7 @@ impl Shell {
             space.open_tab_in(
                 pane,
                 Tab {
-                    title: "iPhone Simulator".into(),
+                    title: "iOS Simulator".into(),
                     renamed: false,
                     pinned: false,
                     kind: TabKind::IosSimulator,
@@ -361,7 +376,11 @@ impl Shell {
             Ok(native) => {
                 native.set_visible(should_show);
                 handle.shown = should_show;
-                handle.device = Some(found);
+                handle.device = Some(found.clone());
+                // The tab is named for what it shows, iPhone or iPad alike.
+                for space in self.spaces.values_mut() {
+                    space.retitle_ios_simulator(found.name.clone().into());
+                }
                 State::Attached(Rc::new(native))
             }
             Err(error) => State::Failed(could_not_attach(error)),
@@ -444,7 +463,7 @@ impl Shell {
             return false;
         }
         if let Err(error) = native.control(control) {
-            tracing::warn!(%error, ?control, "iPhone Simulator control failed");
+            tracing::warn!(%error, ?control, "iOS Simulator control failed");
             self.note = Some(format!("Could not {}: {error}", control.doing()).into());
         }
         if matches!(control, Control::RotateLeft | Control::RotateRight) {
@@ -525,7 +544,7 @@ impl Shell {
             return;
         };
         if let Err(error) = native.control(control) {
-            tracing::warn!(%error, ?control, "iPhone Simulator control failed");
+            tracing::warn!(%error, ?control, "iOS Simulator control failed");
             self.note = Some(format!("Could not {}: {error}", control.doing()).into());
         }
         if matches!(control, Control::RotateLeft | Control::RotateRight) {
@@ -563,7 +582,7 @@ impl Shell {
                 &handle.turn,
                 Model::Iphone,
                 Stage::Looking,
-                "Looking for an iPhone",
+                "Looking for a simulator",
                 "simctl · booted simulators",
                 &theme,
             ),
@@ -591,7 +610,7 @@ impl Shell {
                         .device
                         .as_ref()
                         .map(|device| SharedString::from(device.name.clone()))
-                        .unwrap_or_else(|| "iPhone".into()),
+                        .unwrap_or_else(|| "Simulator".into()),
                     os: handle.device.as_ref().map(|device| device.os.clone()),
                 };
                 // Hidden under the screenshot's own prompt, the phone leaves
@@ -685,7 +704,7 @@ fn discover() -> Result<Discovery, Problem> {
         return Err(Problem {
             retry: false,
             ..Problem::new(
-                "iPhone Simulator needs an Apple silicon Mac",
+                "iOS Simulator needs an Apple silicon Mac",
                 "For now ket can show the simulator only on Macs with Apple silicon. \
                  Apple's Simulator app still works on this Mac.",
             )
@@ -793,13 +812,11 @@ fn discover() -> Result<Discovery, Problem> {
                 .into_iter()
                 .map(move |device| (runtime.clone(), device))
         })
-        .filter(|(_, device)| {
-            device.is_available && device.device_type_identifier.contains("iPhone")
-        })
+        .filter(|(_, device)| device.listed())
         .collect();
     if phones.is_empty() {
         return Err(Problem::new(
-            "No iPhone simulators are installed",
+            "No iOS simulators are installed",
             "Xcode is ready, but it doesn't have an iOS simulator to run yet.",
         )
         .steps([
@@ -826,6 +843,7 @@ fn discover() -> Result<Discovery, Problem> {
             .enumerate()
             .map(|(index, (runtime, device))| Phone {
                 last_used: index == 0 && !device.last_used_at.is_empty(),
+                tablet: device.is_ipad(),
                 boot: Boot {
                     simctl: simctl.clone(),
                     udid: device.udid,
@@ -848,18 +866,18 @@ fn discover() -> Result<Discovery, Problem> {
     })
 }
 
-/// No iPhone is booted: every installed one, to pick from and start here.
+/// No iPhone or iPad is booted: every installed one, to pick from and start here.
 /// `phones` is never empty where this is called from — Open Simulator is
 /// the way out all the same.
 fn not_running(phones: Vec<Phone>) -> Problem {
     let problem = Problem::new(
-        "No iPhone is running",
+        "No simulator is running",
         "Pick one to start here. It takes a few seconds, longer the first time.",
     );
     if phones.is_empty() {
         return problem
             .steps([
-                step("Click Open Simulator, then choose File ▸ Open Simulator and pick an iPhone."),
+                step("Click Open Simulator, then choose File ▸ Open Simulator and pick an iPhone or iPad."),
                 step("Once its home screen appears, click Check again."),
             ])
             .action(Action::OpenSimulator);
@@ -882,10 +900,10 @@ fn runtime_label(runtime: &str) -> SharedString {
 fn could_not_start(name: &str, error: String) -> Problem {
     Problem::new(
         &format!("Couldn't start {name}"),
-        "The simulator didn't finish starting this iPhone.",
+        "The simulator didn't finish starting this device.",
     )
     .steps([
-        step("Click Open Simulator and start the iPhone there (File ▸ Open Simulator)."),
+        step("Click Open Simulator and start it there (File ▸ Open Simulator)."),
         step("Once its home screen appears, click Check again."),
     ])
     .action(Action::OpenSimulator)
@@ -904,7 +922,7 @@ fn simulator_kit_in(contents: &Path) -> Option<PathBuf> {
 fn missing_xcode() -> Problem {
     let Some(app) = installed_xcode() else {
         return Problem::new(
-            "iPhone Simulator needs Xcode",
+            "iOS Simulator needs Xcode",
             "The simulator comes with Xcode, Apple's free developer app, and Xcode isn't \
              installed on this Mac.",
         )
@@ -1014,12 +1032,12 @@ fn xcode_version(developer_dir: &Path) -> Option<String> {
 
 fn could_not_attach(error: String) -> Problem {
     Problem::new(
-        "Couldn't show the iPhone's screen",
-        "The iPhone is running, but ket couldn't connect to its display.",
+        "Couldn't show the simulator's screen",
+        "The simulator is running, but ket couldn't connect to its display.",
     )
     .steps([
         step("Quit Apple's Simulator app, then click Open Simulator to start it again."),
-        step("Once the iPhone's home screen appears, click Check again."),
+        step("Once its home screen appears, click Check again."),
         step(
             "If it keeps happening, use the Simulator app directly for now. This Xcode may \
              have changed something ket relies on.",
@@ -1164,7 +1182,7 @@ fn check_again() -> Button {
     button("ios-simulator-retry", "Check again").leading(Icon::Refresh)
 }
 
-/// Every installed iPhone, the picked one with its Start button.
+/// Every installed iPhone and iPad, the picked one with its Start button.
 fn phone_list(picker: &Picker, theme: &Theme, cx: &mut Context<Shell>) -> AnyElement {
     let rows = picker.phones.iter().enumerate().map(|(index, phone)| {
         let picked = index == picker.picked;
@@ -1186,7 +1204,11 @@ fn phone_list(picker: &Picker, theme: &Theme, cx: &mut Context<Shell>) -> AnyEle
             theme,
         )
         .child(icon(
-            Icon::Smartphone,
+            if phone.tablet {
+                Icon::Tablet
+            } else {
+                Icon::Smartphone
+            },
             paint(if picked {
                 theme.text.primary
             } else {
@@ -1455,13 +1477,13 @@ mod private {
         /// What it does, to finish "Could not …".
         pub(crate) fn doing(self) -> &'static str {
             match self {
-                Self::SoftwareKeyboard => "show the iPhone's keyboard",
-                Self::HardwareKeyboard => "connect the Mac's keyboard to the iPhone",
+                Self::SoftwareKeyboard => "show the on-screen keyboard",
+                Self::HardwareKeyboard => "connect the Mac's keyboard to the simulator",
                 Self::Home => "press Home",
-                Self::Lock => "lock the iPhone",
+                Self::Lock => "lock the device",
                 Self::Siri => "start Siri",
                 Self::VolumeUp | Self::VolumeDown => "change the volume",
-                Self::RotateLeft | Self::RotateRight => "rotate the iPhone",
+                Self::RotateLeft | Self::RotateRight => "rotate the device",
             }
         }
     }
@@ -1512,7 +1534,7 @@ mod private {
                 .ok_or_else(|| "SimulatorKit attachment must run on the main thread".to_owned())?;
             let handle = window.window_handle().map_err(|error| error.to_string())?;
             let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
-                return Err("the iPhone Simulator tab needs an AppKit window".to_owned());
+                return Err("the iOS Simulator tab needs an AppKit window".to_owned());
             };
             let parent = handle.ns_view.as_ptr().cast::<NSView>();
             let found = found.clone();
@@ -1578,7 +1600,7 @@ mod private {
             let device_set = device_set
                 .ok_or_else(|| "CoreSimulator did not return its device set".to_owned())?;
             let device = unsafe { find_device(&device_set, &found.udid) }?
-                .ok_or_else(|| format!("the booted iPhone {} disappeared", found.name))?;
+                .ok_or_else(|| format!("the booted device {} disappeared", found.name))?;
 
             // Xcode 27 identifies an iPhone's integrated PurpleMain display as
             // screen 1. Confirm `isDefault` below before handing it to Swift.
@@ -1589,7 +1611,7 @@ mod private {
                 .ok_or_else(|| "SimulatorKit did not create the device screen".to_owned())?;
             let is_default: bool = unsafe { msg_send![&screen_object, isDefault] };
             if !is_default {
-                return Err("SimulatorKit screen 1 is not the iPhone's default display".to_owned());
+                return Err("SimulatorKit screen 1 is not the device's default display".to_owned());
             }
 
             let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(0.0, 0.0));
@@ -1781,7 +1803,7 @@ mod private {
             // descriptors, sent with a copied send right.
             let result = unsafe { mach_msg_send(message.as_mut_ptr().cast()) };
             if result != 0 {
-                return Err(format!("the iPhone refused the orientation ({result:#x})"));
+                return Err(format!("the device refused the orientation ({result:#x})"));
             }
             Ok(())
         }
@@ -1805,10 +1827,10 @@ mod private {
                 port
             }))
             .map_err(|_| {
-                "CoreSimulator raised an exception finding the iPhone's port".to_owned()
+                "CoreSimulator raised an exception finding the device's port".to_owned()
             })?;
             if port == 0 {
-                return Err("CoreSimulator did not find the iPhone's workspace port".to_owned());
+                return Err("CoreSimulator did not find the device's workspace port".to_owned());
             }
             self.workspace.set(Some(port));
             Ok(port)
@@ -1884,7 +1906,7 @@ mod private {
                 client
             }))
             .map_err(|_| "SimulatorKit raised an exception making a HID client".to_owned())?
-            .ok_or_else(|| "SimulatorKit did not make a HID client for the iPhone".to_owned())?;
+            .ok_or_else(|| "SimulatorKit did not make a HID client for the device".to_owned())?;
             *self.hid.borrow_mut() = Some((client.clone(), send));
             Ok((client, send))
         }
@@ -2371,5 +2393,71 @@ mod private {
         } else {
             Err("GPUIWindow already overrides setAcceptsMouseMovedEvents:".to_owned())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Devices as `simctl list --json devices available` lists them.
+    fn listed_names(json: &str) -> Vec<(String, bool)> {
+        let list: SimctlList = serde_json::from_str(json).expect("simctl JSON");
+        let mut names: Vec<(String, bool)> = list
+            .devices
+            .into_values()
+            .flatten()
+            .filter(SimctlDevice::listed)
+            .map(|device| (device.name.clone(), device.is_ipad()))
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn device(name: &str, kind: &str, available: bool) -> String {
+        format!(
+            r#"{{"name":"{name}","udid":"{name}-id","state":"Shutdown","isAvailable":{available},
+               "deviceTypeIdentifier":"com.apple.CoreSimulator.SimDeviceType.{kind}"}}"#
+        )
+    }
+
+    #[test]
+    fn ipads_are_offered_beside_iphones_and_marked_as_tablets() {
+        let json = format!(
+            r#"{{"devices":{{"com.apple.CoreSimulator.SimRuntime.iOS-26-5":[{},{}]}}}}"#,
+            device("iPhone 17 Pro", "iPhone-17-Pro", true),
+            device("iPad Pro 13-inch (M5)", "iPad-Pro-13-inch-M5-12GB", true),
+        );
+        assert_eq!(
+            listed_names(&json),
+            [
+                ("iPad Pro 13-inch (M5)".to_owned(), true),
+                ("iPhone 17 Pro".to_owned(), false),
+            ]
+        );
+    }
+
+    #[test]
+    fn watches_tvs_and_vision_pro_are_not_offered() {
+        let json = format!(
+            r#"{{"devices":{{
+                "com.apple.CoreSimulator.SimRuntime.watchOS-26-0":[{}],
+                "com.apple.CoreSimulator.SimRuntime.tvOS-26-0":[{}],
+                "com.apple.CoreSimulator.SimRuntime.xrOS-26-0":[{}]
+            }}}}"#,
+            device("Apple Watch Ultra 3", "Apple-Watch-Ultra-3-49mm", true),
+            device("Apple TV 4K", "Apple-TV-4K-3rd-generation-4K", true),
+            device("Apple Vision Pro", "Apple-Vision-Pro-4K", true),
+        );
+        assert!(listed_names(&json).is_empty());
+    }
+
+    #[test]
+    fn an_unavailable_ipad_is_not_offered() {
+        let json = format!(
+            r#"{{"devices":{{"com.apple.CoreSimulator.SimRuntime.iOS-18-0":[{}]}}}}"#,
+            device("iPad Air 11-inch (M2)", "iPad-Air-11-inch-M2", false),
+        );
+        assert!(listed_names(&json).is_empty());
     }
 }

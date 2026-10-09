@@ -5,16 +5,16 @@ import {
   getDesktop,
   getFit,
   getHost,
+  getLastWork,
   getLock,
-  getRecent,
   listHosts,
   phoneKey,
   saveCollapsed,
   saveDesktop,
   saveFit,
   saveHost,
+  saveLastWork,
   saveLock,
-  saveRecent,
   toPaired,
   type LockConfig,
   type SavedHost,
@@ -67,15 +67,18 @@ describe('secure mobile storage', () => {
     expect(await listHosts()).toEqual([{ ...one, name: 'Renamed' }]);
 
     await saveCollapsed('one', ['project']);
+    await saveLastWork('one', { project: 'project', agent: '' });
     await forgetHost('one');
     expect(await listHosts()).toEqual([]);
     expect(await getCollapsed('one')).toEqual([]);
+    expect(await getLastWork('one')).toBeNull();
   });
 
   test('round-trips preferences and lock state', async () => {
-    expect(await getRecent()).toBeNull();
-    await saveRecent({ host: 'h', terminal: '9' });
-    expect(await getRecent()).toEqual({ host: 'h', terminal: '9' });
+    expect(await getLastWork('h')).toBeNull();
+    await saveLastWork('h', { project: 'p', agent: 'codex' });
+    expect(await getLastWork('h')).toEqual({ project: 'p', agent: 'codex' });
+    expect(await getLastWork('other')).toBeNull();
 
     expect(await getDesktop()).toBeNull();
     await saveDesktop('h');

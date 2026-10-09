@@ -419,7 +419,7 @@ fn new_tab_menu(
     #[cfg(target_os = "macos")]
     if simulator {
         entries.push(MenuEntry::Item(
-            MenuItem::new(MenuAction::IosSimulator(pane), "iPhone Simulator")
+            MenuItem::new(MenuAction::IosSimulator(pane), "iOS Simulator")
                 .tinted_icon(Icon::Apple, paint(t.text.primary)),
         ));
     }
@@ -603,7 +603,7 @@ impl Shell {
                 let at = state.map(EditorState::cursor_line_col);
                 (path, at)
             }
-            TabKind::Audio(path) => (path.to_string(), None),
+            TabKind::Audio(path) | TabKind::Image(path) => (path.to_string(), None),
             // The file as it is now, which a deleted one no longer has.
             TabKind::Diff(key) if key.path().exists() => (key.path().display().to_string(), None),
             TabKind::Terminal(_) | TabKind::Browser(_) | TabKind::Diff(_) => return None,
@@ -1505,6 +1505,8 @@ pub enum TabKind {
     Editor(SharedString),
     /// An audio file viewer, named by its absolute path.
     Audio(SharedString),
+    /// An image file viewer, named by its absolute path.
+    Image(SharedString),
     /// An interactive shell in the worktree's directory.
     ///
     /// Carries its own id: two terminal tabs are two terminals, and without
@@ -2538,6 +2540,21 @@ impl Space {
         true
     }
 
+    /// Labels the simulator tab with the device it is showing.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn retitle_ios_simulator(&mut self, title: SharedString) {
+        let Some((pane, index)) = self.root.find_tab(&TabKind::IosSimulator) else {
+            return;
+        };
+        if let Some(tab) = self
+            .root
+            .leaf_mut(pane)
+            .and_then(|(tabs, _)| tabs.get_mut(index))
+        {
+            tab.title = title;
+        }
+    }
+
     #[cfg(target_os = "macos")]
     pub(crate) fn focus_ios_simulator(&mut self) -> bool {
         let Some((pane, index)) = self.root.find_tab(&TabKind::IosSimulator) else {
@@ -2693,6 +2710,26 @@ impl Space {
             tabs.iter()
                 .any(|tab| matches!(tab.kind, TabKind::Terminal(_)))
         })
+    }
+
+    /// The terminals open in `pane`: the active tab's first, when it is one,
+    /// then the rest in tab order.
+    ///
+    /// What a terminal about to open there asks, to start at the size the
+    /// pane already draws its neighbours at. The active one leads because it
+    /// is the one being painted, so its size is the pane's current size.
+    pub(crate) fn pane_terminals(&self, pane: PaneId) -> Vec<crate::terminal::TerminalId> {
+        self.root
+            .leaf(pane)
+            .map_or_else(Vec::new, |(tabs, active)| {
+                std::iter::once(active)
+                    .chain((0..tabs.len()).filter(|&index| index != active))
+                    .filter_map(|index| match tabs.get(index)?.kind {
+                        TabKind::Terminal(id) => Some(id),
+                        _ => None,
+                    })
+                    .collect()
+            })
     }
 
     /// Drops panes that came back from a saved layout with nothing in them.
@@ -3500,7 +3537,7 @@ impl Shell {
                             // The path, not the label: a lettermark comes from the
                             // extension, and a tab someone has renamed no longer has
                             // one in its title.
-                            TabKind::Editor(path) | TabKind::Audio(path) => {
+                            TabKind::Editor(path) | TabKind::Audio(path) | TabKind::Image(path) => {
                                 file_mark(path.as_ref(), !active, mono.clone(), t)
                                     .into_any_element()
                             }
@@ -3884,6 +3921,7 @@ impl Shell {
                     Some(TabKind::Terminal(terminal)) => self.terminal_pane(terminal, window, cx),
                     Some(TabKind::Editor(key)) => self.editor_pane(&key, Some(*id), window, cx),
                     Some(TabKind::Audio(path)) => self.audio_pane(&path, window, cx),
+                    Some(TabKind::Image(path)) => self.image_pane(&path, window, cx),
                     Some(TabKind::Browser(browser)) => self.browser_pane(browser, window, cx),
                     #[cfg(target_os = "macos")]
                     Some(TabKind::IosSimulator) => self.ios_simulator_pane(window, cx),
@@ -4234,6 +4272,53 @@ mod tests {
         let sections = menu.sections();
         assert_eq!(sections.len(), 1);
         assert_eq!(sections[0][0].title.as_ref(), "Terminal");
+    }
+
+    fn image_tab(path: &str) -> Tab {
+        Tab {
+            title: path.rsplit('/').next().unwrap_or(path).to_owned().into(),
+            kind: TabKind::Image(path.to_owned().into()),
+            renamed: false,
+            pinned: false,
+        }
+    }
+
+    #[test]
+    fn opening_the_same_image_twice_focuses_the_one_tab_it_already_has() {
+        let mut space = Space::default();
+        space.open_tab(image_tab("/repo/shot.png"));
+        space.open_tab(Pane::test_tab());
+        space.open_tab(image_tab("/repo/shot.png"));
+
+        let (tabs, active) = space.root.leaf(PaneId(0)).unwrap();
+        assert_eq!(tabs.len(), 2);
+        assert_eq!(active, 0, "the second open focuses the first tab");
+    }
+
+    #[test]
+    fn an_image_open_in_another_pane_is_focused_there_rather_than_opened_again() {
+        let mut space = Space::default();
+        space.open_tab(image_tab("/repo/shot.png"));
+        space.split(Axis::Horizontal);
+        assert_eq!(space.focused, PaneId(1));
+
+        space.open_tab(image_tab("/repo/shot.png"));
+
+        assert_eq!(space.focused, PaneId(0));
+        let (tabs, _) = space.root.leaf(PaneId(1)).unwrap();
+        assert!(tabs.is_empty(), "the new pane did not get a second copy");
+    }
+
+    #[test]
+    fn two_images_are_two_tabs() {
+        let mut space = Space::default();
+        space.open_tab(image_tab("/repo/a.png"));
+        space.open_tab(image_tab("/repo/b.png"));
+
+        let (tabs, active) = space.root.leaf(PaneId(0)).unwrap();
+        assert_eq!(tabs.len(), 2);
+        assert_eq!(active, 1);
+        assert_eq!(tabs[1].title.as_ref(), "b.png");
     }
 
     #[test]

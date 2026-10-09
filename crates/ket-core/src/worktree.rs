@@ -491,6 +491,12 @@ pub struct EconomyPolicy {
     pub verbosity: Option<String>,
     /// Reasoning-summary mode.
     pub reasoning_summary: Option<String>,
+    /// How much successful command output the agent takes inline, in the
+    /// provider's own unit — see `crate::pack::PackPolicy::output_limit`.
+    pub output_limit: Option<u32>,
+    /// Whether a successful command's output is filtered before the model
+    /// reads it — see `crate::filter`.
+    pub command_filter: Option<bool>,
 }
 
 impl TokenReduction {
@@ -557,6 +563,12 @@ impl TokenReduction {
         overlay!(cross_session_inbound);
         overlay!(verbosity);
         overlay!(reasoning_summary);
+        if provider.output_limit.is_some() {
+            policy.output_limit = provider.output_limit;
+        }
+        if provider.command_filter.is_some() {
+            policy.command_filter = provider.command_filter;
+        }
         policy
     }
 
@@ -826,7 +838,8 @@ pub struct EconomyLaunch {
 
 /// Translates one provider-aware level into launch arguments and environment.
 /// Caller-supplied values are explicit ket settings and therefore take
-/// precedence over the pack's suggested cache and compaction values.
+/// precedence over the pack's suggested cache, output-cap and compaction
+/// values.
 pub fn economy_launch(
     agent: &str,
     level: &TokenReduction,
@@ -837,6 +850,7 @@ pub fn economy_launch(
     let policy = level.policy_for(agent);
     let mut launch = EconomyLaunch::default();
     let compact = autocompact.or(policy.autocompact.as_deref());
+    let output_limit = output_limit.or(policy.output_limit);
 
     if let Some(model) = policy.model.as_deref() {
         launch.args.extend(["--model".to_owned(), model.to_owned()]);
@@ -902,6 +916,16 @@ pub fn economy_launch(
                 "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS".to_owned(),
                 "1".to_owned(),
             );
+        }
+        // The hook script filters a successful command's output only when
+        // told which binary to ask, and this process is one: both ket
+        // binaries answer `--filter-hook`. See `crate::filter`.
+        if policy.command_filter == Some(true)
+            && let Ok(exe) = std::env::current_exe()
+        {
+            launch
+                .env
+                .insert(crate::filter::ENV.to_owned(), exe.display().to_string());
         }
     }
 
@@ -1487,6 +1511,60 @@ mod tests {
             !launch
                 .env
                 .contains_key("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS")
+        );
+    }
+
+    #[test]
+    fn a_packs_output_cap_reaches_claude_and_codex_in_their_own_units() {
+        let mut level = level_with_everything();
+        level.claude.output_limit = Some(20_000);
+        level.codex.output_limit = Some(5_000);
+        let claude = economy_launch("claude", &level, None, None, None);
+        let settings = claude
+            .args
+            .iter()
+            .find(|a| a.contains("bashOutputMaxChars"))
+            .expect("a settings document");
+        assert!(settings.contains(r#""bashOutputMaxChars":20000"#));
+        let codex = economy_launch("codex", &level, None, None, None);
+        assert!(
+            codex
+                .args
+                .contains(&"tool_output_token_limit=5000".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_callers_output_cap_wins_over_the_packs() {
+        let mut level = level_with_everything();
+        level.claude.output_limit = Some(20_000);
+        let launch = economy_launch("claude", &level, None, Some(9_000), None);
+        let settings = launch
+            .args
+            .iter()
+            .find(|a| a.contains("bashOutputMaxChars"))
+            .expect("a settings document");
+        assert!(settings.contains(r#""bashOutputMaxChars":9000"#));
+        assert!(!settings.contains("20000"));
+    }
+
+    #[test]
+    fn the_filter_is_named_only_when_a_level_asks_for_it() {
+        let level = level_with_everything();
+        let off = economy_launch("claude", &level, None, None, None);
+        assert!(!off.env.contains_key(crate::filter::ENV));
+
+        let mut asked = level_with_everything();
+        asked.claude.command_filter = Some(true);
+        let on = economy_launch("claude", &asked, None, None, None);
+        let exe = on.env.get(crate::filter::ENV).expect("the binary to ask");
+        assert!(std::path::Path::new(exe).is_absolute());
+        // Codex has no filter yet, so the key is accepted and ignored.
+        asked.codex.command_filter = Some(true);
+        assert!(
+            !economy_launch("codex", &asked, None, None, None)
+                .env
+                .contains_key(crate::filter::ENV)
         );
     }
 

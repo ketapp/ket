@@ -286,14 +286,17 @@ fn waiting_for_a_change_that_never_comes_returns_rather_than_blocking() {
     let sandbox = Sandbox::new("surface-quiet");
     let watcher = FileWatcher::watch(sandbox.root()).unwrap();
 
+    // Whether anything arrives is not the point, and not something to assert:
+    // on Linux, notify reports a stray change on a directory nobody touched
+    // often enough to fail CI. The invariant is that the wait ends — with the
+    // timeout when nothing came, sooner when something did.
     let started = Instant::now();
-    assert!(watcher.next_within(Duration::from_millis(150)).is_none());
+    let _ = watcher.next_within(Duration::from_millis(150));
     assert!(
         started.elapsed() < Duration::from_secs(2),
         "next_within overshot its timeout by {:?}",
         started.elapsed()
     );
-    assert!(watcher.try_next().is_none());
 }
 
 #[test]

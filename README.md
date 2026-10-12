@@ -1,12 +1,130 @@
-# ket
+<p align="center">
+  <img src="docs/images/ket-mark.svg" width="56" height="56" alt="ket">
+</p>
 
-Run coding agents in parallel across isolated Git worktrees, review what they
-produce, and keep the best result.
+<h1 align="center">ket</h1>
 
-ket is built for moving among many projects and several agents—Claude Code,
-Codex, OpenCode, and Grok—without treating any one agent as the center of the
-workflow. The desktop shell is native Rust and GPUI, not Electron. Optional
-browser tabs use the system WKWebView.
+<p align="center">
+  <strong>Build across projects at agent speed.</strong><br>
+  Work across many projects with multiple agents and isolated worktrees—all in
+  one focused native workspace.
+</p>
+
+<p align="center">
+  <a href="https://ketapp.dev">ketapp.dev</a> ·
+  <a href="https://ketapp.dev/docs/">Docs</a> ·
+  <a href="https://ketapp.dev/cli/">CLI reference</a> ·
+  <a href="CONTRIBUTING.md">Contributing</a>
+</p>
+
+<p align="center">
+  <img src="docs/images/ket.png" alt="ket with two agents running across three projects, a Claude Code session and a terminal split side by side, and the ket docs open in a browser tab.">
+</p>
+
+An IDE was built for one. ket was built for you and your agents.
+
+Each task gets its own Git worktree: a separate checkout of the repository on
+its own branch, where one agent works without touching anything else. You
+watch the agents from one window, read their diffs, and merge the work back
+when it's done.
+
+> ket isn't released yet. Until the first public build, run it from source —
+> see [Build and run](#build-and-run).
+
+## Keep all your projects moving at once
+
+Your day spans more than one repository. ket keeps your projects, worktrees
+and agents within reach, and the agents you switch away from keep working.
+
+<table>
+  <tr>
+    <td width="300" valign="top"><img src="docs/images/sidebar.png" width="280" alt="The sidebar sorted by status: worktrees from three projects, two of them running."></td>
+    <td width="70" valign="top"><img src="docs/images/rail.png" width="44" alt="The sidebar folded to a rail of project badges."></td>
+    <td valign="top">
+      <p><strong>One sidebar for all your projects.</strong> The sidebar lists
+      each project's worktrees and what their agents are doing. You switch
+      codebases with one click, and fold it to a rail of project badges when
+      you want the room.</p>
+      <p><strong>Know when an agent needs you.</strong> An agent that stops
+      for you in another project tells you at once, so you can answer it
+      without checking each project.</p>
+      <p><strong>Prompt any project from anywhere.</strong> Type into the
+      quick prompt to send work to any project, in an existing worktree or a
+      new one, without leaving the one you're in.</p>
+    </td>
+  </tr>
+</table>
+
+## Spend less on the same work
+
+Economy tells a worktree's agent how much to say, from Off to Max, in Claude
+Code and Codex. Fewer recaps and less restating means fewer tokens, and ket
+estimates what every session cost and what it saved. Plan usage, running
+agents, work waiting to merge and the Economy level sit in the header, which
+folds to a single line.
+
+<img src="docs/images/header.png" alt="The header: plan usage for three agents, the current branch, two agents running, five worktrees ready to merge, and Economy off.">
+<img src="docs/images/header-compact.png" alt="The same header folded to one line.">
+
+## Everything around the agent
+
+- **Run it from your iPhone or iPad.** Pair with a QR code, then follow every
+  run, answer permission prompts, start a task, and review and merge its diff.
+  The phone reaches your Mac over your own Wi-Fi, encrypted end to end.
+- **Your app's screen, in a tab.** Open the iPhone Simulator or the Android
+  Emulator as a tab beside the agent building your app, and <kbd>⌘S</kbd>
+  sends it a screenshot. The iPhone Simulator needs Apple silicon and Xcode.
+- **Speak your prompt.** Dictate instead of typing. On Apple silicon, ket
+  transcribes common languages on the device, so the audio stays on your Mac.
+- **A backlog for every project.** Write a task down in one line and come back
+  to it. A note can carry a description and files, and Start in worktree makes
+  a worktree for it and hands the agent the whole note.
+- **Merge from the sidebar.** ket lists what it will commit, then commits the
+  work and merges the branch into its base in your primary checkout. It never
+  switches that checkout's branch for you.
+- **A second opinion from Jev.** In beta, with a TypeSafe API key: Jev picks
+  the Economy level for tasks started from your phone, the backlog or the quick
+  prompt, and rates each permission prompt low, medium or high on your phone.
+  It never answers one for you.
+
+## Bring your own agents
+
+ket works with any coding agent, on any model. You choose the agent for each
+worktree, and the model through that agent or a local model through Ollama.
+ket finds Claude Code, Codex, Grok and OpenCode on its own and shows what each
+one is doing. Missing yours? ket is open source, so you can add it with a pull
+request.
+
+<img src="docs/images/agents.png" alt="Claude Code, Codex and OpenCode open as tabs in one worktree, with OpenCode running a GLM model, beside the ket site in a browser tab. The sidebar is folded to its rail.">
+
+## Script any of it
+
+The `ket` command talks to the same engine as the app, so you can add
+projects, create worktrees, start agents and read diffs from a shell or a
+script.
+
+```console
+$ ket project add .
+$ ket worktree add fix-flaky-poll
+fix-flaky-poll-3f2a9c41d0be
+$ ket run claude -o fix-flaky-poll-3f2a9c41d0be -p "fix the flaky test"
+$ ket ps
+$ ket diff fix-flaky-poll-3f2a9c41d0be --stat
+$ ket events --follow
+```
+
+## Built in Rust, from the ground up
+
+ket is Rust end to end. It draws its interface on the GPU with no browser
+underneath, and keeps disk work off the UI thread so the window responds while
+your agents run.
+
+- **Rust.** The app, the engine and the CLI share one language.
+- **GPU.** [gpui](https://www.gpui.rs) draws every frame through Metal, and
+  terminals run on `alacritty_terminal`.
+- **No Electron.** No bundled browser or JavaScript runtime. Optional browser
+  tabs use the system's WKWebView.
+- **293 ms** to clone a 20,000-file dependency folder copy-on-write.
 
 > ket launches tools that can execute commands as your user. Only enable
 > repository automation after you trust the repository. Worktrees isolate Git
@@ -14,11 +132,10 @@ browser tabs use the system WKWebView.
 
 ## Supported platforms
 
-The desktop application and release bundle currently target macOS 11 or newer.
-Core and CLI code may compile elsewhere, but non-macOS desktop behavior is not
-a supported release target. The companion phone application uses Expo for iOS,
-Android, and development web builds; its normal connection is to a relay on the
-same local network as the Mac.
+The desktop application and release bundle target macOS 11 or newer. Core and
+CLI code may compile elsewhere, but non-macOS desktop behavior is not a
+supported release target yet. The companion phone app is built with Expo and
+reaches the Mac over the local network; see `mobile/app/README.md`.
 
 ## Workspace layout
 
@@ -31,6 +148,7 @@ same local network as the Mac.
 | `crates/ket-relay-protocol` | Bounded relay framing |
 | `crates/ket-relay` | Local/development WebSocket relay |
 | `crates/ket-android` | Android-facing Rust integration |
+| `crates/ket-feedback` | Receives in-app feedback reports and emails them to one address |
 | `mobile/remote` | TypeScript remote-protocol client |
 | `mobile/app` | Expo phone application |
 | `vendor` | Locally patched GPUI and Alacritty terminal crates |
@@ -92,7 +210,7 @@ git diff --exit-code -- mobile/remote/src/gen
 ```
 
 The local desktop-host wire protocol is separate and currently version 5. The
-phone application protocol is version 1.7. Compatibility-sensitive changes
+phone application protocol is version 1.10. Compatibility-sensitive changes
 must preserve live-host attachment or include an explicit migration plan.
 
 ## Quality checks
@@ -111,7 +229,8 @@ npm test --prefix mobile/app -- --runInBand
 ```
 
 CI also checks generated protocol drift. The scheduled dependency workflow runs
-Rust advisory/license checks and npm audits.
+Rust advisory and license checks, and npm audits with a reviewed allowlist in
+`.github/npm-audit-allow.json` for advisories that have no patched release.
 
 ## Release process
 

@@ -40,6 +40,10 @@ pub(crate) enum Placement {
     BelowStart,
     /// Popup top-right to trigger bottom-right.
     BelowEnd,
+    /// Popup top-left to trigger top-right: beside the trigger rather than
+    /// under it, for a trigger in a narrow column — the sidebar's rail —
+    /// where a panel hung below would cover the next thing in the column.
+    RightStart,
 }
 
 impl Placement {
@@ -48,10 +52,12 @@ impl Placement {
         let x = match self {
             Self::AboveStart | Self::BelowStart => anchor.x,
             Self::AboveEnd | Self::BelowEnd => anchor.x - size.width,
+            Self::RightStart => anchor.x + TRIGGER_GAP,
         };
         let y = match self {
             Self::AboveStart | Self::AboveEnd => anchor.y - TRIGGER_GAP - size.height,
             Self::BelowStart | Self::BelowEnd => anchor.y + TRIGGER_GAP,
+            Self::RightStart => anchor.y,
         };
         Bounds {
             origin: point(x, y),
@@ -60,12 +66,17 @@ impl Placement {
     }
 
     /// The same cross-axis alignment on the other side of the trigger.
+    ///
+    /// Beside the trigger there is no other side worth flipping to: a panel
+    /// running off the bottom slides up instead — see the clamp in
+    /// [`PopupAnchor`]'s prepaint.
     fn flipped(self) -> Self {
         match self {
             Self::AboveStart => Self::BelowStart,
             Self::AboveEnd => Self::BelowEnd,
             Self::BelowStart => Self::AboveStart,
             Self::BelowEnd => Self::AboveEnd,
+            Self::RightStart => Self::RightStart,
         }
     }
 }
@@ -322,6 +333,7 @@ fn build(
                 })
                 .right_0()
                 .size(Pixels::ZERO),
+            Placement::RightStart => div().absolute().top_0().right_0().size(Pixels::ZERO),
         };
 
         anchor.child(

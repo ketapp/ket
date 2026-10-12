@@ -76,6 +76,7 @@ mod release;
 mod savings;
 mod search;
 mod shortcuts;
+mod sidebar_rail;
 mod snippet_picker;
 mod snippets;
 mod status_bar;
@@ -153,6 +154,15 @@ actions!(
         /// Show or hide the status bar along the bottom of the window.
         /// Dispatched by the View menu, whose item says which it will do.
         ToggleStatusBar,
+        /// The View menu's Zoom In: one step up in the code font size, which
+        /// the terminal, the diffs and the editor draw at. Saved as the
+        /// Appearance pane would save it — see `Shell::zoom_code`.
+        ZoomIn,
+        /// The View menu's Zoom Out: one step down. See [`ZoomIn`].
+        ZoomOut,
+        /// The View menu's Actual Size: the shipped code font size. See
+        /// [`ZoomIn`].
+        ActualSize,
         /// The File menu's Add to Backlog: the ⇧⌘A panel. The chord is the
         /// shell's own — see `shortcuts::CAPTURE_CHORD` — and is taken there
         /// before this; the item is its way in when something native, a web
@@ -253,6 +263,27 @@ const NEW_BLANK_DOCUMENT_CHORD: &str = "cmd-n";
 #[cfg(not(target_os = "macos"))]
 const NEW_BLANK_DOCUMENT_CHORD: &str = "ctrl-n";
 
+/// The chords that step the code font size up: the ones every browser,
+/// terminal and editor answers to. Two, because the key is `=` unshifted
+/// and `+` shifted, and people press both — a shifted punctuation key
+/// arrives as the shifted character, not as the key with a modifier.
+#[cfg(target_os = "macos")]
+const ZOOM_IN_CHORDS: [&str; 2] = ["cmd-=", "cmd-+"];
+#[cfg(not(target_os = "macos"))]
+const ZOOM_IN_CHORDS: [&str; 2] = ["ctrl-=", "ctrl-+"];
+
+/// The chord that steps the code font size down.
+#[cfg(target_os = "macos")]
+const ZOOM_OUT_CHORD: &str = "cmd--";
+#[cfg(not(target_os = "macos"))]
+const ZOOM_OUT_CHORD: &str = "ctrl--";
+
+/// The chord that puts the code font size back to the shipped one.
+#[cfg(target_os = "macos")]
+const ACTUAL_SIZE_CHORD: &str = "cmd-0";
+#[cfg(not(target_os = "macos"))]
+const ACTUAL_SIZE_CHORD: &str = "ctrl-0";
+
 /// The menu bar. macOS delivers Cmd-Q as a *menu* key equivalent, and gpui
 /// installs no menu bar of its own — without one the chord reaches nothing
 /// and the app cannot be quit from the keyboard at all.
@@ -295,14 +326,21 @@ fn app_menus(status_bar_open: bool) -> Vec<Menu> {
         },
         Menu {
             name: "View".into(),
-            items: vec![MenuItem::action(
-                if status_bar_open {
-                    "Hide Status Bar"
-                } else {
-                    "Show Status Bar"
-                },
-                ToggleStatusBar,
-            )],
+            items: vec![
+                MenuItem::action(
+                    if status_bar_open {
+                        "Hide Status Bar"
+                    } else {
+                        "Show Status Bar"
+                    },
+                    ToggleStatusBar,
+                ),
+                MenuItem::separator(),
+                // In the platform's own order — Safari's, Terminal's.
+                MenuItem::action("Actual Size", ActualSize),
+                MenuItem::action("Zoom In", ZoomIn),
+                MenuItem::action("Zoom Out", ZoomOut),
+            ],
         },
     ]
 }
@@ -609,6 +647,12 @@ struct Shell {
     /// Whether the header is folded to its compact strip — see
     /// `crate::header`.
     pub(crate) header_compact: bool,
+    /// Whether the sidebar is folded to its rail — see `crate::sidebar_rail`.
+    pub(crate) sidebar_compact: bool,
+    /// The sidebar strip's ⋯ menu, while it is open.
+    pub(crate) sidebar_menu: Option<crate::ui::menu::OpenMenu<crate::sidebar_rail::SidebarAction>>,
+    /// Which rail tile's peek is open, and where the pointer is.
+    pub(crate) rail_hover: crate::sidebar_rail::RailHover,
     /// Which height the traffic lights were last placed for, so they are
     /// moved when the header changes rather than on every frame.
     pub(crate) lights_placed: std::cell::Cell<Option<bool>>,
@@ -772,6 +816,9 @@ struct Shell {
     /// other half, the proportional face the chrome sets prose in, is not a
     /// field: it is reached through `fonts::prose`. See `crate::fonts`.
     pub(crate) chrome_family: SharedString,
+    /// Every installed family, read the first time Settings asks for it and
+    /// kept: see `crate::fonts::Catalogue`.
+    pub(crate) font_catalogue: Option<crate::fonts::Catalogue>,
     /// Provider quota, refreshed on its own threads and read synchronously.
     pub(crate) rate_limits: Arc<RateLimitCache>,
     /// Keeps the background quota refresh alive for the window's life: the
@@ -972,10 +1019,6 @@ impl Shell {
         let keymap = crate::palette::keymap(&registry);
         let focus = cx.focus_handle();
         let installed = cx.text_system().all_font_names();
-        // Resolved together, and this is the only call: `resolve` is also
-        // what hands the prose face to `fonts::prose`, which every component
-        // reads it from.
-        let (font_family, chrome_family, _prose) = crate::fonts::resolve(&installed);
 
         let rate_limits = Arc::new(RateLimitCache::with_real_sources());
         let refresh = rate_limits.spawn_background_refresh();
@@ -1040,6 +1083,15 @@ impl Shell {
         let theme_config = config.theme;
         let audio_enabled = config.viewer.audio;
         let theme = crate::appearance::current(&theme_config, cx);
+        // Resolved together, against the families the config chose: `resolve`
+        // is also what hands the chrome pair to `fonts::prose` and
+        // `fonts::chrome`, which every component reads them from.
+        let faces = crate::fonts::resolve(
+            &installed,
+            theme_config.code_font.as_deref(),
+            theme_config.ui_font.as_deref(),
+        );
+        let (font_family, chrome_family) = (faces.code, faces.chrome);
 
         // Watched, not merely held. A field notifies its own entity when the
         // text changes; the shell is what draws the list ranked against it,
@@ -1166,6 +1218,9 @@ impl Shell {
                     sidebar_filter: Default::default(),
                     activity_view: false,
                     header_compact: false,
+                    sidebar_compact: false,
+                    sidebar_menu: None,
+                    rail_hover: Default::default(),
                     lights_placed: std::cell::Cell::new(None),
                     reading_git_status: false,
                     git_watch: Default::default(),
@@ -1219,6 +1274,7 @@ impl Shell {
                     focus,
                     font_family,
                     chrome_family,
+                    font_catalogue: None,
                     outbox,
                     caret: Caret::default(),
                     rate_limits,
@@ -1310,6 +1366,9 @@ impl Shell {
             sidebar_filter: Default::default(),
             activity_view: false,
             header_compact: false,
+            sidebar_compact: false,
+            sidebar_menu: None,
+            rail_hover: Default::default(),
             lights_placed: std::cell::Cell::new(None),
             reading_git_status: false,
             git_watch: Default::default(),
@@ -1363,6 +1422,7 @@ impl Shell {
             focus,
             font_family,
             chrome_family,
+            font_catalogue: None,
             outbox,
             caret: Caret::default(),
             rate_limits,
@@ -1537,7 +1597,11 @@ impl Render for Shell {
             let mut outer = div().size_full();
             crate::header::card(&self.theme)
                 .flex_none()
-                .w(self.sidebar_width)
+                .w(if self.sidebar_compact {
+                    crate::sidebar_rail::RAIL_W
+                } else {
+                    self.sidebar_width
+                })
                 .h_full()
                 .child(crate::region::Region::element(
                     &region,
@@ -1674,6 +1738,15 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &ToggleStatusBar, _, cx| {
                 this.set_status_bar(!this.status_bar_open, cx);
             }))
+            .on_action(cx.listener(|this, _: &ZoomIn, _, cx| {
+                this.zoom_code(1, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ZoomOut, _, cx| {
+                this.zoom_code(-1, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ActualSize, _, cx| {
+                this.reset_code_zoom(cx);
+            }))
             .on_action(cx.listener(|this, _: &AddToBacklog, _, cx| {
                 if !this.modal_open() && this.open_quick_capture(cx) {
                     cx.notify();
@@ -1703,6 +1776,7 @@ impl Render for Shell {
                         | this.token_reduction_menu.take().is_some()
                         | this.worktree_snippet_menu.take().is_some()
                         | this.project_menu.take().is_some()
+                        | this.sidebar_menu.take().is_some()
                         | this.tab_open_in.take().is_some()
                         | this.tab_snippets.take().is_some()
                         | this.tab_context_menu.take().is_some()
@@ -1829,6 +1903,10 @@ impl Render for Shell {
                         return;
                     }
                     if this.project_menu_key(event, cx) {
+                        cx.notify();
+                        return;
+                    }
+                    if this.sidebar_menu_key(event, cx) {
                         cx.notify();
                         return;
                     }
@@ -2193,6 +2271,10 @@ fn main() {
                 KeyBinding::new(CLOSE_TAB_CHORD, CloseTab, None),
                 KeyBinding::new(NEW_TERMINAL_TAB_CHORD, NewTerminalTab, None),
                 KeyBinding::new(NEW_BLANK_DOCUMENT_CHORD, NewBlankDocument, None),
+                KeyBinding::new(ZOOM_IN_CHORDS[0], ZoomIn, None),
+                KeyBinding::new(ZOOM_IN_CHORDS[1], ZoomIn, None),
+                KeyBinding::new(ZOOM_OUT_CHORD, ZoomOut, None),
+                KeyBinding::new(ACTUAL_SIZE_CHORD, ActualSize, None),
             ]);
             #[cfg(target_os = "macos")]
             cx.bind_keys([
@@ -2338,6 +2420,27 @@ mod tests {
             }),
             "the app menu has a Quit item"
         );
+    }
+
+    #[test]
+    fn the_view_menu_offers_zoom() {
+        // The chords are bound in `main`; the items are how someone finds
+        // out they exist, and how a native view that took the chord — a web
+        // page — still hands it on.
+        let menus = app_menus(true);
+        let view = menus
+            .iter()
+            .find(|menu| menu.name.as_ref() == "View")
+            .expect("the View menu exists");
+        for wanted in [ZoomIn.name(), ZoomOut.name(), ActualSize.name()] {
+            assert!(
+                view.items.iter().any(|item| match item {
+                    MenuItem::Action { action, .. } => action.name() == wanted,
+                    _ => false,
+                }),
+                "the View menu has {wanted}"
+            );
+        }
     }
 
     #[test]

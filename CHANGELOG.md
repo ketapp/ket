@@ -33,6 +33,14 @@ words; no internal names, no commit hashes. ket reads this file
   show the repository they go to.
 - Image files (PNG, JPEG, GIF, WebP, BMP, TIFF) open in their own tab, scaled
   to fit, with their size shown underneath.
+- Settings → Appearance now sets the interface and code font sizes and
+  shows or hides the status bar, and each change is drawn as soon as it
+  is made.
+- ⌘= and ⌘− step the code font size and ⌘0 puts it back, from the View
+  menu too; in Settings, the up and down arrows step a font size box.
+- Settings → Appearance picks the interface font and the code font from
+  what is installed, with the code list kept to fixed-width faces.
+- The Theme picker shows each theme's accent colour beside its name.
 
 ### Improved
 
@@ -45,3 +53,8 @@ words; no internal names, no commit hashes. ket reads this file
 ### Fixed
 
 - A worktree now shows blue “waiting” while Codex asks you a question in its terminal.
+- Running OpenCode 2 in a ket pane no longer reports a failed plugin: the
+  plugin ket installs now speaks OpenCode 2's plugin language as well as 1's.
+- An OpenCode 2 pane now runs its own server, so the plugin reports the pane
+  it is in rather than nothing; an OpenCode 1 pane is unchanged, and a
+  settings file saved by an earlier ket picks this up without being edited.

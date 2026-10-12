@@ -1786,6 +1786,17 @@ fn the_opencode_plugin_is_a_file_of_kets_own() {
         text.contains("KET_LAUNCH_TOKEN"),
         "inert without ket's token"
     );
+    // One file, two plugin APIs: OpenCode 1 calls `server`, OpenCode 2
+    // `setup`. A ket that has only one of them installed half of an
+    // OpenCode someone has upgraded.
+    assert!(
+        text.contains("async server({ directory })"),
+        "the OpenCode 1 entrypoint"
+    );
+    assert!(
+        text.contains("async setup(ctx)"),
+        "the OpenCode 2 entrypoint"
+    );
 
     // An older plugin is not this one.
     std::fs::write(&plugin, text.replace("chat.message", "chat.old")).unwrap();

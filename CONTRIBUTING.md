@@ -3,6 +3,57 @@
 Thanks for helping improve ket. Please open an issue before a large change so
 the design and scope can be agreed before substantial work begins.
 
+## A change, start to finish
+
+1. **Start from an issue.** Find or open one at
+   https://github.com/ketapp/ket/issues. A `feat` or `fix` names the issue
+   it closes, so it needs one before the commit, not after.
+2. **Fork and clone.** Fork the repository on GitHub, clone your fork, and
+   turn the commit check on once per clone:
+
+   ```sh
+   git clone https://github.com/<you>/ket.git && cd ket
+   git config core.hooksPath .githooks
+   ```
+
+3. **Branch from the issue.** `gh issue develop 142 --checkout` names the
+   branch `142-…`, which is what ket's `{issue}` commit placeholder reads.
+   Any branch name works; the number in the commit message is what matters.
+4. **Set up and build.** See *Development setup* below, then:
+
+   ```sh
+   cargo build -p ket-cli
+   cargo build -p ket-ui
+   ```
+
+5. **Run it against disposable state**, never your own:
+
+   ```sh
+   export XDG_DATA_HOME="$(mktemp -d)"
+   cargo run -p ket-cli -- project add .
+   cargo run -p ket-ui
+   ```
+
+6. **Make the change**, keeping the *Architectural invariants* below. Add or
+   update tests when behaviour changes.
+7. **Run the checks** in *Before submitting*. CI runs the same ones on the
+   pull request.
+8. **Commit** in the format under *Commit messages*. The hook refuses a
+   subject that does not fit, and nothing else: it asks nothing of the
+   content.
+
+   ```sh
+   git commit -m "fix(editor): triple-click selects the line, not the line break (#142)"
+   ```
+
+9. **Push and open a pull request** against `main` with the same one-line
+   title, `Closes #142` in the description, and what you did to verify it.
+   Pull requests are squash-merged, so the title is the commit that lands.
+
+`main` is updated by the maintainers in batches rather than one commit at a
+time, so rebase onto it before opening the pull request and again if it
+moves while yours is open.
+
 ## Development setup
 
 The desktop application is developed and released on macOS. Install Xcode (the

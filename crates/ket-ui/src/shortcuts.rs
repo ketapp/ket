@@ -139,11 +139,6 @@ pub(crate) const SEARCH_HINT: &str = "Search (⌘O)";
 #[cfg(not(target_os = "macos"))]
 pub(crate) const SEARCH_HINT: &str = "Search (Ctrl+O)";
 
-#[cfg(target_os = "macos")]
-pub(crate) const QUICK_PROMPT_HINT: &str = "Quick prompt (⌘⇧P)";
-#[cfg(not(target_os = "macos"))]
-pub(crate) const QUICK_PROMPT_HINT: &str = "Quick prompt (Ctrl+Shift+P)";
-
 /// The key hints along the bottom of the window: the keys first, then what
 /// they do. Only chords this table and the tab strip actually answer to.
 #[cfg(target_os = "macos")]

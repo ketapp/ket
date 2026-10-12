@@ -1021,18 +1021,30 @@ impl HookInstaller for CodexHooks {
 /// person's `opencode.json` is never touched. It posts the same envelope as
 /// [`SCRIPT`], with a payload in Claude Code's shape — `hook_event_name`,
 /// `session_id`, `tool_name`, `tool_input` — so everything that reads a
-/// report reads OpenCode's unchanged. Checked against OpenCode 1.18.33's
-/// source (`packages/opencode/src/plugin`, `permission`, `session`):
+/// report reads OpenCode's unchanged. Checked against OpenCode 1.18.33's and
+/// 2.0.24's source, and every path below driven end to end against 2.0.24:
 ///
-/// - `chat.message` is `UserPromptSubmit`; `tool.execute.before` / `after`
-///   are `PreToolUse` / `PostToolUse`, with OpenCode's tool names spelled as
-///   Claude's so rows read the same.
+/// - `chat.message` (OpenCode 1) and the `prompt` hook (OpenCode 2) are
+///   `UserPromptSubmit`; `tool.execute.before` / `after` are `PreToolUse` /
+///   `PostToolUse`, with OpenCode's tool names spelled as Claude's so rows
+///   read the same. OpenCode 2 renamed the tools — `bash` became `shell`,
+///   `task` became `subagent` — so each half of the plugin carries its own
+///   map. OpenCode 2's after-hook also says whether the tool failed, which
+///   OpenCode 1's never did, so it can report `PostToolUseFailure`.
+/// - A turn's end is where the versions differ most. OpenCode 1 had
+///   `session.status` going idle and `session.error`; OpenCode 2 has
+///   `session.execution.succeeded` / `failed` / `interrupted`, which are
+///   `Stop` / `StopFailure` / `Interrupt`. (`session.status` is matched
+///   too, for a build that publishes it.)
 /// - The `permission.asked` event is `PermissionRequest`. There is no hook
-///   for the answer, so its `permission.replied` event is reported as the
-///   tool starting — otherwise a prompt answered on the desktop would stay
-///   open on the phone until the tool finished. A rejection ends the turn,
-///   and the `session.status` idle that follows is `Stop`.
-/// - Its `question` tool asking is a `Notification` of a person being needed,
+///   for the answer, so `permission.replied` is reported as the tool
+///   starting — otherwise a prompt answered on the desktop would stay open
+///   on the phone until the tool finished. A rejection ends the turn.
+///   OpenCode 2's permission carries an action and resources rather than
+///   the metadata 1's did, which is where the command a shell wants and the
+///   file an edit wants come from.
+/// - OpenCode 1's question tool raised `question.asked`; OpenCode 2 asks as
+///   a form. Either way it is a `Notification` of a person being needed,
 ///   with no question a phone could answer, and the reply is the tool going
 ///   on. A rejected question ends the turn, as a rejected permission does.
 /// - `Stop` carries the text the session last said, as Claude's
@@ -1040,6 +1052,17 @@ impl HookInstaller for CodexHooks {
 /// - A subagent's session (one with a parent) is left out altogether: its
 ///   prompt's Reject opens a feedback box rather than rejecting, so a phone
 ///   must not answer it, and its tools are not the pane's.
+///
+/// **Where the plugin runs is the pane's server, and OpenCode 2 moved it.**
+/// OpenCode 1 was one process: the terminal UI *was* the server, and the
+/// plugin saw the environment ket had injected into the pane. OpenCode 2
+/// splits them: a TUI is a client of one shared background service, and
+/// plugins run in the service — whose environment is a snapshot of whoever
+/// started it, not of any one pane. Reports would name the wrong pane, or
+/// none at all. So the pane's launch line passes `--standalone`
+/// (see [`crate::config::default_agents`]), giving the pane a private server
+/// and the plugin the pane's environment back. `opencode acp`, which the
+/// sidebar's sessions speak, already runs a private server per process.
 ///
 /// Inert outside a terminal ket opened: without ket's launch token in the
 /// environment it reports nothing.
@@ -1105,91 +1128,112 @@ impl HookInstaller for OpenCodeHooks {
 /// The plugin's first line, which says a file is ket's to remove.
 const OPENCODE_PLUGIN_MARK: &str = "// ket-opencode-plugin";
 
-/// OpenCode's plugin — see [`OpenCodeHooks`]. The v1 module shape, a default
-/// export of `{ id, server }`; OpenCode rejects a module with any other
-/// export. Every post is queued, so reports keep their order, and none is
+/// OpenCode's plugin — see [`OpenCodeHooks`]. One file, two plugin APIs:
+/// OpenCode 1 calls the default export's `server`, OpenCode 2 its `setup`,
+/// and neither reads the other's half, so one install serves both. OpenCode
+/// 1 requires `server` to be a function and ignores members it does not
+/// know; OpenCode 2 requires `id` and `setup` (or `effect`) and ignores
+/// `server`. Every post is queued, so reports keep their order, and none is
 /// awaited by a hook OpenCode waits on.
 const OPENCODE_PLUGIN: &str = r#"// ket-opencode-plugin — installed by ket. Reports an OpenCode session's
 // lifecycle back to ket, so its sidebar and a paired phone see what it is
 // doing. Inert outside a terminal ket opened. Deleting this file uninstalls it.
+//
+// One file, two plugin APIs: OpenCode 1 calls `server`, OpenCode 2 calls
+// `setup`, and neither reads the other's half. Both share the wire — the
+// envelope, where it is posted, and the queue that keeps reports in order.
 import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
+// Claude Code's names for OpenCode 1's tools, so a row reads the same
+// whichever agent it is. OpenCode 2 renamed the tools and has a map of its
+// own, inside `setup`.
+const TOOLS = {
+  bash: "Bash", edit: "Edit", write: "Write", read: "Read", glob: "Glob",
+  grep: "Grep", list: "LS", webfetch: "WebFetch", websearch: "WebSearch",
+  task: "Task", todowrite: "TodoWrite",
+};
+// Only the fields a report reads: a file's contents would be the body.
+const pick = (args) => {
+  const a = args || {};
+  const out = {};
+  for (const key of ["command", "description", "pattern", "path", "url", "query"]) {
+    if (typeof a[key] === "string") out[key] = a[key];
+  }
+  if (typeof a.filePath === "string") out.file_path = a.filePath;
+  return out;
+};
+
+// Everything that posts a report, bound to one project directory. `null`
+// when ket did not launch this OpenCode — without the launch token there is
+// nothing to report and nowhere the report would be believed.
+const wire = (directory) => {
+  const env = process.env;
+  const token = env.KET_LAUNCH_TOKEN;
+  if (!token) return null;
+  const home = env.HOME || "";
+  const hooks = join(home, ".ket", "agent-hooks");
+
+  const envelope = (to, payload) => JSON.stringify({
+    agent: env.KET_AGENT_NAME || "opencode",
+    worktree: env.KET_WORKTREE_ID || "",
+    pane: env.KET_PANE_KEY || "",
+    token: to,
+    version: env.KET_HOOK_VERSION || "1",
+    payload,
+  });
+  const hostEndpoint = () => {
+    try {
+      const [port, hostToken] = readFileSync(join(hooks, "host-endpoint"), "utf8").split("\n");
+      return port && hostToken ? { port, token: hostToken } : null;
+    } catch {
+      return null;
+    }
+  };
+  const post = async (target, payload) => {
+    if (!target || !target.port || !target.token) return false;
+    try {
+      const response = await fetch(`http://127.0.0.1:${target.port}/hook`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: envelope(target.token, payload),
+        signal: AbortSignal.timeout(1000),
+      });
+      return response.ok;
+    } catch {
+      return false;
+    }
+  };
+  // In order, the host first, then the window; kept for later if neither.
+  // A pane-bound launch's own token is already correct, so it goes first —
+  // the discovery file never carries a pane-specific token and would only
+  // cost a round trip that never validates for one.
+  let queue = Promise.resolve();
+  const report = (event, fields) => {
+    const payload = { hook_event_name: event, cwd: directory, ...fields };
+    queue = queue.then(async () => {
+      const inherited = { port: env.KET_HOOK_PORT, token };
+      const host = hostEndpoint();
+      const [first, second] = env.KET_PANE_KEY ? [inherited, host] : [host, inherited];
+      if (await post(first, payload)) return;
+      if (await post(second, payload)) return;
+      try {
+        mkdirSync(hooks, { recursive: true, mode: 0o700 });
+        appendFileSync(join(hooks, "spool.jsonl"), envelope(host ? host.token : token, payload) + "\n", { mode: 0o600 });
+      } catch {}
+    });
+  };
+  return { report };
+};
+
 export default {
   id: "ket",
-  server: async ({ directory }) => {
-    const env = process.env;
-    const token = env.KET_LAUNCH_TOKEN;
-    if (!token) return {};
-    const home = env.HOME || "";
-    const hooks = join(home, ".ket", "agent-hooks");
 
-    // Claude Code's names, so a row reads the same whichever agent it is.
-    const TOOLS = {
-      bash: "Bash", edit: "Edit", write: "Write", read: "Read", glob: "Glob",
-      grep: "Grep", list: "LS", webfetch: "WebFetch", websearch: "WebSearch",
-      task: "Task", todowrite: "TodoWrite",
-    };
-    // Only the fields a report reads: a file's contents would be the body.
-    const pick = (args) => {
-      const a = args || {};
-      const out = {};
-      for (const key of ["command", "description", "pattern", "path", "url", "query"]) {
-        if (typeof a[key] === "string") out[key] = a[key];
-      }
-      if (typeof a.filePath === "string") out.file_path = a.filePath;
-      return out;
-    };
-
-    const envelope = (to, payload) => JSON.stringify({
-      agent: env.KET_AGENT_NAME || "opencode",
-      worktree: env.KET_WORKTREE_ID || "",
-      pane: env.KET_PANE_KEY || "",
-      token: to,
-      version: env.KET_HOOK_VERSION || "1",
-      payload,
-    });
-    const hostEndpoint = () => {
-      try {
-        const [port, hostToken] = readFileSync(join(hooks, "host-endpoint"), "utf8").split("\n");
-        return port && hostToken ? { port, token: hostToken } : null;
-      } catch {
-        return null;
-      }
-    };
-    const post = async (target, payload) => {
-      if (!target || !target.port || !target.token) return false;
-      try {
-        const response = await fetch(`http://127.0.0.1:${target.port}/hook`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: envelope(target.token, payload),
-          signal: AbortSignal.timeout(1000),
-        });
-        return response.ok;
-      } catch {
-        return false;
-      }
-    };
-    // In order, the host first, then the window; kept for later if neither.
-    // A pane-bound launch's own token is already correct, so it goes first —
-    // the discovery file never carries a pane-specific token and would only
-    // cost a round trip that never validates for one.
-    let queue = Promise.resolve();
-    const report = (event, fields) => {
-      const payload = { hook_event_name: event, cwd: directory, ...fields };
-      queue = queue.then(async () => {
-        const inherited = { port: env.KET_HOOK_PORT, token };
-        const host = hostEndpoint();
-        const [first, second] = env.KET_PANE_KEY ? [inherited, host] : [host, inherited];
-        if (await post(first, payload)) return;
-        if (await post(second, payload)) return;
-        try {
-          mkdirSync(hooks, { recursive: true, mode: 0o700 });
-          appendFileSync(join(hooks, "spool.jsonl"), envelope(host ? host.token : token, payload) + "\n", { mode: 0o600 });
-        } catch {}
-      });
-    };
+  // ---- OpenCode 1 ----------------------------------------------------------
+  async server({ directory }) {
+    const w = wire(directory);
+    if (!w) return {};
+    const { report } = w;
 
     const children = new Set();
     const own = (session) => session && !children.has(session);
@@ -1291,6 +1335,144 @@ export default {
         });
       },
     };
+  },
+
+  // ---- OpenCode 2 ----------------------------------------------------------
+  async setup(ctx) {
+    const w = wire(ctx.location && ctx.location.directory);
+    if (!w) return;
+    const { report } = w;
+
+    // OpenCode 2's own tool names, which renamed the tools: `bash` became
+    // `shell`, `task` became `subagent`. Claude's names, so a row reads the
+    // same whichever agent it is. A permission action is the tool's name,
+    // with `write` and `patch` both folding into `edit`.
+    const TOOLS = {
+      shell: "Bash", edit: "Edit", patch: "Edit", write: "Write", read: "Read",
+      glob: "Glob", grep: "Grep", webfetch: "WebFetch", websearch: "WebSearch",
+      subagent: "Task", question: "AskUserQuestion",
+    };
+
+    const children = new Set();
+    const own = (session) => session && !children.has(session);
+    const asked = new Map();
+    // What each session last said, for its Stop to carry.
+    const last = new Map();
+    const stop = (session) => {
+      report("Stop", { session_id: session, last_assistant_message: last.get(session) });
+      last.delete(session);
+    };
+    // What a permission is about, from its action and resources: the
+    // command a shell wants to run, the file an edit wants to touch.
+    const question = (d) => {
+      const name = TOOLS[d.action] || d.action;
+      const first = (d.resources || [])[0];
+      const input = {};
+      if (typeof first === "string" && first) {
+        if (name === "Bash") input.command = first;
+        else input.file_path = first;
+      }
+      return { tool_name: name, tool_input: input };
+    };
+
+    await ctx.session.hook("prompt", (event) => {
+      if (own(event.sessionID)) report("UserPromptSubmit", { session_id: event.sessionID });
+    });
+    await ctx.tool.hook("execute.before", (event) => {
+      if (!own(event.sessionID)) return;
+      report("PreToolUse", {
+        session_id: event.sessionID,
+        tool_use_id: event.id,
+        tool_name: TOOLS[event.tool] || event.tool,
+        tool_input: pick(event.input),
+      });
+    });
+    await ctx.tool.hook("execute.after", (event) => {
+      if (!own(event.sessionID)) return;
+      // The output's size, never the output: how much a command cost the
+      // context is worth a number, and the body would be the post.
+      const content = event.status === "completed" && event.result ? event.result.content : undefined;
+      report(event.status === "error" ? "PostToolUseFailure" : "PostToolUse", {
+        session_id: event.sessionID,
+        tool_use_id: event.id,
+        tool_name: TOOLS[event.tool] || event.tool,
+        tool_input: pick(event.input),
+        tool_response_bytes: typeof content === "string" ? content.length
+          : content ? JSON.stringify(content).length : undefined,
+      });
+    });
+
+    // The bus: sessions, turns, prompts and questions, in OpenCode 2's
+    // names. Everything the hooks above cannot see.
+    const controller = new AbortController();
+    void (async () => {
+      for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
+        const d = event.data || {};
+        switch (event.type) {
+          case "session.created":
+            if (d.parentID) children.add(d.sessionID);
+            else report("SessionStart", { session_id: d.sessionID, source: "startup" });
+            break;
+          // The turn's own begin and end. OpenCode 2 has no `session.status`:
+          // `execution.succeeded` is the turn that finished, which is Stop.
+          case "session.execution.succeeded":
+            if (own(d.sessionID)) stop(d.sessionID);
+            break;
+          case "session.execution.failed":
+            if (own(d.sessionID)) {
+              report("StopFailure", { session_id: d.sessionID });
+              last.delete(d.sessionID);
+            }
+            break;
+          case "session.execution.interrupted":
+            if (own(d.sessionID)) {
+              report("Interrupt", { session_id: d.sessionID });
+              last.delete(d.sessionID);
+            }
+            break;
+          case "session.status":
+            if (d.status && d.status.type === "idle" && own(d.sessionID)) stop(d.sessionID);
+            break;
+          // What the session last said. OpenCode 2 ends each of the
+          // assistant's text parts with its full value, which is all of it.
+          case "session.text.ended":
+            if (own(d.sessionID) && typeof d.text === "string") last.set(d.sessionID, d.text);
+            break;
+          // The answer is reported as the tool starting — otherwise a prompt
+          // answered on the desktop would stay open on the phone until the
+          // tool finished.
+          case "permission.asked":
+            if (own(d.sessionID)) {
+              const q = question(d);
+              asked.set(d.id, q);
+              report("PermissionRequest", { session_id: d.sessionID, ...q });
+            }
+            break;
+          case "permission.replied": {
+            const q = asked.get(d.requestID);
+            asked.delete(d.requestID);
+            if (q && d.reply !== "reject") report("PreToolUse", { session_id: d.sessionID, ...q });
+            break;
+          }
+          // The question tool asks as a form. A form whose owner is not a
+          // session — `"global"`, an MCP elicitation — is nobody's pane.
+          case "form.created": {
+            const f = d.form || {};
+            if (own(f.sessionID) && f.sessionID !== "global") {
+              report("Notification", { session_id: f.sessionID, notification_type: "agent_needs_input" });
+            }
+            break;
+          }
+          case "form.replied":
+            if (own(d.sessionID) && d.sessionID !== "global") {
+              report("PreToolUse", { session_id: d.sessionID, tool_name: "AskUserQuestion" });
+            }
+            break;
+        }
+      }
+    })().catch(() => {});
+
+    return () => controller.abort();
   },
 };
 "#;

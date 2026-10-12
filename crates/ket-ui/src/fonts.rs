@@ -47,11 +47,21 @@
 //! sit beside the files in `assets/fonts`). They are registered with the text
 //! system by [`install_bundled`] before the window opens, which is what makes
 //! them show up as installed to the pickers below.
+//!
+//! # A chosen face
+//!
+//! Settings can name a family for the code and one for the interface —
+//! `theme.code_font` and `theme.ui_font`. A chosen family that is installed
+//! takes the role outright; the interface one takes both chrome roles, since
+//! a person who picks a font for the interface means all of it. One that is
+//! not installed is passed over for the lists above, with a note in the log,
+//! so an uninstalled font cannot put the window in Helvetica.
 
 use std::borrow::Cow;
-use std::sync::OnceLock;
+use std::collections::BTreeSet;
+use std::sync::RwLock;
 
-use gpui::{SharedString, Styled, TextSystem};
+use gpui::{Pixels, SharedString, Styled, TextSystem, font, px};
 
 /// The faces compiled into the binary.
 ///
@@ -141,10 +151,12 @@ const PROSE: [&str; 3] = ["Geist", ".SystemUIFont", "Mona Sans"];
 /// A global rather than a field threaded through the component tree. Every
 /// constructor in `ui::` takes a `&Theme` and nothing else, and the
 /// alternative is a second parameter on all of them carrying a value that is
-/// decided once at load and never changes again — which is how a component
-/// vocabulary starts growing arguments that have nothing to do with the
-/// component. Set once by [`resolve`]; read through [`prose`].
-static RESOLVED_PROSE: OnceLock<SharedString> = OnceLock::new();
+/// decided at load and changes only when Settings picks another — which is
+/// how a component vocabulary starts growing arguments that have nothing to
+/// do with the component. Set by [`resolve`]; read through [`prose`]. A lock
+/// rather than a `OnceLock` because a face picked in Settings has to take
+/// effect in the window that picked it.
+static RESOLVED_PROSE: RwLock<Option<SharedString>> = RwLock::new(None);
 
 /// Registers the bundled faces with the text system.
 ///
@@ -158,23 +170,125 @@ pub(crate) fn install_bundled(text_system: &TextSystem) {
     }
 }
 
+/// The faces the shell holds itself, resolved against what is installed.
+///
+/// Two rather than three: the prose face is reached through [`prose`] and
+/// nothing else, so handing it back as well would be a value with no reader.
+pub(crate) struct Faces {
+    /// The terminal grid's and the editor's.
+    pub(crate) code: SharedString,
+    /// The window root's: identifiers and figures.
+    pub(crate) chrome: SharedString,
+}
+
 /// Picks every family the chrome needs, given the text system's list of what
-/// is installed, and remembers the prose one for [`prose`].
+/// is installed and the families Settings chose, and remembers the chrome
+/// pair for [`prose`] and [`chrome`].
 ///
 /// One call rather than three, so the prose face cannot be resolved by one
 /// caller and left unset for the rest of the window — which would show up as
 /// a chrome that is proportional in the places that asked early and Helvetica
-/// in the places that asked late.
-pub(crate) fn resolve(installed: &[String]) -> (SharedString, SharedString, SharedString) {
-    let code: SharedString = monospace_family(installed).into();
-    let chrome: SharedString = chrome_family(installed).into();
-    let prose: SharedString = prose_family(installed).into();
-    // `set` rather than `get_or_init`: a second window would resolve to the
-    // same names anyway, and swallowing the second call is the behaviour that
-    // keeps this from caring how many there are.
-    let _ = RESOLVED_PROSE.set(prose.clone());
-    let _ = RESOLVED_CHROME.set(chrome.clone());
+/// in the places that asked late. Called again when a choice changes, which
+/// is what the lock on the globals is for.
+pub(crate) fn resolve(installed: &[String], code: Option<&str>, ui: Option<&str>) -> Faces {
+    let (code, chrome, prose) = pick(installed, code, ui);
+    *RESOLVED_PROSE.write().unwrap_or_else(|e| e.into_inner()) = Some(prose);
+    *RESOLVED_CHROME.write().unwrap_or_else(|e| e.into_inner()) = Some(chrome.clone());
+    Faces { code, chrome }
+}
+
+/// The three faces a choice comes to — code, chrome, prose — before any of
+/// them is remembered. Kept apart from [`resolve`] so it can be asked
+/// without touching the globals, which is what a test needs.
+fn pick(
+    installed: &[String],
+    code: Option<&str>,
+    ui: Option<&str>,
+) -> (SharedString, SharedString, SharedString) {
+    let code: SharedString = match chosen(code, installed) {
+        Some(family) => family.to_owned().into(),
+        None => monospace_family(installed).into(),
+    };
+    let (chrome, prose): (SharedString, SharedString) = match chosen(ui, installed) {
+        Some(family) => (family.to_owned().into(), family.to_owned().into()),
+        None => (
+            chrome_family(installed).into(),
+            prose_family(installed).into(),
+        ),
+    };
     (code, chrome, prose)
+}
+
+/// A chosen family, when the text system knows it.
+///
+/// One it does not — uninstalled since it was picked, or misspelt in the
+/// file — is noted and passed over, so the window opens in ket's own face
+/// rather than in whatever `gpui` substitutes for a family it cannot find.
+fn chosen<'a>(family: Option<&'a str>, installed: &[String]) -> Option<&'a str> {
+    let family = family?;
+    if installed.iter().any(|name| name == family) {
+        Some(family)
+    } else {
+        tracing::warn!(
+            family,
+            "a chosen font is not installed; drawing with ket's own"
+        );
+        None
+    }
+}
+
+/// Every family the text system knows, for the pickers in Settings, and the
+/// fixed-width ones among them for the code picker.
+///
+/// Read once per window and kept — see `Shell::font_catalogue` — because
+/// telling a fixed-width face from a proportional one means loading each
+/// family, and a Mac has hundreds.
+pub(crate) struct Catalogue {
+    /// Every family, sorted without regard to case, less the hidden system
+    /// faces whose names start with a dot.
+    pub(crate) families: Vec<String>,
+    /// The families that set an `i` as wide as an `m`: what a terminal grid
+    /// can be drawn in.
+    pub(crate) fixed: Vec<String>,
+}
+
+impl Catalogue {
+    /// Reads what is installed, the bundled faces among it.
+    pub(crate) fn read(text_system: &TextSystem) -> Self {
+        let mut families: Vec<String> = text_system
+            .all_font_names()
+            .into_iter()
+            .filter(|name| !name.starts_with('.'))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        families.sort_by_key(|name| name.to_lowercase());
+        let fixed = families
+            .iter()
+            .filter(|family| is_fixed_width(text_system, family))
+            .cloned()
+            .collect();
+        Self { families, fixed }
+    }
+}
+
+/// Whether `family` sets every glyph at one width.
+///
+/// Measured rather than asked: `gpui` does not pass Core Text's fixed-pitch
+/// trait through, and the trait is unset on some faces that are. An `i` and
+/// an `m` are the narrowest and widest of the lowercase, so a face that
+/// gives the two one advance gives everything one advance. A face missing
+/// either glyph — a symbol set, an emoji font — is not one to draw code in.
+fn is_fixed_width(text_system: &TextSystem, family: &str) -> bool {
+    let id = text_system.resolve_font(&font(family.to_owned()));
+    let size: Pixels = px(16.0);
+    match (
+        text_system.advance(id, size, 'i'),
+        text_system.advance(id, size, 'm'),
+    ) {
+        (Ok(i), Ok(m)) => i.width > px(0.0) && i.width == m.width,
+        _ => false,
+    }
 }
 
 /// The chrome's prose face, wherever a component needs it.
@@ -186,21 +300,23 @@ pub(crate) fn resolve(installed: &[String]) -> (SharedString, SharedString, Shar
 /// The chrome's mono, once the shell has resolved it — for a figure inside
 /// a component that has been set in prose, such as a count in a segment.
 /// See [`RESOLVED_PROSE`] for why this is a global.
-static RESOLVED_CHROME: OnceLock<SharedString> = OnceLock::new();
+static RESOLVED_CHROME: RwLock<Option<SharedString>> = RwLock::new(None);
 
 /// The chrome's mono face: what the window root wears. Only needed where a
 /// prose parent has to be undone for a figure.
 pub(crate) fn chrome() -> SharedString {
     RESOLVED_CHROME
-        .get()
-        .cloned()
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
         .unwrap_or_else(|| CHROME[CHROME.len() - 1].into())
 }
 
 pub(crate) fn prose() -> SharedString {
     RESOLVED_PROSE
-        .get()
-        .cloned()
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
         .unwrap_or_else(|| PROSE[PROSE.len() - 1].into())
 }
 
@@ -246,4 +362,51 @@ fn first_installed(preferred: &[&'static str], installed: &[String]) -> &'static
         .copied()
         .find(|family| installed.iter().any(|name| name == family))
         .unwrap_or(preferred[preferred.len() - 1])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn installed(names: &[&str]) -> Vec<String> {
+        names.iter().map(|name| (*name).to_owned()).collect()
+    }
+
+    #[test]
+    fn nothing_chosen_is_the_shipped_pair() {
+        let (code, chrome, prose) = pick(
+            &installed(&["Monaspace Neon", "Geist Mono", "Geist"]),
+            None,
+            None,
+        );
+        assert_eq!(code.as_ref(), "Monaspace Neon");
+        assert_eq!(chrome.as_ref(), "Geist Mono");
+        assert_eq!(prose.as_ref(), "Geist");
+    }
+
+    #[test]
+    fn a_chosen_family_that_is_installed_takes_its_role() {
+        let (code, chrome, prose) = pick(
+            &installed(&["Monaspace Neon", "Geist Mono", "Geist", "Menlo", "Avenir"]),
+            Some("Menlo"),
+            Some("Avenir"),
+        );
+        assert_eq!(code.as_ref(), "Menlo");
+        // The interface choice is the whole chrome, words and identifiers.
+        assert_eq!(chrome.as_ref(), "Avenir");
+        assert_eq!(prose.as_ref(), "Avenir");
+    }
+
+    #[test]
+    fn a_chosen_family_that_is_not_installed_is_passed_over() {
+        // Uninstalled since it was picked. The shipped faces, not Helvetica.
+        let (code, chrome, prose) = pick(
+            &installed(&["Monaspace Neon", "Geist Mono", "Geist"]),
+            Some("Gone Mono"),
+            Some("Gone Sans"),
+        );
+        assert_eq!(code.as_ref(), "Monaspace Neon");
+        assert_eq!(chrome.as_ref(), "Geist Mono");
+        assert_eq!(prose.as_ref(), "Geist");
+    }
 }

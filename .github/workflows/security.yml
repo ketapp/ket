@@ -9,6 +9,8 @@ on:
       - "mobile/**/package-lock.json"
       - "mobile/**/package.json"
       - deny.toml
+      - .github/npm-audit-allow.json
+      - .github/scripts/npm-audit.mjs
   schedule:
     - cron: "23 9 * * 1"
   workflow_dispatch:
@@ -32,6 +34,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-      - run: npm audit --prefix mobile/remote --audit-level=high
-      - run: npm audit --prefix mobile/app --audit-level=high
-      - run: npm audit --prefix scripts/checkpoint-xterm --audit-level=high
+      # `npm audit --audit-level=high`, minus the advisories with no patched
+      # release that .github/npm-audit-allow.json lists, each with its reason.
+      - run: node .github/scripts/npm-audit.mjs mobile/remote
+      - run: node .github/scripts/npm-audit.mjs mobile/app
+      - run: node .github/scripts/npm-audit.mjs scripts/checkpoint-xterm

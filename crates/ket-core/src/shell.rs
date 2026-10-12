@@ -136,10 +136,11 @@ pub fn line(command: &str, arguments: &[String]) -> String {
 
 /// How to start `shell` so that it runs `startup` at its first prompt.
 ///
-/// A `startup` of `None` is a plain interactive shell, which needs no wrapper
-/// and gets none: a terminal pane a person opened for themselves should be
-/// indistinguishable from the one their terminal emulator would have given
-/// them.
+/// A `startup` of `None` is a plain interactive login shell, which needs no
+/// wrapper and gets none: a terminal pane a person opened for themselves
+/// should be indistinguishable from the one their terminal emulator would have
+/// given them — and on macOS that is a login shell, which reads `.zprofile`,
+/// where installers put `~/.local/bin` and the like.
 pub fn launch(shell: &str, startup: Option<&str>) -> ShellLaunch {
     launch_in(wrapper_root().ok().as_deref(), shell, startup)
 }
@@ -155,7 +156,7 @@ pub fn launch_in(root: Option<&Path>, shell: &str, startup: Option<&str>) -> She
     let Some(startup) = startup else {
         return ShellLaunch {
             command: shell.to_owned(),
-            args: Vec::new(),
+            args: vec!["-l".to_owned()],
             env: BTreeMap::new(),
         };
     };

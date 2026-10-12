@@ -87,6 +87,8 @@ pub(crate) struct WindowView {
     activity_view: bool,
     /// Whether the header was folded to its compact strip.
     header_compact: bool,
+    /// Whether the sidebar was folded to its rail.
+    sidebar_compact: bool,
     /// The span the Savings popup totals over, by name — see
     /// `crate::savings::SavingsPeriod::name`. An unknown or missing name reads
     /// as the default.
@@ -110,6 +112,7 @@ impl Default for WindowView {
             selected: None,
             activity_view: false,
             header_compact: false,
+            sidebar_compact: false,
             savings_period: String::new(),
             explorer: BTreeMap::new(),
         }
@@ -209,6 +212,7 @@ impl Shell {
             selected: self.selected_id(),
             activity_view: self.activity_view,
             header_compact: self.header_compact,
+            sidebar_compact: self.sidebar_compact,
             savings_period: self.savings_period.name().to_owned(),
             explorer: self.expanded_trees(),
         }
@@ -303,6 +307,7 @@ impl Shell {
         self.panel_view = crate::panel::PanelView::from_name(&view.panel_view);
         self.activity_view = view.activity_view;
         self.header_compact = view.header_compact;
+        self.sidebar_compact = view.sidebar_compact;
         self.savings_period = crate::savings::SavingsPeriod::from_name(&view.savings_period);
 
         for project in &mut self.projects {

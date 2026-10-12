@@ -22,11 +22,11 @@ use gpui::{
 };
 use ket_core::agents::{Catalogue, DefaultAgent, PermissionPreset, ShellProber};
 use ket_core::config::{
-    AgentLaunch, Config, DEFAULT_LINE_HEIGHT, FONT_SIZE_RANGE, LINE_HEIGHT_RANGE, OpenCodeGoConfig,
-    UpdateCheck,
+    AgentLaunch, Config, DEFAULT_CODE_FONT_SIZE, DEFAULT_LINE_HEIGHT, DEFAULT_UI_FONT_SIZE,
+    FONT_SIZE_RANGE, LINE_HEIGHT_RANGE, OpenCodeGoConfig, UpdateCheck,
 };
 use ket_core::rate_limits::Provider;
-use ket_core::theme::{Appearance, AppearancePreference, Theme};
+use ket_core::theme::{Appearance, AppearancePreference, Color, Theme};
 
 use crate::input::{Style, TextInput, is_text, text_field};
 use crate::paint::{alpha, paint};
@@ -36,8 +36,9 @@ use crate::ui::chip::{badge, caption, kbd, tag, tinted_tag};
 use crate::ui::dialog::{card, centered, header};
 use crate::ui::group::{button_group, segment};
 use crate::ui::icon::{Icon, icon, icon_well, sized_icon};
-use crate::ui::menu::{MenuEntry, MenuItem, OpenMenu, dropdown};
+use crate::ui::menu::{MenuEntry, MenuItem, MenuKey, OpenMenu, dropdown};
 use crate::ui::row::heading_row;
+use crate::ui::toast::Tone;
 use crate::ui::toggle::{checkbox, switch};
 use crate::ui::{CAPTION, LABEL, RADIUS_LG, RADIUS_MD, RADIUS_SM, WELL_SM};
 use crate::{EditorType, Shell};
@@ -336,9 +337,22 @@ pub(crate) struct Preferences {
     editor_font_size: Entity<TextInput>,
     /// The Editor pane's line height, as it is being typed.
     editor_line_height: Entity<TextInput>,
+    /// The Appearance pane's interface font size, as it is being typed.
+    ///
+    /// Pre-filled, unlike the editor's size: there is nothing for it to
+    /// inherit, so the number in the box is the number in effect. Empty means
+    /// the size ket shipped with, the way the line height field does.
+    ui_font_size: Entity<TextInput>,
+    /// The Appearance pane's code font size, as it is being typed.
+    code_font_size: Entity<TextInput>,
     /// The Theme picker's dropdown, open with the current choice ticked, or
     /// `None` while it is closed.
     theme_menu: Option<OpenMenu<Option<String>>>,
+    /// The Interface font picker's dropdown, when open: every installed
+    /// family behind a filter row.
+    ui_font_menu: Option<OpenMenu<Option<String>>>,
+    /// The Code font picker's dropdown, when open: the fixed-width families.
+    code_font_menu: Option<OpenMenu<Option<String>>>,
     /// The General pane's Worktree directory dropdown, when open.
     worktree_dir_menu: Option<OpenMenu<DirPick>>,
     /// The General pane's Check for updates dropdown, when open.
@@ -362,6 +376,16 @@ enum Unhook {
     Working,
     /// What happened in each agent.
     Done(Vec<ket_core::agent_hooks::Removed>),
+}
+
+/// Which of the Appearance pane's two font pickers a menu or a pick belongs
+/// to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FontRole {
+    /// The chrome: the sidebar, tabs, status bar and every label.
+    Ui,
+    /// The terminal grid, the diffs and the editor.
+    Code,
 }
 
 /// One of the view's text fields.
@@ -391,6 +415,10 @@ enum Field {
     EditorFontSize,
     /// The multiple of that size one editor line occupies.
     EditorLineHeight,
+    /// The size the window's chrome is drawn at.
+    UiFontSize,
+    /// The size the terminal and diffs are drawn at.
+    CodeFontSize,
     /// The open snippet card's name.
     SnippetName,
     /// The TypeSafe API key for Jev's beta.
@@ -399,7 +427,7 @@ enum Field {
 
 impl Field {
     /// Every field, in the order they are drawn.
-    const ALL: [Field; 12] = [
+    const ALL: [Field; 14] = [
         Field::Search,
         Field::Command,
         Field::Arguments,
@@ -410,6 +438,8 @@ impl Field {
         Field::MergeTemplate,
         Field::EditorFontSize,
         Field::EditorLineHeight,
+        Field::UiFontSize,
+        Field::CodeFontSize,
         Field::SnippetName,
         Field::JevKey,
     ];
@@ -447,6 +477,9 @@ impl Field {
             // nowhere else in the pane a keyboard would want to go.
             Field::EditorFontSize => Field::EditorLineHeight,
             Field::EditorLineHeight => Field::EditorFontSize,
+            // The Appearance pane's two sizes are a group for the same reason.
+            Field::UiFontSize => Field::CodeFontSize,
+            Field::CodeFontSize => Field::UiFontSize,
             // Tab from the name goes to the body box, which is not a text
             // field — see `Shell::snippets_key`.
             Field::SnippetName => Field::SnippetName,
@@ -483,8 +516,18 @@ impl Preferences {
             Field::MergeTemplate => Some(self.merge_template.clone()),
             Field::EditorFontSize => Some(self.editor_font_size.clone()),
             Field::EditorLineHeight => Some(self.editor_line_height.clone()),
+            Field::UiFontSize => Some(self.ui_font_size.clone()),
+            Field::CodeFontSize => Some(self.code_font_size.clone()),
             Field::SnippetName => self.snippets.name.clone(),
             Field::JevKey => Some(self.jev_key.clone()),
+        }
+    }
+
+    /// One font picker's dropdown, open or not.
+    fn font_menu_mut(&mut self, role: FontRole) -> &mut Option<OpenMenu<Option<String>>> {
+        match role {
+            FontRole::Ui => &mut self.ui_font_menu,
+            FontRole::Code => &mut self.code_font_menu,
         }
     }
 
@@ -703,6 +746,20 @@ impl Shell {
             cx,
         );
         self.watch_field(&editor_line_height, cx);
+        // The two Appearance sizes show what is in effect, and say in their
+        // placeholder what clearing the box goes back to.
+        let ui_font_size = TextInput::with_text(
+            DEFAULT_UI_FONT_SIZE.to_string(),
+            &config.theme.ui_font_size.to_string(),
+            cx,
+        );
+        self.watch_field(&ui_font_size, cx);
+        let code_font_size = TextInput::with_text(
+            DEFAULT_CODE_FONT_SIZE.to_string(),
+            &config.theme.code_font_size.to_string(),
+            cx,
+        );
+        self.watch_field(&code_font_size, cx);
         self.popup = None;
         self.preferences = Some(Preferences {
             section,
@@ -719,7 +776,11 @@ impl Shell {
             merge_template,
             editor_font_size,
             editor_line_height,
+            ui_font_size,
+            code_font_size,
             theme_menu: None,
+            ui_font_menu: None,
+            code_font_menu: None,
             worktree_dir_menu: None,
             update_menu: None,
             phones: crate::phones::PhonesPane::default(),
@@ -810,7 +871,9 @@ impl Shell {
         let theme = view.theme_menu.take().is_some();
         let dir = view.worktree_dir_menu.take().is_some();
         let update = view.update_menu.take().is_some();
-        theme || dir || update
+        let ui_font = view.ui_font_menu.take().is_some();
+        let code_font = view.code_font_menu.take().is_some();
+        theme || dir || update || ui_font || code_font
     }
 
     /// Opens or closes the Worktree directory dropdown.
@@ -994,6 +1057,274 @@ impl Shell {
         self.theme = crate::appearance::current(&self.theme_config, cx);
     }
 
+    /// Every installed family, read the first time it is asked for and kept
+    /// for the window's life — see [`crate::fonts::Catalogue`].
+    fn font_catalogue(&mut self, cx: &App) -> &crate::fonts::Catalogue {
+        self.font_catalogue
+            .get_or_insert_with(|| crate::fonts::Catalogue::read(cx.text_system()))
+    }
+
+    /// Opens one font picker's dropdown, or closes it if it is the one open.
+    ///
+    /// Takes the keyboard for the shell while the menu is up. The filter
+    /// across the top holds it otherwise, and a character typed to narrow
+    /// the list would land in that field too, through the input context a
+    /// field registers while it is focused. The theme picker needs no such
+    /// thing because nothing is typed at it.
+    fn toggle_font_menu(&mut self, role: FontRole, window: &mut Window, cx: &mut Context<Self>) {
+        let open = self
+            .preferences
+            .as_mut()
+            .is_some_and(|view| view.font_menu_mut(role).is_some());
+        self.close_preference_menus();
+        if open {
+            return;
+        }
+        let catalogue = self.font_catalogue(cx);
+        let (families, shipped) = match role {
+            FontRole::Ui => (
+                catalogue.families.clone(),
+                format!(
+                    "{} for names and figures, {} for words",
+                    crate::fonts::chrome_family(&catalogue.families),
+                    crate::fonts::prose_family(&catalogue.families),
+                ),
+            ),
+            FontRole::Code => (
+                catalogue.fixed.clone(),
+                crate::fonts::monospace_family(&catalogue.families).to_owned(),
+            ),
+        };
+        let Some(view) = self.preferences.as_mut() else {
+            return;
+        };
+        let current = match role {
+            FontRole::Ui => view.config.theme.ui_font.clone(),
+            FontRole::Code => view.config.theme.code_font.clone(),
+        };
+        let (origin, placeholder) = match role {
+            FontRole::Ui => ("preferences-ui-font", "Filter fonts"),
+            FontRole::Code => ("preferences-code-font", "Filter fixed-width fonts"),
+        };
+        // ket's own first, then a separator, then everything installed. The
+        // separator takes no selection slot, so a family's row is one past
+        // its index.
+        let selected = current
+            .as_ref()
+            .and_then(|name| families.iter().position(|family| family == name))
+            .map_or(0, |index| index + 1);
+        let shipped_row = MenuItem::new(None, "Default").subtitle(shipped);
+        let mut entries: Vec<MenuEntry<Option<String>>> =
+            vec![MenuEntry::Item(if current.is_none() {
+                shipped_row.checked()
+            } else {
+                shipped_row
+            })];
+        entries.push(MenuEntry::Separator);
+        entries.extend(families.into_iter().map(|family| {
+            let item = MenuItem::new(Some(family.clone()), family.clone());
+            MenuEntry::Item(if current.as_deref() == Some(family.as_str()) {
+                item.checked()
+            } else {
+                item
+            })
+        }));
+        *view.font_menu_mut(role) = Some(
+            OpenMenu::new(
+                origin.into(),
+                Some(placeholder.into()),
+                FONT_SELECT_WIDTH,
+                entries,
+            )
+            .selected(selected)
+            .offset(px(0.0), px(6.0)),
+        );
+        window.focus(&self.focus);
+    }
+
+    /// Routes a key to whichever font picker's dropdown is open. Returns
+    /// whether one took it.
+    fn font_menu_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) -> bool {
+        let Some(view) = self.preferences.as_mut() else {
+            return false;
+        };
+        let (role, result) = if let Some(menu) = view.ui_font_menu.as_mut() {
+            (FontRole::Ui, menu.key(event))
+        } else if let Some(menu) = view.code_font_menu.as_mut() {
+            (FontRole::Code, menu.key(event))
+        } else {
+            return false;
+        };
+        match result {
+            MenuKey::Ignored => false,
+            MenuKey::Consumed => true,
+            MenuKey::Close => {
+                *view.font_menu_mut(role) = None;
+                true
+            }
+            MenuKey::Run(family) => {
+                self.set_font(role, family, cx);
+                true
+            }
+        }
+    }
+
+    /// Changes the family one of the pickers names, saves it, and draws
+    /// with it at once.
+    fn set_font(&mut self, role: FontRole, family: Option<String>, cx: &mut Context<Self>) {
+        let Some(view) = self.preferences.as_mut() else {
+            return;
+        };
+        view.ui_font_menu = None;
+        view.code_font_menu = None;
+        if !view.writable {
+            return;
+        }
+        let before = view.config.theme.clone();
+        match role {
+            FontRole::Ui => view.config.theme.ui_font = family,
+            FontRole::Code => view.config.theme.code_font = family,
+        }
+        match view.config.save() {
+            Ok(()) => {
+                view.error = None;
+                self.theme_config = view.config.theme.clone();
+                self.apply_fonts(cx);
+            }
+            Err(error) => {
+                view.config.theme = before;
+                view.error = Some(error.to_string());
+            }
+        }
+    }
+
+    /// Re-picks the faces the window draws with from what the config now
+    /// names. The terminals take the new family as they are synced each
+    /// frame, the editor and the chrome read it as they render, and the
+    /// prose face goes through `fonts::prose`, which `resolve` resets.
+    fn apply_fonts(&mut self, cx: &mut Context<Self>) {
+        let installed = self.font_catalogue(cx).families.clone();
+        let faces = crate::fonts::resolve(
+            &installed,
+            self.theme_config.code_font.as_deref(),
+            self.theme_config.ui_font.as_deref(),
+        );
+        self.font_family = faces.code;
+        self.chrome_family = faces.chrome;
+        cx.notify();
+    }
+
+    /// The View menu's Zoom In and Zoom Out: one step in the code font size,
+    /// which the terminal, the diffs and the editor draw at. Saved the way
+    /// the Appearance pane saves it, so the pane and the chord agree.
+    pub(crate) fn zoom_code(&mut self, step: i16, cx: &mut Context<Self>) {
+        self.set_code_font_size(stepped(self.theme_config.code_font_size, step), cx);
+    }
+
+    /// The View menu's Actual Size: the shipped code font size.
+    pub(crate) fn reset_code_zoom(&mut self, cx: &mut Context<Self>) {
+        self.set_code_font_size(DEFAULT_CODE_FONT_SIZE, cx);
+    }
+
+    /// Saves a code font size reached by a chord rather than typed, and
+    /// draws with it.
+    ///
+    /// Through the Settings view's copy of the config while the view is
+    /// open, so its box shows what the chord did rather than what was last
+    /// typed into it; through the file otherwise. A file that will not load
+    /// is left alone and said so, as the view would leave it: writing
+    /// defaults over it is how a hand-edited config gets destroyed by a
+    /// keystroke.
+    fn set_code_font_size(&mut self, size: u16, cx: &mut Context<Self>) {
+        if size == self.theme_config.code_font_size {
+            return;
+        }
+        let editor_follows_code = if let Some(view) = self.preferences.as_mut() {
+            if !view.writable {
+                return;
+            }
+            let before = view.config.theme.code_font_size;
+            view.config.theme.code_font_size = size;
+            if let Err(error) = view.config.save() {
+                view.config.theme.code_font_size = before;
+                view.error = Some(error.to_string());
+                return;
+            }
+            view.error = None;
+            view.code_font_size
+                .update(cx, |input, _| input.set_text(&size.to_string()));
+            view.editor_font_size.update(cx, |input, _| {
+                input.set_placeholder(format!("{size} \u{2014} the code font size"));
+            });
+            view.config.editor.font_size.is_none()
+        } else {
+            let mut config = match Config::load() {
+                Ok(config) => config,
+                Err(error) => {
+                    self.toast(
+                        Tone::Error,
+                        format!("The font size was not changed: {error}"),
+                        cx,
+                    );
+                    return;
+                }
+            };
+            config.theme.code_font_size = size;
+            if let Err(error) = config.save() {
+                self.toast(
+                    Tone::Error,
+                    format!("The font size was not saved: {error}"),
+                    cx,
+                );
+                return;
+            }
+            config.editor.font_size.is_none()
+        };
+        self.theme_config.code_font_size = size;
+        if editor_follows_code {
+            self.editor_type.font_size = size;
+        }
+        cx.notify();
+    }
+
+    /// Up or down in one of the font size boxes: the next whole size, saved
+    /// and drawn at once, so the arrows are a way to watch the size change
+    /// rather than to type a number and hope.
+    fn step_size_box(
+        &mut self,
+        field: Field,
+        step: i16,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(input) = self.preferences.as_ref().and_then(|view| view.input(field)) else {
+            return;
+        };
+        let typed = input.read(cx).text();
+        let current = match typed.trim() {
+            "" => match field {
+                Field::UiFontSize => DEFAULT_UI_FONT_SIZE,
+                Field::CodeFontSize => DEFAULT_CODE_FONT_SIZE,
+                // Empty here is following the code size, so that is where a
+                // step starts from.
+                _ => self.theme_config.code_font_size,
+            },
+            // A box holding something that is not a number is left alone:
+            // Enter will say what is wrong with it.
+            text => match text.parse::<u16>() {
+                Ok(size) => size,
+                Err(_) => return,
+            },
+        };
+        let next = stepped(current, step);
+        input.update(cx, |input, _| input.set_text(&next.to_string()));
+        if field == Field::EditorFontSize {
+            self.save_editor_type(cx);
+        } else {
+            self.save_appearance_type(window, cx);
+        }
+    }
+
     /// Saves the commit-message template.
     ///
     /// [`Config::save`] validates before it writes, so a template naming a
@@ -1116,6 +1447,104 @@ impl Shell {
         }
     }
 
+    /// Saves the Appearance pane's two font sizes, and applies them to the
+    /// window at once. Returns whether the pane is settled — false when a
+    /// value would not parse, which holds the view open with its error rather
+    /// than letting the typing vanish with the modal.
+    ///
+    /// Read and written together, as the Editor pane's pair is: they are one
+    /// control in two boxes. A value that will not parse leaves the file
+    /// alone and says why — the typed text stays, because taking it away is
+    /// how somebody loses the number they were halfway through correcting.
+    ///
+    /// Takes the window because the chrome's size is the window's rem, which
+    /// nothing reads back from the config each frame the way the terminals
+    /// read the code size.
+    fn save_appearance_type(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(view) = self.preferences.as_ref() else {
+            return true;
+        };
+        if !view.writable {
+            return true;
+        }
+        let ui = font_size_typed(
+            &view.ui_font_size.read(cx).text(),
+            DEFAULT_UI_FONT_SIZE,
+            "Interface font size",
+        );
+        let code = font_size_typed(
+            &view.code_font_size.read(cx).text(),
+            DEFAULT_CODE_FONT_SIZE,
+            "Code font size",
+        );
+
+        let Some(view) = self.preferences.as_mut() else {
+            return true;
+        };
+        let (ui, code) = match (ui, code) {
+            (Ok(ui), Ok(code)) => (ui, code),
+            // The interface size's complaint first, because it is the field
+            // above.
+            (Err(why), _) | (_, Err(why)) => {
+                view.error = Some(why);
+                return false;
+            }
+        };
+
+        // Nothing typed that is not already saved. Said early so that closing
+        // the view does not rewrite the file every time it is opened.
+        if (
+            view.config.theme.ui_font_size,
+            view.config.theme.code_font_size,
+        ) == (ui, code)
+        {
+            return true;
+        }
+
+        let previous = (
+            view.config.theme.ui_font_size,
+            view.config.theme.code_font_size,
+        );
+        view.config.theme.ui_font_size = ui;
+        view.config.theme.code_font_size = code;
+        match view.config.save() {
+            Ok(()) => {
+                view.error = None;
+                // The Editor pane's size field names what it inherits in its
+                // placeholder, and what it inherits has just changed.
+                view.editor_font_size.update(cx, |input, _| {
+                    input.set_placeholder(format!("{code} \u{2014} the code font size"));
+                });
+                let editor_follows_code = view.config.editor.font_size.is_none();
+                self.theme_config = view.config.theme.clone();
+                // Live, not on the next launch, for the reason the Editor
+                // pane's type is. The terminals pick the code size up from
+                // `theme_config` as they are synced each frame; the chrome
+                // is sized from the window's rem; the editor and the diffs
+                // draw at `editor_type`, which follows the code size unless
+                // the Editor pane has set its own.
+                window.set_rem_size(px(f32::from(ui)));
+                if editor_follows_code {
+                    self.editor_type.font_size = code;
+                }
+                cx.notify();
+                true
+            }
+            Err(error) => {
+                // Put the saved values back, so what the pane reports and what
+                // the window draws with cannot drift apart. `Config::save`
+                // validates before it writes, so this is where a size of 300
+                // is refused.
+                (
+                    view.config.theme.ui_font_size,
+                    view.config.theme.code_font_size,
+                ) = previous;
+                view.error = Some(error.to_string());
+                false
+            }
+        }
+    }
+
     /// Changes whether one provider is offered by selectors and launch resolution.
     fn set_agent_enabled(&mut self, name: &str, enabled: bool) {
         let Some(view) = self.preferences.as_mut() else {
@@ -1177,6 +1606,7 @@ impl Shell {
     fn refresh_agents(&mut self) {
         ket_core::shell::clear_probe_cache();
         ket_core::ollama::clear_cache();
+        ket_core::agents::clear_help_cache();
         let Some(view) = self.preferences.as_mut() else {
             return;
         };
@@ -1475,6 +1905,8 @@ impl Shell {
         if let Some(view) = self.preferences.as_mut()
             && let Some(spec) = view.agent_spec_mut(name)
         {
+            // `None` is the shipped line, not an empty one: the spec resolves
+            // it to whatever ket ships now, this release or the next.
             spec.launch = None;
             if let Some(env) = shipped_env {
                 spec.env = env;
@@ -1508,16 +1940,18 @@ impl Shell {
     ///
     /// A draft that will not parse holds the panel open with its error rather
     /// than vanishing, so the only way to lose typing is to fix it or clear it.
-    pub(crate) fn close_preferences(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn close_preferences(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // Committed before the launch draft decides whether the view may
         // close: a pasted cookie is as much unsaved work as a typed command,
         // and it has no card to hold open with an error of its own.
         self.save_opencode_credentials(cx);
-        // Same reason: a number typed into the Editor pane and then dismissed
-        // with Escape is a setting somebody believes they changed. A value
-        // that will not parse holds the view open, the way an unparseable
-        // launch draft does.
-        let settled = self.save_editor_type(cx);
+        // Same reason: a number typed into the Appearance or Editor pane and
+        // then dismissed with Escape is a setting somebody believes they
+        // changed. A value that will not parse holds the view open, the way
+        // an unparseable launch draft does. Appearance first: the editor's
+        // size falls back to the code size, which has to be the one just
+        // typed by the time the editor's is resolved.
+        let settled = self.save_appearance_type(window, cx) && self.save_editor_type(cx);
         if settled && self.commit_agent_draft(cx) && self.commit_snippet_draft(cx) {
             self.preferences = None;
             self.publish_agents(cx);
@@ -1544,6 +1978,11 @@ impl Shell {
             return false;
         }
         if self.snippets_key(event, window, cx) {
+            return true;
+        }
+        // A font picker's dropdown is the topmost thing on screen while it
+        // is open, and it is typed at — so it comes before the fields.
+        if self.font_menu_key(event, cx) {
             return true;
         }
 
@@ -1576,6 +2015,8 @@ impl Shell {
             focused,
             Some((Field::EditorFontSize | Field::EditorLineHeight, _))
         );
+        let on_size_field = matches!(focused, Some((Field::UiFontSize | Field::CodeFontSize, _)));
+        let on_size_box = on_size_field || matches!(focused, Some((Field::EditorFontSize, _)));
 
         match event.keystroke.key.as_str() {
             // A Revoke asking to be sure backs out first; the view closes on
@@ -1583,11 +2024,14 @@ impl Shell {
             "escape" if self.cancel_phone_prompt() => {}
             "escape" if self.close_preference_menus() => {}
             "escape" if self.clear_preferences_search(cx) => {}
-            "escape" => self.close_preferences(cx),
+            "escape" => self.close_preferences(window, cx),
             "enter" if on_template_field => self.save_merge_template(cx),
             "enter" if on_jev_field => self.save_jev_key(cx),
             "enter" if on_type_field => {
                 self.save_editor_type(cx);
+            }
+            "enter" if on_size_field => {
+                self.save_appearance_type(window, cx);
             }
             "enter" if on_usage_field => self.save_opencode_credentials(cx),
             "enter" if on_field => self.save_agent_launch(cx),
@@ -1596,6 +2040,14 @@ impl Shell {
                     && let Some(next) = self.preferences.as_ref().map(|view| view.next_field(field))
                 {
                     self.focus_preferences_field(next, window, cx);
+                }
+            }
+            // In a size box the arrows step the number rather than the
+            // sections, which is what a number box's arrows do everywhere.
+            "up" | "down" if on_size_box => {
+                if let Some((field, _)) = focused {
+                    let step = if event.keystroke.key == "up" { 1 } else { -1 };
+                    self.step_size_box(field, step, window, cx);
                 }
             }
             // Results span sections, so there is no current one to step from.
@@ -1697,8 +2149,8 @@ impl Shell {
         let close = crate::ui::button::icon_button("preferences-close", Icon::Close)
             .circle()
             .render(t)
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.close_preferences(cx);
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.close_preferences(window, cx);
                 cx.notify();
             }));
 
@@ -1870,14 +2322,14 @@ impl Shell {
                             | Section::Economy
                             | Section::Snippets
                             | Section::General
+                            | Section::Appearance
                             | Section::Editor
                             | Section::Merge
                             | Section::GitHub
                             | Section::Devices => None,
-                            Section::Appearance => Some(
-                                "Only Theme saves here — the rest of this section is still a layout.",
-                            ),
-                            Section::Keybindings => Some("Read-only for now — chords cannot be changed yet."),
+                            Section::Keybindings => {
+                                Some("Read-only for now — chords cannot be changed yet.")
+                            }
                             _ => Some("A layout, not a settings store — nothing here saves yet."),
                         },
                         |el, text| el.child(placeholder_note(text, t, cx)),
@@ -2206,18 +2658,47 @@ impl Shell {
         true
     }
 
-    /// The Appearance pane. Only the Theme row is real — the rest are still
-    /// the layout placeholders the other rows in this file are; see
-    /// `Section::Appearance` in `preferences_view`'s match.
+    /// The Appearance pane: dark or light, which palette, which faces and
+    /// how big, and whether the status bar is drawn. Every row saves.
     fn appearance_settings(
         &self,
         t: &Theme,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<Entry> {
         let Some(view) = self.preferences.as_ref() else {
             return Vec::new();
         };
+        // Built before anything with a listener on it, the way the Editor
+        // pane orders its fields: `text_field` wants the context mutably and
+        // a listener holds it immutably, so the two cannot be interleaved in
+        // one expression.
+        let ui_font_size = text_field(
+            &view.ui_font_size,
+            "appearance-ui-font-size",
+            false,
+            Style::new(t, self.caret.visible),
+            window,
+            cx,
+        );
+        let code_font_size = text_field(
+            &view.code_font_size,
+            "appearance-code-font-size",
+            false,
+            Style::new(t, self.caret.visible),
+            window,
+            cx,
+        );
+        // Not a setting in the file: it is the window's own state, saved with
+        // the sidebar's width — see `crate::view` — and the View menu's item
+        // flips the same switch.
+        let status_bar_open = self.status_bar_open;
+        let status_bar = switch("appearance-status-bar", status_bar_open, t)
+            .cursor_pointer()
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.set_status_bar(!status_bar_open, cx);
+            }))
+            .into_any_element();
         let current = view.config.theme.name.clone();
         let theme_open = view.theme_menu.is_some();
         let chosen = view.config.theme.appearance;
@@ -2263,6 +2744,9 @@ impl Shell {
                 "preferences-theme",
                 theme_label(&current, self.theme.appearance),
             )
+            // The accent of the theme in effect, which is what its row in
+            // the menu carries too.
+            .leading(sized_icon(Icon::Dot, SWATCH, paint(self.theme.accent)))
             .open(theme_open)
             .render(t)
             .w(SELECT_WIDTH),
@@ -2273,6 +2757,83 @@ impl Shell {
             MouseButton::Left,
             cx.listener(|this, _, _window: &mut Window, cx| {
                 this.toggle_theme_menu();
+                cx.notify();
+            }),
+        )
+        .into_any_element();
+
+        let ui_font_menu = view.ui_font_menu.as_ref().map(|menu| {
+            menu.view(
+                t,
+                cx,
+                |this, family, cx| {
+                    this.set_font(FontRole::Ui, family.clone(), cx);
+                    cx.notify();
+                },
+                |this, cx| {
+                    if let Some(view) = this.preferences.as_mut() {
+                        view.ui_font_menu = None;
+                    }
+                    cx.notify();
+                },
+            )
+        });
+        let ui_font_select = dropdown(
+            "preferences-ui-font-select",
+            crate::ui::select::select(
+                "preferences-ui-font",
+                font_label(view.config.theme.ui_font.as_deref()),
+            )
+            // Set in the face in force, which is the preview.
+            .mono(self.chrome_family.clone())
+            .open(view.ui_font_menu.is_some())
+            .render(t)
+            .w(FONT_SELECT_WIDTH),
+            ui_font_menu,
+        )
+        .cursor_pointer()
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, _, window: &mut Window, cx| {
+                this.toggle_font_menu(FontRole::Ui, window, cx);
+                cx.notify();
+            }),
+        )
+        .into_any_element();
+
+        let code_font_menu = view.code_font_menu.as_ref().map(|menu| {
+            menu.view(
+                t,
+                cx,
+                |this, family, cx| {
+                    this.set_font(FontRole::Code, family.clone(), cx);
+                    cx.notify();
+                },
+                |this, cx| {
+                    if let Some(view) = this.preferences.as_mut() {
+                        view.code_font_menu = None;
+                    }
+                    cx.notify();
+                },
+            )
+        });
+        let code_font_select = dropdown(
+            "preferences-code-font-select",
+            crate::ui::select::select(
+                "preferences-code-font",
+                font_label(view.config.theme.code_font.as_deref()),
+            )
+            .mono(self.font_family.clone())
+            .open(view.code_font_menu.is_some())
+            .render(t)
+            .w(FONT_SELECT_WIDTH),
+            code_font_menu,
+        )
+        .cursor_pointer()
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, _, window: &mut Window, cx| {
+                this.toggle_font_menu(FontRole::Code, window, cx);
                 cx.notify();
             }),
         )
@@ -2290,29 +2851,38 @@ impl Shell {
                 row("Theme", "Which palette to draw with.", theme_select, t),
             ),
             setting(
+                "Interface font",
+                "The face the sidebar, tabs, status bar and every label are set in. Default is ket's own pair: a mono for names and figures, a sans for words.",
+                ui_font_select,
+                t,
+            ),
+            // Honest about its reach: the window's rem is what this sets,
+            // and the control recipes in `ui::` are stated in pixels so
+            // they stop following it — see `ui::mod`'s metrics. Until they
+            // are derived from this instead, it moves only what is still
+            // written relative to the rem.
+            setting(
                 "Interface font size",
-                "The sidebar, tabs and status bar are sized from this.",
-                crate::ui::field::field(("placeholder-number", 1usize), 15.to_string(), "")
-                    .read_only()
-                    .render(t)
-                    .w(px(84.0))
-                    .into_any_element(),
+                "The window's base text size. Most of the chrome is drawn at fixed sizes for now, so this moves only the text still set relative to it.",
+                number_well(Some(ui_font_size)),
+                t,
+            ),
+            setting(
+                "Code font",
+                "The face the terminal, diffs and editor are set in. Only fixed-width fonts are listed.",
+                code_font_select,
                 t,
             ),
             setting(
                 "Code font size",
-                "The size the terminal and diffs are drawn at, and the editor unless Editor sets its own.",
-                crate::ui::field::field(("placeholder-number", 2usize), 12.to_string(), "")
-                    .read_only()
-                    .render(t)
-                    .w(px(84.0))
-                    .into_any_element(),
+                "The size the terminal and diffs are drawn at, and the editor unless Editor sets its own. Press Enter to apply, or step it with the arrow keys, or \u{2318}= and \u{2318}\u{2212} anywhere.",
+                number_well(Some(code_font_size)),
                 t,
             ),
             setting(
                 "Show the status bar",
-                "Agent quota and the selected worktree's state, along the bottom.",
-                switch(("placeholder-switch", 1usize), true, t).into_any_element(),
+                "Agent quota and the selected worktree's state, along the bottom. The View menu toggles it too.",
+                status_bar,
                 t,
             ),
         ]
@@ -4126,6 +4696,33 @@ fn result_heading(section: Section, first: bool, t: &Theme, cx: &mut Context<She
 /// How wide the Theme and Check for updates pickers' triggers and dropdowns are.
 const SELECT_WIDTH: gpui::Pixels = px(150.0);
 
+/// How wide the two font pickers' triggers and dropdowns are: a family's
+/// name runs longer than a theme's, and the dropdown has a filter row.
+const FONT_SELECT_WIDTH: gpui::Pixels = px(240.0);
+
+/// The accent swatch beside a theme's name in the picker's trigger: the size
+/// a menu row draws a tinted mark at, so the two read as the same thing.
+const SWATCH: gpui::Pixels = px(12.0);
+
+/// What a font picker shows for its choice: the family, or "Default" for
+/// ket's own — see `crate::fonts`.
+fn font_label(family: Option<&str>) -> gpui::SharedString {
+    match family {
+        Some(family) => family.to_owned().into(),
+        None => "Default".into(),
+    }
+}
+
+/// `size` moved by `step` and held within [`FONT_SIZE_RANGE`]: a step past
+/// either end stays at it rather than being refused, since the chord that
+/// asked has no box to put a complaint under.
+fn stepped(size: u16, step: i16) -> u16 {
+    let next = i32::from(size) + i32::from(step);
+    let low = i32::from(*FONT_SIZE_RANGE.start());
+    let high = i32::from(*FONT_SIZE_RANGE.end());
+    u16::try_from(next.clamp(low, high)).unwrap_or(size)
+}
+
 /// The Worktree directory select and its menu: wide enough for ket's own
 /// `~/.local/share/ket/worktrees` without truncating it.
 const DIR_SELECT_WIDTH: gpui::Pixels = px(260.0);
@@ -4147,20 +4744,32 @@ fn update_check_label(check: UpdateCheck) -> &'static str {
 /// rest are ket's named themes drawn for that appearance, then the user's own
 /// files: a dark theme is not offered while the shell is light, because
 /// choosing it would change nothing until the appearance flipped.
-fn theme_choices(appearance: Appearance) -> Vec<(Option<String>, gpui::SharedString)> {
+fn theme_choices(appearance: Appearance) -> Vec<(Option<String>, gpui::SharedString, Color)> {
     let shipped = match appearance {
         Appearance::Dark => "Desk",
         Appearance::Light => "Light",
     };
-    std::iter::once((None, gpui::SharedString::from(shipped)))
-        .chain(
-            Theme::available()
-                .into_iter()
-                .filter(|entry| !matches!(entry.name.as_str(), "dark" | "light"))
-                .filter(|entry| entry.theme.appearance == appearance)
-                .map(|entry| (Some(entry.name), gpui::SharedString::from(entry.label))),
-        )
-        .collect()
+    // Each row carries its theme's accent: the one colour that tells Acqua
+    // from Coral without choosing each in turn.
+    std::iter::once((
+        None,
+        gpui::SharedString::from(shipped),
+        Theme::shipped(appearance).accent,
+    ))
+    .chain(
+        Theme::available()
+            .into_iter()
+            .filter(|entry| !matches!(entry.name.as_str(), "dark" | "light"))
+            .filter(|entry| entry.theme.appearance == appearance)
+            .map(|entry| {
+                (
+                    Some(entry.name),
+                    gpui::SharedString::from(entry.label),
+                    entry.theme.accent,
+                )
+            }),
+    )
+    .collect()
 }
 
 /// The theme rows the picker offers, with the one in effect ticked.
@@ -4172,8 +4781,8 @@ fn theme_menu_items(
     theme_choices(appearance)
         .into_iter()
         .enumerate()
-        .map(|(position, (value, label))| {
-            let item = MenuItem::new(value, label);
+        .map(|(position, (value, label, accent))| {
+            let item = MenuItem::new(value, label).tinted_icon(Icon::Dot, paint(accent));
             MenuEntry::Item(if position == index {
                 item.checked()
             } else {
@@ -4189,7 +4798,7 @@ fn theme_menu_items(
 fn theme_menu_index(current: &Option<String>, appearance: Appearance) -> usize {
     theme_choices(appearance)
         .iter()
-        .position(|(value, _)| value == current)
+        .position(|(value, _, _)| value == current)
         .unwrap_or(0)
 }
 
@@ -4208,6 +4817,30 @@ fn number_well(field: Option<gpui::Stateful<gpui::Div>>) -> AnyElement {
     match field {
         Some(field) => div().w(px(96.0)).child(field).into_any_element(),
         None => div().into_any_element(),
+    }
+}
+
+/// Reads a font size as somebody typed it into one of the Appearance boxes.
+///
+/// Empty is not a failure to parse a number, it is the absence of a choice:
+/// a cleared box goes back to what ket shipped with, the way the Editor pane's
+/// line height does. Anything else is a whole number or a complaint that names
+/// the box, since the two sizes are saved together and the error has to say
+/// which of them it is about.
+///
+/// The range is [`Config::save`]'s to check, not this function's: that check
+/// is the one the file is held to, and a copy of it here would be a second
+/// place to keep in step.
+fn font_size_typed(typed: &str, default: u16, what: &str) -> Result<u16, String> {
+    match typed.trim() {
+        "" => Ok(default),
+        text => text.parse::<u16>().map_err(|_| {
+            format!(
+                "{what} must be a whole number between {} and {}",
+                FONT_SIZE_RANGE.start(),
+                FONT_SIZE_RANGE.end(),
+            )
+        }),
     }
 }
 
@@ -4375,6 +5008,16 @@ fn keybindings() -> Vec<(&'static str, &'static str, Vec<String>)> {
             vec![primary("j")],
         ),
         (
+            "Zoom in and out",
+            "Step the code font size, which the terminal, diffs and editor draw at.",
+            vec![primary("="), primary("-")],
+        ),
+        (
+            "Actual size",
+            "Back to the shipped code font size.",
+            vec![primary("0")],
+        ),
+        (
             "Git changes",
             "The right panel\u{2019}s Git view.",
             vec![primary("shift+g")],
@@ -4461,9 +5104,10 @@ fn chord_chips(chords: &[String], t: &Theme) -> AnyElement {
 ///
 /// `text` says exactly how much of the section above it is real: a section
 /// that is entirely [`rows`] placeholders gets the blanket warning, and one
-/// with a real row or two among them — Appearance's Theme picker, currently —
-/// gets told apart, because "nothing here saves yet" next to a control that
-/// just saved something is the sort of lie a settings screen cannot afford.
+/// with a real row or two among them — as Appearance was while only its Theme
+/// picker saved — gets told apart, because "nothing here saves yet" next to a
+/// control that just saved something is the sort of lie a settings screen
+/// cannot afford.
 pub(crate) fn placeholder_note(text: &str, t: &Theme, cx: &mut Context<Shell>) -> AnyElement {
     div()
         .flex()
@@ -4476,10 +5120,54 @@ pub(crate) fn placeholder_note(text: &str, t: &Theme, cx: &mut Context<Shell>) -
             button("preferences-done", "Done")
                 .primary()
                 .render(t)
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.close_preferences(cx);
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.close_preferences(window, cx);
                     cx.notify();
                 })),
         )
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FONT_SIZE_RANGE, font_size_typed, stepped};
+
+    #[test]
+    fn a_step_stays_within_the_sizes_a_font_can_be() {
+        assert_eq!(stepped(12, 1), 13);
+        assert_eq!(stepped(12, -1), 11);
+        // ⌘= at the top stays at the top rather than refusing.
+        assert_eq!(stepped(*FONT_SIZE_RANGE.end(), 1), *FONT_SIZE_RANGE.end());
+        assert_eq!(
+            stepped(*FONT_SIZE_RANGE.start(), -1),
+            *FONT_SIZE_RANGE.start()
+        );
+    }
+
+    #[test]
+    fn a_cleared_size_box_means_the_shipped_size() {
+        assert_eq!(font_size_typed("", 15, "Interface font size"), Ok(15));
+        assert_eq!(font_size_typed("   ", 12, "Code font size"), Ok(12));
+    }
+
+    #[test]
+    fn a_typed_size_is_read_as_written() {
+        assert_eq!(font_size_typed(" 14 ", 15, "Interface font size"), Ok(14));
+    }
+
+    #[test]
+    fn a_size_that_is_not_a_whole_number_names_its_box() {
+        let err = font_size_typed("12.5", 12, "Code font size").unwrap_err();
+        assert!(err.starts_with("Code font size must be"), "{err}");
+        let err = font_size_typed("-3", 15, "Interface font size").unwrap_err();
+        assert!(err.starts_with("Interface font size must be"), "{err}");
+    }
+
+    #[test]
+    fn a_size_too_large_to_be_a_size_is_still_refused_as_a_number() {
+        // 70000 overflows a u16 and parses as nothing; the message is the
+        // same one a word gets, which is right — the file's own check says
+        // what the range is for the numbers that do parse.
+        assert!(font_size_typed("70000", 12, "Code font size").is_err());
+    }
 }

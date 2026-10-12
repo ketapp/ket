@@ -1,0 +1,11 @@
+#!/bin/sh
+# Turned on with `git config core.hooksPath .githooks`; see CONTRIBUTING.md.
+#
+# The repository asks nothing of a commit's content. A checkout may: a
+# `pre-commit.local` beside git's own hooks runs here when it is executable,
+# and is never part of the repository.
+local=$(git rev-parse --git-common-dir)/hooks/pre-commit.local
+if [ -x "$local" ]; then
+	exec "$local" "$@"
+fi
+exit 0

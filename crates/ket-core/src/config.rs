@@ -8,6 +8,7 @@
 use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
 use serde::{Deserialize, Serialize};
 
@@ -65,6 +66,10 @@ pub struct AgentSpec {
     /// The command is *shell text*, not a path: it is typed at a real prompt
     /// (see [`crate::shell`]), so an alias or a function is as valid here as
     /// an executable, and it may carry its own arguments.
+    ///
+    /// `None` is not "no arguments": it is "nothing of my own", and the line
+    /// in force is then the one ket ships for this agent, or failing that
+    /// the transport's default — see [`Self::launch_command`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch: Option<AgentLaunch>,
 }
@@ -82,14 +87,29 @@ pub struct AgentLaunch {
 
 impl AgentSpec {
     /// The command ket opens in an interactive terminal.
+    ///
+    /// In order: this spec's own launch line, the one ket ships for an agent
+    /// of this name and transport, and only then the transport's default —
+    /// the agent's name for ACP, whose `command` is an adapter, and `command`
+    /// itself for a pty, where it is the interactive program.
+    ///
+    /// The shipped line comes before the default because a saved config
+    /// carries every agent ket shipped with at the time it was written,
+    /// launch line and all, and a configured spec beats the shipped one (see
+    /// [`crate::agents::Catalogue::detect`]). A shipped launch that ket later
+    /// changes would otherwise never reach anyone whose config predates it:
+    /// their spec says `None`, which used to mean the default. Matched on
+    /// transport as well as name because a pty spec names its interactive
+    /// command outright, and a person who wrote one for an agent ket drives
+    /// over ACP meant that command.
     pub fn launch_command(&self) -> &str {
-        self.launch
-            .as_ref()
-            .map(|launch| launch.command.as_str())
-            .unwrap_or_else(|| match self.transport {
+        match self.launch_in_force() {
+            Some(launch) => launch.command.as_str(),
+            None => match self.transport {
                 Transport::Acp => self.name.as_str(),
                 Transport::Pty => self.command.as_str(),
-            })
+            },
+        }
     }
 
     /// The whole command line ket types at the shell's first prompt.
@@ -105,14 +125,43 @@ impl AgentSpec {
     }
 
     /// The arguments ket passes to the interactive command.
+    ///
+    /// Resolved the same way as [`Self::launch_command`].
     pub fn launch_args(&self) -> &[String] {
-        self.launch
-            .as_ref()
-            .map(|launch| launch.args.as_slice())
-            .unwrap_or_else(|| match self.transport {
+        match self.launch_in_force() {
+            Some(launch) => launch.args.as_slice(),
+            None => match self.transport {
                 Transport::Acp => &[],
                 Transport::Pty => self.args.as_slice(),
-            })
+            },
+        }
+    }
+
+    /// The launch line in force: this spec's own, else the shipped one.
+    fn launch_in_force(&self) -> Option<&AgentLaunch> {
+        self.launch.as_ref().or_else(|| {
+            shipped_agents()
+                .iter()
+                .find(|shipped| shipped.name == self.name && shipped.transport == self.transport)
+                .and_then(|shipped| shipped.launch.as_ref())
+        })
+    }
+
+    /// Whether `other` opens and runs the same way as this spec.
+    ///
+    /// Equality with the launch line written out: a saved spec with no line
+    /// of its own and the shipped spec that spells one out open the same
+    /// pane, and a settings screen that called one an override of the other
+    /// would offer a Reset that changes nothing.
+    pub fn launches_like(&self, other: &AgentSpec) -> bool {
+        let written_out = |spec: &AgentSpec| AgentSpec {
+            launch: Some(AgentLaunch {
+                command: spec.launch_command().to_owned(),
+                args: spec.launch_args().to_vec(),
+            }),
+            ..spec.clone()
+        };
+        written_out(self) == written_out(other)
     }
 }
 
@@ -774,11 +823,26 @@ pub struct ThemeConfig {
     /// size"; the chrome follows the platform's own conventions and is tuned
     /// against them.
     pub code_font_size: u16,
-    /// Base size for the window's chrome, in pixels.
+    /// The window's base text size — its rem — in pixels.
     ///
-    /// Everything in the sidebar, tabs and status bar is expressed relative to
-    /// this, so raising it scales the chrome as a whole rather than one label.
+    /// Meant as the size the chrome as a whole scales from. In practice the
+    /// shell's control recipes are stated in pixels so that a control's
+    /// height cannot drift from the icon inside it, and only the text still
+    /// written relative to the rem follows this.
     pub ui_font_size: u16,
+    /// The family the terminal grid, the diff and the editor are drawn in,
+    /// or `None` for the face ket ships. A family that is not installed —
+    /// removed since it was chosen, or misspelt here — is passed over for
+    /// the shipped one rather than refused, since nothing about a missing
+    /// font is a reason not to open the window.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code_font: Option<String>,
+    /// The family the window's chrome is drawn in — the sidebar, tabs, status
+    /// bar and every label — or `None` for ket's own pair of faces, a mono
+    /// for identifiers and a sans for words. One family stands in for both:
+    /// a person who picks a font for the interface means all of it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ui_font: Option<String>,
 }
 
 impl Default for ThemeConfig {
@@ -788,6 +852,8 @@ impl Default for ThemeConfig {
             name: None,
             code_font_size: DEFAULT_CODE_FONT_SIZE,
             ui_font_size: DEFAULT_UI_FONT_SIZE,
+            code_font: None,
+            ui_font: None,
         }
     }
 }
@@ -1386,7 +1452,22 @@ pub(crate) fn default_agents() -> Vec<AgentSpec> {
             args: vec!["acp".to_owned()],
             env: BTreeMap::new(),
             env_remove: Vec::new(),
-            launch: None,
+            // OpenCode 2 runs one shared background service, and plugins run
+            // in *it*, not in the terminal that opened them — so a pane's
+            // plugin could never see the environment ket injected into the
+            // pane, and its reports would name the wrong one or none at all
+            // (see `crate::agent_hooks::OpenCodeHooks`). `--standalone` gives
+            // the pane a private server, which is what OpenCode 1 always was
+            // and what the whole hook correlation rests on. `opencode acp`
+            // above is unaffected: it already runs a private server. Checked
+            // against OpenCode 2.0.24's CLI. OpenCode 1 does not know the
+            // flag and, being strict about options, would not start on it:
+            // detection leaves it off where the installed binary does not
+            // list it — see the candidate table in `crate::agents`.
+            launch: Some(AgentLaunch {
+                command: "opencode".to_owned(),
+                args: vec!["--standalone".to_owned()],
+            }),
         },
         AgentSpec {
             name: "grok".to_owned(),
@@ -1401,6 +1482,13 @@ pub(crate) fn default_agents() -> Vec<AgentSpec> {
             launch: None,
         },
     ]
+}
+
+/// The shipped agents, built once, so a spec can borrow its launch line from
+/// them — see [`AgentSpec::launch_command`].
+fn shipped_agents() -> &'static [AgentSpec] {
+    static SHIPPED: LazyLock<Vec<AgentSpec>> = LazyLock::new(default_agents);
+    &SHIPPED
 }
 
 /// Writes `text` to `path` through a sibling temporary file renamed into
@@ -1573,6 +1661,20 @@ impl Config {
             }
         }
 
+        // An empty name is neither a family nor the absence of one. Leaving
+        // the key out is how to ask for ket's own face, and a blank that
+        // slipped in by hand should say so rather than resolve to nothing.
+        for (field, family) in [
+            ("theme.code_font", &self.theme.code_font),
+            ("theme.ui_font", &self.theme.ui_font),
+        ] {
+            if family.as_deref().is_some_and(|name| name.trim().is_empty()) {
+                return Err(KetError::Config(format!(
+                    "{field} must name a font family; leave it out for ket's own"
+                )));
+            }
+        }
+
         let line_height = self.editor.line_height;
         if !line_height.is_finite() || !LINE_HEIGHT_RANGE.contains(&line_height) {
             return Err(KetError::Config(format!(
@@ -1663,6 +1765,27 @@ mod tests {
     }
 
     #[test]
+    fn a_font_family_is_read_back_as_it_was_written() {
+        let config: Config =
+            toml::from_str("[theme]\ncode_font = \"Menlo\"\nui_font = \"Avenir\"\n").unwrap();
+        config.validate().unwrap();
+        assert_eq!(config.theme.code_font.as_deref(), Some("Menlo"));
+        assert_eq!(config.theme.ui_font.as_deref(), Some("Avenir"));
+        // Neither is written when neither was chosen, so a file that never
+        // mentioned a font does not grow two keys on its next save.
+        let text = toml::to_string(&Config::default()).unwrap();
+        assert!(!text.contains("code_font ="), "{text}");
+        assert!(!text.contains("ui_font ="), "{text}");
+    }
+
+    #[test]
+    fn a_blank_font_family_is_refused() {
+        let config: Config = toml::from_str("[theme]\ncode_font = \" \"\n").unwrap();
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("code_font"), "unhelpful message: {err}");
+    }
+
+    #[test]
     fn an_unusable_font_size_is_refused_rather_than_drawn() {
         // Zero would render an invisible grid and no explanation.
         let config: Config = toml::from_str("[theme]\ncode_font_size = 0\n").unwrap();
@@ -1719,6 +1842,79 @@ mod tests {
         let opencode = config.agent("opencode").expect("opencode");
         assert_eq!(opencode.command, "opencode");
         assert_eq!(opencode.args, ["acp"]);
+    }
+
+    #[test]
+    fn the_opencode_pane_runs_its_own_server() {
+        // OpenCode 2 runs plugins in its shared background service, where the
+        // pane's environment never arrives; `--standalone` puts the pane back
+        // on a server of its own. The ACP command above is untouched — ACP
+        // already runs one. See `agent_hooks::OpenCodeHooks` for the whole
+        // story, and `default_agents` for why this lives on the launch line.
+        let config = Config::default();
+        let opencode = config.agent("opencode").expect("opencode");
+        assert_eq!(opencode.launch_line(&[]), "opencode --standalone");
+    }
+
+    #[test]
+    fn a_saved_spec_with_no_launch_line_of_its_own_opens_the_shipped_way() {
+        // A config an older ket wrote carries the agents it shipped with,
+        // launch line and all, and a configured spec beats the shipped one.
+        // "No line of my own" has to mean the shipped line, or a shipped
+        // launch that changes would never reach anyone with a saved config.
+        // The variable they set is still theirs.
+        let config: Config = toml::from_str(
+            "[[agents]]\nname = \"opencode\"\ntransport = \"acp\"\ncommand = \"opencode\"\nargs = [\"acp\"]\n\
+             [agents.env]\nOPENCODE_LOG_LEVEL = \"debug\"\n",
+        )
+        .unwrap();
+
+        let opencode = config.agent("opencode").expect("opencode");
+        assert_eq!(opencode.launch_line(&[]), "opencode --standalone");
+        assert_eq!(
+            opencode.env.get("OPENCODE_LOG_LEVEL").map(String::as_str),
+            Some("debug")
+        );
+    }
+
+    #[test]
+    fn a_launch_line_of_the_persons_own_is_left_alone() {
+        let config: Config = toml::from_str(
+            "[[agents]]\nname = \"opencode\"\ntransport = \"acp\"\ncommand = \"opencode\"\nargs = [\"acp\"]\n\
+             [agents.launch]\ncommand = \"opencode\"\nargs = [\"--print-logs\"]\n",
+        )
+        .unwrap();
+
+        let opencode = config.agent("opencode").expect("opencode");
+        assert_eq!(opencode.launch_line(&[]), "opencode --print-logs");
+    }
+
+    #[test]
+    fn a_pty_spec_under_a_shipped_name_opens_with_its_own_command() {
+        // A pty spec names its interactive program outright; the shipped
+        // line belongs to the agent ket drives over ACP, not to this one.
+        let config: Config = toml::from_str(
+            "[[agents]]\nname = \"opencode\"\ntransport = \"pty\"\ncommand = \"my-opencode\"\n",
+        )
+        .unwrap();
+
+        let opencode = config.agent("opencode").expect("opencode");
+        assert_eq!(opencode.launch_line(&[]), "my-opencode");
+    }
+
+    #[test]
+    fn a_spec_with_no_launch_line_launches_like_the_shipped_one() {
+        let config = Config::default();
+        let shipped = config.agent("opencode").expect("opencode");
+        let mut saved = shipped.clone();
+        saved.launch = None;
+        assert!(saved.launches_like(shipped));
+
+        saved.launch = Some(AgentLaunch {
+            command: "opencode".to_owned(),
+            args: Vec::new(),
+        });
+        assert!(!saved.launches_like(shipped));
     }
 
     #[test]

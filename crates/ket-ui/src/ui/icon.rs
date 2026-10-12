@@ -175,6 +175,11 @@ pub(crate) enum Icon {
     FoldVertical,
     /// Let it back out: the chevrons parting.
     UnfoldVertical,
+    /// Make a column narrower: two chevrons closing on a line — the
+    /// sidebar's fold to its rail.
+    FoldHorizontal,
+    /// Let it back out: the chevrons parting sideways.
+    UnfoldHorizontal,
     /// Start playback. Filled, like [`Icon::Pause`]: the two sit on the
     /// audio player's primary button, which is a solid accent fill, and a
     /// hairline triangle there reads as a smudge rather than a control.
@@ -297,6 +302,11 @@ pub(crate) enum Icon {
     Ellipsis,
     /// GitHub: its accounts in Settings, and the one a project picks.
     GitHub,
+    /// A filled disc, for a colour rather than a shape: a theme's accent
+    /// beside its name in the Theme picker. Drawn here rather than as a
+    /// rounded `div` so a menu row can carry it the way it carries any
+    /// other tinted mark.
+    Dot,
 }
 
 impl Icon {
@@ -352,6 +362,8 @@ impl Icon {
             Icon::FolderPlus => "icons/folder-plus.svg",
             Icon::FoldVertical => "icons/fold-vertical.svg",
             Icon::UnfoldVertical => "icons/unfold-vertical.svg",
+            Icon::FoldHorizontal => "icons/fold-horizontal.svg",
+            Icon::UnfoldHorizontal => "icons/unfold-horizontal.svg",
             Icon::Play => "icons/play.svg",
             Icon::Pause => "icons/pause.svg",
             Icon::RotateCcw => "icons/rotate-ccw.svg",
@@ -396,6 +408,7 @@ impl Icon {
             Icon::Tag => "icons/tag.svg",
             Icon::BookMarked => "icons/book-marked.svg",
             Icon::GitHub => "icons/github.svg",
+            Icon::Dot => "icons/dot.svg",
         }
     }
 }
@@ -433,7 +446,7 @@ pub(crate) fn sized_icon(which: Icon, size: Pixels, colour: Rgba) -> Svg {
 pub(crate) struct Assets;
 
 /// The bytes for every path [`Icon::asset`] can return.
-const FILES: [(&str, &[u8]); 93] = [
+const FILES: [(&str, &[u8]); 96] = [
     (
         "icons/chevron-down.svg",
         include_bytes!("../../assets/icons/chevron-down.svg"),
@@ -623,6 +636,14 @@ const FILES: [(&str, &[u8]); 93] = [
         include_bytes!("../../assets/icons/unfold-vertical.svg"),
     ),
     (
+        "icons/fold-horizontal.svg",
+        include_bytes!("../../assets/icons/fold-horizontal.svg"),
+    ),
+    (
+        "icons/unfold-horizontal.svg",
+        include_bytes!("../../assets/icons/unfold-horizontal.svg"),
+    ),
+    (
         "icons/play.svg",
         include_bytes!("../../assets/icons/play.svg"),
     ),
@@ -806,6 +827,10 @@ const FILES: [(&str, &[u8]); 93] = [
         "icons/github.svg",
         include_bytes!("../../assets/icons/github.svg"),
     ),
+    (
+        "icons/dot.svg",
+        include_bytes!("../../assets/icons/dot.svg"),
+    ),
 ];
 
 impl AssetSource for Assets {
@@ -916,6 +941,8 @@ mod tests {
             Icon::FolderPlus,
             Icon::FoldVertical,
             Icon::UnfoldVertical,
+            Icon::FoldHorizontal,
+            Icon::UnfoldHorizontal,
             Icon::Play,
             Icon::Pause,
             Icon::RotateCcw,
@@ -961,6 +988,7 @@ mod tests {
             Icon::Tag,
             Icon::BookMarked,
             Icon::GitHub,
+            Icon::Dot,
         ];
         assert_eq!(
             every.len(),

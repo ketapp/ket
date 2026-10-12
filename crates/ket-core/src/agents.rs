@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::{AgentSpec, Config, default_agents};
+use crate::config::{AgentLaunch, AgentSpec, Config, default_agents};
 
 /// How long a single probe may take before it is treated as absent.
 ///
@@ -44,6 +44,13 @@ struct Candidate {
     /// would report every agent installed on any machine with Node, which is
     /// useless. What a person means by "is Claude installed" is `claude`.
     probe: &'static str,
+    /// Flags on the shipped launch line that only a newer version takes.
+    ///
+    /// Left off the line when the binary found does not list them in its
+    /// `--help`: a command line parsed strictly refuses an option it does not
+    /// know, and a pane that dies at its first line is worse than one that
+    /// starts without the flag. See [`without_rejected_flags`].
+    gated_flags: &'static [&'static str],
 }
 
 /// The name of every agent ket would recognise, without probing for any of
@@ -77,18 +84,24 @@ const CANDIDATES: &[Candidate] = &[
     Candidate {
         name: "claude",
         probe: "claude",
+        gated_flags: &[],
     },
     Candidate {
         name: "codex",
         probe: "codex",
+        gated_flags: &[],
     },
     Candidate {
         name: "grok",
         probe: "grok",
+        gated_flags: &[],
     },
     Candidate {
         name: "opencode",
         probe: "opencode",
+        // OpenCode 2's private server; OpenCode 1 refuses the flag. Why the
+        // pane wants it is with the shipped spec in `crate::config`.
+        gated_flags: &["--standalone"],
     },
 ];
 
@@ -100,6 +113,15 @@ const CANDIDATES: &[Candidate] = &[
 pub trait Prober: Send + Sync {
     /// Where `binary` lives, or `None` if it is not on `PATH`.
     fn find(&self, binary: &str) -> Option<PathBuf>;
+
+    /// Whether the binary at `found` takes `flag`, judged from its `--help`.
+    ///
+    /// Asked about a [`Candidate::gated_flags`] entry once a binary has been
+    /// found. Runs the binary, which [`find`](Self::find) deliberately never
+    /// does, so a test prober answers without one.
+    fn accepts(&self, found: &Path, flag: &str) -> bool {
+        help_lists(found, flag)
+    }
 }
 
 /// Looks along the real `PATH`.
@@ -170,6 +192,129 @@ fn is_executable(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Whether `binary --help` mentions `flag`.
+///
+/// `--help` rather than `--version`: it asks the question itself, and the
+/// answer does not depend on knowing which release added the flag. A path
+/// that is not a file — a shell prober reports an alias or a function as a
+/// description — is not run, and the answer is no: the line then carries
+/// only what every version takes.
+///
+/// Cached per binary and flag for the life of the process, like the shell
+/// probes it sits beside; [`clear_help_cache`] is what Refresh calls. The
+/// run is bounded by [`PROBE_TIMEOUT`] the way a `PATH` walk is, and a
+/// binary that does not answer in time is taken not to know the flag.
+fn help_lists(binary: &Path, flag: &str) -> bool {
+    if !is_executable(binary) {
+        return false;
+    }
+    let key = (binary.to_path_buf(), flag.to_owned());
+    if let Some(known) = help_cache()
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(&key).copied())
+    {
+        return known;
+    }
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let path = binary.to_path_buf();
+    std::thread::spawn(move || {
+        let output = std::process::Command::new(&path)
+            .arg("--help")
+            .stdin(std::process::Stdio::null())
+            .output();
+        let _ = tx.send(output);
+    });
+    let lists = match rx.recv_timeout(PROBE_TIMEOUT) {
+        Ok(Ok(output)) => {
+            String::from_utf8_lossy(&output.stdout).contains(flag)
+                || String::from_utf8_lossy(&output.stderr).contains(flag)
+        }
+        Ok(Err(_)) => false,
+        Err(_) => {
+            tracing::warn!(
+                binary = %binary.display(),
+                flag,
+                "help probe timed out; leaving the flag off"
+            );
+            false
+        }
+    };
+
+    if let Ok(mut cache) = help_cache().lock() {
+        cache.insert(key, lists);
+    }
+    lists
+}
+
+/// Forgets what [`help_lists`] learned, so the next detection asks again.
+pub fn clear_help_cache() {
+    if let Ok(mut cache) = help_cache().lock() {
+        cache.clear();
+    }
+}
+
+fn help_cache() -> &'static std::sync::Mutex<std::collections::HashMap<(PathBuf, String), bool>> {
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<(PathBuf, String), bool>>,
+    > = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// `spec` and `shipped` with every flag in `gated` that the binary at
+/// `found` does not take left off the shipped launch line.
+///
+/// Only the shipped line is touched, and only while it is the line in force:
+/// a line the person wrote is theirs, flags and all. Both specs change alike,
+/// so the entry reads as unmodified rather than as an override of a line this
+/// machine cannot run. The pruned line is written into `spec` outright —
+/// left as "nothing of my own", it would resolve straight back to the shipped
+/// line, flag included (see [`AgentSpec::launch_command`]).
+fn without_rejected_flags(
+    spec: &AgentSpec,
+    shipped: Option<&AgentSpec>,
+    gated: &[&str],
+    found: Option<&Path>,
+    prober: &dyn Prober,
+) -> (AgentSpec, Option<AgentSpec>) {
+    let untouched = || (spec.clone(), shipped.cloned());
+    let (Some(found), Some(shipped_launch)) = (found, shipped.and_then(|s| s.launch.as_ref()))
+    else {
+        return untouched();
+    };
+    let shipped_in_force = spec.launch.as_ref().is_none_or(|own| own == shipped_launch);
+    if gated.is_empty() || !shipped_in_force {
+        return untouched();
+    }
+
+    let rejected: Vec<&str> = gated
+        .iter()
+        .copied()
+        .filter(|flag| !prober.accepts(found, flag))
+        .collect();
+    if rejected.is_empty() {
+        return untouched();
+    }
+
+    let pruned = AgentLaunch {
+        command: shipped_launch.command.clone(),
+        args: shipped_launch
+            .args
+            .iter()
+            .filter(|arg| !rejected.contains(&arg.as_str()))
+            .cloned()
+            .collect(),
+    };
+    let mut spec = spec.clone();
+    spec.launch = Some(pruned.clone());
+    let shipped = shipped.cloned().map(|mut shipped| {
+        shipped.launch = Some(pruned);
+        shipped
+    });
+    (spec, shipped)
+}
+
 /// What a bare `ket run` should pick when nothing else says.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", tag = "kind", content = "name")]
@@ -209,10 +354,14 @@ pub struct AgentEntry {
 
 impl AgentEntry {
     /// Whether the user has changed how this agent is launched.
+    ///
+    /// Judged by what each spec would run, not by the fields as written: a
+    /// saved spec with no launch line of its own opens the shipped way, and
+    /// is no override — see [`AgentSpec::launches_like`].
     pub fn is_overridden(&self) -> bool {
         self.shipped
             .as_ref()
-            .is_some_and(|shipped| shipped != &self.spec)
+            .is_some_and(|shipped| !shipped.launches_like(&self.spec))
     }
 
     /// Whether this agent can actually be run right now.
@@ -274,14 +423,21 @@ impl Catalogue {
                 .and_then(|launch| launch.command.split_whitespace().next())
                 .unwrap_or(candidate.probe);
             let found = prober.find(probe);
+            let (spec, shipped_spec) = without_rejected_flags(
+                spec,
+                shipped_spec,
+                candidate.gated_flags,
+                found.as_deref(),
+                prober,
+            );
 
             entries.push(AgentEntry {
                 name: candidate.name.to_owned(),
                 installed: found.is_some(),
                 found_at: found,
                 enabled: !config.agent.disabled.contains(candidate.name),
-                spec: spec.clone(),
-                shipped: shipped_spec.cloned(),
+                spec,
+                shipped: shipped_spec,
             });
         }
 
@@ -451,6 +607,8 @@ mod tests {
     use std::collections::BTreeMap;
 
     /// A prober with a fixed answer, so tests do not depend on this machine.
+    ///
+    /// Every binary it finds is current: it takes every flag asked about.
     struct Fake(Vec<&'static str>);
 
     impl Prober for Fake {
@@ -458,6 +616,23 @@ mod tests {
             self.0
                 .contains(&binary)
                 .then(|| PathBuf::from("/fake/bin").join(binary))
+        }
+
+        fn accepts(&self, _found: &Path, _flag: &str) -> bool {
+            true
+        }
+    }
+
+    /// The same, for a machine whose binaries predate every gated flag.
+    struct Outdated(Vec<&'static str>);
+
+    impl Prober for Outdated {
+        fn find(&self, binary: &str) -> Option<PathBuf> {
+            Fake(self.0.clone()).find(binary)
+        }
+
+        fn accepts(&self, _found: &Path, _flag: &str) -> bool {
+            false
         }
     }
 
@@ -547,6 +722,72 @@ mod tests {
     fn an_unmodified_agent_is_not_reported_as_overridden() {
         let catalogue = Catalogue::detect(&config(), &Fake(vec!["claude"]));
         assert!(!catalogue.get("claude").unwrap().is_overridden());
+    }
+
+    #[test]
+    fn a_saved_spec_with_no_launch_line_of_its_own_is_not_an_override() {
+        // What an older ket wrote: the shipped spec of its day, with no launch
+        // line. It opens the shipped way, so there is nothing to reset.
+        let mut config = config();
+        config
+            .agents
+            .iter_mut()
+            .find(|spec| spec.name == "opencode")
+            .expect("opencode is shipped")
+            .launch = None;
+
+        let catalogue = Catalogue::detect(&config, &Fake(vec!["opencode"]));
+        let opencode = catalogue.get("opencode").unwrap();
+
+        assert_eq!(opencode.spec.launch_line(&[]), "opencode --standalone");
+        assert!(!opencode.is_overridden());
+    }
+
+    #[test]
+    fn a_flag_an_older_binary_rejects_is_left_off_the_shipped_line() {
+        // OpenCode 1 refuses `--standalone` outright; a pane that typed it
+        // would die at its first line. Current and shipped change together,
+        // so the entry is not an override of a line this machine cannot run.
+        let catalogue = Catalogue::detect(&config(), &Outdated(vec!["opencode"]));
+        let opencode = catalogue.get("opencode").unwrap();
+
+        assert_eq!(opencode.spec.launch_line(&[]), "opencode");
+        assert_eq!(
+            opencode.shipped.as_ref().unwrap().launch_line(&[]),
+            "opencode"
+        );
+        assert!(!opencode.is_overridden());
+    }
+
+    #[test]
+    fn a_launch_line_of_the_persons_own_keeps_its_flags_on_an_older_binary() {
+        let mut config = config();
+        config
+            .agents
+            .iter_mut()
+            .find(|spec| spec.name == "opencode")
+            .expect("opencode is shipped")
+            .launch = Some(AgentLaunch {
+            command: "opencode".to_owned(),
+            args: vec!["--standalone".to_owned(), "--print-logs".to_owned()],
+        });
+
+        let catalogue = Catalogue::detect(&config, &Outdated(vec!["opencode"]));
+        let opencode = catalogue.get("opencode").unwrap();
+
+        assert_eq!(
+            opencode.spec.launch_line(&[]),
+            "opencode --standalone --print-logs"
+        );
+        assert!(opencode.is_overridden());
+    }
+
+    #[test]
+    fn a_binary_that_is_not_installed_keeps_the_shipped_line_as_written() {
+        // Nothing to ask; the settings screen shows what ket would run.
+        let catalogue = Catalogue::detect(&config(), &Outdated(vec![]));
+        let opencode = catalogue.get("opencode").unwrap();
+        assert_eq!(opencode.spec.launch_line(&[]), "opencode --standalone");
     }
 
     #[test]

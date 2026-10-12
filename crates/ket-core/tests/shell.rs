@@ -76,10 +76,10 @@ fn line_with_no_arguments_is_just_the_command() {
 }
 
 #[test]
-fn launch_in_with_no_startup_is_a_plain_shell() {
+fn launch_in_with_no_startup_is_a_plain_login_shell() {
     let launch = launch_in(None, "/bin/zsh", None);
     assert_eq!(launch.command, "/bin/zsh");
-    assert!(launch.args.is_empty());
+    assert_eq!(launch.args, vec!["-l".to_owned()]);
     assert!(launch.env.is_empty());
 }
 

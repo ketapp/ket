@@ -5,4 +5,13 @@
 git rev-parse -q --verify MERGE_HEAD >/dev/null && exit 0
 
 subject=$(grep -v '^#' "$1" | grep -m1 -v '^[[:space:]]*$')
-exec "$(git rev-parse --show-toplevel)/scripts/check-commit-msg.sh" "$subject"
+"$(git rev-parse --show-toplevel)/scripts/check-commit-msg.sh" "$subject" || exit 1
+
+# A checkout may ask more of the message than the format: a
+# `commit-msg.local` beside git's own hooks runs here when it is executable,
+# and is never part of the repository.
+local=$(git rev-parse --git-common-dir)/hooks/commit-msg.local
+if [ -x "$local" ]; then
+	exec "$local" "$@"
+fi
+exit 0

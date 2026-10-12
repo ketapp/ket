@@ -166,7 +166,8 @@ impl Shell {
     }
 }
 
-fn status_rank(signal: Signal) -> u8 {
+/// Where a state sorts in the status view: waiting on a person first.
+pub(crate) fn status_rank(signal: Signal) -> u8 {
     match signal {
         Signal::Blocked => 0,
         Signal::Working => 1,

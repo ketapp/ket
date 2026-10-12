@@ -664,9 +664,9 @@ fn a_launch_line_survives_the_shell_that_types_it() {
     let other = ket_core::shell::launch_in(Some(&root), "/bin/bash", Some(&line));
     assert_eq!(other.args, vec!["-i".to_owned(), "-c".to_owned(), line]);
 
-    // No startup command is a plain shell, indistinguishable from the one a
-    // terminal emulator would have opened.
+    // No startup command is a plain login shell, indistinguishable from the
+    // one a terminal emulator would have opened.
     let plain = ket_core::shell::launch_in(Some(&root), "/bin/zsh", None);
-    assert!(plain.args.is_empty());
+    assert_eq!(plain.args, vec!["-l".to_owned()]);
     assert!(plain.env.is_empty());
 }

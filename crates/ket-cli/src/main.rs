@@ -2206,6 +2206,8 @@ mod tests {
         &["ket", "run", "claude", "--prompt", "fix the flaky test"],
         &["ket", "ps"],
         &["ket", "ps", "--reap"],
+        &["ket", "filter", "--keep", "--", "cargo", "build"],
+        &["ket", "recall", "a1b2c3"],
         &["ket", "host", "status"],
         &["ket", "host", "stop"],
         &["ket", "host", "stop", "--force"],

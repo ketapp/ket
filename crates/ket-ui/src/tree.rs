@@ -2730,6 +2730,9 @@ impl Shell {
 
     /// The projects tree.
     pub(crate) fn sidebar(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        if self.sidebar_compact {
+            return self.sidebar_rail(window, cx);
+        }
         let t = &self.theme;
         let selection = self.selection;
         let now = ket_core::now_ms();
@@ -2862,34 +2865,12 @@ impl Shell {
         };
 
         let open = self.search.open;
+        // Search, then the ⋯ menu holding Quick prompt and Add project, then
+        // the fold to the rail — the header's own fold, turned on its side.
         let actions = div()
             .flex()
             .flex_none()
             .items_center()
-            .child(tip(
-                "strip-add-project",
-                icon_button("strip-add-project", Icon::FolderPlus)
-                    .bare()
-                    .dense()
-                    .render(t)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.add_project(cx);
-                        cx.notify();
-                    })),
-                "Add project".into(),
-            ))
-            .child(tip(
-                "strip-quick-prompt",
-                icon_button("strip-quick-prompt", Icon::Pencil)
-                    .bare()
-                    .dense()
-                    .render(t)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.open_quick_prompt(cx);
-                        cx.notify();
-                    })),
-                crate::shortcuts::QUICK_PROMPT_HINT.into(),
-            ))
             .child(tip(
                 "strip-search",
                 icon_button("strip-search", Icon::Search)
@@ -2901,7 +2882,9 @@ impl Shell {
                         cx.notify();
                     })),
                 crate::shortcuts::SEARCH_HINT.into(),
-            ));
+            ))
+            .child(self.sidebar_more_button(cx))
+            .child(self.sidebar_fold_button(cx));
 
         let strip = div()
             .flex()
@@ -4030,18 +4013,21 @@ impl Shell {
             .h_full()
             .flex_none()
             // No line of its own: the cards' borders either side of it are
-            // the edge, and the desk between them is the divider.
-            .child(
-                div()
-                    .id("sidebar-divider-grab")
-                    .absolute()
-                    .top_0()
-                    .bottom_0()
-                    .left(-DIVIDER_GRAB)
-                    .right(-DIVIDER_GRAB)
-                    .cursor(CursorStyle::ResizeLeftRight)
-                    .on_drag(SidebarResize, |drag, _, _, cx| cx.new(|_| *drag)),
-            )
+            // the edge, and the desk between them is the divider. Folded to
+            // its rail the sidebar has one width, so there is nothing to grab.
+            .when(!self.sidebar_compact, |el| {
+                el.child(
+                    div()
+                        .id("sidebar-divider-grab")
+                        .absolute()
+                        .top_0()
+                        .bottom_0()
+                        .left(-DIVIDER_GRAB)
+                        .right(-DIVIDER_GRAB)
+                        .cursor(CursorStyle::ResizeLeftRight)
+                        .on_drag(SidebarResize, |drag, _, _, cx| cx.new(|_| *drag)),
+                )
+            })
             .into_any_element()
     }
 

@@ -1061,9 +1061,6 @@ fn prune(state: Prune, name: AnyElement, t: &Theme) -> AnyElement {
             if let Ok(path) = line.build() {
                 window.paint_path(path, base);
             }
-            for x in [36.0, 70.0, right - 110.0, right - 44.0] {
-                dot(at(x, 92.0), commit, ground, window);
-            }
 
             // The branch, as points: the curve up off the base, then level.
             let mut points: Vec<Point<Pixels>> = (0..=24)
@@ -1088,6 +1085,13 @@ fn prune(state: Prune, name: AnyElement, t: &Theme) -> AnyElement {
                 1.0
             };
             stroke_prefix(&points, shown, branch, window);
+
+            // The base's commits go on after the branch: it leaves from the
+            // centre of the second one, and painted first that ring sat
+            // under the red line instead of on it.
+            for x in [36.0, 70.0, right - 110.0, right - 44.0] {
+                dot(at(x, 92.0), commit, ground, window);
+            }
 
             let mut faded = branch;
             faded.a *= pulse;

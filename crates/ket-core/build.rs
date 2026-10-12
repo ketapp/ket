@@ -2,10 +2,14 @@
 //! theme is a new file, with nothing to register by hand. See
 //! `ket_core::theme` for what a file holds.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 fn main() {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("themes");
+    // Read at run time, not `env!` at compile time: a build-script binary
+    // compiled in one checkout can be reused from another when they share
+    // `target/`, and a baked-in path then points at a tree that is gone.
+    let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
+    let dir = manifest.join("themes");
     // The folder itself, so a file added or removed is noticed too.
     println!("cargo:rerun-if-changed={}", dir.display());
     let mut names: Vec<String> = std::fs::read_dir(&dir)

@@ -627,7 +627,7 @@ impl MergeConfig {
 
 /// The issue number a branch is named for: the digits that open its last
 /// `/`-separated part, as in `142-fix-the-thing` or `me/142`.
-fn issue_of(branch: &str) -> Option<&str> {
+pub(crate) fn issue_of(branch: &str) -> Option<&str> {
     let name = branch.rsplit('/').next().unwrap_or(branch);
     let digits = name.len() - name.trim_start_matches(|c: char| c.is_ascii_digit()).len();
     let rest = &name[digits..];

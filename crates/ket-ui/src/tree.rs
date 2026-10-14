@@ -619,6 +619,10 @@ pub struct WorktreeNode {
     /// False until a sweep says otherwise, and swept on its own slow cadence
     /// rather than with the git status tick: see [`Shell::refresh_merged`].
     pub(crate) merged: bool,
+    /// The pull request its branch is open as, once ket has opened or found
+    /// one — see [`ket_core::worktree::Worktree::pull_request`]. The row
+    /// wears it as a mark that opens the page.
+    pub(crate) pull_request: Option<ket_core::github::PullRequestLink>,
 }
 
 impl WorktreeNode {
@@ -1032,12 +1036,47 @@ impl Shell {
             }))
         });
 
+        // The pull request the branch is open as, when there is one: a mark
+        // that opens its page, since that is where its state now lives.
+        let pull_request = node.pull_request.as_ref().map(|open| {
+            let url = open.url.clone();
+            let hovered = self.hovered_pull_request.as_ref() == Some(&node.id);
+            let node_id = node.id.clone();
+            let mark = icon_button(("worktree-pull-request-button", row), Icon::GitHub)
+                .bare()
+                .dense()
+                .render(t)
+                .on_click(move |_, _, cx| {
+                    cx.open_url(&url);
+                    cx.stop_propagation();
+                })
+                .into_any_element();
+            crate::ui::tooltip::tooltip(
+                ("worktree-pull-request", row),
+                mark,
+                format!("#{} on GitHub", open.number),
+                crate::ui::tooltip::Side::Top,
+                hovered,
+                t,
+            )
+            .flex_none()
+            .on_hover(cx.listener(move |this, is_hovered, _, cx| {
+                if *is_hovered {
+                    this.hovered_pull_request = Some(node_id.clone());
+                } else if this.hovered_pull_request.as_ref() == Some(&node_id) {
+                    this.hovered_pull_request = None;
+                }
+                cx.notify();
+            }))
+        });
+
         div()
             .flex()
             .flex_none()
             .items_center()
             .gap(px(6.0))
             .children(leading)
+            .children(pull_request)
             .children(merge_button)
             // The row's facts — what it weighs on disk — show only while the
             // pointer is on the row. At rest every row ends in one mark, the
@@ -1401,6 +1440,7 @@ impl Shell {
                             // The base branch is not a thing that gets merged
                             // away, and a badge on it would say nothing.
                             merged: false,
+                            pull_request: None,
                         }
                     })
                     .chain(managed.iter().map(|worktree| {
@@ -1452,6 +1492,7 @@ impl Shell {
                             // Carried over by `Shell::reload`, so a reload does
                             // not blink every badge off until the next sweep.
                             merged: false,
+                            pull_request: worktree.pull_request.clone(),
                         }
                     }))
                     .collect(),

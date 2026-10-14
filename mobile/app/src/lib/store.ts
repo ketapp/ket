@@ -16,6 +16,67 @@ const FIT = 'ket.fit';
 const LOCK = 'ket.lock';
 const collapsedEntry = (host: string) => `ket.collapsed.${host}`;
 const lastWorkEntry = (host: string) => `ket.lastwork.${host}`;
+/** Set once every entry has been moved to `KEYCHAIN`'s class. */
+const UPGRADED = 'ket.keychain';
+/** The theme's entries — see lib/theme.ts. */
+const THEME_KEYS = ['ket.palette', 'ket.palette.reloadedAt'];
+
+/** Readable from the first unlock after a restart, not only while unlocked.
+ * The app keeps running for a moment after the phone locks — a redial, the
+ * desktop list polled every few seconds — and under iOS's default class every
+ * read then failed with "User interaction is not allowed". */
+const KEYCHAIN: SecureStore.SecureStoreOptions = {
+  keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK,
+};
+
+/** Moves entries written under the default class to `KEYCHAIN`'s. Writing an
+ * existing entry keeps its class, so each is deleted and written again. Every
+ * read and write waits for it, so none sees an entry in between; one that
+ * fails, with the phone locked at launch, is tried again on the next. */
+async function upgrade(): Promise<void> {
+  if (await SecureStore.getItemAsync(UPGRADED)) return;
+  const ids: string[] = JSON.parse((await SecureStore.getItemAsync(HOSTS)) ?? '[]');
+  const keys = [
+    KEY,
+    HOSTS,
+    DESKTOP,
+    FIT,
+    LOCK,
+    ...ids.flatMap((id) => [hostEntry(id), collapsedEntry(id), lastWorkEntry(id)]),
+    ...THEME_KEYS,
+  ];
+  for (const key of keys) {
+    const value = await SecureStore.getItemAsync(key);
+    if (value === null) continue;
+    await SecureStore.deleteItemAsync(key);
+    await SecureStore.setItemAsync(key, value, KEYCHAIN);
+  }
+  await SecureStore.setItemAsync(UPGRADED, '1', KEYCHAIN);
+}
+
+let upgrading: Promise<void> | null = null;
+function upgraded(): Promise<void> {
+  upgrading ??= upgrade().catch((error: unknown) => {
+    upgrading = null;
+    throw error;
+  });
+  return upgrading;
+}
+
+async function get(key: string): Promise<string | null> {
+  await upgraded();
+  return SecureStore.getItemAsync(key);
+}
+
+async function set(key: string, value: string): Promise<void> {
+  await upgraded();
+  await SecureStore.setItemAsync(key, value, KEYCHAIN);
+}
+
+async function del(key: string): Promise<void> {
+  await upgraded();
+  await SecureStore.deleteItemAsync(key);
+}
 
 /** A paired host as the app lists it. */
 export interface SavedHost {
@@ -31,58 +92,58 @@ export interface SavedHost {
 
 /** This phone's key pair, made the first time it is asked for. */
 export async function phoneKey(): Promise<Keypair> {
-  const stored = await SecureStore.getItemAsync(KEY);
+  const stored = await get(KEY);
   if (stored) return keypairFrom(fromBase64Url(stored));
   const keys = generateKeypair();
-  await SecureStore.setItemAsync(KEY, toBase64Url(keys.privateKey));
+  await set(KEY, toBase64Url(keys.privateKey));
   return keys;
 }
 
 export async function listHosts(): Promise<SavedHost[]> {
-  const ids: string[] = JSON.parse((await SecureStore.getItemAsync(HOSTS)) ?? '[]');
+  const ids: string[] = JSON.parse((await get(HOSTS)) ?? '[]');
   const hosts = await Promise.all(ids.map((id) => getHost(id)));
   return hosts.filter((h): h is SavedHost => h !== null);
 }
 
 export async function getHost(id: string): Promise<SavedHost | null> {
-  const stored = await SecureStore.getItemAsync(hostEntry(id));
+  const stored = await get(hostEntry(id));
   return stored ? (JSON.parse(stored) as SavedHost) : null;
 }
 
 export async function saveHost(host: SavedHost): Promise<void> {
-  await SecureStore.setItemAsync(hostEntry(host.id), JSON.stringify(host));
-  const ids: string[] = JSON.parse((await SecureStore.getItemAsync(HOSTS)) ?? '[]');
+  await set(hostEntry(host.id), JSON.stringify(host));
+  const ids: string[] = JSON.parse((await get(HOSTS)) ?? '[]');
   if (!ids.includes(host.id)) {
     ids.push(host.id);
-    await SecureStore.setItemAsync(HOSTS, JSON.stringify(ids));
+    await set(HOSTS, JSON.stringify(ids));
   }
 }
 
 export async function forgetHost(id: string): Promise<void> {
-  await SecureStore.deleteItemAsync(hostEntry(id));
-  await SecureStore.deleteItemAsync(collapsedEntry(id));
-  await SecureStore.deleteItemAsync(lastWorkEntry(id));
-  const ids: string[] = JSON.parse((await SecureStore.getItemAsync(HOSTS)) ?? '[]');
-  await SecureStore.setItemAsync(HOSTS, JSON.stringify(ids.filter((i) => i !== id)));
+  await del(hostEntry(id));
+  await del(collapsedEntry(id));
+  await del(lastWorkEntry(id));
+  const ids: string[] = JSON.parse((await get(HOSTS)) ?? '[]');
+  await set(HOSTS, JSON.stringify(ids.filter((i) => i !== id)));
 }
 
 /** The desktop the Worktrees screen shows, when more than one is paired. */
 export async function saveDesktop(id: string): Promise<void> {
-  await SecureStore.setItemAsync(DESKTOP, id);
+  await set(DESKTOP, id);
 }
 
 export async function getDesktop(): Promise<string | null> {
-  return (await SecureStore.getItemAsync(DESKTOP)) ?? null;
+  return (await get(DESKTOP)) ?? null;
 }
 
 /** The projects folded on the Worktrees screen, per desktop. The phone's own:
  * the desktop's sidebar folds what fits a window, not what fits a phone. */
 export async function saveCollapsed(host: string, projects: string[]): Promise<void> {
-  await SecureStore.setItemAsync(collapsedEntry(host), JSON.stringify(projects));
+  await set(collapsedEntry(host), JSON.stringify(projects));
 }
 
 export async function getCollapsed(host: string): Promise<string[]> {
-  return JSON.parse((await SecureStore.getItemAsync(collapsedEntry(host))) ?? '[]') as string[];
+  return JSON.parse((await get(collapsedEntry(host))) ?? '[]') as string[];
 }
 
 /** The project and agent New task last started work with on a desktop, so the
@@ -93,21 +154,21 @@ export interface LastWork {
 }
 
 export async function saveLastWork(host: string, last: LastWork): Promise<void> {
-  await SecureStore.setItemAsync(lastWorkEntry(host), JSON.stringify(last));
+  await set(lastWorkEntry(host), JSON.stringify(last));
 }
 
 export async function getLastWork(host: string): Promise<LastWork | null> {
-  const stored = await SecureStore.getItemAsync(lastWorkEntry(host));
+  const stored = await get(lastWorkEntry(host));
   return stored ? (JSON.parse(stored) as LastWork) : null;
 }
 
 /** Whether a terminal is fitted to the phone while the phone has control. */
 export async function saveFit(on: boolean): Promise<void> {
-  await SecureStore.setItemAsync(FIT, on ? '1' : '0');
+  await set(FIT, on ? '1' : '0');
 }
 
 export async function getFit(): Promise<boolean> {
-  return (await SecureStore.getItemAsync(FIT)) === '1';
+  return (await get(FIT)) === '1';
 }
 
 /** The app lock — see lib/lock.ts. The PIN is kept only as a salted hash. */
@@ -123,13 +184,13 @@ export interface LockConfig {
 }
 
 export async function getLock(): Promise<LockConfig | null> {
-  const stored = await SecureStore.getItemAsync(LOCK);
+  const stored = await get(LOCK);
   return stored ? (JSON.parse(stored) as LockConfig) : null;
 }
 
 export async function saveLock(config: LockConfig | null): Promise<void> {
-  if (config) await SecureStore.setItemAsync(LOCK, JSON.stringify(config));
-  else await SecureStore.deleteItemAsync(LOCK);
+  if (config) await set(LOCK, JSON.stringify(config));
+  else await del(LOCK);
 }
 
 export function toPaired(host: SavedHost): PairedHost {

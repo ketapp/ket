@@ -60,6 +60,9 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     "NSEvent",
     "NSImage",
     "NSResponder",
+    # Apple's Simulator app, which a build tool opens beside the iPhone tab;
+    # ket hides it. See `src/ios_simulator.rs`.
+    "NSRunningApplication",
     "NSView",
     "NSWindow",
 ] }

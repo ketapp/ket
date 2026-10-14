@@ -49,8 +49,9 @@ use crate::worktree_menu::WorktreeTarget;
 /// How many changed paths the dialog names before it stops listing them.
 ///
 /// Enough to recognise a stray `.env` or a `node_modules` that is not ignored,
-/// short enough that the dialog does not become a file browser.
-const LISTED_PATHS: usize = 8;
+/// short enough that the dialog does not become a file browser. The pull
+/// request dialog lists the same commit, so it lists the same number.
+pub(crate) const LISTED_PATHS: usize = 8;
 
 /// The dialog's width. Wide enough that a long branch name in the commit
 /// step and a full path in the file list both fit without truncating.
@@ -674,9 +675,65 @@ impl Shell {
 
         // What `git add -A` is about to sweep up, named. This is the only place
         // a person sees a secret about to be committed — see the module docs.
-        let listed = (!finished && !confirm.paths.is_empty()).then(|| {
-            let hidden = confirm.changes.saturating_sub(confirm.paths.len());
-            let mono = self.font_family.clone();
+        let listed = (!finished)
+            .then(|| self.committed_paths_list(confirm.changes, &confirm.paths))
+            .flatten();
+
+        // The other way out: the same commit, pushed instead of merged.
+        // Offered only while the merge has not started or finished.
+        let pull_request = (!finished && !running).then(|| {
+            button("merge-as-pull-request", "Pull request\u{2026}")
+                .ghost()
+                .render(t)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    let Some(confirm) = this.confirm_merge_worktree.take() else {
+                        return;
+                    };
+                    this.request_pull_request(confirm.target, cx);
+                    cx.notify();
+                }))
+        });
+
+        Some(
+            centered(
+                card("merge-worktree", WIDTH, t)
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(
+                        header(if finished { "Merged" } else { "Merge worktree" }, t).child(close),
+                    )
+                    .child(top)
+                    .children(listed)
+                    .child(
+                        footer()
+                            .child(cancel)
+                            .children(pull_request)
+                            .children(reclaim)
+                            .children(agent_button)
+                            .children(confirm_button),
+                    ),
+            )
+            .into_any_element(),
+        )
+    }
+
+    /// The first paths a commit would take, as a bordered list, or nothing
+    /// when there are none.
+    ///
+    /// Shared by the merge and pull request dialogs, which make the same
+    /// commit: `changes` is how many paths there are, `paths` the first
+    /// [`LISTED_PATHS`] of them, and the difference is said in words.
+    pub(crate) fn committed_paths_list(
+        &self,
+        changes: usize,
+        paths: &[SharedString],
+    ) -> Option<gpui::Div> {
+        if paths.is_empty() {
+            return None;
+        }
+        let t = &self.theme;
+        let hidden = changes.saturating_sub(paths.len());
+        let mono = self.font_family.clone();
+        Some(
             div()
                 .flex()
                 .flex_col()
@@ -685,7 +742,7 @@ impl Shell {
                 .border_1()
                 .border_color(paint(t.rule))
                 .text_size(FILE_TEXT)
-                .children(confirm.paths.iter().map(|path| {
+                .children(paths.iter().map(|path| {
                     let (dir, name) = match path.rfind('/') {
                         Some(at) => (&path[..=at], &path[at + 1..]),
                         None => ("", path.as_ref()),
@@ -734,27 +791,7 @@ impl Shell {
                             .text_color(paint(t.text.dim))
                             .child(format!("and {hidden} more")),
                     )
-                })
-        });
-
-        Some(
-            centered(
-                card("merge-worktree", WIDTH, t)
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .child(
-                        header(if finished { "Merged" } else { "Merge worktree" }, t).child(close),
-                    )
-                    .child(top)
-                    .children(listed)
-                    .child(
-                        footer()
-                            .child(cancel)
-                            .children(reclaim)
-                            .children(agent_button)
-                            .children(confirm_button),
-                    ),
-            )
-            .into_any_element(),
+                }),
         )
     }
 }

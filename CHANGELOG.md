@@ -15,6 +15,12 @@ words; no internal names, no commit hashes. ket reads this file
 
 ### New
 
+- A worktree's work can leave ket as a pull request. Right-click the
+  worktree and choose Push and open pull request, or press Pull request… in
+  the merge dialog: ket commits what is uncommitted, pushes the branch as
+  the project's GitHub account, and opens the pull request with the title
+  and description you checked, as a draft if you like. The row then shows
+  a mark that opens it on GitHub, and `ket pr` does the same from a shell.
 - Right-click → Inspect Element in a browser tab opens Web Inspector, docked
   inside that tab.
 - Links clicked in the terminal can now be copied from the link menu.
@@ -52,6 +58,8 @@ words; no internal names, no commit hashes. ket reads this file
 
 ### Fixed
 
+- The drawing in the Delete worktree dialog stays still while the delete
+  runs, instead of shrinking and flickering.
 - A worktree now shows blue “waiting” while Codex asks you a question in its terminal.
 - Running OpenCode 2 in a ket pane no longer reports a failed plugin: the
   plugin ket installs now speaks OpenCode 2's plugin language as well as 1's.

@@ -118,6 +118,15 @@ pub struct Worktree {
     /// still load, unpinned.
     #[serde(default)]
     pub pinned: bool,
+    /// The pull request its branch is open as, once ket has opened one or
+    /// found one — see [`crate::workspace::Workspace::open_pull_request`].
+    ///
+    /// Remembered rather than asked of GitHub on every draw: the row shows
+    /// it, and the row is drawn far more often than a pull request changes.
+    /// `#[serde(default)]` so state files written before this field existed
+    /// still load, with none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pull_request: Option<crate::github::PullRequestLink>,
 }
 
 /// [`Worktree::token_reduction`] when nothing has chosen otherwise: the active
@@ -1676,6 +1685,7 @@ mod tests {
             token_reduction_id: None,
             token_reduction_pack_id: None,
             pinned: false,
+            pull_request: None,
         }
     }
 

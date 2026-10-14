@@ -26,14 +26,14 @@ use ket_core::event::{Envelope, Event, SessionOutcome};
 use ket_core::id::{ProjectId, WorktreeId};
 use ket_core::journal::Journal;
 use ket_core::status::{ChangeKind, WorktreeStatus};
-use ket_core::workspace::{CollapseOptions, MergeError, Workspace};
+use ket_core::workspace::{CollapseOptions, MergeError, PullRequestOptions, Workspace};
 use ket_core::{KetError, logging, paths};
 
 #[derive(Parser, Debug)]
 #[command(
     name = "ket",
     version = ket_core::build_info::display(),
-    about = "Run coding agents in parallel across isolated git worktrees"
+    about = "Run coding agents in parallel across isolated git worktrees (beta)"
 )]
 struct Cli {
     /// Logging filter. Overrides the `KET_LOG` environment variable.
@@ -110,6 +110,31 @@ enum Cmd {
         /// Merge even when the primary checkout has uncommitted changes.
         #[arg(long)]
         force: bool,
+    },
+
+    /// Commit a worktree's work, push its branch and open a pull request.
+    ///
+    /// The other way out of a worktree: the same commit `merge` makes, then
+    /// the branch goes to the repository's remote as the GitHub account the
+    /// project picked, and a pull request into its base is opened with `gh`.
+    /// A pull request the branch already has open is pushed to and reported
+    /// instead of doubled. The primary checkout is not touched.
+    ///
+    /// Without `--title`, the title is the backlog note the branch was started
+    /// from, or the branch name made readable; without `--body`, it is
+    /// `Closes #142` for a branch named for an issue.
+    Pr {
+        /// Worktree id to push and open a pull request for.
+        worktree: String,
+        /// The pull request's title.
+        #[arg(long)]
+        title: Option<String>,
+        /// The pull request's description.
+        #[arg(long)]
+        body: Option<String>,
+        /// Open it as a draft.
+        #[arg(long)]
+        draft: bool,
     },
 
     /// Print what a worktree changed, as a unified diff.
@@ -517,6 +542,17 @@ impl Cmd {
             Cmd::Merge { worktree, force } => Invocation::new("worktree.merge")
                 .text("worktree", worktree)
                 .flag("force", force),
+
+            Cmd::Pr {
+                worktree,
+                title,
+                body,
+                draft,
+            } => Invocation::new("worktree.pull_request")
+                .text("worktree", worktree)
+                .maybe_text("title", title)
+                .maybe_text("body", body)
+                .flag("draft", draft),
 
             Cmd::Diff { worktree, stat } => Invocation::new("worktree.diff")
                 .maybe_text("worktree", worktree)
@@ -926,6 +962,14 @@ fn registry() -> Result<Registry, KetError> {
         merge_worktree(
             invocation.require_text("worktree")?,
             invocation.is_set("force"),
+        )
+    })?;
+    registry.bind("worktree.pull_request", |invocation, _| {
+        open_pull_request(
+            invocation.require_text("worktree")?,
+            invocation.text_of("title"),
+            invocation.text_of("body"),
+            invocation.is_set("draft"),
         )
     })?;
     registry.bind("worktree.create", |invocation, _| {
@@ -2000,6 +2044,55 @@ fn merge_worktree(worktree: &str, force: bool) -> Result<(), KetError> {
     Ok(())
 }
 
+/// Handles `ket pr`.
+fn open_pull_request(
+    worktree: &str,
+    title: Option<&str>,
+    body: Option<&str>,
+    draft: bool,
+) -> Result<(), KetError> {
+    let workspace = Workspace::open()?;
+    let id = WorktreeId::new(worktree);
+
+    // Whatever was not given is drafted the way the app drafts it: from the
+    // backlog note the branch came from, else the branch itself.
+    let (title, body) = match (title, body) {
+        (Some(title), Some(body)) => (title.to_owned(), body.to_owned()),
+        _ => {
+            let project = workspace
+                .worktrees(None)?
+                .into_iter()
+                .find(|w| w.id == id)
+                .map(|w| w.project_id)
+                .ok_or_else(|| KetError::UnknownWorktree(worktree.to_owned()))?;
+            let notes = Backlog::load(&project).map(|b| b.notes).unwrap_or_default();
+            let draft = workspace.pull_request_draft(&id, &notes)?;
+            (
+                title.map_or(draft.title, str::to_owned),
+                body.map_or(draft.body, str::to_owned),
+            )
+        }
+    };
+
+    let report = workspace.open_pull_request(&id, &PullRequestOptions { title, body, draft })?;
+
+    match &report.committed {
+        Some(commit) if commit.files > 0 => {
+            println!("committed {} file(s) in {}", commit.files, report.worktree);
+        }
+        _ => println!("nothing to commit in {}", report.worktree),
+    }
+    println!("pushed {} to {}", report.branch, report.remote);
+    let pr = &report.pull_request;
+    if report.existed {
+        println!("#{} was already open: {}", pr.number, pr.url);
+    } else {
+        println!("opened #{} into {}: {}", pr.number, report.base, pr.url);
+    }
+
+    Ok(())
+}
+
 /// Handles `ket diff`.
 ///
 /// Writes to stdout in `git diff` format so the output pipes into everything
@@ -2150,6 +2243,17 @@ mod tests {
             "--keep-losers",
         ],
         &["ket", "merge", "wt-1", "--force"],
+        &["ket", "pr", "wt-1"],
+        &[
+            "ket",
+            "pr",
+            "wt-1",
+            "--title",
+            "Fix it",
+            "--body",
+            "Closes #1",
+            "--draft",
+        ],
         &["ket", "diff", "wt-1"],
         &["ket", "diff", "--stat"],
         &["ket", "events"],

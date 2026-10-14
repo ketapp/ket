@@ -8,7 +8,7 @@ import Svg, { Path } from 'react-native-svg';
 
 import { font, t, tint } from '../lib/theme';
 import { BrandMark, Camera } from './icons';
-import { Button, TAB_BAR_ROOM } from './ui';
+import { Button, TAB_BAR_ROOM, Tag } from './ui';
 
 const AnimatedPath = Animated.createAnimatedComponent(Path);
 
@@ -23,6 +23,9 @@ export function Unpaired() {
       <Rise v={enter[0]} style={styles.top}>
         <BrandMark size={23} />
         <Text style={styles.wordmark}>ket</Text>
+        <Tag color={t.merging} style={styles.beta}>
+          Beta
+        </Tag>
       </Rise>
 
       <View style={styles.middle}>
@@ -195,6 +198,7 @@ const styles = StyleSheet.create({
   page: { flex: 1, paddingHorizontal: 16 },
   top: { height: 44, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10 },
   wordmark: { fontFamily: font.chromeSemibold, fontSize: 23, letterSpacing: -0.46, color: t.text },
+  beta: { alignSelf: 'center' },
   middle: { flex: 1, justifyContent: 'center', gap: 32 },
   intro: { alignItems: 'center', gap: 26, paddingHorizontal: 8 },
   title: {

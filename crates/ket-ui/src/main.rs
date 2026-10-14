@@ -70,6 +70,7 @@ mod phones;
 mod preferences;
 mod projects;
 mod projects_view;
+mod pull_request;
 mod quick_prompt;
 mod region;
 mod release;
@@ -449,6 +450,11 @@ struct Shell {
     ///
     /// One at a time, and also what the row draws its in-flight state from.
     pub(crate) merging: crate::merge_worktree::Merging,
+    /// The pull request dialog for one worktree row, while it is up.
+    pub(crate) confirm_pull_request: Option<crate::pull_request::PullRequestConfirm>,
+    /// The worktree whose push and pull request are in flight, if any. One
+    /// at a time, as a merge is.
+    pub(crate) opening_pull_request: crate::pull_request::OpeningPullRequest,
     /// The tab whose title is being edited in the strip, if any. One at a
     /// time: the field is what holds the keyboard, and two of them would be
     /// two places a character could land.
@@ -594,6 +600,8 @@ struct Shell {
     /// The worktree whose merge mark is under the pointer, if any. Its own
     /// field for the same reason `hovered_primary` is.
     pub(crate) hovered_merge: Option<WorktreeId>,
+    /// The worktree whose pull request mark is under the pointer, if any.
+    pub(crate) hovered_pull_request: Option<WorktreeId>,
     /// The worktree whose size on disk is under the pointer, for its
     /// tooltip.
     pub(crate) hovered_footprint: Option<WorktreeId>,
@@ -915,6 +923,7 @@ impl Shell {
             || self.confirm_discard.is_some()
             || self.confirm_close_session.is_some()
             || self.confirm_merge_worktree.is_some()
+            || self.confirm_pull_request.is_some()
             || self.worktree_rename.is_some()
             || self.quick_prompt.is_some()
             || self.backlog.is_some()
@@ -1170,6 +1179,8 @@ impl Shell {
                     tab_snippets: None,
                     confirm_merge_worktree: None,
                     merging: None,
+                    confirm_pull_request: None,
+                    opening_pull_request: None,
                     tab_rename: None,
                     worktree_rename: None,
                     quick_prompt: None,
@@ -1201,6 +1212,7 @@ impl Shell {
                     override_hover: Default::default(),
                     hovered_primary: None,
                     hovered_merge: None,
+                    hovered_pull_request: None,
                     hovered_footprint: None,
                     hovered_worktree: None,
                     collapsed_subagents: std::collections::HashSet::new(),
@@ -1318,6 +1330,8 @@ impl Shell {
             tab_snippets: None,
             confirm_merge_worktree: None,
             merging: None,
+            confirm_pull_request: None,
+            opening_pull_request: None,
             tab_rename: None,
             worktree_rename: None,
             quick_prompt: None,
@@ -1349,6 +1363,7 @@ impl Shell {
             override_hover: Default::default(),
             hovered_primary: None,
             hovered_merge: None,
+            hovered_pull_request: None,
             hovered_footprint: None,
             hovered_worktree: None,
             collapsed_subagents: std::collections::HashSet::new(),
@@ -1667,6 +1682,7 @@ impl Render for Shell {
         let clear_build = self.clear_build_view(cx);
         let discard = self.discard_view(cx);
         let merge_worktree = self.merge_worktree_view(cx);
+        let pull_request = self.pull_request_view(window, cx);
         let rename_worktree = self.worktree_rename_view(window, cx);
         let quick_prompt = self.quick_prompt_view(window, cx);
         let backlog = self.backlog_view(window, cx);
@@ -1682,6 +1698,7 @@ impl Render for Shell {
             .or(clear_build)
             .or(discard)
             .or(merge_worktree)
+            .or(pull_request)
             .or(rename_worktree)
             .or(quick_prompt)
             .or(backlog)
@@ -1875,6 +1892,11 @@ impl Render for Shell {
                         return;
                     }
                     if this.merge_worktree_key(event, cx) {
+                        cx.notify();
+                        return;
+                    }
+                    if this.pull_request_key(event, window, cx) {
+                        this.caret_wake(cx);
                         cx.notify();
                         return;
                     }

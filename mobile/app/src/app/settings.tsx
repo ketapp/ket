@@ -8,7 +8,7 @@ import { useEffect, useState } from 'react';
 import { Linking, ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import { BrandMark, Desktop, External } from '../components/icons';
-import { Button, Card, Heading, Prose, Row, Screen, Segmented, TAB_BAR_ROOM, TabBar, Toggle } from '../components/ui';
+import { Button, Card, Heading, Prose, Row, Screen, Segmented, TAB_BAR_ROOM, TabBar, Tag, Toggle } from '../components/ui';
 import { everyWorktree } from '../lib/activity';
 import { statusLine, useHosts } from '../lib/hosts';
 import { LOCK_AFTER, biometry, confirmIdentity, setLockAfter, turnOff, useLock } from '../lib/lock';
@@ -116,7 +116,18 @@ export default function Settings() {
         </Card>
         <Card style={styles.card}>
           <Heading>About</Heading>
-          <Row small title="Version" meta={<Text style={styles.version}>{`${version} (${build})`}</Text>} />
+          <Row
+            small
+            title="Version"
+            meta={
+              <View style={styles.versionLine}>
+                <Tag color={t.merging} style={styles.beta}>
+                  Beta
+                </Tag>
+                <Text style={styles.version}>{`${version} (${build})`}</Text>
+              </View>
+            }
+          />
           <Row
             small
             title="Website"
@@ -163,6 +174,8 @@ const styles = StyleSheet.create({
   settingDetail: { fontSize: size.detail, lineHeight: 18 },
   segmented: { marginHorizontal: 8, marginBottom: 6 },
   version: { fontFamily: font.chrome, fontSize: size.label, color: t.dim, paddingRight: 6 },
+  versionLine: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  beta: { alignSelf: 'center' },
   link: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingRight: 6 },
   linkText: { fontFamily: font.chrome, fontSize: size.label, color: t.dim },
   brand: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10, paddingTop: 18, paddingBottom: 10 },

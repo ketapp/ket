@@ -53,6 +53,11 @@ impl GitWorktree {
 /// enough to be an inconvenience rather than a hang.
 const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// How long a push may run. Longer than a fetch: a branch carries whatever
+/// an agent made, and a slow uplink is not a reason to lose the pull
+/// request it was about to become.
+const PUSH_TIMEOUT: Duration = Duration::from_secs(120);
+
 /// What happened to the remote before a worktree was cut.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Fetch {
@@ -739,12 +744,65 @@ impl Git {
     /// Never prompts: a remote that wants credentials nobody is there to type
     /// fails instead of hanging, and a hang past the timeout is killed.
     pub fn fetch(&self, remote: &str) -> Result<()> {
-        let command = format!("fetch --prune {remote}");
+        self.run_networked(
+            &["fetch", "--prune", "--quiet", remote],
+            &[],
+            FETCH_TIMEOUT,
+            &format!("fetch --prune {remote}"),
+        )
+    }
+
+    /// `git push -u <remote> <branch>`, bounded by [`PUSH_TIMEOUT`].
+    ///
+    /// `-u` so the branch tracks what it was pushed to: [`Git::worktree_add`]
+    /// leaves a worktree's branch with no upstream, and a pull request has
+    /// to name a branch the remote has.
+    ///
+    /// With `credentials`, the push runs with that credential helper alone,
+    /// in place of whatever the person's git config names, so an HTTPS
+    /// remote answers as the account ket was told to use — see
+    /// [`crate::github::git_credential_helper`]. Without, git's own
+    /// configuration decides, as it does for a push typed in a terminal.
+    /// Never prompts either way.
+    pub fn push(
+        &self,
+        remote: &str,
+        branch: &str,
+        credentials: Option<&crate::github::PushCredentials>,
+    ) -> Result<()> {
+        let mut args: Vec<&str> = Vec::new();
+        let helper;
+        if let Some(credentials) = credentials {
+            // The empty value first: it clears every helper configured
+            // before it, so the one that follows is the only one asked.
+            helper = format!("credential.helper={}", credentials.helper);
+            args.extend(["-c", "credential.helper=", "-c", &helper]);
+        }
+        args.extend(["push", "--quiet", "-u", remote, branch]);
+        let env = credentials.map(|c| c.env()).unwrap_or_default();
+        self.run_networked(
+            &args,
+            &env,
+            PUSH_TIMEOUT,
+            &format!("push -u {remote} {branch}"),
+        )
+    }
+
+    /// Runs a git command that talks to a remote: never prompting, with
+    /// `env` set, killed at `timeout`. `command` is how an error names it.
+    fn run_networked(
+        &self,
+        args: &[&str],
+        env: &[(&str, &str)],
+        timeout: Duration,
+        command: &str,
+    ) -> Result<()> {
         let mut child = Command::new("git")
             .arg("-C")
             .arg(&self.root)
-            .args(["fetch", "--prune", "--quiet", remote])
+            .args(args)
             .env("GIT_TERMINAL_PROMPT", "0")
+            .envs(env.iter().copied())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -764,12 +822,12 @@ impl Git {
         let status = loop {
             match child.try_wait() {
                 Ok(Some(status)) => break status,
-                Ok(None) if started.elapsed() >= FETCH_TIMEOUT => {
+                Ok(None) if started.elapsed() >= timeout => {
                     let _ = child.kill();
                     let _ = child.wait();
                     return Err(KetError::Git {
-                        command,
-                        status: format!("timed out after {}s", FETCH_TIMEOUT.as_secs()),
+                        command: command.to_owned(),
+                        status: format!("timed out after {}s", timeout.as_secs()),
                         stderr: String::new(),
                     });
                 }
@@ -780,7 +838,7 @@ impl Git {
         let stderr = drain.join().unwrap_or_default();
         if !status.success() {
             return Err(KetError::Git {
-                command,
+                command: command.to_owned(),
                 status: status.to_string(),
                 stderr: stderr.trim().to_owned(),
             });

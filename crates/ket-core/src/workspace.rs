@@ -14,6 +14,7 @@ use crate::config::{Config, HookConfig, ProvisionConfig, Transport};
 use crate::diff::{self, WorktreeDiff};
 use crate::event::{Event, EventBus, SessionOutcome};
 use crate::git::{Fetch, Git, PreparedBase};
+use crate::github::{self, PullRequestLink};
 use crate::hook::{HookPoint, HookRunner};
 use crate::id::{ProjectId, SessionId, WorktreeId};
 use crate::journal::Journal;
@@ -122,6 +123,65 @@ pub enum MergeError {
     Failed(#[from] KetError),
 }
 
+/// What a pull request for a worktree would be, read before anything runs:
+/// the words to offer, and the facts a dialog or a command states first.
+///
+/// All of it is local and quick — the remote is named, not asked — so a
+/// dialog can open on it without waiting on the network.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PullRequestDraft {
+    /// The worktree.
+    pub worktree: WorktreeId,
+    /// Its branch, which becomes the pull request's head.
+    pub branch: String,
+    /// The branch it was cut from, which becomes the pull request's base.
+    pub base: String,
+    /// The remote it would be pushed to. `None` means it cannot be: the
+    /// repository has none.
+    pub remote: Option<String>,
+    /// A title to offer: the backlog note the branch came from, or the
+    /// branch name made readable.
+    pub title: String,
+    /// A body to offer: `Closes #142` for a branch named for an issue, else
+    /// nothing.
+    pub body: String,
+    /// The pull request the worktree already remembers, if any.
+    pub existing: Option<PullRequestLink>,
+    /// How many paths are uncommitted, and would be committed first.
+    pub changes: usize,
+}
+
+/// What [`Workspace::open_pull_request`] is asked for.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PullRequestOptions {
+    /// The pull request's title. Required: `gh` would otherwise prompt.
+    pub title: String,
+    /// Its description, in markdown. May be empty.
+    pub body: String,
+    /// Whether to open it as a draft.
+    pub draft: bool,
+}
+
+/// What [`Workspace::open_pull_request`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PullRequestReport {
+    /// The worktree.
+    pub worktree: WorktreeId,
+    /// Its branch, now on the remote.
+    pub branch: String,
+    /// The branch the pull request asks to merge into.
+    pub base: String,
+    /// The remote the branch was pushed to.
+    pub remote: String,
+    /// The commit made from uncommitted work, if there was any to make.
+    pub committed: Option<crate::git::CommitReport>,
+    /// The pull request.
+    pub pull_request: PullRequestLink,
+    /// Whether it was already open for the branch, so none was made: the
+    /// branch was pushed and that one is current.
+    pub existed: bool,
+}
+
 /// What [`Workspace::collapse`] did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CollapseReport {
@@ -147,6 +207,9 @@ pub struct Workspace {
     /// Runs the commands configured at each lifecycle point, gating the
     /// operation they sit around by exit code. See [`crate::hook`].
     hooks: HookRunner,
+    /// The `gh` a pull request is opened with, when it is not the real one —
+    /// see [`crate::github::Checkout::program`]. `None` everywhere but a test.
+    gh_program: Option<PathBuf>,
     /// Sessions this process is driving.
     ///
     /// In memory rather than in the store, and deliberately so: a permission
@@ -190,6 +253,7 @@ impl Workspace {
             worktrees_root: config.worktrees_dir()?,
             config,
             hooks: HookRunner::real(),
+            gh_program: None,
             live: std::sync::Mutex::new(std::collections::HashMap::new()),
         })
     }
@@ -229,8 +293,20 @@ impl Workspace {
             worktrees_root: worktrees_root.into(),
             config,
             hooks,
+            gh_program: None,
             live: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
+    }
+
+    /// The same workspace, opening pull requests through `program` rather
+    /// than the `gh` on the login shell's PATH.
+    ///
+    /// A test's seam, so that what ket would ask `gh` can be read off a
+    /// script of the test's own — the real `gh` is found somewhere a test
+    /// cannot reach into. See [`crate::github::Checkout::program`].
+    pub fn with_gh_program(mut self, program: impl Into<PathBuf>) -> Self {
+        self.gh_program = Some(program.into());
+        self
     }
 
     /// The configuration this workspace was opened with.
@@ -765,6 +841,7 @@ impl Workspace {
             token_reduction_id: Some(economy.id.clone()),
             token_reduction_pack_id: Some(worktree::active_pack_id()),
             pinned: false,
+            pull_request: None,
         };
 
         let record = created.clone();
@@ -1260,6 +1337,7 @@ impl Workspace {
                 .into(),
             token_reduction_pack_id: Some(worktree::active_pack_id()),
             pinned: false,
+            pull_request: None,
         };
 
         let record = adopted.clone();
@@ -1733,6 +1811,190 @@ impl Workspace {
             already_merged,
             removed,
             remove_failed,
+        })
+    }
+
+    /// What a pull request for `id` would be — see [`PullRequestDraft`].
+    ///
+    /// `notes` is the project's backlog, handed in rather than read here:
+    /// where a backlog lives is a setting read from the real state file,
+    /// which is not something an operation on a sandboxed workspace gets
+    /// to touch. A caller with no backlog passes none, and the title comes
+    /// from the branch.
+    pub fn pull_request_draft(
+        &self,
+        id: &WorktreeId,
+        notes: &[crate::backlog::Note],
+    ) -> Result<PullRequestDraft> {
+        let state = self.store.load()?;
+        let MergePlan {
+            worktree,
+            git,
+            base,
+            ..
+        } = self.prepare_merge(&state, id)?;
+        let changes = worktree
+            .exists()
+            .then(|| status::of_worktree(&worktree.path, None))
+            .transpose()?
+            .map_or(0, |status| status.total_changes);
+        Ok(PullRequestDraft {
+            title: crate::pull_request::title_for(&worktree, notes),
+            body: crate::pull_request::body_for(&worktree.branch),
+            remote: git.base_remote(),
+            existing: worktree.pull_request.clone(),
+            changes,
+            worktree: worktree.id,
+            branch: worktree.branch,
+            base,
+        })
+    }
+
+    /// Commits a worktree's uncommitted work, pushes its branch, and opens a
+    /// pull request for it into its base — or, when the branch already has
+    /// one open, pushes and reports that one.
+    ///
+    /// The other way out of a worktree, beside [`Self::merge_worktree`]: the
+    /// commit is the same, with the same template, and from there the work
+    /// goes to the remote instead of the primary checkout. The primary
+    /// checkout is not touched and does not have to be on the base, which
+    /// is the one check merge makes that this does not.
+    ///
+    /// The push goes as the GitHub account the project picked, by lending
+    /// git `gh`'s credential helper for that one command — see
+    /// [`crate::github::git_credential_helper`]. Nothing is remembered on the
+    /// worktree until the pull request is known: a push that fails leaves
+    /// the record exactly as it was.
+    pub fn open_pull_request(
+        &self,
+        id: &WorktreeId,
+        options: &PullRequestOptions,
+    ) -> Result<PullRequestReport> {
+        let title = options.title.trim();
+        if title.is_empty() {
+            return Err(KetError::Conflict(
+                "a pull request needs a title".to_owned(),
+            ));
+        }
+
+        let state = self.store.load()?;
+        let MergePlan {
+            worktree,
+            project,
+            git,
+            base,
+        } = self.prepare_merge(&state, id)?;
+
+        if !worktree.exists() {
+            return Err(KetError::Conflict(format!(
+                "{}'s checkout is gone from {}, so there is nothing to push",
+                worktree.id,
+                worktree.path.display()
+            )));
+        }
+        let Some(remote) = git.base_remote() else {
+            return Err(KetError::Conflict(format!(
+                "{} has no remote to push to",
+                project.name
+            )));
+        };
+
+        // The same two refusals as a merge, for the same reason: committing
+        // on top of a half-applied operation is how work is lost.
+        let status = status::of_worktree(&worktree.path, None)?;
+        if let Some(operation) = status.in_progress {
+            return Err(KetError::Conflict(format!(
+                "{} is in the middle of a {}; finish or abort it in that worktree first",
+                worktree.id,
+                operation.label(),
+            )));
+        }
+        if let Some(conflicted) = status
+            .files
+            .iter()
+            .find(|file| file.kind == status::ChangeKind::Conflicted)
+        {
+            return Err(KetError::Conflict(format!(
+                "{} has an unresolved conflict in `{}`; resolve it before opening a pull request",
+                worktree.id, conflicted.path,
+            )));
+        }
+
+        let in_worktree = Git::new(&worktree.path);
+        let committed = (status.total_changes > 0)
+            .then(|| {
+                let message = self.config.merge.commit_message(
+                    &worktree.branch,
+                    &base,
+                    worktree.id.as_str(),
+                    status.total_changes,
+                );
+                in_worktree.commit_all(&message)
+            })
+            .transpose()?;
+
+        let at = github::Checkout {
+            root: project.root.clone(),
+            account: self.project_settings(&project.id)?.github_account,
+            program: self.gh_program.clone(),
+        };
+
+        // Asked before the push, so a pull request an agent opened itself
+        // is found and brought up to date rather than doubled.
+        let existing = github::open_pull_request_for(&at, &worktree.branch)?;
+
+        let credentials = github::git_credential_helper(&at)?;
+        in_worktree
+            .push(&remote, &worktree.branch, credentials.as_ref())
+            .map_err(|e| {
+                let detail = match &e {
+                    KetError::Git { stderr, .. } if !stderr.is_empty() => format!(": {stderr}"),
+                    _ => String::new(),
+                };
+                KetError::Conflict(format!(
+                    "could not push `{}` to {remote}{detail}",
+                    worktree.branch
+                ))
+            })?;
+
+        let (pull_request, existed) = match existing {
+            Some(open) => (open, true),
+            None => (
+                github::create_pull_request(
+                    &at,
+                    &base,
+                    &worktree.branch,
+                    title,
+                    &options.body,
+                    options.draft,
+                )?,
+                false,
+            ),
+        };
+
+        let remembered = pull_request.clone();
+        let id = worktree.id.clone();
+        self.store.update(move |state| {
+            if let Some(record) = state.worktrees.iter_mut().find(|w| w.id == id) {
+                record.pull_request = Some(remembered);
+            }
+            Ok(())
+        })?;
+        self.bus.publish(Event::PullRequestOpened {
+            worktree_id: worktree.id.clone(),
+            project_id: project.id,
+            number: pull_request.number,
+            url: pull_request.url.clone(),
+        });
+
+        Ok(PullRequestReport {
+            worktree: worktree.id,
+            branch: worktree.branch,
+            base,
+            remote,
+            committed,
+            pull_request,
+            existed,
         })
     }
 
@@ -2226,6 +2488,7 @@ impl Workspace {
                         token_reduction_id: None,
                         token_reduction_pack_id: None,
                         pinned: false,
+                        pull_request: None,
                     })
                 })
             })

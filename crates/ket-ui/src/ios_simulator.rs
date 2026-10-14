@@ -5,6 +5,13 @@
 //! adapter allowed to load those frameworks or message their Objective-C API.
 //! An iPhone is booted only from the tab's own Start button; nothing is
 //! created, shut down, installed to or launched here.
+//!
+//! The one thing done to another app: while the tab is starting or showing a
+//! phone, Apple's Simulator app is hidden each time it launches. Build tools
+//! open it to put their app on screen — Expo's CLI runs `open -a Simulator`
+//! whenever no Simulator is running — and its window then sits over ket
+//! showing the same phone the tab does. Hidden once per launch, so a
+//! Simulator somebody brings back stays where they put it.
 
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -15,6 +22,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use gpui::{AnyElement, ClipboardItem, Context, SharedString, Window, canvas, div, prelude::*, px};
 use ket_core::theme::Theme;
+use objc2::rc::Retained;
+use objc2_app_kit::NSRunningApplication;
+use objc2_foundation::NSString;
 use serde::Deserialize;
 
 use crate::Shell;
@@ -65,6 +75,46 @@ pub(crate) struct IosSimulatorHandle {
     last_shot: Option<PathBuf>,
     /// The phone drawn while the tab waits, and how far it has turned.
     turn: Cell<Turn>,
+    /// Which watch hides Apple's Simulator app for this tab, so one left
+    /// running by a tab that closed and reopened stops — see
+    /// [`Shell::keep_simulator_app_hidden`].
+    hide_watch: u64,
+    /// The Simulator app launches already hidden, each once.
+    hidden_apps: Vec<Retained<NSRunningApplication>>,
+}
+
+/// Apple's Simulator app under both names Xcode ships it as: Simulator, and
+/// DeviceHub from Xcode 27 — the pair Expo's CLI looks for before it opens one.
+const SIMULATOR_APPS: [&str; 2] = ["com.apple.iphonesimulator", "com.apple.dt.Devices"];
+
+/// How often the tab looks for a Simulator app to hide: often enough that a
+/// window a build tool opens is gone before anyone reaches for it.
+const HIDE_POLL: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Numbers each watch that hides the Simulator app.
+static NEXT_HIDE_WATCH: AtomicU64 = AtomicU64::new(1);
+
+/// Hides every Simulator app launch not hidden before, and remembers it.
+///
+/// Once per launch, never again: hiding on every look would fight a person who
+/// brought Simulator back on purpose. Compared as instances rather than by
+/// process id, as AppKit asks.
+fn hide_new_simulator_apps(hidden: &mut Vec<Retained<NSRunningApplication>>) {
+    hidden.retain(|app| !app.isTerminated());
+    for id in SIMULATOR_APPS {
+        let running =
+            NSRunningApplication::runningApplicationsWithBundleIdentifier(&NSString::from_str(id));
+        for app in running.to_vec() {
+            // Not before it has finished launching: a request to hide an app
+            // still starting can be lost, and it would be marked done anyway.
+            if hidden.contains(&app) || !app.isFinishedLaunching() {
+                continue;
+            }
+            if app.isHidden() || app.hide() {
+                hidden.push(app);
+            }
+        }
+    }
 }
 
 enum State {
@@ -277,6 +327,7 @@ impl Shell {
             )
         });
         if opened {
+            let hide_watch = NEXT_HIDE_WATCH.fetch_add(1, Ordering::Relaxed);
             self.ios_simulator = Some(IosSimulatorHandle {
                 state: State::Discovering,
                 shown: false,
@@ -284,9 +335,38 @@ impl Shell {
                 device: None,
                 last_shot: None,
                 turn: Cell::default(),
+                hide_watch,
+                hidden_apps: Vec::new(),
             });
             self.discover_ios_simulator(cx);
+            self.keep_simulator_app_hidden(hide_watch, cx);
         }
+    }
+
+    /// Hides Apple's Simulator app while this tab is starting or showing a
+    /// phone, until the tab closes. See the module doc for why.
+    fn keep_simulator_app_hidden(&mut self, watch: u64, cx: &mut Context<Self>) {
+        cx.spawn(async move |shell: gpui::WeakEntity<Shell>, cx| {
+            loop {
+                cx.background_executor().timer(HIDE_POLL).await;
+                let watching = shell.update(cx, |shell, _| {
+                    let Some(handle) = shell.ios_simulator.as_mut() else {
+                        return false;
+                    };
+                    if handle.hide_watch != watch {
+                        return false;
+                    }
+                    if matches!(handle.state, State::Starting(_) | State::Attached(_)) {
+                        hide_new_simulator_apps(&mut handle.hidden_apps);
+                    }
+                    true
+                });
+                if !matches!(watching, Ok(true)) {
+                    break;
+                }
+            }
+        })
+        .detach();
     }
 
     fn discover_ios_simulator(&mut self, cx: &mut Context<Self>) {

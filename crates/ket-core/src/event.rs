@@ -102,6 +102,19 @@ pub enum Event {
         worktree_id: WorktreeId,
     },
 
+    /// A worktree's branch was pushed and is open as a pull request — one
+    /// ket just opened, or one it found already open for the branch.
+    PullRequestOpened {
+        /// The worktree.
+        worktree_id: WorktreeId,
+        /// Its owning project.
+        project_id: ProjectId,
+        /// The pull request's number in the repository.
+        number: u64,
+        /// Its page on GitHub.
+        url: String,
+    },
+
     /// A project's durable state changed — which worktrees are open, or which
     /// one has focus.
     ///

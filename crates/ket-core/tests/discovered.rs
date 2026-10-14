@@ -179,6 +179,7 @@ fn a_discovered_worktree_that_is_later_registered_stops_being_discovered() {
         token_reduction_id: None,
         token_reduction_pack_id: None,
         pinned: false,
+        pull_request: None,
     };
     store
         .update(move |state| {

@@ -94,6 +94,8 @@ export function useDesktopPalette(): void {
         const conns = hosts.map((host) => connection(host));
         offs = conns.map((c) => c.onChange(() => follow(conns)));
         follow(conns);
+      }).catch(() => {
+        // The Keychain unreadable for now: the next look tries again.
       });
     };
     look();

@@ -348,9 +348,32 @@ function lift(hex: string): string {
   return lum < 90 ? t.dim : hex;
 }
 
-/** A quiet tag in a well: a word or a count. */
-export function Tag({ children, mono }: { children: ReactNode; mono?: boolean }) {
-  return <Text style={[styles.tag, mono && { fontFamily: font.chrome }]}>{children}</Text>;
+/** A quiet tag in a well: a word or a count. Given a `color`, it carries
+ * that state's own hue on a faint ground of it instead — the desktop's
+ * tinted tag, as on "Beta". */
+export function Tag({
+  children,
+  mono,
+  color,
+  style,
+}: {
+  children: ReactNode;
+  mono?: boolean;
+  color?: string;
+  style?: StyleProp<TextStyle>;
+}) {
+  return (
+    <Text
+      style={[
+        styles.tag,
+        mono && { fontFamily: font.chrome },
+        color ? { color, backgroundColor: tint(color, 0.16) } : null,
+        style,
+      ]}
+    >
+      {children}
+    </Text>
+  );
 }
 
 /** A read-out: a figure in a small recessed well, usually led by a glyph. */

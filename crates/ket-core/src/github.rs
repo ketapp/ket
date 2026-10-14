@@ -1,4 +1,4 @@
-//! GitHub issues, through the `gh` command line.
+//! GitHub issues and pull requests, through the `gh` command line.
 //!
 //! `gh` rather than the REST API and a token of ket's own: it already holds
 //! the person's logins, in their keychain. A project that picks one of
@@ -11,6 +11,9 @@
 //! Every call runs in a project's checkout and lets `gh` work out the
 //! repository from its remotes, the way it does on the command line. Each is
 //! bounded by [`TIMEOUT`] and never prompts.
+//!
+//! A push is git's, not `gh`'s, but it needs the same account: see
+//! [`git_credential_helper`], which lends `gh` to git for one push.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -37,11 +40,51 @@ pub struct Checkout {
     pub root: PathBuf,
     /// The GitHub login to act as.
     pub account: Option<String>,
+    /// The `gh` to run, when it is not the one on the login shell's PATH.
+    ///
+    /// A test's seam, and nothing else's: `gh` is found on the login shell's
+    /// PATH, which a test cannot reach into, so a test that wants to see
+    /// what ket would run hands in a script of its own here. `None`, which
+    /// every caller in the app passes, is the real `gh`.
+    pub program: Option<PathBuf>,
+}
+
+impl Checkout {
+    /// A checkout acting as `account`, with the real `gh`.
+    pub fn new(root: impl Into<PathBuf>, account: Option<String>) -> Self {
+        Self {
+            root: root.into(),
+            account,
+            program: None,
+        }
+    }
+
+    /// Where its `gh` is.
+    fn gh(&self) -> Result<PathBuf> {
+        match &self.program {
+            Some(program) => Ok(program.clone()),
+            None => gh(),
+        }
+    }
 }
 
 /// An issue a note is linked to.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueLink {
+    /// Its number in the repository, as `#142` shows it.
+    pub number: u64,
+    /// Its page on GitHub.
+    pub url: String,
+}
+
+/// A pull request a worktree's branch is open as.
+///
+/// The same two facts as an [`IssueLink`], and its own type anyway: a
+/// worktree's pull request and a note's issue are never the same thing, and
+/// one type for both would let a number cross from one to the other
+/// without anything noticing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PullRequestLink {
     /// Its number in the repository, as `#142` shows it.
     pub number: u64,
     /// Its page on GitHub.
@@ -98,12 +141,72 @@ pub fn create_issue(at: &Checkout, title: &str, body: &str) -> Result<IssueLink>
         &["issue", "create", "--title", title, "--body-file", "-"],
         Some(body),
     )?;
-    issue_link(&out)
+    let (number, url) = link_in_output(&out, "issue")?;
+    Ok(IssueLink { number, url })
 }
 
-/// The issue `gh issue create` says it made, from what it printed.
-fn issue_link(out: &str) -> Result<IssueLink> {
-    // `gh issue create` prints the new issue's address and nothing else.
+/// Opens a pull request for `head` into `base` in the repository `at` is a
+/// checkout of. `head` has to be on the remote already: this names it, it
+/// does not push it.
+pub fn create_pull_request(
+    at: &Checkout,
+    base: &str,
+    head: &str,
+    title: &str,
+    body: &str,
+    draft: bool,
+) -> Result<PullRequestLink> {
+    let mut args = vec![
+        "pr",
+        "create",
+        "--base",
+        base,
+        "--head",
+        head,
+        "--title",
+        title,
+        "--body-file",
+        "-",
+    ];
+    if draft {
+        args.push("--draft");
+    }
+    let out = run(at, &args, Some(body))?;
+    let (number, url) = link_in_output(&out, "pull request")?;
+    Ok(PullRequestLink { number, url })
+}
+
+/// The open pull request whose head is `head`, if there is one — opened by
+/// ket, or by an agent that ran `gh pr create` itself.
+pub fn open_pull_request_for(at: &Checkout, head: &str) -> Result<Option<PullRequestLink>> {
+    let out = run(
+        at,
+        &[
+            "pr",
+            "list",
+            "--head",
+            head,
+            "--state",
+            "open",
+            "--json",
+            "number,url",
+        ],
+        None,
+    )?;
+    read_pull_requests(&out).map(|mut open| open.drain(..).next())
+}
+
+/// The pull requests `gh pr list --json number,url` printed.
+fn read_pull_requests(out: &str) -> Result<Vec<PullRequestLink>> {
+    serde_json::from_str(out)
+        .map_err(|e| failed(format!("could not read gh's list of pull requests: {e}")))
+}
+
+/// The thing `gh … create` says it made, from what it printed: its number
+/// and its address. `what` names it in the error when it printed neither.
+fn link_in_output(out: &str, what: &str) -> Result<(u64, String)> {
+    // `gh issue create` and `gh pr create` print the new thing's address
+    // last, after any chatter about where it is being made.
     let url = out
         .lines()
         .rev()
@@ -111,7 +214,7 @@ fn issue_link(out: &str) -> Result<IssueLink> {
         .find(|line| line.starts_with("https://"))
         .ok_or_else(|| {
             failed(format!(
-                "gh did not say which issue it made: {}",
+                "gh did not say which {what} it made: {}",
                 out.trim()
             ))
         })?;
@@ -119,11 +222,49 @@ fn issue_link(out: &str) -> Result<IssueLink> {
         .rsplit('/')
         .next()
         .and_then(|tail| tail.parse().ok())
-        .ok_or_else(|| failed(format!("gh made an issue at {url}, with no number in it")))?;
-    Ok(IssueLink {
-        number,
-        url: url.to_owned(),
-    })
+        .ok_or_else(|| failed(format!("gh made a {what} at {url}, with no number in it")))?;
+    Ok((number, url.to_owned()))
+}
+
+/// What a `git push` needs to go as `at`'s account: the credential helper
+/// that lends it `gh`, and the token that tells `gh` which account.
+///
+/// `gh auth git-credential` is what `gh auth setup-git` installs in a
+/// person's git config; handed to one push on the command line instead, it
+/// answers that push with `GH_TOKEN`'s account when one is set, else with
+/// `gh`'s active account, and nothing is written anywhere. An SSH remote
+/// never asks, so the helper is harmless there.
+///
+/// `None` when `gh` is not installed: the push then goes as git's own
+/// configuration decides, which is what happened before ket could push.
+pub fn git_credential_helper(at: &Checkout) -> Result<Option<PushCredentials>> {
+    let Ok(gh) = at.gh() else {
+        return Ok(None);
+    };
+    let token = token_for(at)?;
+    Ok(Some(PushCredentials {
+        helper: format!("!{} auth git-credential", gh.display()),
+        token,
+    }))
+}
+
+/// How a push identifies itself — see [`git_credential_helper`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PushCredentials {
+    /// The `credential.helper` value to run the push with.
+    pub helper: String,
+    /// The account's token, for `GH_TOKEN`; `None` for `gh`'s active account.
+    pub token: Option<String>,
+}
+
+impl PushCredentials {
+    /// The environment the push runs with.
+    pub fn env(&self) -> Vec<(&str, &str)> {
+        self.token
+            .as_deref()
+            .map(|token| vec![("GH_TOKEN", token)])
+            .unwrap_or_default()
+    }
 }
 
 /// The open issues of the repository `at` is a checkout of.
@@ -486,28 +627,8 @@ impl Login {
 /// asked of `gh` itself just before. It goes nowhere else — not stored, not
 /// logged — and `gh`'s active account is left as it was.
 fn run(at: &Checkout, args: &[&str], input: Option<&str>) -> Result<String> {
-    let gh = gh()?;
-    let token = match &at.account {
-        Some(login) => Some(
-            run_program(
-                &gh,
-                &["auth", "token", "--hostname", "github.com", "--user", login],
-                &at.root,
-                None,
-                TIMEOUT,
-                &[],
-            )
-            .map_err(|_| {
-                failed(format!(
-                    "@{login} is no longer signed in to GitHub on this Mac. Sign in again in \
-                     Settings \u{2192} GitHub, or pick another account in the project's settings."
-                ))
-            })?
-            .trim()
-            .to_owned(),
-        ),
-        None => None,
-    };
+    let gh = at.gh()?;
+    let token = token_for(at)?;
     let env: Vec<(&str, &str)> = token
         .as_deref()
         .map(|token| vec![("GH_TOKEN", token)])
@@ -517,6 +638,32 @@ fn run(at: &Checkout, args: &[&str], input: Option<&str>) -> Result<String> {
             "ket is not signed in to GitHub. Sign in in Settings \u{2192} GitHub.".to_owned(),
         ),
         e => e,
+    })
+}
+
+/// The token of the account `at` picked, asked of `gh` just now; `None`
+/// when it picked none and `gh`'s active account will do.
+///
+/// The token goes nowhere but the one call it is fetched for — not stored,
+/// not logged — and `gh`'s active account is left as it was.
+fn token_for(at: &Checkout) -> Result<Option<String>> {
+    let Some(login) = &at.account else {
+        return Ok(None);
+    };
+    run_program(
+        &at.gh()?,
+        &["auth", "token", "--hostname", "github.com", "--user", login],
+        &at.root,
+        None,
+        TIMEOUT,
+        &[],
+    )
+    .map(|token| Some(token.trim().to_owned()))
+    .map_err(|_| {
+        failed(format!(
+            "@{login} is no longer signed in to GitHub on this Mac. Sign in again in \
+             Settings \u{2192} GitHub, or pick another account in the project's settings."
+        ))
     })
 }
 
@@ -645,30 +792,72 @@ mod tests {
 
     #[test]
     fn a_new_issue_is_read_off_the_address_gh_prints() {
-        let link = issue_link("https://github.com/ketapp/ket/issues/142\n").unwrap();
-        assert_eq!(
-            link,
-            IssueLink {
-                number: 142,
-                url: "https://github.com/ketapp/ket/issues/142".to_owned(),
-            }
-        );
+        let (number, url) =
+            link_in_output("https://github.com/ketapp/ket/issues/142\n", "issue").unwrap();
+        assert_eq!(number, 142);
+        assert_eq!(url, "https://github.com/ketapp/ket/issues/142");
+    }
+
+    #[test]
+    fn a_new_pull_request_is_read_the_same_way() {
+        let (number, url) =
+            link_in_output("https://github.com/ketapp/ket/pull/143\n", "pull request").unwrap();
+        assert_eq!(number, 143);
+        assert_eq!(url, "https://github.com/ketapp/ket/pull/143");
     }
 
     #[test]
     fn the_address_is_the_last_one_gh_prints_after_any_chatter() {
         // `gh` may say where it is creating the issue before the address.
         let out = "\nCreating issue in ketapp/ket\n\n  https://github.com/ketapp/ket/issues/7  \n";
-        assert_eq!(issue_link(out).unwrap().number, 7);
+        assert_eq!(link_in_output(out, "issue").unwrap().0, 7);
     }
 
     #[test]
     fn output_without_an_address_or_number_is_an_error() {
-        let err = issue_link("something went sideways")
+        let err = link_in_output("something went sideways", "issue")
             .unwrap_err()
             .to_string();
         assert!(err.contains("something went sideways"), "{err}");
-        assert!(issue_link("https://github.com/ketapp/ket/issues/new").is_err());
+        assert!(err.contains("which issue"), "{err}");
+        assert!(link_in_output("https://github.com/ketapp/ket/issues/new", "issue").is_err());
+    }
+
+    #[test]
+    fn listed_pull_requests_are_read_and_an_empty_list_is_none() {
+        let out = r#"[{"number": 9, "url": "https://github.com/o/r/pull/9"}]"#;
+        assert_eq!(
+            read_pull_requests(out).unwrap(),
+            [PullRequestLink {
+                number: 9,
+                url: "https://github.com/o/r/pull/9".to_owned(),
+            }]
+        );
+        assert!(read_pull_requests("[]").unwrap().is_empty());
+        assert!(read_pull_requests("not json").is_err());
+    }
+
+    #[test]
+    fn a_push_carries_the_token_only_when_an_account_was_picked() {
+        let picked = PushCredentials {
+            helper: "!/opt/gh auth git-credential".to_owned(),
+            token: Some("ghp_x".to_owned()),
+        };
+        assert_eq!(picked.env(), [("GH_TOKEN", "ghp_x")]);
+        let active = PushCredentials {
+            helper: picked.helper.clone(),
+            token: None,
+        };
+        assert!(active.env().is_empty());
+    }
+
+    #[test]
+    fn a_checkout_runs_the_gh_it_was_handed() {
+        let own = Checkout {
+            program: Some(PathBuf::from("/tmp/fake-gh")),
+            ..Checkout::new("/tmp/repo", None)
+        };
+        assert_eq!(own.gh().unwrap(), PathBuf::from("/tmp/fake-gh"));
     }
 
     #[test]

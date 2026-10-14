@@ -1001,6 +1001,15 @@ fn builtin_commands() -> Vec<Command> {
         .arg(Arg::required("worktree", ArgKind::Worktree))
         .arg(Arg::flag("force")),
         Command::new(
+            "worktree.pull_request",
+            "Commit a worktree's work, push its branch and open a pull request",
+            Category::Review,
+        )
+        .arg(Arg::required("worktree", ArgKind::Worktree))
+        .arg(Arg::optional("title", ArgKind::Text))
+        .arg(Arg::optional("body", ArgKind::Text))
+        .arg(Arg::flag("draft")),
+        Command::new(
             "worktree.create",
             "Create a worktree on a new branch",
             Category::Worktree,
@@ -1391,7 +1400,12 @@ mod tests {
 
         assert_eq!(
             review,
-            ["worktree.collapse", "worktree.diff", "worktree.merge"]
+            [
+                "worktree.collapse",
+                "worktree.diff",
+                "worktree.merge",
+                "worktree.pull_request"
+            ]
         );
     }
 

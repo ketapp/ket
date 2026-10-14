@@ -457,6 +457,7 @@ mod tests {
             token_reduction_id: None,
             token_reduction_pack_id: None,
             pinned: false,
+            pull_request: None,
         }
     }
 

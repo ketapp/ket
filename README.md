@@ -18,6 +18,11 @@
 </p>
 
 <p align="center">
+  <sub>ket is in beta. Expect rough edges, and
+  <a href="https://github.com/ketapp/ket/issues">tell us what breaks</a>.</sub>
+</p>
+
+<p align="center">
   <img src="docs/images/ket.png" alt="ket with two agents running across three projects, a Claude Code session and a terminal split side by side, and the ket docs open in a browser tab.">
 </p>
 
@@ -79,9 +84,11 @@ folds to a single line.
 - **A backlog for every project.** Write a task down in one line and come back
   to it. A note can carry a description and files, and Start in worktree makes
   a worktree for it and hands the agent the whole note.
-- **Merge from the sidebar.** ket lists what it will commit, then commits the
-  work and merges the branch into its base in your primary checkout. It never
-  switches that checkout's branch for you.
+- **Merge from the sidebar, or open a pull request.** ket lists what it will
+  commit, then commits the work and merges the branch into its base in your
+  primary checkout. It never switches that checkout's branch for you. Or push
+  instead: ket pushes the branch as the project's GitHub account and opens
+  the pull request with a title and description you checked first.
 - **A second opinion from Jev.** In beta, with a TypeSafe API key: Jev picks
   the Economy level for tasks started from your phone, the backlog or the quick
   prompt, and rates each permission prompt low, medium or high on your phone.

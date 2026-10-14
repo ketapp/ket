@@ -24,6 +24,7 @@ import {
   StatFilter,
   TAB_BAR_ROOM,
   TabBar,
+  Tag,
 } from '../components/ui';
 import { type Filter, agentTerminal, detail, detailColor, everyWorktree, filterOf, projectColor, stateOf } from '../lib/activity';
 import type { HostConnection } from '../lib/connection';
@@ -132,6 +133,9 @@ export default function Worktrees() {
                 <Text style={styles.statusText} numberOfLines={1}>
                   {status.connected ? 'connected · relay' : status.text}
                 </Text>
+                <Tag color={t.merging} style={styles.beta}>
+                  Beta
+                </Tag>
               </View>
               <Text style={styles.desktopName} numberOfLines={1}>
                 {conn?.host.name ?? ''}
@@ -365,7 +369,8 @@ const styles = StyleSheet.create({
   },
   headerText: { flex: 1, minWidth: 0, gap: 2 },
   statusLine: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  statusText: { fontFamily: font.prose, fontSize: size.detail, color: t.dim },
+  statusText: { flexShrink: 1, fontFamily: font.prose, fontSize: size.detail, color: t.dim },
+  beta: { alignSelf: 'center', fontSize: 10.5, paddingHorizontal: 6, paddingVertical: 1 },
   desktopName: { fontFamily: font.proseSemibold, fontSize: size.value, color: t.text },
   switch: { width: 34, height: 34 },
   hr: { height: 1, backgroundColor: t.rule, marginHorizontal: 12 },

@@ -45,6 +45,7 @@ pub mod paths;
 pub mod project;
 pub mod provision;
 pub mod pty_lock;
+pub mod pull_request;
 pub mod rate_limits;
 pub mod rates;
 pub mod review;

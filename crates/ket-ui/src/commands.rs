@@ -329,6 +329,10 @@ pub(crate) const DELIBERATELY_UNBOUND: &[(&str, &str)] = &[
         "reached from the row's own button, which knows which worktree",
     ),
     (
+        "worktree.pull_request",
+        "reached from the row's own menu, which knows which worktree",
+    ),
+    (
         "worktree.collapse",
         "discards the other attempts; wants a confirmation step first",
     ),

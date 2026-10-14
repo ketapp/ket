@@ -30,10 +30,10 @@ impl Shell {
             dialog.github_repo = None;
             return;
         }
-        let at = Checkout {
-            root: PathBuf::from(dialog.root.as_ref()),
-            account: dialog.form.github_account.clone().flatten(),
-        };
+        let at = Checkout::new(
+            PathBuf::from(dialog.root.as_ref()),
+            dialog.form.github_account.clone().flatten(),
+        );
         dialog.github_repo = None;
         let id = dialog.id.clone();
         let asked = at.account.clone();

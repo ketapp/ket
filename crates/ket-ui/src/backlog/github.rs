@@ -311,10 +311,7 @@ fn checkout(project: &ProjectId) -> ket_core::Result<(Checkout, bool)> {
         .map(|known| known.root)
         .ok_or_else(|| KetError::UnknownProject(project.as_str().to_owned()))?;
     let settings = workspace.project_settings(project)?;
-    let at = Checkout {
-        root,
-        account: settings.github_account,
-    };
+    let at = Checkout::new(root, settings.github_account);
     Ok((at, settings.github_issues))
 }
 

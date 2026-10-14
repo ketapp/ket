@@ -17,6 +17,7 @@ use gpui::{
     WindowControlArea, div, prelude::*, px,
 };
 use ket_core::activity::Signal;
+use ket_core::build_info::{self, Channel};
 use ket_core::subagents::SubagentState;
 use ket_core::theme::Theme;
 
@@ -218,7 +219,8 @@ impl Shell {
                     .border_color(paint(t.border))
                     .when(card_open, |el| el.bg(paint(t.hover)))
                     .child(sized_icon(Icon::KetMark, px(13.0), paint(t.status.running))),
-            );
+            )
+            .when_some(stage_tag(t), |el, tag| el.gap(px(8.0)).child(tag));
         let identity = drag_area()
             .flex()
             .flex_none()
@@ -388,7 +390,8 @@ impl Shell {
                     .items_center()
                     .h_full()
                     .px(px(8.0))
-                    .child(sized_icon(Icon::KetMark, px(12.0), paint(t.status.running))),
+                    .child(sized_icon(Icon::KetMark, px(12.0), paint(t.status.running)))
+                    .when_some(stage_tag(t), |el, tag| el.gap(px(6.0)).child(tag)),
                 drag_area().child(
                     crate::ui::chip::readout(t)
                         .child(sized_icon(Icon::GitBranch, px(13.0), paint(t.text.dim)))
@@ -728,4 +731,13 @@ impl Shell {
             t,
         )
     }
+}
+
+/// The pill beside the mark saying ket is not finished: the same Beta as
+/// Jev's in settings. Every build short of a stable release carries it, a
+/// checkout's included, and it is part of the mark, so resting on it opens
+/// the release card too.
+fn stage_tag(t: &Theme) -> Option<gpui::Div> {
+    (build_info::CHANNEL != Channel::Stable)
+        .then(|| crate::ui::chip::tinted_tag("Beta", paint(t.status.merging)))
 }

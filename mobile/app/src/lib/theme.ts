@@ -66,6 +66,10 @@ export type Tokens = typeof DESK;
 /** Where the desktop's last palette is kept. */
 const PALETTE_KEY = 'ket.palette';
 
+/** The Keychain class lib/store.ts writes with, which also moves these two
+ * entries to it: readable after the first unlock, not only while unlocked. */
+const KEYCHAIN: SecureStore.SecureStoreOptions = { keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK };
+
 /** What a stored palette may set: every colour token but ket's own brand. */
 type Stored = { light: boolean } & Partial<Omit<Tokens, 'brand' | 'onBrand'>>;
 
@@ -172,11 +176,11 @@ export function adoptPalette(palette: Palette): void {
   const next = JSON.stringify(fromPalette(palette));
   if (next === saved || next === kept) return;
   try {
-    SecureStore.setItem(PALETTE_KEY, next);
+    SecureStore.setItem(PALETTE_KEY, next, KEYCHAIN);
     kept = next;
     const last = Number(SecureStore.getItem(RELOADED_KEY) ?? 0);
     if (Date.now() - last < RELOAD_GAP_MS) return;
-    SecureStore.setItem(RELOADED_KEY, String(Date.now()));
+    SecureStore.setItem(RELOADED_KEY, String(Date.now()), KEYCHAIN);
   } catch {
     return;
   }

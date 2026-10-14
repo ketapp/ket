@@ -19,8 +19,6 @@
 //! shown, and the button becomes **Delete anyway**. Nothing is destroyed
 //! without the reader seeing what they are destroying.
 
-use std::time::Duration;
-
 use gpui::{
     AnyElement, Bounds, ClipboardItem, Context, Entity, KeyDownEvent, MouseButton, PathBuilder,
     Pixels, Point, Rgba, SharedString, WeakEntity, Window, canvas, div, fill, point, prelude::*,
@@ -87,6 +85,8 @@ pub(crate) enum WorktreeAction {
     Snippets,
     /// Delete the regenerable build output inside it.
     ClearBuildOutput,
+    /// Commit its work, push its branch and open a pull request for it.
+    PullRequest,
     /// Remove the worktree.
     Delete,
 }
@@ -106,6 +106,7 @@ impl WorktreeAction {
             Self::TokenReduction => "Economy",
             Self::Snippets => "Send snippet",
             Self::ClearBuildOutput => "Clear build output",
+            Self::PullRequest => "Push and open pull request",
             Self::Delete => "Delete",
         }
     }
@@ -188,10 +189,6 @@ const REMOVE_MAX_WIDTH: Pixels = px(640.0);
 /// How tall the drawing of the branch is.
 const PRUNE_H: Pixels = px(118.0);
 
-/// How long the branch takes to drain back into its base while the delete
-/// runs, and the pulse of what is on it.
-const DRAIN: Duration = Duration::from_millis(1600);
-
 /// The menu for one worktree row.
 ///
 /// `primary` disables **Delete**: the repository's own checkout is not a
@@ -236,6 +233,18 @@ pub(crate) fn worktree_menu(
                     .icon(Icon::Layers)
                     .submenu(),
             ),
+            // Disabled on the primary checkout: it is the base a pull
+            // request asks to merge into, so it cannot also be the head.
+            MenuEntry::Item({
+                let pull_request =
+                    MenuItem::new(WorktreeAction::PullRequest, "Push and open pull request…")
+                        .icon(Icon::GitHub);
+                if primary {
+                    pull_request.disabled()
+                } else {
+                    pull_request
+                }
+            }),
             // Named with its current level rather than just "Economy":
             // this is the only place a worktree's level can be read after it
             // was created, and a reader opening the menu to change it wants to
@@ -348,6 +357,10 @@ impl Shell {
             WorktreeAction::Delete => {
                 self.popup = None;
                 self.request_remove_worktree(target, cx);
+            }
+            WorktreeAction::PullRequest => {
+                self.popup = None;
+                self.request_pull_request(target, cx);
             }
             WorktreeAction::Pin => self.set_worktree_pinned(&target, !target.pinned, cx),
             WorktreeAction::CopyPath => {
@@ -925,10 +938,12 @@ impl Shell {
             cx.notify();
         }));
 
-        let state = match (pending, escalated) {
-            (true, _) => Prune::Draining,
-            (false, true) => Prune::Refused,
-            (false, false) => Prune::Asking,
+        // Held still while the delete runs: the button already says it is
+        // busy, and a drawing that moved under it read as something breaking.
+        let state = if escalated {
+            Prune::Refused
+        } else {
+            Prune::Asking
         };
 
         let name = tooltip(
@@ -1009,10 +1024,9 @@ fn tilde(path: &str) -> String {
 /// Where the delete dialog's drawing is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Prune {
-    /// Before the button: the branch in the danger ink, cut at its base.
+    /// Before the button, and while the delete runs: the branch in the
+    /// danger ink, cut at its base.
     Asking,
-    /// The delete running: the branch drains back into its base.
-    Draining,
     /// Git refused: the branch greys, and the cut becomes a warning.
     Refused,
 }
@@ -1021,17 +1035,6 @@ enum Prune {
 /// it with two of its own, a mark where it leaves, and the checkout — a
 /// folder and the name — at its tip.
 fn prune(state: Prune, name: AnyElement, t: &Theme) -> AnyElement {
-    let phase = if state == Prune::Draining {
-        crate::motion::phase(DRAIN)
-    } else {
-        0.0
-    };
-    // 1 at rest, dipping to a third and back once a cycle while draining.
-    let pulse = if state == Prune::Draining {
-        0.35 + 0.65 * (0.5 + 0.5 * (phase * std::f32::consts::TAU).cos())
-    } else {
-        1.0
-    };
     let warning = Tone::Warning.colour(t);
     let danger = paint(t.status.failed);
     let branch = if state == Prune::Refused {
@@ -1079,12 +1082,14 @@ fn prune(state: Prune, name: AnyElement, t: &Theme) -> AnyElement {
                 })
                 .collect();
             points.push(at(186.0, 44.0));
-            let shown = if state == Prune::Draining {
-                1.0 - phase
-            } else {
-                1.0
-            };
-            stroke_prefix(&points, shown, branch, window);
+            let mut stem = PathBuilder::stroke(px(2.0));
+            stem.move_to(points[0]);
+            for &p in &points[1..] {
+                stem.line_to(p);
+            }
+            if let Ok(path) = stem.build() {
+                window.paint_path(path, branch);
+            }
 
             // The base's commits go on after the branch: it leaves from the
             // centre of the second one, and painted first that ring sat
@@ -1093,10 +1098,8 @@ fn prune(state: Prune, name: AnyElement, t: &Theme) -> AnyElement {
                 dot(at(x, 92.0), commit, ground, window);
             }
 
-            let mut faded = branch;
-            faded.a *= pulse;
             for x in [148.0, 172.0] {
-                dot(at(x, 44.0), faded, ground, window);
+                dot(at(x, 44.0), branch, ground, window);
             }
 
             // The cut: a disc on the curve where it leaves the base.
@@ -1140,7 +1143,6 @@ fn prune(state: Prune, name: AnyElement, t: &Theme) -> AnyElement {
         .bg(paint(t.hover))
         .border_1()
         .border_color(edge)
-        .opacity(pulse)
         .child(sized_icon(Icon::Folder, px(14.0), mark))
         .child(name);
 
@@ -1173,38 +1175,6 @@ fn dot(centre: Point<Pixels>, ink: Rgba, ground: Rgba, window: &mut Window) {
     let bounds = Bounds::centered_at(centre, size(px(9.0), px(9.0)));
     window.paint_quad(fill(bounds, ground).corner_radii(px(4.5)));
     stroke_arc(bounds, 0.0, 1.0, ink, px(1.6), window);
-}
-
-/// Strokes the first `fraction` (0 to 1) of the polyline through `points`,
-/// by length.
-fn stroke_prefix(points: &[Point<Pixels>], fraction: f32, colour: Rgba, window: &mut Window) {
-    let length = |a: Point<Pixels>, b: Point<Pixels>| {
-        let (dx, dy) = (f32::from(b.x - a.x), f32::from(b.y - a.y));
-        (dx * dx + dy * dy).sqrt()
-    };
-    let total: f32 = points.windows(2).map(|w| length(w[0], w[1])).sum();
-    let mut left = total * fraction.clamp(0.0, 1.0);
-    if left <= 0.5 || points.len() < 2 {
-        return;
-    }
-    let mut path = PathBuilder::stroke(px(2.0));
-    path.move_to(points[0]);
-    for pair in points.windows(2) {
-        let step = length(pair[0], pair[1]);
-        if step >= left {
-            let k = left / step;
-            path.line_to(point(
-                pair[0].x + (pair[1].x - pair[0].x) * k,
-                pair[0].y + (pair[1].y - pair[0].y) * k,
-            ));
-            break;
-        }
-        path.line_to(pair[1]);
-        left -= step;
-    }
-    if let Ok(path) = path.build() {
-        window.paint_path(path, colour);
-    }
 }
 
 #[cfg(test)]

@@ -10,7 +10,7 @@
     "@ket/remote": "file:../remote",
     "@xterm/addon-webgl": "^0.18.0",
     "@xterm/xterm": "^5.5.0",
-    "expo": "~57.0.25",
+    "expo": "~57.0.28",
     "expo-camera": "~57.0.5",
     "expo-clipboard": "~57.0.2",
     "expo-constants": "~57.0.19",

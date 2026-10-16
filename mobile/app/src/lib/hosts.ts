@@ -14,16 +14,19 @@ import { connection, type HostConnection } from './connection';
 import { getHost, listHosts } from './store';
 import { adoptPalette } from './theme';
 
-/** Every paired desktop, connected; `null` until the list has been read. */
-export function useHosts(): HostConnection[] | null {
+/** Every paired desktop, connected; `null` until the list has been read.
+ * Read again each time the screen is focused, and when `refresh` changes. */
+export function useHosts(refresh?: string): HostConnection[] | null {
   const [conns, setConns] = useState<HostConnection[] | null>(null);
   const [, redraw] = useState(0);
 
-  useFocusEffect(
-    useCallback(() => {
-      void listHosts().then((hosts) => setConns(hosts.map((host) => connection(host))));
-    }, []),
-  );
+  const read = useCallback(() => {
+    void listHosts().then((hosts) => setConns(hosts.map((host) => connection(host))));
+  }, []);
+  useFocusEffect(read);
+  useEffect(() => {
+    if (refresh !== undefined) read();
+  }, [refresh, read]);
 
   useEffect(() => {
     const offs = (conns ?? []).map((c) => c.onChange(() => redraw((n) => n + 1)));

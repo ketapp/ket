@@ -59,7 +59,7 @@ impl Shell {
         if !open {
             self.dismiss_feedback();
         }
-        cx.set_menus(crate::app_menus(open));
+        self.refresh_native_menus(cx);
         cx.notify();
     }
 }

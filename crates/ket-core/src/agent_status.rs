@@ -117,7 +117,23 @@ pub struct PaneAgentStatus {
     /// hook said. See [`crate::agent_hooks::PermissionQuestion`].
     #[serde(default)]
     pub question: Option<PermissionQuestion>,
+    /// The last permission prompt a person answered, and how — what the
+    /// window offers to remember as a rule. See [`Answered`].
+    #[serde(default)]
+    pub answered: Option<Answered>,
     pub(crate) roster: Roster,
+}
+
+/// A permission prompt that has been answered: allowed when the call it
+/// held went ahead, refused when the agent said it was denied.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Answered {
+    /// The prompt, as it was asked.
+    pub question: PermissionQuestion,
+    /// Whether it was allowed.
+    pub allowed: bool,
+    /// When the answer was seen.
+    pub at_ms: u64,
 }
 
 /// A new prompt's id: never `0`, never the same twice in a run, and not the
@@ -153,6 +169,7 @@ impl PaneAgentStatus {
             cancel: None,
             last_tool: None,
             question: None,
+            answered: None,
             roster: Roster::default(),
         }
     }
@@ -545,6 +562,32 @@ impl StatusStore {
             }
             _ => None,
         };
+        // A permission prompt leaving the screen: the call it held going
+        // ahead is the person allowing it, a refusal is them saying no.
+        // Anything else — a stop, an interrupt — answers nothing worth
+        // remembering. Questions and plans are not permissions.
+        if entry.state == AgentState::AwaitingPermission
+            && state != AgentState::AwaitingPermission
+            && let Some(asked) = entry.question.as_ref().filter(|q| q.prompt.is_none())
+        {
+            let allowed = match report.event {
+                HookEvent::PreTool | HookEvent::PostTool | HookEvent::PostToolFailure => report
+                    .call
+                    .as_deref()
+                    .is_some_and(|call| answers(asked, call))
+                    .then_some(true),
+                HookEvent::PermissionDenied => Some(false),
+                _ => None,
+            };
+            if let Some(allowed) = allowed {
+                entry.answered = Some(Answered {
+                    question: asked.clone(),
+                    allowed,
+                    at_ms,
+                });
+            }
+        }
+
         // A `Notification` restating the wait says no more than that it
         // waits, and must not wipe what the `PermissionRequest` before it
         // said it was waiting on.

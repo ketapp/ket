@@ -107,6 +107,10 @@ impl Shell {
                 .pr(px(12.0))
                 .cursor_text()
                 .child(body)
+                // Both the markdown view and the editor scroll inside this
+                // fixed-height pane. Keep their wheel events out of the
+                // surrounding backlog list.
+                .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
                 // Over an empty description, where the typed words will
                 // start.
                 .when(empty, |el| {

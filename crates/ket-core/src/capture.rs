@@ -68,3 +68,71 @@ fn prune(dir: &Path) {
         let _ = std::fs::remove_file(path);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Dir(PathBuf);
+
+    impl Drop for Dir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn dir(tag: &str) -> Dir {
+        let path = std::env::temp_dir().join(format!(
+            "ket-capture-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).unwrap();
+        Dir(path)
+    }
+
+    fn shot(dir: &Path, taken: u64) {
+        std::fs::write(dir.join(format!("{PREFIX}{taken}-0.png")), b"png").unwrap();
+    }
+
+    fn count(dir: &Path) -> usize {
+        std::fs::read_dir(dir).unwrap().count()
+    }
+
+    #[test]
+    fn under_the_limit_nothing_is_pruned() {
+        let d = dir("under");
+        for taken in 0..(KEPT as u64 - 1) {
+            shot(&d.0, taken);
+        }
+        prune(&d.0);
+        assert_eq!(count(&d.0), KEPT - 1);
+    }
+
+    #[test]
+    fn at_the_limit_the_oldest_go_to_make_room_for_one_more() {
+        let d = dir("over");
+        for taken in 0..(KEPT as u64 + 5) {
+            shot(&d.0, 1_000 + taken);
+        }
+        std::fs::write(d.0.join("notes.txt"), b"not a screenshot").unwrap();
+        prune(&d.0);
+        // Room for the screenshot about to be taken; other files untouched.
+        assert_eq!(count(&d.0), KEPT);
+        assert!(d.0.join("notes.txt").exists());
+        assert!(
+            !d.0.join(format!("{PREFIX}1000-0.png")).exists(),
+            "oldest gone"
+        );
+        assert!(
+            d.0.join(format!("{PREFIX}{}-0.png", 1_000 + KEPT as u64 + 4))
+                .exists()
+        );
+    }
+
+    #[test]
+    fn a_missing_directory_is_nothing_to_prune() {
+        prune(Path::new("/nonexistent/ket/screenshots"));
+    }
+}

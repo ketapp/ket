@@ -87,6 +87,9 @@ pub(crate) enum WorktreeAction {
     ClearBuildOutput,
     /// Commit its work, push its branch and open a pull request for it.
     PullRequest,
+    /// Hand a local agent's task to a cloud agent, in a new tab here: the
+    /// one explicit step that lets a local task leave the Mac.
+    Escalate,
     /// Remove the worktree.
     Delete,
 }
@@ -107,6 +110,7 @@ impl WorktreeAction {
             Self::Snippets => "Send snippet",
             Self::ClearBuildOutput => "Clear build output",
             Self::PullRequest => "Push and open pull request",
+            Self::Escalate => "Hand to a cloud agent",
             Self::Delete => "Delete",
         }
     }
@@ -189,6 +193,12 @@ const REMOVE_MAX_WIDTH: Pixels = px(640.0);
 /// How tall the drawing of the branch is.
 const PRUNE_H: Pixels = px(118.0);
 
+/// What a cloud agent is handed with a local agent's task, typed into its
+/// input for the person to finish and send.
+const HANDOFF: &str = "A local model has been working on a task in this worktree. Its changes \
+                       are in the working tree: read `git status` and `git diff` first. Then \
+                       continue the task: ";
+
 /// The menu for one worktree row.
 ///
 /// `primary` disables **Delete**: the repository's own checkout is not a
@@ -200,6 +210,7 @@ pub(crate) fn worktree_menu(
     pinned: bool,
     token_reduction: u8,
     build_bytes: Option<u64>,
+    escalate_to: Option<SharedString>,
     t: &Theme,
 ) -> OpenMenu<WorktreeAction> {
     let clear_build = match build_bytes.filter(|bytes| *bytes > 0) {
@@ -233,6 +244,18 @@ pub(crate) fn worktree_menu(
                     .icon(Icon::Layers)
                     .submenu(),
             ),
+        ]
+        .into_iter()
+        // Only on a worktree a local agent runs in, and only when there is a
+        // cloud agent to hand to: the step that lets its task leave the Mac.
+        .chain(escalate_to.map(|label| {
+            MenuEntry::Item(
+                MenuItem::new(WorktreeAction::Escalate, format!("Hand to {label}\u{2026}"))
+                    .icon(Icon::Launch)
+                    .subtitle("cloud".to_owned()),
+            )
+        }))
+        .chain([
             // Disabled on the primary checkout: it is the base a pull
             // request asks to merge into, so it cannot also be the head.
             MenuEntry::Item({
@@ -282,13 +305,182 @@ pub(crate) fn worktree_menu(
                     .disabled(),
             ),
             MenuEntry::Item(if primary { delete.disabled() } else { delete }),
-        ],
+        ])
+        .collect(),
     )
     .with_header("Workspace")
     .at(at)
 }
 
 impl Shell {
+    /// Reveal the selected worktree directory through the same file-manager handoff.
+    pub(crate) fn native_reveal_worktree(&mut self) {
+        let Some(selection) = self.selection else {
+            return;
+        };
+        let Some(node) = self
+            .projects
+            .get(selection.project)
+            .and_then(|project| project.worktrees.get(selection.worktree))
+        else {
+            return;
+        };
+        if node.missing {
+            return;
+        }
+        self.note = Some(
+            match ket_core::surface::reveal_in_file_manager(&node.path) {
+                Ok(()) => format!("showed {} in Finder", node.label()).into(),
+                Err(error) => format!("could not reveal worktree: {error}").into(),
+            },
+        );
+    }
+    /// Apply a native Economy pick only to the id and pack level it displayed.
+    pub(crate) fn native_economy(&mut self, id: &WorktreeId, level: u8, cx: &mut Context<Self>) {
+        if self.selected_id().as_ref() != Some(id)
+            || !ket_core::worktree::token_reduction_levels()
+                .iter()
+                .any(|item| item.level == level)
+        {
+            return;
+        }
+        let Some(selection) = self.selection else {
+            return;
+        };
+        let Some(node) = self
+            .projects
+            .get(selection.project)
+            .and_then(|project| project.worktrees.get(selection.worktree))
+        else {
+            return;
+        };
+        if node.primary || node.missing {
+            return;
+        }
+        self.worktree_target = Some(WorktreeTarget {
+            id: node.id.clone(),
+            branch: node.branch.clone(),
+            label: node.label(),
+            path: node.path.display().to_string().into(),
+            token_reduction: node.token_reduction,
+            agent: node.agent.clone(),
+            pinned: node.pinned,
+            at: point(px(0.0), px(0.0)),
+        });
+        self.set_token_reduction(level, cx);
+        cx.notify();
+    }
+    /// Run a native Worktree command for the selected row, rechecking restrictions.
+    pub(crate) fn native_worktree_action(
+        &mut self,
+        action: WorktreeAction,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(selection) = self.selection else {
+            return;
+        };
+        let Some(node) = self
+            .projects
+            .get(selection.project)
+            .and_then(|project| project.worktrees.get(selection.worktree))
+        else {
+            return;
+        };
+        if node.primary
+            && matches!(
+                action,
+                WorktreeAction::Rename
+                    | WorktreeAction::Pin
+                    | WorktreeAction::TokenReduction
+                    | WorktreeAction::PullRequest
+                    | WorktreeAction::Delete
+            )
+        {
+            return;
+        }
+        if node.missing && !matches!(action, WorktreeAction::Delete | WorktreeAction::CopyPath) {
+            return;
+        }
+        if action == WorktreeAction::ClearBuildOutput
+            && !self.footprint(&node.id).is_some_and(|size| size.build > 0)
+        {
+            return;
+        }
+        self.worktree_target = Some(WorktreeTarget {
+            id: node.id.clone(),
+            branch: node.branch.clone(),
+            label: node.label(),
+            path: node.path.display().to_string().into(),
+            token_reduction: node.token_reduction,
+            agent: node.agent.clone(),
+            pinned: node.pinned,
+            at: point(px(0.0), px(0.0)),
+        });
+        self.run_worktree_action(action, cx);
+        cx.notify();
+    }
+    /// The cloud agent a local agent's task can be handed to: the default
+    /// agent when it is not local, else the first runnable agent that is not.
+    /// `None` when `agent` is not local, or there is nothing to hand to.
+    pub(crate) fn escalation_target(&self, agent: Option<&str>) -> Option<String> {
+        let local = |name: &str| ket_core::local_models::model_tag(name).is_some();
+        if !agent.is_some_and(local) {
+            return None;
+        }
+        let cloud = |name: &str| !local(name) && ket_core::agents::harness(name) != "ollama";
+        let runnable: Vec<String> = self
+            .runnable_agents()
+            .iter()
+            .map(|spec| spec.name.clone())
+            .collect();
+        let default = ket_core::config::Config::load()
+            .ok()
+            .and_then(|config| match config.agent.default {
+                ket_core::agents::DefaultAgent::Named(name) => Some(name),
+                _ => None,
+            })
+            .filter(|name| cloud(name) && runnable.contains(name));
+        default.or_else(|| runnable.into_iter().find(|name| cloud(name)))
+    }
+
+    /// Opens the cloud agent in a new tab in `target`, with a handoff note
+    /// typed into its input but not sent: nothing about the task leaves the
+    /// Mac until the person presses Enter. The local agent's tab and its
+    /// changes stay as they are.
+    fn escalate_worktree(&mut self, target: WorktreeTarget, cx: &mut Context<Self>) {
+        let Some(agent) = self.escalation_target(target.agent.as_ref().map(|agent| agent.as_ref()))
+        else {
+            self.toast(Tone::Error, "No cloud agent is set up to hand this to.", cx);
+            return;
+        };
+        if let Some(selection) = self.position_of(&target.id) {
+            self.select(selection, cx);
+        }
+        let pane = self.spaces.entry(target.id.clone()).or_default().focused;
+        let terminal = crate::terminal::TerminalId(self.next_terminal);
+        self.open_agent_tab_in(pane, &agent, cx);
+        if self.next_terminal == terminal.0 {
+            return;
+        }
+        self.toast_detail(
+            Tone::Info,
+            format!("Opened {} here", crate::ui::agent::agent_label(&agent)),
+            "A handoff note is typed in, not sent. Nothing about this task leaves the Mac \
+             until you press Enter.",
+            cx,
+        );
+        cx.spawn(async move |shell: WeakEntity<Shell>, cx| {
+            cx.background_executor()
+                .timer(crate::phone_work::AGENT_START)
+                .await;
+            let _ = shell.update(cx, |shell, cx| {
+                shell.paste_into_terminal(terminal, HANDOFF, cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     /// Opens the context menu for the row at `project`/`worktree`.
     pub(crate) fn open_worktree_menu(
         &mut self,
@@ -322,12 +514,16 @@ impl Shell {
             at,
         });
         let build_bytes = self.footprint(&node.id).map(|footprint| footprint.build);
+        let escalate_to = self
+            .escalation_target(node.agent.as_ref().map(|agent| agent.as_ref()))
+            .map(|agent| crate::ui::agent::agent_label(&agent).into());
         self.worktree_menu = Some(worktree_menu(
             at,
             node.primary,
             node.pinned,
             node.token_reduction,
             build_bytes,
+            escalate_to,
             &self.theme,
         ));
     }
@@ -361,6 +557,10 @@ impl Shell {
             WorktreeAction::PullRequest => {
                 self.popup = None;
                 self.request_pull_request(target, cx);
+            }
+            WorktreeAction::Escalate => {
+                self.popup = None;
+                self.escalate_worktree(target, cx);
             }
             WorktreeAction::Pin => self.set_worktree_pinned(&target, !target.pinned, cx),
             WorktreeAction::CopyPath => {
@@ -1188,6 +1388,7 @@ mod tests {
             primary,
             false,
             ket_core::worktree::default_token_reduction(),
+            None,
             None,
             &Theme::dark(),
         )

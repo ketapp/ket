@@ -624,12 +624,18 @@ impl Host {
 
     /// Files `terminal` the way a window's `Open` does, and returns its id.
     pub(super) fn file_for_tests(&self, terminal: LocalTerminal) -> u64 {
+        self.file_keyed_for_tests(terminal, None)
+    }
+
+    /// [`Self::file_for_tests`] under `key` — `worktree|agent|nonce`, as a
+    /// window names a pane — so it is listed in its worktree.
+    pub(super) fn file_keyed_for_tests(&self, terminal: LocalTerminal, key: Option<String>) -> u64 {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         lock(&self.terminals).insert(
             id,
             Entry {
                 terminal: Arc::new(terminal),
-                key: None,
+                key,
                 watchers: Vec::new(),
                 closed_at: None,
                 killed: false,
@@ -2035,5 +2041,346 @@ mod tests {
     fn same_program_recognises_its_own_process() {
         let (a, _b) = UnixStream::pair().expect("a socket pair");
         assert!(same_program(&a));
+    }
+
+    // ---- prompts, work and merges handed between phones and windows -----------
+
+    /// A greeted window, past its welcome and first status snapshot.
+    fn window(host: &Arc<Host>) -> (Arc<Out>, UnixStream) {
+        let (out, mut reader) = out_pair();
+        lock(&host.outs).push((1, out.clone()));
+        assert!(handle(
+            host,
+            1,
+            &out,
+            Request::Hello {
+                protocol: wire::PROTOCOL,
+                build: "a-window".to_owned(),
+            },
+        ));
+        assert!(matches!(next_reply(&mut reader), Reply::Welcome { .. }));
+        assert!(matches!(next_reply(&mut reader), Reply::AgentStatus { .. }));
+        reader
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("a read timeout");
+        (out, reader)
+    }
+
+    /// `cat` filed under pane `key`, so what is typed at it can be read.
+    fn pane(host: &Arc<Host>, key: &str) -> (u64, Arc<LocalTerminal>) {
+        let terminal = LocalTerminal::open(&spec("/bin/cat", &[])).expect("a terminal");
+        let id = host.file_keyed_for_tests(terminal, Some(key.to_owned()));
+        (id, host.find(id).expect("filed"))
+    }
+
+    /// Reports that pane `key` of worktree `wt` is asking `tool`'s permission
+    /// — as its hook would — and returns the prompt's id.
+    /// A hook report from pane `key` of worktree `wt`, asking nothing yet.
+    fn prompt_report(key: &str) -> agent_hooks::HookReport {
+        agent_hooks::HookReport {
+            agent: "claude".to_owned(),
+            event: agent_hooks::HookEvent::PermissionRequest,
+            worktree: Some("wt".to_owned()),
+            cwd: None,
+            pane: Some(key.to_owned()),
+            session: None,
+            tool_name: None,
+            note: None,
+            mutating_git: false,
+            command: None,
+            at_ms: crate::now_ms(),
+            subagent: None,
+            subagent_type: None,
+            subagent_description: None,
+            subagent_model: None,
+            tool_use_id: None,
+            teammate: None,
+            fresh_session: false,
+            background: None,
+            question: None,
+            call: None,
+            ruling: None,
+        }
+    }
+
+    fn ask_permission(
+        host: &Host,
+        key: &str,
+        tool: &str,
+        prompt: Option<agent_hooks::Prompt>,
+    ) -> u64 {
+        let report = agent_hooks::HookReport {
+            tool_name: Some(tool.to_owned()),
+            question: Some(Box::new(agent_hooks::PermissionQuestion {
+                tool: tool.to_owned(),
+                subject: Some("cargo test".to_owned()),
+                id: 0,
+                prompt,
+            })),
+            ..prompt_report(key)
+        };
+        assert!(lock(&host.status).report(&report, |_| true));
+        lock(&host.status)
+            .snapshot()
+            .panes
+            .into_iter()
+            .find(|p| p.pane == key)
+            .and_then(|p| p.question)
+            .map(|q| q.id)
+            .expect("the prompt has an id")
+    }
+
+    fn allow_once(agent: &str, tool: &str) -> Option<&'static [u8]> {
+        (agent == "claude" && tool == "Bash").then_some(b"allowed-from-phone\n".as_slice())
+    }
+
+    fn screen(terminal: &LocalTerminal) -> String {
+        String::from_utf8_lossy(&terminal.checkpoint().ansi).into_owned()
+    }
+
+    #[test]
+    fn a_phones_answer_is_typed_into_the_terminal_showing_that_prompt() {
+        let host = Host::for_tests();
+        let (id, terminal) = pane(&host, "wt|claude|1");
+        let question = ask_permission(&host, "wt|claude|1", "Bash", None);
+
+        assert_eq!(host.answer_prompt(id, question, allow_once), Ok(()));
+        assert!(
+            wait_until(Duration::from_secs(5), || screen(&terminal)
+                .contains("allowed-from-phone")),
+            "{}",
+            screen(&terminal)
+        );
+        terminal.kill();
+    }
+
+    #[test]
+    fn an_answer_to_a_prompt_that_moved_on_is_refused_and_types_nothing() {
+        let host = Host::for_tests();
+        let (id, terminal) = pane(&host, "wt|claude|1");
+        let question = ask_permission(&host, "wt|claude|1", "Bash", None);
+
+        assert_eq!(
+            host.answer_prompt(999, question, allow_once),
+            Err(AnswerRefused::Gone)
+        );
+        assert_eq!(
+            host.answer_prompt(id, 0, allow_once),
+            Err(AnswerRefused::Unnamed)
+        );
+        assert_eq!(
+            host.answer_prompt(id, question + 1, allow_once),
+            Err(AnswerRefused::Changed)
+        );
+        assert_eq!(
+            host.answer_prompt(id, question, |_, _| None),
+            Err(AnswerRefused::Unknown)
+        );
+
+        // Typed at the desktop after the prompt: that may have been the answer.
+        lock(&host.terminals).get_mut(&id).unwrap().typed_at_ms = crate::now_ms() + 1;
+        assert_eq!(
+            host.answer_prompt(id, question, allow_once),
+            Err(AnswerRefused::Answered)
+        );
+
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(!screen(&terminal).contains("allowed-from-phone"));
+        terminal.kill();
+    }
+
+    #[test]
+    fn a_terminal_with_no_pane_or_no_prompt_cannot_be_answered() {
+        let host = Host::for_tests();
+        let unkeyed = host.file_for_tests(LocalTerminal::open(&spec("/bin/cat", &[])).unwrap());
+        assert_eq!(
+            host.answer_prompt(unkeyed, 1, allow_once),
+            Err(AnswerRefused::Gone)
+        );
+
+        let (quiet, terminal) = pane(&host, "wt|claude|2");
+        assert_eq!(
+            host.answer_prompt(quiet, 1, allow_once),
+            Err(AnswerRefused::Answered)
+        );
+        terminal.kill();
+        host.find(unkeyed).unwrap().kill();
+    }
+
+    #[test]
+    fn declining_from_a_phone_presses_escape_in_the_terminal() {
+        let host = Host::for_tests();
+        let (id, terminal) = pane(&host, "wt|claude|1");
+        let question = ask_permission(&host, "wt|claude|1", "Bash", None);
+
+        assert_eq!(
+            host.answer_prompt(id, question, |_, _| Some(b"declined\x1b".as_slice())),
+            Ok(())
+        );
+        assert!(
+            wait_until(Duration::from_secs(5), || screen(&terminal)
+                .contains("declined")),
+            "{}",
+            screen(&terminal)
+        );
+        terminal.kill();
+    }
+
+    #[test]
+    fn a_respond_needs_a_question_with_a_prompt_and_a_hook_still_held() {
+        let host = Host::for_tests();
+        let (id, terminal) = pane(&host, "wt|claude|1");
+
+        // A plain permission prompt is answered with keys, not a Respond.
+        let plain = ask_permission(&host, "wt|claude|1", "Bash", None);
+        assert_eq!(
+            host.respond_prompt(id, plain, |_| Some(agent_hooks::Decision::Approve)),
+            Err(AnswerRefused::Unknown)
+        );
+
+        let plan = ask_permission(
+            &host,
+            "wt|claude|1",
+            "ExitPlanMode",
+            Some(agent_hooks::Prompt::Plan),
+        );
+        // An answer that does not fit what was asked.
+        assert_eq!(
+            host.respond_prompt(id, plan, |_| None),
+            Err(AnswerRefused::Unfit)
+        );
+        // It fits, but no hook is being held for it to answer.
+        assert_eq!(
+            host.respond_prompt(id, plan, |_| Some(agent_hooks::Decision::Approve)),
+            Err(AnswerRefused::Unknown)
+        );
+        assert!(!host.prompt_held(
+            "wt|claude|1",
+            &agent_hooks::PermissionQuestion {
+                tool: "ExitPlanMode".to_owned(),
+                subject: None,
+                id: plan,
+                prompt: Some(agent_hooks::Prompt::Plan),
+            }
+        ));
+        terminal.kill();
+    }
+
+    #[test]
+    fn work_and_merges_from_a_phone_go_to_a_window_and_only_when_one_is_open() {
+        let host = Host::for_tests();
+        assert!(!host.start_work("p".to_owned(), "Fix it".to_owned(), None, None));
+        assert!(!host.merge_work("wt".to_owned()));
+
+        let (_out, mut reader) = window(&host);
+        assert!(host.start_work(
+            "proj".to_owned(),
+            "Fix the login".to_owned(),
+            Some("codex".to_owned()),
+            Some("note-1".to_owned()),
+        ));
+        match next_reply(&mut reader) {
+            Reply::StartWork {
+                project,
+                prompt,
+                agent,
+                note,
+            } => {
+                assert_eq!(project, "proj");
+                assert_eq!(prompt, "Fix the login");
+                assert_eq!(agent.as_deref(), Some("codex"));
+                assert_eq!(note.as_deref(), Some("note-1"));
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(host.merge_work("wt-7".to_owned()));
+        match next_reply(&mut reader) {
+            Reply::MergeWork { worktree } => assert_eq!(worktree, "wt-7"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// Reports that pane `key` has started a turn, as its prompt hook would.
+    fn working(host: &Host, key: &str) {
+        let mut report = agent_hooks::HookReport {
+            event: agent_hooks::HookEvent::UserPrompt,
+            question: None,
+            tool_name: None,
+            at_ms: crate::now_ms(),
+            ..prompt_report(key)
+        };
+        report.pane = Some(key.to_owned());
+        assert!(lock(&host.status).report(&report, |_| true));
+    }
+
+    /// Whether `state` is no longer a turn in progress.
+    fn stopped_state(state: crate::event::AgentState) -> bool {
+        !matches!(
+            state,
+            crate::event::AgentState::Thinking | crate::event::AgentState::ExecutingTool
+        )
+    }
+
+    fn state_of(reply: Reply, key: &str) -> crate::event::AgentState {
+        match reply {
+            Reply::AgentStatus { snapshot } => {
+                snapshot
+                    .panes
+                    .iter()
+                    .find(|p| p.pane == key)
+                    .expect("the pane")
+                    .state
+            }
+            other => panic!("the windows were not told: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_phones_interrupt_or_escape_stops_a_working_turn_and_the_windows_are_told() {
+        let host = Host::for_tests();
+        let (_out, mut reader) = window(&host);
+        let (cancelled, first) = pane(&host, "wt|claude|1");
+        let (escaped, second) = pane(&host, "wt|claude|2");
+        working(&host, "wt|claude|1");
+        working(&host, "wt|claude|2");
+
+        host.cancel_terminal(cancelled, crate::agent_status::CancelSource::Phone);
+        assert!(stopped_state(state_of(
+            next_reply(&mut reader),
+            "wt|claude|1"
+        )));
+        host.escape_terminal(escaped);
+        assert!(stopped_state(state_of(
+            next_reply(&mut reader),
+            "wt|claude|2"
+        )));
+
+        // A terminal with no pane has nothing to stop, and says nothing.
+        let unkeyed = host.file_for_tests(LocalTerminal::open(&spec("/bin/cat", &[])).unwrap());
+        host.cancel_terminal(unkeyed, crate::agent_status::CancelSource::Phone);
+        host.escape_terminal(unkeyed);
+        reader
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+        assert!(wire::read(&mut reader).is_err(), "nothing more was sent");
+        for terminal in [first, second] {
+            terminal.kill();
+        }
+        host.find(unkeyed).unwrap().kill();
+    }
+
+    #[test]
+    fn the_pane_keys_are_those_of_terminals_still_running() {
+        let host = Host::for_tests();
+        let (live, live_terminal) = pane(&host, "wt|claude|1");
+        let (dead, dead_terminal) = pane(&host, "wt|claude|2");
+        dead_terminal.kill();
+        assert!(wait_until(Duration::from_secs(5), || dead_terminal.is_closed()));
+        assert_eq!(host.key(live).as_deref(), Some("wt|claude|1"));
+        assert_eq!(host.key(dead).as_deref(), Some("wt|claude|2"));
+        let keys = host.pane_keys();
+        assert!(keys.contains("wt|claude|1"));
+        assert!(!keys.contains("wt|claude|2"));
+        live_terminal.kill();
     }
 }

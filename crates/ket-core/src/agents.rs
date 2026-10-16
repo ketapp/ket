@@ -53,6 +53,64 @@ struct Candidate {
     gated_flags: &'static [&'static str],
 }
 
+/// The harness an agent's name runs: the part before the first `:`.
+///
+/// A local agent is named `opencode:ollama/<model>` and a bare Ollama chat
+/// `ollama:<model>`; everything that dispatches on which program it is
+/// talking to — the phone's keys, transcripts, Economy's provider block,
+/// resuming a session — asks this, while the full name stays the agent's
+/// identity everywhere else. A plain name is its own harness.
+pub fn harness(name: &str) -> &str {
+    name.split_once(':').map_or(name, |(harness, _)| harness)
+}
+
+/// The local coding agents `snapshot` makes, for an OpenCode at `opencode`
+/// on a Mac with `total` bytes of memory: one per model whose profile is
+/// ready (see [`crate::local_models::standing`]), skipping names `taken`
+/// already has. The reserved local-agent name always uses ket's guarded
+/// launch spec; a custom command cannot silently inherit its local label.
+pub fn local_entries(
+    config: &Config,
+    opencode: &Path,
+    snapshot: &crate::ollama::Snapshot,
+    total: u64,
+    taken: &[AgentEntry],
+) -> Vec<AgentEntry> {
+    let mut out: Vec<AgentEntry> = Vec::new();
+    for model in snapshot.listed() {
+        let crate::local_models::Standing::Ready(_) =
+            crate::local_models::standing(snapshot, model, total)
+        else {
+            continue;
+        };
+        let name = crate::local_models::agent_name(&model.tag);
+        if taken.iter().chain(&out).any(|entry| entry.name == name) {
+            continue;
+        }
+        let spec = AgentSpec {
+            name: name.clone(),
+            transport: crate::config::Transport::Pty,
+            command: "opencode".to_owned(),
+            args: vec!["--standalone".to_owned()],
+            env: std::collections::BTreeMap::from([(
+                "OPENCODE_CONFIG_CONTENT".to_owned(),
+                crate::local_models::opencode_config(&model.tag, &snapshot.endpoint.base),
+            )]),
+            env_remove: Vec::new(),
+            launch: None,
+        };
+        out.push(AgentEntry {
+            name: name.clone(),
+            installed: true,
+            found_at: Some(opencode.to_path_buf()),
+            enabled: !config.agent.disabled.contains(&name),
+            spec,
+            shipped: None,
+        });
+    }
+    out
+}
+
 /// The name of every agent ket would recognise, without probing for any of
 /// them.
 ///
@@ -441,43 +499,38 @@ impl Catalogue {
             });
         }
 
-        // Models a local Ollama has pulled — zero to many, named by whatever
-        // the user ran `ollama pull` on, so this is an append pass rather
-        // than a fifth row in `CANDIDATES`. Checked before the loop below so
-        // a model the user has *also* hand-written a `config.agents` entry
-        // for is deduplicated by that loop's own guard, exactly as a shipped
-        // candidate would be.
-        for model in crate::ollama::installed_models(prober) {
-            let name = format!("ollama:{}", model.tag);
-            if entries.iter().any(|entry| entry.name == name) {
-                continue;
-            }
-
-            let configured = config.agents.iter().find(|spec| spec.name == name);
-            let spec = configured.cloned().unwrap_or_else(|| AgentSpec {
-                name: name.clone(),
-                transport: crate::config::Transport::Pty,
-                command: "ollama".to_owned(),
-                args: vec!["run".to_owned(), model.tag.clone()],
-                env: Default::default(),
-                env_remove: Vec::new(),
-                launch: None,
-            });
-
-            entries.push(AgentEntry {
-                name: name.clone(),
-                installed: true,
-                found_at: prober.find("ollama"),
-                enabled: !config.agent.disabled.contains(&name),
-                spec,
-                // Nothing shipped to reset to — same as an agent the user
-                // configured by hand (see the loop below).
-                shipped: None,
-            });
+        // A model Ollama has pulled is not offered on its own: `ollama run`
+        // chats and cannot touch a file. It is an agent only driven by
+        // OpenCode, below. One written into `config.agents` by hand still
+        // loads, with the rest of the configured agents.
+        // Local coding agents: OpenCode driving a model this Mac's Ollama
+        // runs. Only a model that is really local (not proxied to Ollama's
+        // cloud, not on another machine), calls tools, and has its agent
+        // profile pinned to the context it fits at — a model that launches
+        // and then fails at its first tool call is worse than none. See
+        // `crate::local_models`. Only an OpenCode that runs on its own
+        // server, too: without `--standalone` its panes cannot be told apart.
+        let opencode = entries
+            .iter()
+            .find(|entry| entry.name == "opencode" && entry.installed)
+            .and_then(|entry| entry.found_at.clone())
+            .filter(|found| prober.accepts(found, "--standalone"));
+        if let (Some(opencode), crate::ollama::Probe::Running(snapshot), Some(total)) = (
+            opencode,
+            crate::ollama::probe(prober),
+            crate::machine::total_memory_bytes(),
+        ) {
+            let local = local_entries(config, &opencode, &snapshot, total, &entries);
+            entries.extend(local);
         }
 
         // Anything the user configured that ket cannot probe for.
         for spec in &config.agents {
+            // Only a prepared model gets this reserved name. Otherwise a
+            // custom command could look local to every privacy check.
+            if crate::local_models::model_tag(&spec.name).is_some() {
+                continue;
+            }
             if entries.iter().any(|entry| entry.name == spec.name) {
                 continue;
             }
@@ -935,5 +988,139 @@ mod tests {
             panic!("expected a refusal");
         };
         assert!(why.contains("switched off"), "unhelpful: {why}");
+    }
+    #[test]
+    fn harness_is_the_name_before_the_first_colon() {
+        assert_eq!(harness("opencode:ollama/qwen3-coder:30b"), "opencode");
+        assert_eq!(harness("ollama:qwen3:0.6b"), "ollama");
+        assert_eq!(harness("claude"), "claude");
+    }
+
+    const GB: u64 = 1024 * 1024 * 1024;
+
+    fn model(tag: &str) -> crate::ollama::ModelInfo {
+        crate::ollama::ModelInfo {
+            tag: tag.to_owned(),
+            size_bytes: GB / 2,
+            family: None,
+            parameters: None,
+            quantization: None,
+            cloud: false,
+            tools: true,
+            context_max: Some(40_960),
+            parent: None,
+            num_ctx: None,
+            kv_per_token: Some(114_688),
+        }
+    }
+
+    /// `tag`'s model with its profile pinned at what a 64 GB Mac gives it.
+    fn prepared(tag: &str) -> [crate::ollama::ModelInfo; 2] {
+        let base = model(tag);
+        let profile = crate::ollama::ModelInfo {
+            tag: crate::local_models::profile_tag(tag),
+            parent: Some(tag.to_owned()),
+            num_ctx: Some(40_960),
+            ..model(tag)
+        };
+        [base, profile]
+    }
+
+    fn snapshot(models: Vec<crate::ollama::ModelInfo>) -> crate::ollama::Snapshot {
+        crate::ollama::Snapshot {
+            endpoint: crate::ollama::Endpoint {
+                base: "http://127.0.0.1:11434".to_owned(),
+            },
+            version: None,
+            models,
+            loaded: Vec::new(),
+        }
+    }
+
+    fn local(config: &Config, models: Vec<crate::ollama::ModelInfo>) -> Vec<AgentEntry> {
+        local_entries(
+            config,
+            Path::new("/fake/bin/opencode"),
+            &snapshot(models),
+            64 * GB,
+            &[],
+        )
+    }
+
+    #[test]
+    fn a_prepared_local_model_becomes_an_opencode_agent_on_its_profile() {
+        let entries = local(&config(), prepared("qwen3:0.6b").to_vec());
+        assert_eq!(entries.len(), 1);
+        let entry = &entries[0];
+        assert_eq!(entry.name, "opencode:ollama/qwen3:0.6b");
+        assert!(entry.installed && entry.enabled);
+        assert_eq!(entry.spec.transport, crate::config::Transport::Pty);
+        assert_eq!(entry.spec.launch_line(&[]), "opencode --standalone");
+        let config: serde_json::Value =
+            serde_json::from_str(&entry.spec.env["OPENCODE_CONFIG_CONTENT"]).unwrap();
+        assert_eq!(
+            config,
+            serde_json::json!({
+                "model": "ollama/qwen3:0.6b-ket",
+                "small_model": "ollama/qwen3:0.6b-ket",
+                "providers": { "ollama": { "settings": { "baseURL": "http://127.0.0.1:11434/v1" } } },
+                "policies": [
+                    { "action": "provider.use", "resource": "*", "effect": "deny" },
+                    { "action": "provider.use", "resource": "ollama", "effect": "allow" },
+                ],
+            })
+        );
+    }
+
+    #[test]
+    fn no_local_agent_without_tools_a_profile_or_a_local_model() {
+        let toolless = crate::ollama::ModelInfo {
+            tools: false,
+            ..model("llama3.2:3b")
+        };
+        let cloud = crate::ollama::ModelInfo {
+            cloud: true,
+            ..model("gpt-oss:20b-cloud")
+        };
+        let mut stale = prepared("qwen3:1.7b");
+        stale[1].num_ctx = Some(8_192);
+        let mut models = vec![toolless, cloud, model("gemma4:12b")];
+        models.extend(stale);
+        assert!(local(&config(), models).is_empty());
+
+        let remote = local_entries(
+            &config(),
+            Path::new("/fake/bin/opencode"),
+            &crate::ollama::Snapshot {
+                endpoint: crate::ollama::Endpoint {
+                    base: "http://gpu-box.local:11434".to_owned(),
+                },
+                ..snapshot(prepared("qwen3:0.6b").to_vec())
+            },
+            64 * GB,
+            &[],
+        );
+        assert!(remote.is_empty());
+    }
+
+    #[test]
+    fn a_configured_local_name_cannot_replace_the_guarded_launch() {
+        let name = "opencode:ollama/qwen3:0.6b";
+        let mut config = config();
+        config.agents.push(AgentSpec {
+            name: name.to_owned(),
+            transport: crate::config::Transport::Pty,
+            command: "cloud-agent".to_owned(),
+            args: vec![],
+            env: BTreeMap::new(),
+            env_remove: Vec::new(),
+            launch: None,
+        });
+        config.agent.disabled.insert(name.to_owned());
+        let entries = local(&config, prepared("qwen3:0.6b").to_vec());
+        assert_eq!(entries[0].spec.command, "opencode");
+        assert_eq!(entries[0].spec.args, ["--standalone"]);
+        assert!(entries[0].spec.env.contains_key("OPENCODE_CONFIG_CONTENT"));
+        assert!(!entries[0].enabled);
     }
 }

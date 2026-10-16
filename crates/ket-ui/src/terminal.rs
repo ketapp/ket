@@ -55,7 +55,7 @@ mod keys;
 mod mouse;
 
 use std::ops::Range;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -105,6 +105,49 @@ const BLINK_INTERVAL: Duration = Duration::from_millis(530);
 /// it is, because whatever it printed on the way out is the only explanation
 /// anyone is going to get.
 const STARTUP_GRACE: Duration = Duration::from_secs(3);
+
+/// The CLI shipped beside the app, or beside a development `ket-ui` binary.
+fn cli_path_for(exe: &Path) -> Option<PathBuf> {
+    let bin = exe.parent()?;
+    if bin.file_name().is_some_and(|name| name == "MacOS")
+        && bin
+            .parent()?
+            .file_name()
+            .is_some_and(|name| name == "Contents")
+    {
+        Some(bin.parent()?.join("Resources/bin/ket"))
+    } else {
+        Some(bin.join("ket"))
+    }
+}
+
+/// Put ket's CLI on the PATH inherited by shells and the agents they start.
+fn expose_cli(spec: &mut TerminalSpec) {
+    let Some(cli) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| cli_path_for(&exe))
+        .filter(|path| path.is_file())
+    else {
+        return;
+    };
+    let Some(dir) = cli.parent() else {
+        return;
+    };
+    let inherited = spec
+        .env
+        .get("PATH")
+        .map(std::ffi::OsString::from)
+        .or_else(|| std::env::var_os("PATH"));
+    let mut entries = vec![dir.to_path_buf()];
+    if let Some(inherited) = inherited {
+        entries.extend(std::env::split_paths(&inherited));
+    }
+    if let Ok(path) = std::env::join_paths(entries)
+        && let Some(path) = path.to_str()
+    {
+        spec.env.insert("PATH".to_owned(), path.to_owned());
+    }
+}
 
 /// A running terminal, plus what the pane needs beyond the backend itself.
 ///
@@ -276,12 +319,16 @@ fn resume_args(cwd: &std::path::Path, agent: &AgentSpec) -> Option<(String, Vec<
         .scan(&[cwd])
         .remove(cwd)?
         .into_iter()
+        // Exact: a local agent resumes only its own model's sessions, and a
+        // cloud OpenCode none of them — see `OpencodeSessions`.
         .find(|session| session.agent == agent)?;
 
     // Not `resume_args`: the newest record is often one still running, and
     // resuming one of those exits immediately. See `Sessions::open_args`.
+    // Asked of the harness, whose store it is: a local agent's sessions are
+    // OpenCode's.
     sessions
-        .open_args(agent, cwd, &latest.id)
+        .open_args(ket_core::agents::harness(agent), cwd, &latest.id)
         .map(|args| (latest.id, args))
 }
 
@@ -476,9 +523,15 @@ impl Shell {
             .clone()
             .map(SharedString::from)
             .or_else(|| {
-                agent
-                    .as_ref()
-                    .map(|spec| SharedString::from(spec.name.clone()))
+                agent.as_ref().map(|spec| {
+                    // A local agent's name is a launch key; it reads as its
+                    // model, `Qwen3 0.6B`.
+                    if ket_core::local_models::model_tag(&spec.name).is_some() {
+                        SharedString::from(crate::ui::agent::agent_label(&spec.name))
+                    } else {
+                        SharedString::from(spec.name.clone())
+                    }
+                })
             })
             .unwrap_or_else(|| "Terminal".into());
 
@@ -773,6 +826,7 @@ impl Shell {
         let name = agent.as_ref().map(|a| a.name.as_str()).unwrap_or("claude");
         spec.env.extend(self.hook_env(worktree, name, id));
         spec.env.extend(economy_env);
+        expose_cli(&mut spec);
         if let Some(session) = resumed_codex_session {
             spec.env.insert(
                 ket_core::agent_hooks::RESUME_SESSION_ENV.to_owned(),
@@ -1314,7 +1368,7 @@ impl Shell {
 
     /// `Cmd-C`: the selection to the clipboard. Nothing selected, nothing
     /// happens — the interrupt lives on `Ctrl-C`, as everywhere on macOS.
-    fn terminal_copy(&mut self, id: TerminalId, cx: &mut Context<Self>) {
+    pub(crate) fn terminal_copy(&mut self, id: TerminalId, cx: &mut Context<Self>) {
         let Some(handle) = self.terminals.get(&id) else {
             return;
         };
@@ -1326,7 +1380,7 @@ impl Shell {
     /// `Cmd-V`: the clipboard to the program, bracketed when it asked for
     /// that so a multi-line paste is not executed line by line, and with
     /// newlines as carriage returns, which is what the Enter key sends.
-    fn terminal_paste(&mut self, id: TerminalId, cx: &mut Context<Self>) {
+    pub(crate) fn terminal_paste(&mut self, id: TerminalId, cx: &mut Context<Self>) {
         let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
             return;
         };
@@ -1367,6 +1421,21 @@ impl Shell {
             .active_tab()
             .and_then(agent)
             .or_else(|| space.all_tabs().into_iter().find_map(agent))
+    }
+
+    /// Pastes `text` into a terminal without pressing Enter: typed into the
+    /// agent's input for the person to finish and send.
+    pub(crate) fn paste_into_terminal(
+        &mut self,
+        id: TerminalId,
+        text: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(handle) = self.terminals.get(&id) else {
+            return;
+        };
+        let bytes = paste_bytes(&handle.term, text);
+        self.terminal_input(id, bytes, cx);
     }
 
     /// Pastes `text` into a terminal and presses Enter, as though somebody
@@ -1904,7 +1973,11 @@ impl Shell {
             return terminal_note(&self.theme, note);
         };
 
-        let bar = self.terminal_find_bar(id, window, cx);
+        // The find bar, or else the offer to remember a permission answer:
+        // one strip at a time, and finding is what the person asked for.
+        let bar = self
+            .terminal_find_bar(id, window, cx)
+            .or_else(|| self.rule_offer_strip(id, cx));
         let mut style = gpui::StyleRefinement::default();
         style.size.width = Some(gpui::relative(1.).into());
         match bar {
@@ -2405,6 +2478,20 @@ pub(crate) fn runnable_specs() -> Vec<AgentSpec> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finds_the_cli_in_app_and_development_layouts() {
+        assert_eq!(
+            cli_path_for(Path::new("/Applications/ket.app/Contents/MacOS/ket")),
+            Some(PathBuf::from(
+                "/Applications/ket.app/Contents/Resources/bin/ket"
+            ))
+        );
+        assert_eq!(
+            cli_path_for(Path::new("/checkout/target/debug/ket-ui")),
+            Some(PathBuf::from("/checkout/target/debug/ket"))
+        );
+    }
 
     fn chars(text: &str) -> Vec<char> {
         text.chars().collect()

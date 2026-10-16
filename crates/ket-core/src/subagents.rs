@@ -373,6 +373,7 @@ mod tests {
             subagent_model: None,
             tool_use_id: None,
             call: None,
+            ruling: None,
             teammate: None,
             fresh_session: false,
             background: None,

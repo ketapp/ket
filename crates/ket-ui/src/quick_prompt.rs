@@ -508,9 +508,68 @@ impl Shell {
         .detach();
     }
 
+    /// Whether the quick prompt could reach a local agent. Its words then
+    /// stay on the Mac — see `voice::Dictation::start` — so where the answer
+    /// is only settled when the prompt is sent, any way it could go local
+    /// counts.
+    fn quick_prompt_is_local(&self) -> bool {
+        let Some(dialog) = self.quick_prompt.as_ref() else {
+            return false;
+        };
+        let local = |agent: &str| ket_core::local_models::model_tag(agent).is_some();
+        // The agent new work in the project would get, and a worktree with
+        // none of its own starts.
+        let preferred_is_local = || {
+            let names: Vec<String> = self
+                .runnable_agents()
+                .iter()
+                .map(|spec| spec.name.clone())
+                .collect();
+            ket_core::workspace::Workspace::open()
+                .ok()
+                .and_then(|workspace| {
+                    crate::worktree_dialog::preferred_agent(&workspace, &names, &dialog.project)
+                })
+                .is_some_and(|agent| local(&agent))
+        };
+        // A prompt for a worktree goes to an agent terminal open in it, which
+        // can be any of its tabs and any agent; with none open, to the agent
+        // the worktree starts.
+        let reaches_local = |node: &crate::tree::WorktreeNode| {
+            let open_local = self.spaces.get(&node.id).is_some_and(|space| {
+                space.all_tabs().into_iter().any(|tab| {
+                    matches!(tab.kind, crate::tabs::TabKind::Terminal(terminal)
+                        if self.runs_local_agent(terminal))
+                })
+            });
+            open_local
+                || match node.agent.as_ref() {
+                    Some(agent) => local(agent),
+                    None => preferred_is_local(),
+                }
+        };
+        let mut worktrees = self
+            .projects
+            .iter()
+            .filter(|project| project.id == dialog.project)
+            .flat_map(|project| &project.worktrees);
+        match &dialog.target {
+            QuickTarget::Existing(id) => {
+                worktrees.any(|node| &node.id == id && reaches_local(node))
+            }
+            // Which free worktree gets it is decided when it is sent.
+            QuickTarget::AnyFree => {
+                preferred_is_local() || worktrees.any(|node| !node.missing && reaches_local(node))
+            }
+            QuickTarget::NewWorktree => preferred_is_local(),
+        }
+    }
+
     /// Opens the microphone once the permissions are in, if the dictation
     /// that asked for them is still the one the dialog is waiting on.
     fn begin_quick_voice(&mut self, heard: &voice::Transcript, access: Result<(), String>) -> bool {
+        // Asked before the dialog is borrowed: it reads the sidebar.
+        let local = self.quick_prompt_is_local();
         let Some(dialog) = self.quick_prompt.as_mut() else {
             return false;
         };
@@ -521,7 +580,7 @@ impl Shell {
         else {
             return false;
         };
-        match access.and_then(|()| voice::Dictation::start(heard.clone())) {
+        match access.and_then(|()| voice::Dictation::start(heard.clone(), local)) {
             Ok(dictation) => {
                 voice.dictation = Some(dictation);
                 true
@@ -684,7 +743,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         if let Some(terminal) = self.agent_terminal(&id) {
-            self.submit_to_terminal(terminal, &prompt, cx);
+            self.submit_or_queue(terminal, &prompt, cx);
             return;
         }
 

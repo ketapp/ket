@@ -12,7 +12,68 @@ use crate::shortcuts::global_shortcut;
 
 use super::selection::line_range;
 
+/// The editing operations shared by native menus and the editor's keys.
+#[derive(Clone, Copy)]
+pub(crate) enum NativeEdit {
+    Undo,
+    Redo,
+    Cut,
+    Copy,
+    Paste,
+    SelectAll,
+}
+
 impl Shell {
+    /// Whether the focused editor currently wraps lines.
+    pub(crate) fn active_editor_wrap(&self) -> Option<bool> {
+        self.editors
+            .get(self.active_editor_key()?.as_ref())
+            .map(|state| state.wrap)
+    }
+
+    /// Toggle wrapping in the focused editor for the menu and its shortcut.
+    pub(crate) fn toggle_active_editor_wrap(&mut self, cx: &mut Context<Self>) {
+        let Some(key) = self.active_editor_key() else {
+            return;
+        };
+        if let Some(state) = self.editors.get_mut(key.as_ref()) {
+            state.wrap = !state.wrap;
+            cx.notify();
+        }
+    }
+    /// Apply a native Edit menu command to the active editor, if one owns the pane.
+    pub(crate) fn native_editor_edit(
+        &mut self,
+        operation: NativeEdit,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(key) = self.active_editor_key() else {
+            return false;
+        };
+        if self
+            .editors
+            .get(key.as_ref())
+            .is_some_and(|state| state.load_error.is_some())
+        {
+            return true;
+        }
+        let chord = match operation {
+            NativeEdit::Undo => "cmd-z",
+            NativeEdit::Redo => "cmd-shift-z",
+            NativeEdit::Cut => "cmd-x",
+            NativeEdit::Copy => "cmd-c",
+            NativeEdit::Paste => "cmd-v",
+            NativeEdit::SelectAll => "cmd-a",
+        };
+        self.caret_wake(cx);
+        self.handle_editor_key(
+            key.as_ref(),
+            &Keystroke::parse(chord).expect("valid edit chord"),
+            cx,
+        );
+        cx.notify();
+        true
+    }
     /// Handles a keystroke for the editor pane. Returns whether it was
     /// consumed, the same convention as [`Shell::palette_key`], so
     /// `main.rs`'s `on_key_down` can fall through to the shell's own
@@ -85,9 +146,7 @@ impl Shell {
             }
             "s" if cmd => return self.save_editor(editor_key, cx),
             "w" if cmd && m.alt => {
-                if let Some(state) = self.editors.get_mut(editor_key) {
-                    state.wrap = !state.wrap;
-                }
+                self.toggle_active_editor_wrap(cx);
                 return;
             }
             // Whole-line delete, not macOS's own delete-to-start-of-line:

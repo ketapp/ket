@@ -26,6 +26,7 @@
 
 mod agent_override;
 mod android_emulator;
+mod app_menu;
 mod appearance;
 mod audio;
 mod backlog;
@@ -59,12 +60,15 @@ mod input;
 #[allow(unsafe_code)]
 mod ios_simulator;
 mod layout;
+mod local_models;
 mod merge_worktree;
 mod motion;
+mod notify;
 mod orbit;
 mod paint;
 mod palette;
 mod panel;
+mod permissions;
 mod phone_work;
 mod phones;
 mod preferences;
@@ -102,9 +106,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use gpui::{
-    App, Application, Bounds, Context, FocusHandle, Focusable, KeyBinding, KeyDownEvent, Menu,
-    MenuItem, MouseButton, Pixels, SharedString, TitlebarOptions, Window, WindowAppearance,
-    WindowBounds, WindowOptions, actions, deferred, div, point, prelude::*, px, size,
+    App, Application, Bounds, Context, FocusHandle, Focusable, KeyBinding, KeyDownEvent,
+    MouseButton, Pixels, SharedString, TitlebarOptions, Window, WindowAppearance, WindowBounds,
+    WindowOptions, actions, deferred, div, point, prelude::*, px, size,
 };
 
 use ket_core::activity::Tracker;
@@ -117,11 +121,14 @@ use ket_core::rate_limits::{BackgroundRefresh, RateLimitCache};
 use ket_core::theme::Theme;
 use ket_core::workspace::Workspace;
 
+pub(crate) use crate::app_menu::app_menus;
+
 use crate::audio::AudioEngine;
 use crate::browser::{BrowserHandle, BrowserId};
 use crate::commands::Outbox;
 use crate::editor::EditorState;
 use crate::explorer::{Explorer, Finder, PanelResize};
+use crate::input::Key;
 use crate::input::Searches;
 #[cfg(target_os = "macos")]
 use crate::ios_simulator::IosSimulatorHandle;
@@ -184,6 +191,142 @@ actions!(
         /// The Edit menu's Select All: `selectAll:` to whatever has the
         /// keyboard. See [`EditCut`].
         EditSelectAll,
+        /// Undo the focused editing target's last change.
+        EditUndo,
+        /// Redo the focused editing target's last undone change.
+        EditRedo,
+        /// Save the focused document or capture the focused simulator.
+        SaveDocument,
+        /// Find text in the focused editor or terminal.
+        FindInTab,
+        /// Close unpinned tabs other than the focused tab.
+        CloseOtherTabs,
+        /// Close unpinned tabs to the right.
+        CloseTabsRight,
+        /// Close unpinned tabs to the left.
+        CloseTabsLeft,
+        /// Put the focused tab's path on the clipboard.
+        CopyTabPath,
+        /// Put the focused tab's relative path on the clipboard.
+        CopyRelativeTabPath,
+        /// Pin or unpin the focused tab.
+        ToggleTabPin,
+        /// Edit the focused tab's title.
+        ChangeTabTitle,
+        /// Open the add-project dialog.
+        AddProject,
+        /// Open settings for the selected project.
+        ProjectSettings,
+        /// Open the selected project's backlog.
+        OpenBacklog,
+        /// Show or hide discovered worktrees in the selected project.
+        ToggleDiscoveredWorktrees,
+        /// Reload the project sidebar.
+        RefreshProjects,
+        /// Confirm removal of the selected project.
+        RemoveProject,
+        /// Commit and merge the selected worktree.
+        CommitAndMerge,
+        /// Push and open a pull request for the selected worktree.
+        OpenPullRequest,
+        /// Rename the selected worktree.
+        RenameWorktree,
+        /// Pin or unpin the selected worktree.
+        ToggleWorktreePin,
+        /// Copy the selected worktree's path.
+        CopyWorktreePath,
+        /// Clear regenerable build output in the selected worktree.
+        ClearBuildOutput,
+        /// Confirm deletion of the selected worktree.
+        DeleteWorktree,
+        /// Open a browser in the focused pane.
+        NewBrowserTab,
+        /// Open the file finder.
+        FindFile,
+        /// Open the command palette.
+        OpenCommandPalette,
+        /// Search projects and tabs.
+        SearchProjects,
+        /// Search the selected worktree.
+        SearchWorktree,
+        /// Toggle the sidebar.
+        ToggleSidebar,
+        /// Toggle the right panel.
+        ToggleRightPanel,
+        /// Show the file panel.
+        ShowFilesPanel,
+        /// Show the search panel.
+        ShowSearchPanel,
+        /// Show the Git panel.
+        ShowGitPanel,
+        /// Create a worktree in the current project context.
+        NewWorktree,
+        /// Open the quick prompt.
+        OpenQuickPrompt,
+        /// Open the saved snippet picker.
+        SendSnippet,
+        /// Switch to the preceding tab.
+        PreviousTab,
+        /// Switch to the following tab.
+        NextTab,
+        /// Split the focused pane to the right.
+        SplitRight,
+        /// Split the focused pane downward.
+        SplitDown,
+        /// Close the focused pane when another remains.
+        ClosePane,
+        /// Open keyboard shortcuts in Settings.
+        KeyboardShortcuts,
+        /// Open the public release list in a browser.
+        ViewAvailableReleases,
+        /// Open ket's online help.
+        KetHelp,
+        /// Open the CLI reference.
+        CliReference,
+        /// Open release notes in a browser.
+        ReleaseNotes,
+        /// Open the issue tracker.
+        ReportIssue,
+        /// Minimize the current window.
+        MinimizeWindow,
+        /// Zoom the current window.
+        ZoomWindow,
+        /// Enter or leave full screen.
+        ToggleFullScreen,
+        /// Hide ket through the native application API.
+        HideKet,
+        /// Hide other applications.
+        HideOthers,
+        /// Show previously hidden applications.
+        ShowAll,
+        /// Close the window after saving its view.
+        CloseWindow,
+        /// Activate ket's windows.
+        BringAllToFront,
+        /// Move focus to the pane on the left.
+        FocusPaneLeft,
+        /// Move focus to the pane on the right.
+        FocusPaneRight,
+        /// Move focus to the pane above.
+        FocusPaneAbove,
+        /// Move focus to the pane below.
+        FocusPaneBelow,
+        /// Show the build information dialog.
+        AboutKet,
+        /// Toggle wrapping in the focused editor.
+        ToggleEditorWrap,
+        /// Find the next match in the active local search.
+        FindNext,
+        /// Find the previous match in the active local search.
+        FindPrevious,
+        /// Reveal the selected worktree in Finder.
+        RevealWorktree,
+        /// Show Economy savings in the existing popover.
+        EconomySavings,
+        /// Show measured storage for the selected project.
+        ProjectStorage,
+        /// Open the existing feedback form.
+        SendFeedback,
     ]
 );
 
@@ -285,67 +428,6 @@ const ACTUAL_SIZE_CHORD: &str = "cmd-0";
 #[cfg(not(target_os = "macos"))]
 const ACTUAL_SIZE_CHORD: &str = "ctrl-0";
 
-/// The menu bar. macOS delivers Cmd-Q as a *menu* key equivalent, and gpui
-/// installs no menu bar of its own — without one the chord reaches nothing
-/// and the app cannot be quit from the keyboard at all.
-///
-/// Takes what the View menu toggles, because gpui's menu items carry no
-/// checkmark: the item names what choosing it will do, the way macOS's own
-/// "Show Tab Bar" and "Hide Toolbar" do, and the bar is rebuilt when that
-/// changes — see [`Shell::set_status_bar`].
-fn app_menus(status_bar_open: bool) -> Vec<Menu> {
-    vec![
-        Menu {
-            name: "ket".into(),
-            items: vec![
-                MenuItem::action("Settings…", OpenSettings),
-                MenuItem::separator(),
-                MenuItem::action("Quit ket", Quit),
-            ],
-        },
-        Menu {
-            name: "File".into(),
-            items: vec![
-                MenuItem::action("New Blank Document", NewBlankDocument),
-                MenuItem::action("New Terminal Tab", NewTerminalTab),
-                MenuItem::separator(),
-                MenuItem::action("Add to Backlog\u{2026}", AddToBacklog),
-                MenuItem::separator(),
-                MenuItem::action("Close Tab", CloseTab),
-            ],
-        },
-        #[cfg(target_os = "macos")]
-        Menu {
-            name: "Edit".into(),
-            items: vec![
-                MenuItem::os_action("Cut", EditCut, gpui::OsAction::Cut),
-                MenuItem::os_action("Copy", EditCopy, gpui::OsAction::Copy),
-                MenuItem::os_action("Paste", EditPaste, gpui::OsAction::Paste),
-                MenuItem::separator(),
-                MenuItem::os_action("Select All", EditSelectAll, gpui::OsAction::SelectAll),
-            ],
-        },
-        Menu {
-            name: "View".into(),
-            items: vec![
-                MenuItem::action(
-                    if status_bar_open {
-                        "Hide Status Bar"
-                    } else {
-                        "Show Status Bar"
-                    },
-                    ToggleStatusBar,
-                ),
-                MenuItem::separator(),
-                // In the platform's own order — Safari's, Terminal's.
-                MenuItem::action("Actual Size", ActualSize),
-                MenuItem::action("Zoom In", ZoomIn),
-                MenuItem::action("Zoom Out", ZoomOut),
-            ],
-        },
-    ]
-}
-
 /// How ket's own editor draws text.
 ///
 /// A pair rather than two loose fields on the shell, because they are changed
@@ -398,6 +480,22 @@ struct Shell {
     /// Whether the status bar is showing. Hidden, it is neither built nor
     /// fed: see [`Shell::set_status_bar`].
     pub(crate) status_bar_open: bool,
+    /// Snapshot currently installed in the native menu bar.
+    menu_state: Option<crate::app_menu::MenuState>,
+    /// Set by user actions and background discovery; terminal output alone does not rebuild menus.
+    menu_dirty: bool,
+    menu_tools_refreshing: bool,
+    /// Runnable agent names in the same order as the new-tab menu.
+    menu_agents: Vec<String>,
+    /// Device launchers currently available on this machine.
+    menu_ios_available: bool,
+    menu_android_available: bool,
+    /// Persistent About or release-notes dialog opened from the menu bar.
+    release_dialog: Option<crate::release::ReleaseDialog>,
+    /// Project whose measured storage is open in a dialog.
+    storage_dialog: Option<ProjectId>,
+    /// Last native full-screen state, for the View menu's label.
+    menu_fullscreen: bool,
     /// The sidebar, as a view gpui can reuse between frames — see
     /// `crate::region`. Made on the first frame that shows it.
     sidebar_region: Option<gpui::Entity<crate::region::Region>>,
@@ -586,6 +684,12 @@ struct Shell {
     /// The tick slows to every [`UNFOCUSED_EVERY`]th run while this is false,
     /// and runs at once when it turns true again.
     pub(crate) window_active: bool,
+    /// Which worktrees were waiting at the last look — see `crate::notify`.
+    pub(crate) waiting: crate::notify::Waiting,
+    /// Answers waiting to be remembered as rules — see `crate::permissions`.
+    pub(crate) rule_offers: crate::permissions::RuleOffers,
+    /// Prompts waiting for the local model — see `crate::local_models`.
+    pub(crate) local_queue: crate::local_models::LocalQueue,
     /// Whether a merged-state sweep is already running.
     ///
     /// One at a time, for the same reason `reading_git_status` is — and it
@@ -910,7 +1014,9 @@ impl Shell {
 
     /// Whether a modal currently owns the window.
     pub(crate) fn modal_open(&self) -> bool {
-        self.preferences.is_some()
+        self.storage_dialog.is_some()
+            || self.release_dialog.is_some()
+            || self.preferences.is_some()
             || self.new_worktree.is_some()
             || self.settings.is_some()
             || self.adding_project.is_some()
@@ -943,6 +1049,9 @@ impl Shell {
             let _t = crate::frametrace::tick("refresh_activity");
             self.refresh_activity(cx);
         }
+        self.announce_waiting();
+        self.refresh_rule_offers();
+        self.drain_local_queue(cx);
         // Files change under ket constantly — the agent in the terminal is
         // editing the same worktree. See `Shell::refresh_editors`.
         {
@@ -957,6 +1066,8 @@ impl Shell {
             self.persist_view();
         }
         self.refresh_savings();
+        self.refresh_menu_tools(cx);
+        self.refresh_native_menus(cx);
         // The theme the window is drawn in, for phones to draw in too. Sent
         // only when it changed — the system flipping to dark, a pick in
         // Settings — so asking every tick costs a comparison.
@@ -1068,6 +1179,9 @@ impl Shell {
                 if shell
                     .update(cx, |shell, cx| {
                         if shell.drain_hook_reports(false) {
+                            shell.announce_waiting();
+                            shell.refresh_rule_offers();
+                            shell.drain_local_queue(cx);
                             cx.notify();
                         }
                     })
@@ -1083,6 +1197,7 @@ impl Shell {
         // to. A config that will not load falls back to defaults rather than
         // refusing to open a window — see `Config::load`.
         let config = Config::load().unwrap_or_default();
+        crate::notify::prepare();
         // Read before the theme is moved out: the editor's size falls back to
         // the code size, so it needs the whole config still standing.
         let editor_type = EditorType {
@@ -1159,6 +1274,15 @@ impl Shell {
                     editor_type,
                     sidebar_open: true,
                     status_bar_open: true,
+                    menu_state: None,
+                    menu_agents: Vec::new(),
+                    menu_dirty: true,
+                    menu_tools_refreshing: false,
+                    menu_ios_available: false,
+                    menu_android_available: false,
+                    release_dialog: None,
+                    storage_dialog: None,
+                    menu_fullscreen: false,
                     sidebar_region: None,
                     panel_open: true,
                     panel_width: px(280.0),
@@ -1238,6 +1362,9 @@ impl Shell {
                     git_watch: Default::default(),
                     reading_records: false,
                     window_active: true,
+                    waiting: Default::default(),
+                    rule_offers: Default::default(),
+                    local_queue: Default::default(),
                     reading_merged: false,
                     merged_swept_at_ms: 0,
                     drop_target: None,
@@ -1310,6 +1437,15 @@ impl Shell {
             editor_type,
             sidebar_open: true,
             status_bar_open: true,
+            menu_state: None,
+            menu_agents: Vec::new(),
+            menu_dirty: true,
+            menu_tools_refreshing: false,
+            menu_ios_available: false,
+            menu_android_available: false,
+            release_dialog: None,
+            storage_dialog: None,
+            menu_fullscreen: false,
             sidebar_region: None,
             panel_open: true,
             panel_width: px(280.0),
@@ -1389,6 +1525,9 @@ impl Shell {
             git_watch: Default::default(),
             reading_records: false,
             window_active: true,
+            waiting: Default::default(),
+            rule_offers: Default::default(),
+            local_queue: Default::default(),
             reading_merged: false,
             merged_swept_at_ms: 0,
             drop_target: None,
@@ -1472,6 +1611,7 @@ impl Shell {
         }
 
         shell.restore_layouts(&workspace);
+        shell.refresh_menu_tools(cx);
 
         // Off the window's thread and only ever here: measuring a worktree is
         // a walk of every file in it, so it is done once at launch rather than
@@ -1561,8 +1701,38 @@ impl Shell {
     }
 }
 
+/// Stops a key's propagation unless it is text.
+///
+/// A dialog that has taken a chord must keep it from the shell's bindings
+/// behind it. A character is different: the key event is not what puts it
+/// in the field — macOS's input method is, and that only runs once the
+/// event has propagated to the end. Stopping it there was how every field
+/// in a dialog went deaf at once.
+fn stop_unless_text(event: &KeyDownEvent, cx: &mut Context<Shell>) {
+    if !crate::input::is_text(&event.keystroke) {
+        cx.stop_propagation();
+    }
+}
+
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let modal_open = self.modal_open();
+        if self
+            .menu_state
+            .as_ref()
+            .is_some_and(|state| state.modal_open != modal_open)
+        {
+            self.menu_dirty = true;
+        }
+        let full_screen = window.is_fullscreen();
+        if self.menu_fullscreen != full_screen {
+            self.menu_fullscreen = full_screen;
+            self.menu_dirty = true;
+        }
+        if self.menu_dirty {
+            self.refresh_native_menus(cx);
+            self.menu_dirty = false;
+        }
         // A native child view sits above GPUI's compositor. Hide it whenever
         // another tab or an overlay owns the same rectangle; CSS-style z-order
         // cannot put a GPUI menu in front of an NSView.
@@ -1587,7 +1757,6 @@ impl Render for Shell {
         // wants a blinking caret without wanting the focus moved.
         let wants_caret = self.typing(window, cx) || self.editor_active();
         self.caret_blink(wants_caret, cx);
-        let modal_open = self.modal_open();
         // Built in sequence rather than inline: each borrows `cx` mutably.
         // Cached, so a terminal writing beside it does not lay it out again.
         // Its content is still `Shell::sidebar`; see `crate::region`.
@@ -1655,6 +1824,8 @@ impl Render for Shell {
         let settings = self.settings_view(window, cx);
         let add_project = self.add_project_view(window, cx);
         let preferences = self.preferences_view(window, cx);
+        let release_dialog = self.release_dialog_view(cx);
+        let storage_dialog = self.storage_dialog_view(cx);
         // A surface with a text field in it takes the keyboard while it is
         // up, because `handle_input` is registered against *that field's*
         // handle and a field which is not focused is not a text field as far
@@ -1689,7 +1860,9 @@ impl Render for Shell {
         let quick_capture = self.quick_capture_view(window, cx);
         let close_session = self.close_session_view(cx);
         // One at a time: two modals stacked is a state with no way back.
-        let modal = preferences
+        let modal = storage_dialog
+            .or(release_dialog)
+            .or(preferences)
             .or(new_worktree)
             .or(settings)
             .or(add_project)
@@ -1713,6 +1886,7 @@ impl Render for Shell {
             let feedback = self.feedback_trigger(window, cx);
             self.window_status_bar(feedback)
         });
+        let feedback_overlay = self.feedback_overlay(window, cx);
         let toasts = self.toasts_view(window, cx);
         let backdrop = paint(self.theme.backdrop);
 
@@ -1734,40 +1908,649 @@ impl Render for Shell {
             .font_family(self.chrome_family.clone())
             .track_focus(&self.focus)
             .on_action(cx.listener(|this, _: &OpenSettings, _, cx| {
+                this.menu_dirty = true;
+                if this.modal_open() {
+                    return;
+                }
                 this.open_preferences(cx);
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &CloseTab, _, cx| {
+                this.menu_dirty = true;
+                if this.modal_open() {
+                    return;
+                }
                 if this.close_tab_from_shortcut(cx) {
                     cx.notify();
                 }
             }))
             .on_action(cx.listener(|this, _: &NewTerminalTab, _, cx| {
+                this.menu_dirty = true;
+                if this.modal_open() {
+                    return;
+                }
                 if this.new_terminal_tab_from_shortcut(cx) {
                     cx.notify();
                 }
             }))
             .on_action(cx.listener(|this, _: &NewBlankDocument, _, cx| {
+                this.menu_dirty = true;
+                if this.modal_open() {
+                    return;
+                }
                 if this.new_blank_document_from_shortcut() {
                     cx.notify();
                 }
             }))
             .on_action(cx.listener(|this, _: &ToggleStatusBar, _, cx| {
+                this.menu_dirty = true;
+                if this.modal_open() {
+                    return;
+                }
                 this.set_status_bar(!this.status_bar_open, cx);
             }))
             .on_action(cx.listener(|this, _: &ZoomIn, _, cx| {
+                this.menu_dirty = true;
+                if this.modal_open() {
+                    return;
+                }
                 this.zoom_code(1, cx);
             }))
             .on_action(cx.listener(|this, _: &ZoomOut, _, cx| {
+                this.menu_dirty = true;
+                if this.modal_open() {
+                    return;
+                }
                 this.zoom_code(-1, cx);
             }))
             .on_action(cx.listener(|this, _: &ActualSize, _, cx| {
+                this.menu_dirty = true;
+                if this.modal_open() {
+                    return;
+                }
                 this.reset_code_zoom(cx);
             }))
             .on_action(cx.listener(|this, _: &AddToBacklog, _, cx| {
+                this.menu_dirty = true;
                 if !this.modal_open() && this.open_quick_capture(cx) {
                     cx.notify();
                 }
+            }))
+            .on_action(cx.listener(|this, _: &NewBrowserTab, _, cx| {
+                this.menu_dirty = true;
+                if this.modal_open() {
+                    return;
+                }
+                if this.new_browser_tab_from_shortcut(cx) {
+                    cx.notify();
+                }
+            }))
+            .on_action(cx.listener(|this, _: &FindFile, _, cx| {
+                this.menu_dirty = true;
+                if this.modal_open() {
+                    return;
+                }
+                this.open_finder(cx);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &OpenCommandPalette, _, cx| {
+                this.menu_dirty = true;
+                if this.modal_open() {
+                    return;
+                }
+                this.open_palette(cx);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &SearchProjects, _, cx| {
+                this.menu_dirty = true;
+                if this.modal_open() {
+                    return;
+                }
+                this.open_search(cx);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &SearchWorktree, _, cx| {
+                this.menu_dirty = true;
+                if this.modal_open() {
+                    return;
+                }
+                this.open_workspace_search(cx);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| {
+                this.menu_dirty = true;
+                if this.modal_open() {
+                    return;
+                }
+                this.dispatch("shell.toggle_sidebar", cx);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &ToggleRightPanel, _, cx| {
+                this.menu_dirty = true;
+                if this.modal_open() {
+                    return;
+                }
+                this.dispatch("shell.toggle_panel", cx);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &ShowFilesPanel, _, cx| {
+                this.menu_dirty = true;
+                if this.modal_open() {
+                    return;
+                }
+                this.show_panel_view(crate::panel::PanelView::Files, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ShowSearchPanel, _, cx| {
+                this.menu_dirty = true;
+                if this.modal_open() {
+                    return;
+                }
+                this.show_panel_view(crate::panel::PanelView::Search, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ShowGitPanel, _, cx| {
+                this.menu_dirty = true;
+                if this.modal_open() {
+                    return;
+                }
+                this.show_panel_view(crate::panel::PanelView::Git, cx);
+            }))
+            .on_action(cx.listener(|this, _: &NewWorktree, _, cx| {
+                this.menu_dirty = true;
+                if this.modal_open() {
+                    return;
+                }
+                if this.new_worktree_from_shortcut(cx) {
+                    cx.notify();
+                }
+            }))
+            .on_action(cx.listener(|this, _: &OpenQuickPrompt, _, cx| {
+                this.menu_dirty = true;
+                if this.modal_open() {
+                    return;
+                }
+                this.open_quick_prompt(cx);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &SendSnippet, _, cx| {
+                this.menu_dirty = true;
+                if this.modal_open() {
+                    return;
+                }
+                this.open_snippet_picker(cx);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &PreviousTab, _, cx| {
+                this.menu_dirty = true;
+                if this.modal_open() {
+                    return;
+                }
+                this.cycle_tab(-1);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &NextTab, _, cx| {
+                this.menu_dirty = true;
+                if this.modal_open() {
+                    return;
+                }
+                this.cycle_tab(1);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &SplitRight, _, cx| {
+                this.menu_dirty = true;
+                if this.modal_open() {
+                    return;
+                }
+                this.dispatch("shell.split_right", cx);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &SplitDown, _, cx| {
+                this.menu_dirty = true;
+                if this.modal_open() {
+                    return;
+                }
+                this.dispatch("shell.split_down", cx);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &ClosePane, _, cx| {
+                this.menu_dirty = true;
+                if this.modal_open() {
+                    return;
+                }
+                this.dispatch("shell.close_pane", cx);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &EditUndo, _, cx| {
+                this.menu_dirty = true;
+                if !this.modal_open()
+                    && !this.native_editor_edit(crate::editor::NativeEdit::Undo, cx)
+                {
+                    this.browser_edit_history(false);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &EditRedo, _, cx| {
+                this.menu_dirty = true;
+                if !this.modal_open()
+                    && !this.native_editor_edit(crate::editor::NativeEdit::Redo, cx)
+                {
+                    this.browser_edit_history(true);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &EditCut, _, cx| {
+                this.menu_dirty = true;
+                if !this.modal_open() {
+                    this.native_editor_edit(crate::editor::NativeEdit::Cut, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &EditCopy, _, cx| {
+                this.menu_dirty = true;
+                if !this.modal_open()
+                    && !this.native_editor_edit(crate::editor::NativeEdit::Copy, cx)
+                    && let Some(id) = this.active_terminal_id()
+                {
+                    this.terminal_copy(id, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &EditPaste, _, cx| {
+                this.menu_dirty = true;
+                if !this.modal_open()
+                    && !this.native_editor_edit(crate::editor::NativeEdit::Paste, cx)
+                    && let Some(id) = this.active_terminal_id()
+                {
+                    this.terminal_paste(id, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &EditSelectAll, _, cx| {
+                this.menu_dirty = true;
+                if !this.modal_open() {
+                    this.native_editor_edit(crate::editor::NativeEdit::SelectAll, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &SaveDocument, _, cx| {
+                this.menu_dirty = true;
+                #[cfg(target_os = "macos")]
+                if this.save_focused_simulator(cx) {
+                    return;
+                }
+                if !this.modal_open() && this.save_active_editor(cx) {
+                    cx.notify();
+                }
+            }))
+            .on_action(cx.listener(|this, _: &FindInTab, _, cx| {
+                this.menu_dirty = true;
+                if this.modal_open() {
+                    return;
+                }
+                if this.find_active_editor(cx) {
+                    cx.notify();
+                    return;
+                }
+                if let Some(id) = this.active_terminal_id() {
+                    this.open_terminal_find(id, cx);
+                    cx.notify();
+                }
+            }))
+            .on_action(cx.listener(|this, _: &FindNext, _, cx| {
+                this.menu_dirty = true;
+                if !this.modal_open() && !this.find_active_step(false, cx) {
+                    this.terminal_find_step(false, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &FindPrevious, _, cx| {
+                this.menu_dirty = true;
+                if !this.modal_open() && !this.find_active_step(true, cx) {
+                    this.terminal_find_step(true, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &CloseOtherTabs, _, cx| {
+                this.menu_dirty = true;
+                if this.modal_open() {
+                    return;
+                }
+                this.active_tab_context_action(crate::tabs::TabContextAction::CloseOthers, cx);
+            }))
+            .on_action(cx.listener(|this, _: &CloseTabsRight, _, cx| {
+                this.menu_dirty = true;
+                if this.modal_open() {
+                    return;
+                }
+                this.active_tab_context_action(crate::tabs::TabContextAction::CloseToRight, cx);
+            }))
+            .on_action(cx.listener(|this, _: &CloseTabsLeft, _, cx| {
+                this.menu_dirty = true;
+                if this.modal_open() {
+                    return;
+                }
+                this.active_tab_context_action(crate::tabs::TabContextAction::CloseToLeft, cx);
+            }))
+            .on_action(cx.listener(|this, _: &CopyTabPath, _, cx| {
+                this.menu_dirty = true;
+                if this.modal_open() {
+                    return;
+                }
+                this.active_tab_context_action(crate::tabs::TabContextAction::CopyPath, cx);
+            }))
+            .on_action(cx.listener(|this, _: &CopyRelativeTabPath, _, cx| {
+                this.menu_dirty = true;
+                if this.modal_open() {
+                    return;
+                }
+                this.active_tab_context_action(crate::tabs::TabContextAction::CopyRelativePath, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ToggleTabPin, _, cx| {
+                this.menu_dirty = true;
+                if this.modal_open() {
+                    return;
+                }
+                this.active_tab_context_action(crate::tabs::TabContextAction::PinTab, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ChangeTabTitle, _, cx| {
+                this.menu_dirty = true;
+                if this.modal_open() {
+                    return;
+                }
+                this.active_tab_context_action(crate::tabs::TabContextAction::ChangeTitle, cx);
+                cx.notify();
+            }))
+            .on_action(
+                cx.listener(|this, action: &crate::app_menu::SwitchProject, _, cx| {
+                    if this.modal_open() {
+                        return;
+                    }
+                    this.switch_project_id(&action.id, cx);
+                }),
+            )
+            .on_action(
+                cx.listener(|this, action: &crate::app_menu::SwitchWorktree, _, cx| {
+                    if this.modal_open() {
+                        return;
+                    }
+                    this.switch_worktree_id(&action.id, cx);
+                }),
+            )
+            .on_action(
+                cx.listener(|this, action: &crate::app_menu::LaunchAgent, _, cx| {
+                    this.menu_dirty = true;
+                    if this.modal_open() {
+                        return;
+                    }
+                    if this.new_agent_session_from_menu(&action.name, cx) {
+                        cx.notify();
+                    }
+                }),
+            )
+            .on_action(
+                cx.listener(|this, action: &crate::app_menu::LaunchDevice, _, cx| {
+                    this.menu_dirty = true;
+                    if this.modal_open() {
+                        return;
+                    }
+                    if this.new_device_tab_from_menu(action.device, cx) {
+                        cx.notify();
+                    }
+                }),
+            )
+            .on_action(
+                cx.listener(|this, action: &crate::app_menu::OpenInExternal, _, cx| {
+                    if this.modal_open() {
+                        return;
+                    }
+                    this.native_open_in(action.program.as_deref());
+                    cx.notify();
+                }),
+            )
+            .on_action(
+                cx.listener(|this, action: &crate::app_menu::SetEconomy, _, cx| {
+                    this.menu_dirty = true;
+                    if this.modal_open() {
+                        return;
+                    }
+                    this.native_economy(&action.worktree, action.level, cx);
+                }),
+            )
+            .on_action(cx.listener(|this, _: &AddProject, _, cx| {
+                this.menu_dirty = true;
+                if this.modal_open() {
+                    return;
+                }
+                this.add_project(cx);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &ProjectSettings, _, cx| {
+                this.menu_dirty = true;
+                if this.modal_open() {
+                    return;
+                }
+                this.native_project_action(crate::projects::ProjectAction::Settings, cx);
+            }))
+            .on_action(cx.listener(|this, _: &OpenBacklog, _, cx| {
+                this.menu_dirty = true;
+                if this.modal_open() {
+                    return;
+                }
+                this.native_project_action(crate::projects::ProjectAction::Backlog, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ToggleDiscoveredWorktrees, _, cx| {
+                this.menu_dirty = true;
+                if this.modal_open() {
+                    return;
+                }
+                this.native_project_action(crate::projects::ProjectAction::ToggleDiscovered, cx);
+            }))
+            .on_action(cx.listener(|this, _: &RefreshProjects, _, cx| {
+                this.menu_dirty = true;
+                if this.modal_open() {
+                    return;
+                }
+                this.dispatch("shell.refresh", cx);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &RemoveProject, _, cx| {
+                this.menu_dirty = true;
+                if this.modal_open() {
+                    return;
+                }
+                this.native_project_action(crate::projects::ProjectAction::Remove, cx);
+            }))
+            .on_action(cx.listener(|this, _: &CommitAndMerge, _, cx| {
+                this.menu_dirty = true;
+                if this.modal_open() {
+                    return;
+                }
+                if let Some(selection) = this.selection {
+                    this.request_merge_worktree(selection.project, selection.worktree, cx);
+                    cx.notify();
+                }
+            }))
+            .on_action(cx.listener(|this, _: &OpenPullRequest, _, cx| {
+                this.menu_dirty = true;
+                if this.modal_open() {
+                    return;
+                }
+                this.native_worktree_action(crate::worktree_menu::WorktreeAction::PullRequest, cx);
+            }))
+            .on_action(cx.listener(|this, _: &RenameWorktree, _, cx| {
+                this.menu_dirty = true;
+                if this.modal_open() {
+                    return;
+                }
+                this.native_worktree_action(crate::worktree_menu::WorktreeAction::Rename, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ToggleWorktreePin, _, cx| {
+                this.menu_dirty = true;
+                if this.modal_open() {
+                    return;
+                }
+                this.native_worktree_action(crate::worktree_menu::WorktreeAction::Pin, cx);
+            }))
+            .on_action(cx.listener(|this, _: &CopyWorktreePath, _, cx| {
+                this.menu_dirty = true;
+                if this.modal_open() {
+                    return;
+                }
+                this.native_worktree_action(crate::worktree_menu::WorktreeAction::CopyPath, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ClearBuildOutput, _, cx| {
+                this.menu_dirty = true;
+                if this.modal_open() {
+                    return;
+                }
+                this.native_worktree_action(
+                    crate::worktree_menu::WorktreeAction::ClearBuildOutput,
+                    cx,
+                );
+            }))
+            .on_action(cx.listener(|this, _: &DeleteWorktree, _, cx| {
+                this.menu_dirty = true;
+                if this.modal_open() {
+                    return;
+                }
+                this.native_worktree_action(crate::worktree_menu::WorktreeAction::Delete, cx);
+            }))
+            .on_action(cx.listener(|this, _: &RevealWorktree, _, cx| {
+                this.menu_dirty = true;
+                if this.modal_open() {
+                    return;
+                }
+                this.native_reveal_worktree();
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &EconomySavings, _, cx| {
+                this.menu_dirty = true;
+                if this.modal_open() {
+                    return;
+                }
+                this.popup = Some(PopupKind::Savings);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &ProjectStorage, _, cx| {
+                this.menu_dirty = true;
+                if this.modal_open() {
+                    return;
+                }
+                if let Some(selection) = this.selection
+                    && let Some(project) = this.projects.get(selection.project)
+                {
+                    this.storage_dialog = Some(project.id.clone());
+                    cx.notify();
+                }
+            }))
+            .on_action(cx.listener(|this, _: &SendFeedback, window, cx| {
+                this.menu_dirty = true;
+                if this.modal_open() {
+                    return;
+                }
+                this.toggle_feedback(window, cx);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &KeyboardShortcuts, _, cx| {
+                this.menu_dirty = true;
+                if this.modal_open() {
+                    return;
+                }
+                this.open_preferences_at(crate::preferences::Section::Keybindings, cx);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &ViewAvailableReleases, _, cx| {
+                if !this.modal_open() {
+                    cx.open_url("https://github.com/ketapp/ket/releases");
+                }
+            }))
+            .on_action(cx.listener(|this, _: &KetHelp, _, cx| {
+                if !this.modal_open() {
+                    cx.open_url("https://ketapp.dev/docs/");
+                }
+            }))
+            .on_action(cx.listener(|this, _: &CliReference, _, cx| {
+                if !this.modal_open() {
+                    cx.open_url("https://ketapp.dev/cli/");
+                }
+            }))
+            .on_action(cx.listener(|this, _: &ReleaseNotes, _, cx| {
+                this.menu_dirty = true;
+                if this.modal_open() {
+                    return;
+                }
+                this.release_dialog = Some(crate::release::ReleaseDialog::Notes);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &AboutKet, _, cx| {
+                this.menu_dirty = true;
+                if this.modal_open() {
+                    return;
+                }
+                this.release_dialog = Some(crate::release::ReleaseDialog::About);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &ToggleEditorWrap, _, cx| {
+                this.menu_dirty = true;
+                if !this.modal_open() {
+                    this.toggle_active_editor_wrap(cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &ReportIssue, _, cx| {
+                if !this.modal_open() {
+                    cx.open_url("https://github.com/ketapp/ket/issues/new");
+                }
+            }))
+            .on_action(cx.listener(|_, _: &MinimizeWindow, window, _| {
+                window.minimize_window();
+            }))
+            .on_action(cx.listener(|_, _: &ZoomWindow, window, _| {
+                window.zoom_window();
+            }))
+            .on_action(cx.listener(|this, _: &ToggleFullScreen, window, cx| {
+                this.menu_dirty = true;
+                window.toggle_fullscreen();
+                cx.notify();
+            }))
+            .on_action(cx.listener(|_, _: &HideKet, _, cx| cx.hide()))
+            .on_action(cx.listener(|_, _: &HideOthers, _, cx| cx.hide_other_apps()))
+            .on_action(cx.listener(|_, _: &ShowAll, _, cx| cx.unhide_other_apps()))
+            .on_action(cx.listener(|this, _: &CloseWindow, window, _| {
+                this.menu_dirty = true;
+                if this.modal_open() {
+                    return;
+                }
+                this.persist_view();
+                window.remove_window();
+            }))
+            .on_action(cx.listener(|this, _: &BringAllToFront, window, cx| {
+                if !this.modal_open() {
+                    cx.activate(true);
+                    window.activate_window();
+                }
+            }))
+            .on_action(cx.listener(|this, _: &FocusPaneLeft, _, cx| {
+                this.menu_dirty = true;
+                if this.modal_open() {
+                    return;
+                }
+                this.dispatch("shell.focus_pane_left", cx);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &FocusPaneRight, _, cx| {
+                this.menu_dirty = true;
+                if this.modal_open() {
+                    return;
+                }
+                this.dispatch("shell.focus_pane_right", cx);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &FocusPaneAbove, _, cx| {
+                this.menu_dirty = true;
+                if this.modal_open() {
+                    return;
+                }
+                this.dispatch("shell.focus_pane_up", cx);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &FocusPaneBelow, _, cx| {
+                this.menu_dirty = true;
+                if this.modal_open() {
+                    return;
+                }
+                this.dispatch("shell.focus_pane_down", cx);
+                cx.notify();
             }))
             // Before anything under it can stop the click: a click that
             // reaches GPUI at all missed the phone, whose native view takes
@@ -1779,6 +2562,15 @@ impl Render for Shell {
                 }
                 #[cfg(not(target_os = "macos"))]
                 let _ = (this, cx);
+            }))
+            // Tab and sidebar clicks change selection on mouse-up. Defer the
+            // menu refresh until their click handlers have run, even when a
+            // child stops the mouse-up event during bubbling.
+            .capture_any_mouse_up(cx.listener(|_, _, window, cx| {
+                cx.defer_in(window, |this, _, cx| {
+                    this.menu_dirty = true;
+                    cx.notify();
+                });
             }))
             // A click anywhere but the menu closes it. The panel occludes, so
             // an event arriving here is one that missed it.
@@ -1814,14 +2606,29 @@ impl Render for Shell {
             )
             .on_key_down(
                 cx.listener(|this, event: &KeyDownEvent, window: &mut Window, cx| {
+                    let modifiers = event.keystroke.modifiers;
+                    let shortcut = (modifiers.platform || modifiers.control)
+                        .then(|| global_shortcut(&event.keystroke))
+                        .flatten();
+                    if shortcut.is_some()
+                        || (this.modal_open()
+                            && matches!(event.keystroke.key.as_str(), "escape" | "enter"))
+                    {
+                        this.menu_dirty = true;
+                    }
                     // An iPhone Simulator with the keyboard takes
                     // Simulator.app's chords before anything else: nothing
                     // ket draws can be over it while it shows. Stopped here,
                     // or AppKit hands the chord on to the phone as a key.
                     #[cfg(target_os = "macos")]
                     if this.ios_simulator_key(&event.keystroke, cx) {
-                        cx.stop_propagation();
+                        stop_unless_text(event, cx);
                         cx.notify();
+                        return;
+                    }
+                    if this.storage_dialog_key(event, cx) || this.release_dialog_key(event, cx) {
+                        cx.notify();
+                        stop_unless_text(event, cx);
                         return;
                     }
                     // An open menu is the topmost thing on screen, so it gets the
@@ -1829,6 +2636,7 @@ impl Render for Shell {
                     // own chord runs it. See `menu.rs`.
                     if this.menu_key(event, cx) {
                         cx.notify();
+                        stop_unless_text(event, cx);
                         return;
                     }
                     // Above the menu it hangs off: while the branch is open
@@ -1836,18 +2644,22 @@ impl Render for Shell {
                     // close it rather than the menu behind it.
                     if this.tab_open_in_key(event, cx) {
                         cx.notify();
+                        stop_unless_text(event, cx);
                         return;
                     }
                     if this.tab_snippets_key(event, cx) {
                         cx.notify();
+                        stop_unless_text(event, cx);
                         return;
                     }
                     if this.tab_context_menu_key(event, cx) {
                         cx.notify();
+                        stop_unless_text(event, cx);
                         return;
                     }
                     if this.link_menu_key(event, cx) {
                         cx.notify();
+                        stop_unless_text(event, cx);
                         return;
                     }
                     // The field a tab's menu just opened over its label. Above
@@ -1856,11 +2668,13 @@ impl Render for Shell {
                     if this.tab_rename_key(event, cx) {
                         this.caret_wake(cx);
                         cx.notify();
+                        stop_unless_text(event, cx);
                         return;
                     }
                     if this.worktree_rename_key(event, cx) {
                         this.caret_wake(cx);
                         cx.notify();
+                        stop_unless_text(event, cx);
                         return;
                     }
                     // A project dialog takes every key while it is up — typing a
@@ -1869,11 +2683,13 @@ impl Render for Shell {
                     if this.preferences_key(event, window, cx) {
                         this.caret_wake(cx);
                         cx.notify();
+                        stop_unless_text(event, cx);
                         return;
                     }
                     if this.project_key(event, window, cx) {
                         this.caret_wake(cx);
                         cx.notify();
+                        stop_unless_text(event, cx);
                         return;
                     }
                     // The delete confirmation is a modal, and the context menu is
@@ -1881,55 +2697,67 @@ impl Render for Shell {
                     // could be reached from behind them.
                     if this.clear_build_key(event, cx) {
                         cx.notify();
+                        stop_unless_text(event, cx);
                         return;
                     }
                     if this.discard_key(event) {
                         cx.notify();
+                        stop_unless_text(event, cx);
                         return;
                     }
                     if this.remove_worktree_key(event, cx) {
                         cx.notify();
+                        stop_unless_text(event, cx);
                         return;
                     }
                     if this.merge_worktree_key(event, cx) {
                         cx.notify();
+                        stop_unless_text(event, cx);
                         return;
                     }
                     if this.pull_request_key(event, window, cx) {
                         this.caret_wake(cx);
                         cx.notify();
+                        stop_unless_text(event, cx);
                         return;
                     }
                     if this.close_session_key(event, cx) {
                         cx.notify();
+                        stop_unless_text(event, cx);
                         return;
                     }
                     if this.quick_prompt_key(event, cx) {
                         this.caret_wake(cx);
                         cx.notify();
+                        stop_unless_text(event, cx);
                         return;
                     }
                     if this.backlog_key(event, window, cx) {
                         this.caret_wake(cx);
                         cx.notify();
+                        stop_unless_text(event, cx);
                         return;
                     }
                     if this.quick_capture_key(event, window, cx) {
                         this.caret_wake(cx);
                         cx.notify();
+                        stop_unless_text(event, cx);
                         return;
                     }
                     if this.feedback_key(event, window, cx) {
                         this.caret_wake(cx);
                         cx.notify();
+                        stop_unless_text(event, cx);
                         return;
                     }
                     if this.project_menu_key(event, cx) {
                         cx.notify();
+                        stop_unless_text(event, cx);
                         return;
                     }
                     if this.sidebar_menu_key(event, cx) {
                         cx.notify();
+                        stop_unless_text(event, cx);
                         return;
                     }
                     // Above the menu it opened from: while the picker is up it is
@@ -1937,18 +2765,22 @@ impl Render for Shell {
                     // rather than the menu behind it.
                     if this.token_reduction_menu_key(event, cx) {
                         cx.notify();
+                        stop_unless_text(event, cx);
                         return;
                     }
                     if this.worktree_snippet_menu_key(event, cx) {
                         cx.notify();
+                        stop_unless_text(event, cx);
                         return;
                     }
                     if this.worktree_menu_key(event, cx) {
                         cx.notify();
+                        stop_unless_text(event, cx);
                         return;
                     }
                     if this.path_menu_key(event, cx) {
                         cx.notify();
+                        stop_unless_text(event, cx);
                         return;
                     }
                     // A popup takes only Escape. Every other key continues to
@@ -1957,28 +2789,44 @@ impl Render for Shell {
                     if this.popup.is_some() && event.keystroke.key == "escape" {
                         this.popup = None;
                         cx.notify();
+                        stop_unless_text(event, cx);
                         return;
                     }
                     // The two overlays get first refusal on every key while one is
                     // open, so typing a name cannot also drive the shell behind it.
-                    if this.new_worktree_key(event, window, cx).is_some() {
-                        this.caret_wake(cx);
-                        cx.notify();
-                        return;
+                    // Propagation stops for a command and not for text: a
+                    // character has to reach the input method or it never
+                    // lands in the name field. See `Key`.
+                    match this.new_worktree_key(event, window, cx) {
+                        Some(Key::Taken) => {
+                            this.caret_wake(cx);
+                            cx.notify();
+                            stop_unless_text(event, cx);
+                            return;
+                        }
+                        Some(Key::Text) => {
+                            this.caret_wake(cx);
+                            cx.notify();
+                            return;
+                        }
+                        None => {}
                     }
 
                     if this.finder_key(event, cx) {
                         cx.notify();
+                        stop_unless_text(event, cx);
                         return;
                     }
 
                     if this.palette_key(event, cx) {
                         cx.notify();
+                        stop_unless_text(event, cx);
                         return;
                     }
 
                     if this.snippet_picker_key(event, cx) {
                         cx.notify();
+                        stop_unless_text(event, cx);
                         return;
                     }
 
@@ -1987,12 +2835,14 @@ impl Render for Shell {
                     if this.search_key(event, window, cx) {
                         this.caret_wake(cx);
                         cx.notify();
+                        stop_unless_text(event, cx);
                         return;
                     }
 
                     if this.workspace_search_key(event, window, cx) {
                         this.caret_wake(cx);
                         cx.notify();
+                        stop_unless_text(event, cx);
                         return;
                     }
 
@@ -2001,6 +2851,7 @@ impl Render for Shell {
                     if this.explorer_key(event, window, cx) {
                         this.caret_wake(cx);
                         cx.notify();
+                        stop_unless_text(event, cx);
                         return;
                     }
 
@@ -2010,6 +2861,7 @@ impl Render for Shell {
                     if this.browser_key(event, window, cx) {
                         this.caret_wake(cx);
                         cx.notify();
+                        stop_unless_text(event, cx);
                         return;
                     }
 
@@ -2018,10 +2870,10 @@ impl Render for Shell {
                     // ahead of the editor so a buffer with focus does not
                     // swallow it as an unrecognised chord. See `shortcuts.rs`
                     // for what each chord in this match is and why.
-                    let shortcut = global_shortcut(&event.keystroke);
                     if let Some(GlobalShortcut::CycleTab(direction)) = shortcut {
                         this.cycle_tab(direction);
                         cx.notify();
+                        stop_unless_text(event, cx);
                         return;
                     }
                     // Same reasoning as `CycleTab` above: a buffer with focus
@@ -2029,30 +2881,36 @@ impl Render for Shell {
                     if let Some(GlobalShortcut::ToggleSidebar) = shortcut {
                         this.dispatch("shell.toggle_sidebar", cx);
                         cx.notify();
+                        stop_unless_text(event, cx);
                         return;
                     }
                     if let Some(GlobalShortcut::TogglePanel) = shortcut {
                         this.dispatch("shell.toggle_panel", cx);
                         cx.notify();
+                        stop_unless_text(event, cx);
                         return;
                     }
                     if let Some(GlobalShortcut::OpenWorkspaceSearch) = shortcut {
                         this.open_workspace_search(cx);
                         cx.notify();
+                        stop_unless_text(event, cx);
                         return;
                     }
                     if let Some(GlobalShortcut::OpenQuickPrompt) = shortcut {
                         this.open_quick_prompt(cx);
                         cx.notify();
+                        stop_unless_text(event, cx);
                         return;
                     }
                     if let Some(GlobalShortcut::SendSnippet) = shortcut {
                         this.open_snippet_picker(cx);
                         cx.notify();
+                        stop_unless_text(event, cx);
                         return;
                     }
                     if let Some(GlobalShortcut::OpenGitPanel) = shortcut {
                         this.show_panel_view(crate::panel::PanelView::Git, cx);
+                        stop_unless_text(event, cx);
                         return;
                     }
                     // The `+` menu's rows, from anywhere: ahead of the editor
@@ -2061,12 +2919,14 @@ impl Render for Shell {
                         if this.new_browser_tab_from_shortcut(cx) {
                             cx.notify();
                         }
+                        stop_unless_text(event, cx);
                         return;
                     }
                     if let Some(GlobalShortcut::NewAgentSession(index)) = shortcut {
                         if this.new_agent_session_from_shortcut(index, cx) {
                             cx.notify();
                         }
+                        stop_unless_text(event, cx);
                         return;
                     }
                     // The Create worktree dialog, from anywhere and for the
@@ -2081,13 +2941,14 @@ impl Render for Shell {
                         }
                         // Taken: the File menu's item has the same chord,
                         // and would open the panel a second time.
-                        cx.stop_propagation();
+                        stop_unless_text(event, cx);
                         return;
                     }
                     if let Some(GlobalShortcut::NewWorktree) = shortcut {
                         if this.new_worktree_from_shortcut(cx) {
                             cx.notify();
                         }
+                        stop_unless_text(event, cx);
                         return;
                     }
                     // Also ahead of the panes, and for the same reason: the
@@ -2104,6 +2965,7 @@ impl Render for Shell {
                             cx,
                         );
                         cx.notify();
+                        stop_unless_text(event, cx);
                         return;
                     }
 
@@ -2118,6 +2980,7 @@ impl Render for Shell {
                         || this.editor_key(event, window, cx)
                     {
                         cx.notify();
+                        stop_unless_text(event, cx);
                         return;
                     }
 
@@ -2134,6 +2997,7 @@ impl Render for Shell {
                                 this.open_palette(cx);
                             }
                             cx.notify();
+                            stop_unless_text(event, cx);
                             return;
                         }
                         // Not routed through the registry: it opens a shell
@@ -2142,11 +3006,13 @@ impl Render for Shell {
                         Some(GlobalShortcut::OpenSearch) => {
                             this.open_search(cx);
                             cx.notify();
+                            stop_unless_text(event, cx);
                             return;
                         }
                         Some(GlobalShortcut::OpenFinder) => {
                             this.open_finder(cx);
                             cx.notify();
+                            stop_unless_text(event, cx);
                             return;
                         }
                         // There is no palette entry for this one yet: that
@@ -2155,6 +3021,7 @@ impl Render for Shell {
                         Some(GlobalShortcut::OpenTerminalTab) => {
                             this.open_terminal_tab(cx);
                             cx.notify();
+                            stop_unless_text(event, cx);
                             return;
                         }
                         // The sidebar's merge button, from the keyboard. Acts
@@ -2169,6 +3036,7 @@ impl Render for Shell {
                                 );
                             }
                             cx.notify();
+                            stop_unless_text(event, cx);
                             return;
                         }
                         // Handled above, ahead of the editor pane.
@@ -2229,6 +3097,7 @@ impl Render for Shell {
             // Outside the workspace row, so it spans the sidebar as well: the
             // bar describes the app, not the pane you happen to be looking at.
             .children(status)
+            .children(feedback_overlay)
             // Non-modal overlays defer above the workspace. They are omitted
             // while a modal owns the window, so no stale menu crosses it.
             .children(palette.map(|el| deferred(el).with_priority(8)))
@@ -2266,12 +3135,117 @@ impl Render for Shell {
     }
 }
 
+fn open_main_window(cx: &mut App) {
+    // Where it was left, if that is still somewhere a window can be —
+    // see `crate::view::saved_window_bounds` — and centred at a size
+    // that fits a laptop screen the first time ket is run.
+    let bounds = crate::view::saved_window_bounds(cx)
+        .unwrap_or_else(|| Bounds::centered(None, size(px(1200.0), px(780.0)), cx));
+
+    let window = cx
+        .open_window(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                // No system title bar: the header card is the title bar,
+                // and the traffic lights sit inside its left end, centred
+                // on it. See `crate::header`.
+                titlebar: Some(TitlebarOptions {
+                    title: Some("ket".into()),
+                    appears_transparent: true,
+                    traffic_light_position: Some(point(
+                        px(crate::header::TRAFFIC_LIGHTS.0),
+                        px(crate::header::TRAFFIC_LIGHTS.1),
+                    )),
+                }),
+                // ket moves its own window — see `crate::window_drag`.
+                //
+                // A window with a full-size content view is dragged by
+                // AppKit from the top of that view, and the tab strip runs
+                // to the top edge. gpui has the concept that would exempt
+                // it — `WindowControlArea` — but its macOS backend never
+                // implemented the hook, so the band could not be given up
+                // and a tab in it could not be picked up: the window moved
+                // before gpui's drag threshold was reached. Refusing AppKit
+                // the whole window and handing the drag back only where
+                // ket wants it is what makes a tab at the top edge
+                // draggable, which is where the tab strip belongs.
+                is_movable: false,
+                ..Default::default()
+            },
+            |window, cx| {
+                // Every text size and most spacing in the shell is in rems,
+                // and gpui's default rem is 16px — a web page's. macOS draws
+                // its own UI at 13px with 11px secondary text; 15px here puts
+                // `text_sm` and `text_xs` on exactly those, and shrinks the
+                // padding that goes with them in step.
+                let shell = cx.new(Shell::load);
+                // Installed before the shell existed, so it names the
+                // status bar's default; this names what was restored.
+                cx.set_menus(app_menus(&crate::app_menu::MenuState::from_shell(
+                    shell.read(cx),
+                )));
+                window.set_rem_size(px(f32::from(shell.read(cx).theme_config.ui_font_size)));
+                // Without focus the window receives no key events at
+                // all, so the palette would be unopenable.
+                window.focus(&shell.focus_handle(cx));
+
+                // Follow the OS live. A tool that stays dark when the system
+                // goes light is one that ignores its host, and the subscription
+                // is held for the window's lifetime rather than dropped — a
+                // dropped `Subscription` stops observing.
+                let watched = shell.clone();
+                let subscription = window.observe_window_appearance(move |window, cx| {
+                    watched.update(cx, |shell, cx| {
+                        shell.follow_system_appearance(window.appearance(), cx);
+                    });
+                });
+                std::mem::forget(subscription);
+
+                // Which window has focus decides how often the tick
+                // runs, and regaining it refreshes at once. Held for
+                // the window's lifetime, like the observer above.
+                let subscription = shell.update(cx, |_, cx| {
+                    cx.observe_window_activation(window, |shell, window, cx| {
+                        let active = window.is_window_active();
+                        let regained = active && !shell.window_active;
+                        shell.window_active = active;
+                        if regained {
+                            shell.poll_tick(cx);
+                        }
+                    })
+                });
+                std::mem::forget(subscription);
+
+                shell
+            },
+        )
+        .expect("open window");
+
+    // The last save on the way out. The tick writes the window's shape
+    // at most a tick after it moves, which is fine for a crash
+    // and not fine for a quit: closing the sidebar and pressing ⌘Q is
+    // exactly the sequence where the change somebody just made would be
+    // the one that did not survive. Forgotten rather than held for the
+    // same reason the appearance observer above is: a dropped
+    // `Subscription` stops observing, and there is nothing here to hold
+    // it for the life of the application.
+    std::mem::forget(cx.on_app_quit(move |cx: &mut App| {
+        let _ = window.update(cx, |shell, _, _| shell.persist_view());
+        async {}
+    }));
+
+    cx.activate(true);
+}
+
 fn main() {
     // This binary is also the ket host when started as one — see
     // `ket_core::host`. Before anything opens a window.
     ket_core::host::serve_if_asked();
     // And the hook that trims a command's output — see `ket_core::filter`.
     ket_core::filter::serve_if_asked();
+    // Likewise the permission hook, which rules every tool call an agent
+    // makes and so has to answer in milliseconds — see `ket_core::permissions`.
+    ket_core::permissions::serve_if_asked();
 
     // The icons are compiled in; without an asset source `gpui` resolves every
     // `svg()` to nothing and draws blank space with no error. See `ui::icon`.
@@ -2280,148 +3254,74 @@ fn main() {
     // session lookup that found nothing all looked identical: silence.
     ket_core::logging::init("warn");
 
-    Application::new()
-        .with_assets(crate::ui::icon::Assets)
-        .run(|cx: &mut App| {
-            // Quit before anything else can fail: binding first, because
-            // `set_menus` reads the keymap to give the Quit item its key
-            // equivalent; handling the action globally, because nothing in the
-            // element tree owns quitting.
-            cx.bind_keys([
-                KeyBinding::new(QUIT_CHORD, Quit, None),
-                KeyBinding::new(SETTINGS_CHORD, OpenSettings, None),
-                KeyBinding::new(CLOSE_TAB_CHORD, CloseTab, None),
-                KeyBinding::new(NEW_TERMINAL_TAB_CHORD, NewTerminalTab, None),
-                KeyBinding::new(NEW_BLANK_DOCUMENT_CHORD, NewBlankDocument, None),
-                KeyBinding::new(ZOOM_IN_CHORDS[0], ZoomIn, None),
-                KeyBinding::new(ZOOM_IN_CHORDS[1], ZoomIn, None),
-                KeyBinding::new(ZOOM_OUT_CHORD, ZoomOut, None),
-                KeyBinding::new(ACTUAL_SIZE_CHORD, ActualSize, None),
-            ]);
-            #[cfg(target_os = "macos")]
-            cx.bind_keys([
-                KeyBinding::new("cmd-x", EditCut, Some(EDIT_CONTEXT)),
-                KeyBinding::new("cmd-c", EditCopy, Some(EDIT_CONTEXT)),
-                KeyBinding::new("cmd-v", EditPaste, Some(EDIT_CONTEXT)),
-                KeyBinding::new("cmd-a", EditSelectAll, Some(EDIT_CONTEXT)),
-                // The menu item's key equivalent, under the same context
-                // nothing sets: the shell takes the chord itself first.
-                KeyBinding::new(
-                    crate::shortcuts::CAPTURE_BINDING,
-                    AddToBacklog,
-                    Some(EDIT_CONTEXT),
-                ),
-            ]);
-            cx.on_action::<Quit>(|_, cx| cx.quit());
-            cx.set_menus(app_menus(true));
+    let app = Application::new().with_assets(crate::ui::icon::Assets);
+    app.on_reopen(|cx| {
+        if cx.windows().is_empty() {
+            open_main_window(cx);
+        }
+    });
+    app.run(|cx: &mut App| {
+        // Quit before anything else can fail: binding first, because
+        // `set_menus` reads the keymap to give the Quit item its key
+        // equivalent; handling the action globally, because nothing in the
+        // element tree owns quitting.
+        cx.bind_keys([
+            KeyBinding::new(QUIT_CHORD, Quit, None),
+            KeyBinding::new(SETTINGS_CHORD, OpenSettings, None),
+            KeyBinding::new(CLOSE_TAB_CHORD, CloseTab, None),
+            KeyBinding::new(NEW_TERMINAL_TAB_CHORD, NewTerminalTab, None),
+            KeyBinding::new(NEW_BLANK_DOCUMENT_CHORD, NewBlankDocument, None),
+            KeyBinding::new(ZOOM_IN_CHORDS[0], ZoomIn, None),
+            KeyBinding::new(ZOOM_IN_CHORDS[1], ZoomIn, None),
+            KeyBinding::new(ZOOM_OUT_CHORD, ZoomOut, None),
+            KeyBinding::new(ACTUAL_SIZE_CHORD, ActualSize, None),
+        ]);
+        #[cfg(target_os = "macos")]
+        cx.bind_keys([
+            KeyBinding::new("cmd-x", EditCut, Some(EDIT_CONTEXT)),
+            KeyBinding::new("cmd-c", EditCopy, Some(EDIT_CONTEXT)),
+            KeyBinding::new("cmd-v", EditPaste, Some(EDIT_CONTEXT)),
+            KeyBinding::new("cmd-a", EditSelectAll, Some(EDIT_CONTEXT)),
+            KeyBinding::new("cmd-z", EditUndo, Some(EDIT_CONTEXT)),
+            KeyBinding::new("cmd-shift-z", EditRedo, Some(EDIT_CONTEXT)),
+            KeyBinding::new("cmd-shift-b", NewBrowserTab, Some(EDIT_CONTEXT)),
+            KeyBinding::new("cmd-p", FindFile, Some(EDIT_CONTEXT)),
+            KeyBinding::new("cmd-k", OpenCommandPalette, Some(EDIT_CONTEXT)),
+            KeyBinding::new("cmd-o", SearchProjects, Some(EDIT_CONTEXT)),
+            KeyBinding::new("cmd-shift-f", SearchWorktree, Some(EDIT_CONTEXT)),
+            KeyBinding::new("cmd-\\", ToggleSidebar, Some(EDIT_CONTEXT)),
+            KeyBinding::new("cmd-j", ToggleRightPanel, Some(EDIT_CONTEXT)),
+            KeyBinding::new("cmd-shift-g", ShowGitPanel, Some(EDIT_CONTEXT)),
+            KeyBinding::new("cmd-shift-n", NewWorktree, Some(EDIT_CONTEXT)),
+            KeyBinding::new("cmd-shift-p", OpenQuickPrompt, Some(EDIT_CONTEXT)),
+            KeyBinding::new("cmd-/", SendSnippet, Some(EDIT_CONTEXT)),
+            KeyBinding::new("cmd-m", MinimizeWindow, Some(EDIT_CONTEXT)),
+            KeyBinding::new("cmd-s", SaveDocument, Some(EDIT_CONTEXT)),
+            KeyBinding::new("cmd-f", FindInTab, Some(EDIT_CONTEXT)),
+            KeyBinding::new("cmd-h", HideKet, Some(EDIT_CONTEXT)),
+            KeyBinding::new("cmd-alt-h", HideOthers, Some(EDIT_CONTEXT)),
+            KeyBinding::new("cmd-alt-w", ToggleEditorWrap, Some(EDIT_CONTEXT)),
+            // The menu item's key equivalent, under the same context
+            // nothing sets: the shell takes the chord itself first.
+            KeyBinding::new(
+                crate::shortcuts::CAPTURE_BINDING,
+                AddToBacklog,
+                Some(EDIT_CONTEXT),
+            ),
+        ]);
+        cx.on_action::<Quit>(|_, cx| cx.quit());
+        cx.set_menus(app_menus(&crate::app_menu::MenuState::default()));
 
-            // Before anything asks which fonts exist — see `fonts`.
-            crate::fonts::install_bundled(cx.text_system());
-            // Where it was left, if that is still somewhere a window can be —
-            // see `crate::view::saved_window_bounds` — and centred at a size
-            // that fits a laptop screen the first time ket is run.
-            let bounds = crate::view::saved_window_bounds(cx)
-                .unwrap_or_else(|| Bounds::centered(None, size(px(1200.0), px(780.0)), cx));
-
-            let window = cx
-                .open_window(
-                    WindowOptions {
-                        window_bounds: Some(WindowBounds::Windowed(bounds)),
-                        // No system title bar: the header card is the title bar,
-                        // and the traffic lights sit inside its left end, centred
-                        // on it. See `crate::header`.
-                        titlebar: Some(TitlebarOptions {
-                            title: Some("ket".into()),
-                            appears_transparent: true,
-                            traffic_light_position: Some(point(
-                                px(crate::header::TRAFFIC_LIGHTS.0),
-                                px(crate::header::TRAFFIC_LIGHTS.1),
-                            )),
-                        }),
-                        // ket moves its own window — see `crate::window_drag`.
-                        //
-                        // A window with a full-size content view is dragged by
-                        // AppKit from the top of that view, and the tab strip runs
-                        // to the top edge. gpui has the concept that would exempt
-                        // it — `WindowControlArea` — but its macOS backend never
-                        // implemented the hook, so the band could not be given up
-                        // and a tab in it could not be picked up: the window moved
-                        // before gpui's drag threshold was reached. Refusing AppKit
-                        // the whole window and handing the drag back only where
-                        // ket wants it is what makes a tab at the top edge
-                        // draggable, which is where the tab strip belongs.
-                        is_movable: false,
-                        ..Default::default()
-                    },
-                    |window, cx| {
-                        // Every text size and most spacing in the shell is in rems,
-                        // and gpui's default rem is 16px — a web page's. macOS draws
-                        // its own UI at 13px with 11px secondary text; 15px here puts
-                        // `text_sm` and `text_xs` on exactly those, and shrinks the
-                        // padding that goes with them in step.
-                        let shell = cx.new(Shell::load);
-                        // Installed before the shell existed, so it names the
-                        // status bar's default; this names what was restored.
-                        cx.set_menus(app_menus(shell.read(cx).status_bar_open));
-                        window
-                            .set_rem_size(px(f32::from(shell.read(cx).theme_config.ui_font_size)));
-                        // Without focus the window receives no key events at
-                        // all, so the palette would be unopenable.
-                        window.focus(&shell.focus_handle(cx));
-
-                        // Follow the OS live. A tool that stays dark when the system
-                        // goes light is one that ignores its host, and the subscription
-                        // is held for the window's lifetime rather than dropped — a
-                        // dropped `Subscription` stops observing.
-                        let watched = shell.clone();
-                        let subscription = window.observe_window_appearance(move |window, cx| {
-                            watched.update(cx, |shell, cx| {
-                                shell.follow_system_appearance(window.appearance(), cx);
-                            });
-                        });
-                        std::mem::forget(subscription);
-
-                        // Which window has focus decides how often the tick
-                        // runs, and regaining it refreshes at once. Held for
-                        // the window's lifetime, like the observer above.
-                        let subscription = shell.update(cx, |_, cx| {
-                            cx.observe_window_activation(window, |shell, window, cx| {
-                                let active = window.is_window_active();
-                                let regained = active && !shell.window_active;
-                                shell.window_active = active;
-                                if regained {
-                                    shell.poll_tick(cx);
-                                }
-                            })
-                        });
-                        std::mem::forget(subscription);
-
-                        shell
-                    },
-                )
-                .expect("open window");
-
-            // The last save on the way out. The tick writes the window's shape
-            // at most a tick after it moves, which is fine for a crash
-            // and not fine for a quit: closing the sidebar and pressing ⌘Q is
-            // exactly the sequence where the change somebody just made would be
-            // the one that did not survive. Forgotten rather than held for the
-            // same reason the appearance observer above is: a dropped
-            // `Subscription` stops observing, and there is nothing here to hold
-            // it for the life of the application.
-            std::mem::forget(cx.on_app_quit(move |cx: &mut App| {
-                let _ = window.update(cx, |shell, _, _| shell.persist_view());
-                async {}
-            }));
-
-            cx.activate(true);
-        });
+        // Before anything asks which fonts exist — see `fonts`.
+        crate::fonts::install_bundled(cx.text_system());
+        open_main_window(cx);
+    });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::Action as _;
+    use gpui::{Action as _, MenuItem};
 
     #[test]
     fn the_app_menu_offers_quit() {
@@ -2429,7 +3329,10 @@ mod tests {
         // against the menu's key equivalents, so no Quit item means no way to
         // quit from the keyboard. The item's equivalent comes from the
         // QUIT_CHORD binding, which is asserted separately below.
-        let menus = app_menus(true);
+        let menus = app_menus(&crate::app_menu::MenuState {
+            status_bar_open: true,
+            ..Default::default()
+        });
         let app_menu = menus
             .iter()
             .find(|menu| menu.name.as_ref() == "ket")
@@ -2449,7 +3352,10 @@ mod tests {
         // The chords are bound in `main`; the items are how someone finds
         // out they exist, and how a native view that took the chord — a web
         // page — still hands it on.
-        let menus = app_menus(true);
+        let menus = app_menus(&crate::app_menu::MenuState {
+            status_bar_open: true,
+            ..Default::default()
+        });
         let view = menus
             .iter()
             .find(|menu| menu.name.as_ref() == "View")
@@ -2462,6 +3368,173 @@ mod tests {
                 }),
                 "the View menu has {wanted}"
             );
+        }
+    }
+
+    #[test]
+    fn switch_worktree_actions_keep_ids_when_rows_reorder() {
+        use crate::app_menu::{MenuState, MenuWorktree, SwitchWorktree};
+        let first = WorktreeId::new("first");
+        let second = WorktreeId::new("second");
+        let menu_for = |ids: &[WorktreeId]| {
+            let state = MenuState {
+                selected_worktree: Some(second.clone()),
+                worktrees: ids
+                    .iter()
+                    .map(|id| MenuWorktree {
+                        id: id.clone(),
+                        name: id.to_string(),
+                    })
+                    .collect(),
+                ..Default::default()
+            };
+            app_menus(&state)
+                .into_iter()
+                .find(|menu| menu.name.as_ref() == "Worktree")
+                .unwrap()
+                .items
+                .into_iter()
+                .find_map(|item| match item {
+                    MenuItem::Submenu(menu) if menu.name.as_ref() == "Switch Worktree" => {
+                        Some(menu.items)
+                    }
+                    _ => None,
+                })
+                .unwrap()
+                .into_iter()
+                .map(|item| match item {
+                    MenuItem::Action {
+                        action, checked, ..
+                    } => (
+                        action
+                            .as_any()
+                            .downcast_ref::<SwitchWorktree>()
+                            .unwrap()
+                            .id
+                            .clone(),
+                        checked,
+                    ),
+                    _ => panic!("expected worktree action"),
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            menu_for(&[first.clone(), second.clone()]),
+            vec![(first.clone(), false), (second.clone(), true)]
+        );
+        assert_eq!(
+            menu_for(&[second.clone(), first.clone()]),
+            vec![(second, true), (first, false)]
+        );
+    }
+
+    #[test]
+    fn agent_menu_shortcuts_follow_runnable_order() {
+        let state = crate::app_menu::MenuState {
+            agents: vec!["claude".into(), "codex".into()],
+            ..Default::default()
+        };
+        let file = app_menus(&state)
+            .into_iter()
+            .find(|menu| menu.name.as_ref() == "File")
+            .unwrap();
+        let agent_items = file
+            .items
+            .into_iter()
+            .find_map(|item| match item {
+                MenuItem::Submenu(menu) if menu.name.as_ref() == "New Agent Session" => {
+                    Some(menu.items)
+                }
+                _ => None,
+            })
+            .unwrap();
+        for (index, item) in agent_items.into_iter().enumerate() {
+            let MenuItem::Action { key_equivalent, .. } = item else {
+                panic!("expected agent action");
+            };
+            assert_eq!(key_equivalent, crate::shortcuts::agent_session_chord(index));
+        }
+    }
+
+    #[test]
+    fn modal_disables_commands_behind_its_fields() {
+        fn find_action<'a>(items: &'a [MenuItem], wanted: &str) -> Option<&'a MenuItem> {
+            items.iter().find_map(|item| match item {
+                MenuItem::Action { name, .. } if name.as_ref() == wanted => Some(item),
+                MenuItem::Submenu(menu) => find_action(&menu.items, wanted),
+                _ => None,
+            })
+        }
+
+        let state = crate::app_menu::MenuState {
+            modal_open: true,
+            selected_project: Some(ProjectId::new("project")),
+            selected_worktree: Some(WorktreeId::new("worktree")),
+            projects: vec![crate::app_menu::MenuProject {
+                id: ProjectId::new("project"),
+                name: "Project A".into(),
+            }],
+            worktrees: vec![crate::app_menu::MenuWorktree {
+                id: WorktreeId::new("worktree"),
+                name: "Worktree A".into(),
+            }],
+            economy_levels: vec![crate::app_menu::MenuEconomyLevel {
+                level: 1,
+                name: "Economy Level".into(),
+            }],
+            has_tab: true,
+            has_multiple_panes: true,
+            can_new_worktree: true,
+            ..Default::default()
+        };
+        let menus = app_menus(&state);
+        for wanted in [
+            "Change Tab Title…",
+            "Split Pane Right",
+            "Close Pane",
+            "Close Other Tabs",
+            "Pin/Unpin Tab",
+            "New Worktree…",
+            "Project A",
+            "Worktree A",
+            "Economy Level",
+        ] {
+            assert!(
+                menus.iter().any(|menu| matches!(
+                    find_action(&menu.items, wanted),
+                    Some(MenuItem::Action { enabled: false, .. })
+                )),
+                "{wanted} remains enabled behind a modal"
+            );
+        }
+        #[cfg(target_os = "macos")]
+        assert!(menus.iter().any(|menu| matches!(
+            find_action(&menu.items, "Paste"),
+            Some(MenuItem::Action { enabled: true, .. })
+        )));
+        for wanted in ["Minimize", "Zoom", "Enter Full Screen"] {
+            assert!(
+                menus.iter().any(|menu| matches!(
+                    find_action(&menu.items, wanted),
+                    Some(MenuItem::Action { enabled: true, .. })
+                )),
+                "{wanted} is disabled by a modal"
+            );
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn unsupported_edit_history_is_disabled() {
+        let state = crate::app_menu::MenuState::default();
+        let edit = app_menus(&state)
+            .into_iter()
+            .find(|menu| menu.name.as_ref() == "Edit")
+            .unwrap();
+        for name in ["Undo", "Redo", "Cut"] {
+            assert!(edit.items.iter().any(|item| matches!(item,
+                MenuItem::Action { name: item_name, enabled: false, .. } if item_name == name
+            )));
         }
     }
 

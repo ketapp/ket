@@ -40,7 +40,7 @@ workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libproc = "0.14"
-nix = { version = "0.31", default-features = false, features = ["socket", "signal", "resource"] }
+nix = { version = "0.31", default-features = false, features = ["socket", "signal", "resource", "fs"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-nix = { version = "0.31", default-features = false, features = ["socket"] }
+nix = { version = "0.31", default-features = false, features = ["socket", "fs"] }

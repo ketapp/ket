@@ -525,3 +525,353 @@ fn tail(path: &Path) -> String {
         (false, _) => text,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! The billing answer, the spend in `usage.json`, and the refusals in
+    //! `updates.jsonl`. No real `grok` runs: the agent is the shared
+    //! [`FakeHarness`], and Grok's home is a directory the test writes.
+
+    use super::*;
+    use crate::rate_limits::fakes::*;
+
+    /// A Grok home under the temp dir, removed when dropped.
+    struct Home(PathBuf);
+
+    impl Home {
+        fn new(tag: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "ket-grok-{tag}-{}-{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+
+        /// A session directory, `sessions/<cwd>/<session>/`.
+        fn session(&self, cwd: &str, session: &str) -> PathBuf {
+            let dir = self.0.join("sessions").join(cwd).join(session);
+            std::fs::create_dir_all(&dir).unwrap();
+            dir
+        }
+    }
+
+    impl Drop for Home {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// `ms` since the epoch as Grok writes a time: `2026-10-14T09:30:00Z`.
+    fn rfc3339(ms: u64) -> String {
+        let secs = ms / 1000;
+        let (days, rem) = (secs / 86_400, secs % 86_400);
+        // Howard Hinnant's civil-from-days.
+        let z = days as i64 + 719_468;
+        let era = z.div_euclid(146_097);
+        let doe = z - era * 146_097;
+        let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let day = doy - (153 * mp + 2) / 5 + 1;
+        let month = if mp < 10 { mp + 3 } else { mp - 9 };
+        let year = yoe + era * 400 + i64::from(month <= 2);
+        format!(
+            "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+            rem / 3600,
+            rem % 3600 / 60,
+            rem % 60
+        )
+    }
+
+    fn billing(result: serde_json::Value) -> String {
+        serde_json::json!({"jsonrpc": "2.0", "id": BILLING_REQUEST_ID, "result": result})
+            .to_string()
+    }
+
+    fn fetch_with(lines: &[&str]) -> ProviderSnapshot {
+        let home = Home::new("billing");
+        let source =
+            GrokRateLimitSource::with(home.0.clone(), Arc::new(FakeHarness::with_lines(lines)));
+        source.billing_in(&home.0, Duration::from_secs(5))
+    }
+
+    #[test]
+    fn the_weekly_allowance_is_read_from_the_billing_answer() {
+        // The shape observed on 2026-09-30, with a used share filled in.
+        let answer = billing(serde_json::json!({
+            "config": {
+                "currentPeriod": {"type": "USAGE_PERIOD_TYPE_WEEKLY",
+                    "start": "2026-09-30T13:51:59Z", "end": "2026-10-07T13:51:59Z"},
+                "creditUsagePercent": 37.5
+            },
+            "subscription_tier": "SuperGrok Lite"
+        }));
+        let snapshot = fetch_with(&[
+            r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}"#,
+            r#"{"jsonrpc":"2.0","method":"session/update","params":{}}"#,
+            &answer,
+        ]);
+        assert_eq!(snapshot.status, SnapshotStatus::Fresh);
+        assert_eq!(snapshot.plan.as_deref(), Some("SuperGrok Lite"));
+        let week = &snapshot.windows[0];
+        assert_eq!(week.name, "Weekly");
+        assert_eq!(week.window_minutes, Some(7 * 24 * 60));
+        assert!((week.used_percent - 37.5).abs() < f32::EPSILON);
+        assert_eq!(
+            week.resets_at_ms,
+            super::super::opencode::parse_rfc3339_ms("2026-10-07T13:51:59Z")
+        );
+    }
+
+    #[test]
+    fn a_used_share_left_out_is_the_zero_the_tui_shows() {
+        let answer = billing(serde_json::json!({
+            "config": {"currentPeriod": {"type": "USAGE_PERIOD_TYPE_MONTHLY"}}
+        }));
+        let snapshot = fetch_with(&[&answer]);
+        let window = &snapshot.windows[0];
+        assert_eq!(window.used_percent, 0.0);
+        // No dates, so no length: named by its type alone.
+        assert_eq!(window.name, "Monthly");
+        assert_eq!(window.window_minutes, None);
+        assert_eq!(snapshot.plan, None);
+    }
+
+    #[test]
+    fn the_older_period_fields_are_read_when_the_newer_ones_are_absent() {
+        let answer = billing(serde_json::json!({
+            "config": {"billingPeriodStart": "2026-10-01T00:00:00Z",
+                       "billingPeriodEnd": "2026-10-01T05:00:00Z"}
+        }));
+        let window = &fetch_with(&[&answer]).windows[0];
+        assert_eq!(window.window_minutes, Some(300));
+        assert_eq!(window.name, "Session");
+    }
+
+    #[test]
+    fn an_error_or_an_answer_with_no_allowance_is_unavailable_with_a_reason() {
+        let error = serde_json::json!({"jsonrpc": "2.0", "id": BILLING_REQUEST_ID,
+            "error": {"code": -32601, "message": "Method not found"}})
+        .to_string();
+        assert_eq!(
+            fetch_with(&[&error]).status,
+            SnapshotStatus::Unavailable {
+                reason: "grok: Method not found".to_owned()
+            }
+        );
+
+        let empty = billing(serde_json::json!({}));
+        assert!(matches!(
+            fetch_with(&[&empty]).status,
+            SnapshotStatus::Unavailable { reason } if reason.contains("no allowance")
+        ));
+
+        let odd = billing(serde_json::json!({"config": {"creditUsagePercent": "lots"}}));
+        assert!(matches!(
+            fetch_with(&[&odd]).status,
+            SnapshotStatus::Unavailable { reason } if reason.contains("usage share")
+        ));
+    }
+
+    #[test]
+    fn an_agent_that_exits_without_answering_is_unavailable() {
+        let snapshot = fetch_with(&[r#"{"jsonrpc":"2.0","id":1,"result":{}}"#, "not json"]);
+        assert!(
+            matches!(snapshot.status, SnapshotStatus::Unavailable { .. }),
+            "{:?}",
+            snapshot.status
+        );
+    }
+
+    #[test]
+    fn an_agent_that_never_answers_times_out() {
+        let home = Home::new("hang");
+        let source = GrokRateLimitSource::with(home.0.clone(), Arc::new(FakeHarness::hanging()));
+        let started = Instant::now();
+        let snapshot = source.billing_in(&home.0, Duration::from_millis(50));
+        // The shared fake ends its output once the wait runs out, so this
+        // reads as an agent gone quiet rather than the deadline: either way
+        // unavailable, never a 0% read off nothing.
+        assert!(
+            matches!(snapshot.status, SnapshotStatus::Unavailable { .. }),
+            "{:?}",
+            snapshot.status
+        );
+        assert!(snapshot.windows.is_empty());
+        assert!(started.elapsed() >= Duration::from_millis(50));
+    }
+
+    #[test]
+    fn the_request_asks_initialize_then_billing_and_nothing_else() {
+        let home = Home::new("command");
+        let harness = Arc::new(FakeHarness::with_lines(&[]));
+        let source = GrokRateLimitSource::with(home.0.clone(), harness.clone());
+        let _ = source.billing_in(&home.0, Duration::from_millis(50));
+        let spawned = harness.spawned.lock().unwrap();
+        let methods: Vec<String> = spawned[0]
+            .stdin_lines
+            .iter()
+            .map(|line| {
+                serde_json::from_str::<serde_json::Value>(line).unwrap()["method"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned()
+            })
+            .collect();
+        assert_eq!(methods, ["initialize", "_x.ai/billing"]);
+    }
+
+    #[test]
+    fn spend_is_summed_per_period_and_unpriced_turns_make_the_cost_unknown() {
+        let home = Home::new("spend");
+        let now = now_ms();
+        let hour = 60 * 60 * 1000;
+        std::fs::write(
+            home.session("repo", "s1").join("usage.json"),
+            serde_json::json!({"turns": [
+                {"endedAt": rfc3339(now - hour), "totalTokens": 1000, "costUsdTicks": 20_000_000_000u64},
+                {"endedAt": rfc3339(now - 3 * 24 * hour), "totalTokens": 500, "costUsdTicks": 10_000_000_000u64},
+                {"endedAt": rfc3339(now - 30 * 24 * hour), "totalTokens": 9999, "costUsdTicks": 1u64},
+                {"totalTokens": 7}
+            ]})
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            home.session("other", "s2").join("usage.json"),
+            serde_json::json!({"turns": [
+                {"endedAt": rfc3339(now - 2 * 24 * hour), "totalTokens": 250, "costIsPartial": true, "costUsdTicks": 5u64}
+            ]})
+            .to_string(),
+        )
+        .unwrap();
+
+        let snapshot =
+            GrokRateLimitSource::with(home.0.clone(), Arc::new(FakeHarness::with_lines(&[])))
+                .local_at(now);
+        let [day, week] = snapshot.spend.as_slice() else {
+            panic!("{:?}", snapshot.spend);
+        };
+        assert_eq!(day.period, "24h");
+        assert_eq!(day.tokens, 1000);
+        assert_eq!(day.sessions, 1);
+        assert_eq!(day.cost_usd, Some(2.0));
+
+        assert_eq!(week.period, "7d");
+        assert_eq!(week.tokens, 1750);
+        assert_eq!(week.sessions, 2);
+        // The second session's turn was partially priced.
+        assert_eq!(week.cost_usd, None);
+    }
+
+    #[test]
+    fn a_home_where_grok_never_ran_has_no_spend_and_no_refusal() {
+        let home = Home::new("empty");
+        let snapshot =
+            GrokRateLimitSource::with(home.0.clone(), Arc::new(FakeHarness::with_lines(&[])))
+                .local_at(now_ms());
+        assert!(snapshot.spend.is_empty());
+        assert_eq!(snapshot.limited_at_ms, None);
+    }
+
+    fn update(at_secs: u64, update: serde_json::Value) -> String {
+        serde_json::json!({"timestamp": at_secs, "params": {"update": update}}).to_string()
+    }
+
+    #[test]
+    fn a_refusal_nothing_has_answered_since_is_reported() {
+        let home = Home::new("limited");
+        let now = now_ms();
+        let secs = now / 1000;
+        let log = [
+            update(
+                secs - 120,
+                serde_json::json!({"sessionUpdate": "agent_message_chunk"}),
+            ),
+            update(
+                secs - 60,
+                serde_json::json!({"sessionUpdate": "retry_state",
+                                                  "error_type": "rate_limited"}),
+            ),
+            // A retry for another reason is not a limit.
+            update(
+                secs - 30,
+                serde_json::json!({"sessionUpdate": "retry_state",
+                                                  "error_type": "overloaded"}),
+            ),
+            "{not json but mentions retry_state".to_owned(),
+        ]
+        .join("\n");
+        std::fs::write(home.session("repo", "s1").join("updates.jsonl"), log).unwrap();
+
+        let source =
+            GrokRateLimitSource::with(home.0.clone(), Arc::new(FakeHarness::with_lines(&[])));
+        assert_eq!(source.local_at(now).limited_at_ms, Some((secs - 60) * 1000));
+
+        // An answer in any session afterwards means the limit has passed.
+        std::fs::write(
+            home.session("elsewhere", "s2").join("updates.jsonl"),
+            update(
+                secs - 10,
+                serde_json::json!({"sessionUpdate": "turn_completed"}),
+            ),
+        )
+        .unwrap();
+        assert_eq!(source.local_at(now).limited_at_ms, None);
+    }
+
+    #[test]
+    fn a_429_in_the_reason_counts_as_a_limit_and_an_old_one_does_not_hold() {
+        assert!(is_rate_limit(
+            &serde_json::json!({"reason": "HTTP 429 Too Many Requests"})
+        ));
+        assert!(!is_rate_limit(&serde_json::json!({"reason": "HTTP 500"})));
+
+        let home = Home::new("old-limit");
+        let now = now_ms();
+        let long_ago = (now - LIMIT_HOLDS_MS - 60_000) / 1000;
+        std::fs::write(
+            home.session("repo", "s1").join("updates.jsonl"),
+            update(
+                long_ago,
+                serde_json::json!({"sessionUpdate": "retry_state",
+                                                 "reason": "429"}),
+            ),
+        )
+        .unwrap();
+        let source =
+            GrokRateLimitSource::with(home.0.clone(), Arc::new(FakeHarness::with_lines(&[])));
+        assert_eq!(source.local_at(now).limited_at_ms, None);
+    }
+
+    #[test]
+    fn only_the_end_of_a_long_log_is_read_and_from_a_whole_line() {
+        let home = Home::new("tail");
+        let path = home.0.join("updates.jsonl");
+        let filler = "x".repeat(100);
+        let mut text = String::new();
+        while text.len() < (LOG_TAIL as usize) + 10_000 {
+            text.push_str(&filler);
+            text.push('\n');
+        }
+        text.push_str("last line\n");
+        std::fs::write(&path, &text).unwrap();
+        let tailed = tail(&path);
+        assert!(tailed.len() <= LOG_TAIL as usize);
+        assert!(tailed.ends_with("last line\n"));
+        assert!(tailed.starts_with(&filler), "starts on a whole line");
+        assert_eq!(tail(&home.0.join("missing")), "");
+    }
+
+    #[test]
+    fn the_test_clock_formats_as_grok_writes_it() {
+        assert_eq!(rfc3339(0), "1970-01-01T00:00:00Z");
+        assert_eq!(
+            super::super::opencode::parse_rfc3339_ms(&rfc3339(1_791_000_000_000)),
+            Some(1_791_000_000_000)
+        );
+    }
+}

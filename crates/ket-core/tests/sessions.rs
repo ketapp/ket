@@ -695,6 +695,52 @@ fn opencode_sessions_reads_matching_rows_from_a_real_database() {
 }
 
 #[test]
+fn opencode_2_sessions_on_a_local_model_belong_to_that_local_agent() {
+    let sandbox = Sandbox::new("sessions-opencode-v2");
+    let worktree = "/some/worktree";
+    let db = sandbox.path("opencode.db");
+    let status = std::process::Command::new("sqlite3")
+        .arg(&db)
+        .arg(
+            "CREATE TABLE session_v2 (id TEXT, title TEXT, directory TEXT, time_updated INTEGER, \
+             parent_id TEXT, time_archived INTEGER, model TEXT); \
+             CREATE TABLE session_message (id TEXT, session_id TEXT, type TEXT, seq INTEGER, \
+             data TEXT); \
+             CREATE TABLE credential (secret TEXT); \
+             INSERT INTO session_message VALUES \
+             ('m1', 'configured', 'user', 1, '{}'), \
+             ('m2', 'configured', 'assistant', 2, '{\"model\":{\"id\":\"qwen3:0.6b-ket\",\"providerID\":\"ollama\"}}'); \
+             INSERT INTO session_v2 VALUES \
+             ('cloud', NULL, '/some/worktree', 400, NULL, NULL, '{\"id\":\"glm-5.2\",\"providerID\":\"opencode-go\"}'), \
+             ('local', NULL, '/some/worktree', 300, NULL, NULL, '{\"id\":\"qwen3:0.6b-ket\",\"providerID\":\"ollama\"}'), \
+             ('child', NULL, '/some/worktree', 500, 'local', NULL, '{\"id\":\"qwen3:0.6b-ket\",\"providerID\":\"ollama\"}'), \
+             ('archived', NULL, '/some/worktree', 600, NULL, 1, NULL), \
+             ('unknown', NULL, '/some/worktree', 200, NULL, NULL, NULL), \
+             ('configured', NULL, '/some/worktree', 100, NULL, NULL, NULL);",
+        )
+        .status()
+        .expect("spawn sqlite3");
+    assert!(status.success());
+
+    let dir = PathBuf::from(worktree);
+    let found = OpencodeSessions::at(db).sessions_for(&[&dir]).unwrap();
+    let seen: Vec<(&str, &str)> = found
+        .iter()
+        .map(|session| (session.id.as_str(), session.agent.as_str()))
+        .collect();
+    assert_eq!(
+        seen,
+        vec![
+            ("cloud", "opencode"),
+            ("local", "opencode:ollama/qwen3:0.6b"),
+            ("unknown", "opencode"),
+            ("configured", "opencode:ollama/qwen3:0.6b"),
+        ],
+        "subagent and archived sessions are left out"
+    );
+}
+
+#[test]
 fn opencode_sessions_for_a_missing_database_is_empty() {
     let sandbox = Sandbox::new("sessions-opencode-missing-db");
     let sessions = OpencodeSessions::at(sandbox.path("does-not-exist.db"));

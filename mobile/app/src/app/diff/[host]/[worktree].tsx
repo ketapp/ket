@@ -52,7 +52,7 @@ export default function DiffScreen() {
   const folder = path?.includes('/') ? path.slice(0, path.lastIndexOf('/')) : undefined;
 
   return (
-    <Screen>
+    <Screen full>
       <Bar back title={name} detail={folder} />
       {error ? (
         <Prose style={styles.message}>{error.charAt(0).toUpperCase() + error.slice(1)}</Prose>

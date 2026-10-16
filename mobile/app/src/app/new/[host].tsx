@@ -32,10 +32,12 @@ import Animated, {
 import { KeyboardStickyView } from 'react-native-keyboard-controller';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { KeyCommands } from '../../components/KeyCommands';
 import { AgentMark, Check, ChevronDown, Close } from '../../components/icons';
 import { Badge, Button, Prose } from '../../components/ui';
 import { projectColor } from '../../lib/activity';
 import { useHost } from '../../lib/hosts';
+import { READABLE_WIDTH } from '../../lib/layout';
 import { getLastWork, saveLastWork } from '../../lib/store';
 import { agentLabel, font, size, t } from '../../lib/theme';
 
@@ -237,16 +239,18 @@ export default function NewTask() {
                 ) : null}
               </View>
 
-              <TextInput
-                value={prompt}
-                onChangeText={setPrompt}
-                onFocus={() => setOpen(null)}
-                placeholder="What should the agent do?"
-                placeholderTextColor={t.faint}
-                multiline
-                autoFocus
-                style={styles.prompt}
-              />
+              <KeyCommands title="Start task" onSend={() => (sending || tooOld ? undefined : void start())}>
+                <TextInput
+                  value={prompt}
+                  onChangeText={setPrompt}
+                  onFocus={() => setOpen(null)}
+                  placeholder="What should the agent do?"
+                  placeholderTextColor={t.faint}
+                  multiline
+                  autoFocus
+                  style={styles.prompt}
+                />
+              </KeyCommands>
 
               {projects.length === 0 ? (
                 <Prose style={styles.note}>No projects on this desktop yet.</Prose>
@@ -402,7 +406,9 @@ function Item({ on, lead, label, note, onPress }: { on: boolean; lead: ReactNode
 const styles = StyleSheet.create({
   fill: { flex: 1 },
   scrim: { position: 'absolute', top: 0, right: 0, bottom: 0, left: 0, backgroundColor: 'rgba(0,0,0,0.6)' },
-  room: { flex: 1, justifyContent: 'flex-end' },
+  // On a wide screen the sheet rises from the middle of the foot, no wider
+  // than reads well, rather than across the whole screen.
+  room: { flex: 1, width: '100%', maxWidth: READABLE_WIDTH, alignSelf: 'center', justifyContent: 'flex-end' },
   sheet: {
     backgroundColor: t.card,
     borderTopLeftRadius: 18,

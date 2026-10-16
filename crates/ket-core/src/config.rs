@@ -503,6 +503,9 @@ pub struct GeneralConfig {
     /// `git worktree move`, not a setting.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub worktree_dir: Option<String>,
+    /// Whether macOS is asked to show a notification when a worktree's agent
+    /// stops on a permission prompt while ket is not the app in front.
+    pub notify_waiting: bool,
 }
 
 impl Default for GeneralConfig {
@@ -511,6 +514,7 @@ impl Default for GeneralConfig {
             open_terminal: true,
             confirm_delete: true,
             worktree_dir: None,
+            notify_waiting: true,
         }
     }
 }

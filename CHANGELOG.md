@@ -15,6 +15,11 @@ words; no internal names, no commit hashes. ket reads this file
 
 ### New
 
+- The macOS menu bar now offers File, Edit, View, Project, Worktree, Window and Help commands, with shortcuts, availability and checkmarks that follow the current selection.
+- The phone app runs full-screen on an iPad. On a wide screen your worktrees
+  stay in a sidebar and what you open shows beside them, conversations keep
+  to a comfortable width, and with a keyboard attached ⌘Return sends a
+  message or starts a task.
 - A worktree's work can leave ket as a pull request. Right-click the
   worktree and choose Push and open pull request, or press Pull request… in
   the merge dialog: ket commits what is uncommitted, pushes the branch as
@@ -58,6 +63,14 @@ words; no internal names, no commit hashes. ket reads this file
 
 ### Fixed
 
+- A browser tab given an address that does not exist, typed or opened from a
+  terminal link, shows a "This site can’t be reached" page with a Reload
+  button, instead of a blank white page.
+- macOS menu commands and checkmarks now catch up when you click to another tab, and window controls remain available while a dialog is open.
+- Agents opened in ket can use `ket` commands, including `ket backlog add`,
+  without installing the command separately.
+- Scrolling through a long backlog note description no longer moves the
+  backlog list behind it.
 - The drawing in the Delete worktree dialog stays still while the delete
   runs, instead of shrinking and flickering.
 - A worktree now shows blue “waiting” while Codex asks you a question in its terminal.

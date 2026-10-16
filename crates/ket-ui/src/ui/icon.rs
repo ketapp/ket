@@ -307,6 +307,10 @@ pub(crate) enum Icon {
     /// rounded `div` so a menu row can carry it the way it carries any
     /// other tinted mark.
     Dot,
+    /// Something that runs off this Mac: the Cloud agents tab.
+    Cloud,
+    /// Something that runs on this Mac: the local agents tab.
+    Laptop,
 }
 
 impl Icon {
@@ -409,6 +413,8 @@ impl Icon {
             Icon::BookMarked => "icons/book-marked.svg",
             Icon::GitHub => "icons/github.svg",
             Icon::Dot => "icons/dot.svg",
+            Icon::Cloud => "icons/cloud.svg",
+            Icon::Laptop => "icons/laptop.svg",
         }
     }
 }
@@ -446,7 +452,7 @@ pub(crate) fn sized_icon(which: Icon, size: Pixels, colour: Rgba) -> Svg {
 pub(crate) struct Assets;
 
 /// The bytes for every path [`Icon::asset`] can return.
-const FILES: [(&str, &[u8]); 96] = [
+const FILES: [(&str, &[u8]); 106] = [
     (
         "icons/chevron-down.svg",
         include_bytes!("../../assets/icons/chevron-down.svg"),
@@ -831,6 +837,48 @@ const FILES: [(&str, &[u8]); 96] = [
         "icons/dot.svg",
         include_bytes!("../../assets/icons/dot.svg"),
     ),
+    (
+        "icons/cloud.svg",
+        include_bytes!("../../assets/icons/cloud.svg"),
+    ),
+    (
+        "icons/laptop.svg",
+        include_bytes!("../../assets/icons/laptop.svg"),
+    ),
+    // A model family's logo, drawn in its own colours by `img` — see
+    // `crate::local_models`.
+    (
+        "logos/qwen.svg",
+        include_bytes!("../../assets/logos/qwen.svg"),
+    ),
+    (
+        "logos/gemma.svg",
+        include_bytes!("../../assets/logos/gemma.svg"),
+    ),
+    (
+        "logos/glm.svg",
+        include_bytes!("../../assets/logos/glm.svg"),
+    ),
+    (
+        "logos/openai.svg",
+        include_bytes!("../../assets/logos/openai.svg"),
+    ),
+    (
+        "logos/meta.svg",
+        include_bytes!("../../assets/logos/meta.svg"),
+    ),
+    (
+        "logos/mistral.svg",
+        include_bytes!("../../assets/logos/mistral.svg"),
+    ),
+    (
+        "logos/deepseek.svg",
+        include_bytes!("../../assets/logos/deepseek.svg"),
+    ),
+    (
+        "logos/microsoft.svg",
+        include_bytes!("../../assets/logos/microsoft.svg"),
+    ),
 ];
 
 impl AssetSource for Assets {
@@ -989,10 +1037,16 @@ mod tests {
             Icon::BookMarked,
             Icon::GitHub,
             Icon::Dot,
+            Icon::Cloud,
+            Icon::Laptop,
         ];
+        // Logos are images, not icons: only `icons/` files have an `Icon`.
         assert_eq!(
             every.len(),
-            FILES.len(),
+            FILES
+                .iter()
+                .filter(|(name, _)| name.starts_with("icons/"))
+                .count(),
             "an icon has no asset, or vice versa"
         );
 

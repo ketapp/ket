@@ -15,7 +15,8 @@
 use std::time::Duration;
 
 use gpui::{
-    AnyElement, ClipboardItem, Context, FontWeight, Pixels, Window, div, prelude::*, px, relative,
+    AnyElement, ClipboardItem, Context, FontWeight, KeyDownEvent, Pixels, Window, div, prelude::*,
+    px, relative,
 };
 use ket_core::build_info::{self, Channel};
 use ket_core::changelog::{self, Release, UNRELEASED};
@@ -28,9 +29,117 @@ use crate::ui::LABEL;
 use crate::ui::banner::banner;
 use crate::ui::button::{button, icon_button};
 use crate::ui::chip::{caption, tag, tinted_tag};
+use crate::ui::dialog::{card, centered, footer, header};
 use crate::ui::icon::Icon;
 use crate::ui::popup::{self, Placement};
 use crate::ui::toast::Tone;
+
+/// The release surface opened persistently from a native menu command.
+#[derive(Clone, Copy)]
+pub(crate) enum ReleaseDialog {
+    About,
+    Notes,
+}
+
+impl Shell {
+    /// Close a release dialog on Escape, retaining modal keyboard precedence.
+    pub(crate) fn release_dialog_key(
+        &mut self,
+        event: &KeyDownEvent,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.release_dialog.is_none() {
+            return false;
+        }
+        if event.keystroke.key == "escape" {
+            self.release_dialog = None;
+            cx.notify();
+        }
+        true
+    }
+
+    /// About and Release Notes use the shared dialog recipes.
+    pub(crate) fn release_dialog_view(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let dialog = self.release_dialog?;
+        let t = &self.theme;
+        let title = match dialog {
+            ReleaseDialog::About => "About ket",
+            ReleaseDialog::Notes => "Release Notes",
+        };
+        let content = match dialog {
+            ReleaseDialog::About => {
+                let mut details = format!(
+                    "ket {} · {} channel",
+                    build_info::display(),
+                    build_info::CHANNEL.name()
+                );
+                if let Some(commit) = build_info::COMMIT {
+                    details.push_str(&format!("\nCommit: {commit}"));
+                }
+                if let Some(date) = build_info::BUILD_DATE {
+                    details.push_str(&format!("\nBuilt: {date}"));
+                }
+                crate::ui::dialog::body(details, t)
+            }
+            ReleaseDialog::Notes => {
+                let release = if build_info::CHANNEL == Channel::Dev {
+                    changelog::release(UNRELEASED)
+                } else {
+                    changelog::release(build_info::VERSION)
+                };
+                div()
+                    .id("menu-release-notes")
+                    .max_h(px(400.0))
+                    .overflow_y_scroll()
+                    .child(release_notes(
+                        release,
+                        build_info::CHANNEL == Channel::Dev,
+                        t,
+                    ))
+                    .into_any_element()
+            }
+        };
+        let buttons = footer()
+            .when(matches!(dialog, ReleaseDialog::About), |el| {
+                el.child(
+                    button("about-copy-version", "Copy Version")
+                        .ghost()
+                        .render(t)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            cx.write_to_clipboard(ClipboardItem::new_string(format!(
+                                "ket {}",
+                                build_info::display()
+                            )));
+                            this.toast_detail(
+                                Tone::Info,
+                                "Copied version",
+                                build_info::display(),
+                                cx,
+                            );
+                            cx.notify();
+                        })),
+                )
+            })
+            .child(
+                button("release-dialog-close", "Close")
+                    .primary()
+                    .render(t)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.release_dialog = None;
+                        cx.notify();
+                    })),
+            );
+        Some(
+            centered(
+                card("release-dialog", px(460.0), t)
+                    .child(header(title, t))
+                    .child(content)
+                    .child(buttons),
+            )
+            .into_any_element(),
+        )
+    }
+}
 
 /// The card's width.
 const POPUP_W: Pixels = px(344.0);

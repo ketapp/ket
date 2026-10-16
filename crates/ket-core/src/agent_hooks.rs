@@ -391,6 +391,11 @@ pub struct HookReport {
     /// it by this. Claude's `PermissionRequest` carries no `tool_use_id`.
     #[serde(default)]
     pub call: Option<Box<PermissionQuestion>>,
+    /// What a permission rule ruled on this call, when one did — see
+    /// [`crate::permissions`]. A prompt a rule answered arrives already as
+    /// the event it became: allowed, a tool call; denied, a refusal.
+    #[serde(default)]
+    pub ruling: Option<Box<crate::permissions::Ruling>>,
 }
 
 /// A permission prompt, as the agent's hook described it: the tool, and
@@ -2120,6 +2125,11 @@ pub fn install_script() -> Result<PathBuf> {
 /// read (`shown`, in the envelope). Nothing back — no binary, a failed run,
 /// a command with no recipe — is the same `{}` as ever. See
 /// [`crate::filter`].
+///
+/// On `PreToolUse` and `PermissionRequest` it does the same with
+/// [`crate::permissions::ENV`]'s `--permission-hook`: a rule's deny or ask
+/// before the tool runs, its allow once Claude would ask, carried in the
+/// envelope as `ruling`. Questions and plans are never ruled.
 const SCRIPT: &str = r#"#!/bin/sh
 # ket-agent-hook — installed by ket. Reports an agent's lifecycle back to it,
 # and on session start, tells Claude how tersely this worktree asked it to work.
@@ -2165,14 +2175,38 @@ if [ -n "${KET_COMMAND_FILTER:-}" ] && [ "$agent" = claude ] && [ -x "$KET_COMMA
   esac
 fi
 
+# A permission rule's ruling on a tool call — only when the launch named a ket
+# binary to ask, only for Claude, and never for a question or a plan, which
+# are a person's to answer. Decided before the report below, so the report can
+# say what ket ruled. Any failure leaves both empty, and the call to Claude.
+ruling=
+verdict=
+if [ -n "${KET_PERMISSION_HOOK:-}" ] && [ "$agent" = claude ] && [ -x "$KET_PERMISSION_HOOK" ]; then
+  case "$payload" in
+    *'"hook_event_name":"PreToolUse"'*|*'"hook_event_name":"PermissionRequest"'*)
+      case "$payload" in
+        *'"tool_name":"AskUserQuestion"'*|*'"tool_name":"ExitPlanMode"'*) ;;
+        *)
+          out=$(printf '%s' "$payload" | "$KET_PERMISSION_HOOK" --permission-hook 2>/dev/null) || out=
+          if [ -n "$out" ]; then
+            ruling=$(printf '%s\n' "$out" | sed -n '1p')
+            verdict=$(printf '%s\n' "$out" | sed '1d')
+          fi
+          ;;
+      esac
+      ;;
+  esac
+fi
+
 envelope() {
-  printf '{"agent":"%s","worktree":"%s","pane":"%s","token":"%s","version":"%s","shown":%s,"payload":%s}' \
+  printf '{"agent":"%s","worktree":"%s","pane":"%s","token":"%s","version":"%s","shown":%s,"ruling":%s,"payload":%s}' \
     "$(escape "$agent")" \
     "$(escape "${KET_WORKTREE_ID:-}")" \
     "$(escape "${KET_PANE_KEY:-}")" \
     "$(escape "$1")" \
     "$(escape "${KET_HOOK_VERSION:-1}")" \
     "${shown:-null}" \
+    "${ruling:-null}" \
     "$payload"
 }
 
@@ -2296,6 +2330,10 @@ case "$payload" in
   *'"hook_event_name":"PostToolUse"'*)
     # The filter's answer, when there is one; the same `{}` when not.
     if [ -n "$decision" ]; then printf '%s\n' "$decision"; else printf '{}\n'; fi
+    ;;
+  *'"hook_event_name":"PreToolUse"'*|*'"hook_event_name":"PermissionRequest"'*)
+    # A permission rule's answer, when one ruled; the same `{}` when not.
+    if [ -n "$verdict" ]; then printf '%s\n' "$verdict"; else printf '{}\n'; fi
     ;;
   *)
     printf '{}\n'
@@ -2967,6 +3005,24 @@ fn decode_envelope(
         event
     };
 
+    // A call a permission rule already decided. Claude never shows a prompt
+    // ket allowed, and never runs a call ket refused, so neither may wait on
+    // a person here — not on a row, not on a phone.
+    let ruling: Option<crate::permissions::Ruling> = envelope
+        .get("ruling")
+        .filter(|ruling| !ruling.is_null())
+        .and_then(|ruling| serde_json::from_value(ruling.clone()).ok());
+    let event = match (event, ruling.as_ref().map(|ruling| ruling.verdict)) {
+        (HookEvent::PermissionRequest, Some(crate::permissions::Verdict::Allow)) => {
+            HookEvent::PreTool
+        }
+        (
+            HookEvent::PreTool | HookEvent::PermissionRequest,
+            Some(crate::permissions::Verdict::Deny),
+        ) => HookEvent::PermissionDenied,
+        (event, _) => event,
+    };
+
     let subagent = text(payload.get("agent_id"));
     let subagent_description = subagent
         .as_deref()
@@ -3027,6 +3083,7 @@ fn decode_envelope(
         // returned is the stale-state bug in the other direction.
         mutating_git: matches!(event, HookEvent::PreTool) && tool_is_mutating_git(payload),
         command: command_output(event, payload, envelope).map(Box::new),
+        ruling: ruling.map(Box::new),
         at_ms: crate::now_ms(),
     })))
 }
@@ -3101,7 +3158,7 @@ fn response_bytes(value: &serde_json::Value) -> u64 {
 /// The program a command runs, with its subcommand for the tools whose
 /// subcommand is the job: `cargo test` and `cargo build` are different
 /// things to be noisy about, `cargo` is not.
-fn command_program(command: &str) -> String {
+pub(crate) fn command_program(command: &str) -> String {
     const WITH_SUBCOMMAND: [&str; 7] = ["cargo", "git", "npm", "pnpm", "yarn", "go", "gh"];
     let program = program(command).to_ascii_lowercase();
     if !WITH_SUBCOMMAND.contains(&program.as_str()) {
@@ -3808,6 +3865,139 @@ mod tests {
             panic!("a report");
         };
         assert_eq!(report.command.unwrap().shown_bytes, 14);
+    }
+
+    /// A shell call about to run, compact the way Claude Code sends it.
+    const COMMAND_ASKED: &str = r#"{"hook_event_name":"PreToolUse","session_id":"s-1","tool_use_id":"toolu_02","tool_name":"Bash","tool_input":{"command":"git push --force"}}"#;
+
+    const RULED_DENY: &str = r#"{"verdict":"deny","scope":"global","index":0}"#;
+    const DENIED: &str = r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"ket: global rule 1"}}"#;
+
+    #[test]
+    fn the_script_answers_with_a_rules_verdict_and_reports_the_ruling() {
+        let home = Home::new("rules-on");
+        let port = closed_port();
+        let rules = fake_filter(&home, &format!("{RULED_DENY}\n{DENIED}\n"));
+        let env = [
+            (PORT_ENV, port.as_str()),
+            (TOKEN_ENV, "window"),
+            (crate::permissions::ENV, rules.as_str()),
+        ];
+        assert_eq!(
+            run(SCRIPT, &[], &home, &env, COMMAND_ASKED),
+            format!("{DENIED}\n")
+        );
+        assert_eq!(home.spool()[0]["ruling"]["verdict"], "deny");
+        // A `PermissionRequest` gets the same treatment.
+        let asked = COMMAND_ASKED.replace("PreToolUse", "PermissionRequest");
+        assert_eq!(run(SCRIPT, &[], &home, &env, &asked), format!("{DENIED}\n"));
+    }
+
+    #[test]
+    fn without_a_ruling_the_script_says_nothing_and_ruling_is_null() {
+        let home = Home::new("rules-silent");
+        let port = closed_port();
+        let silent = fake_filter(&home, "");
+        let env = [
+            (PORT_ENV, port.as_str()),
+            (TOKEN_ENV, "window"),
+            (crate::permissions::ENV, silent.as_str()),
+        ];
+        assert_eq!(run(SCRIPT, &[], &home, &env, COMMAND_ASKED), "{}\n");
+        assert_eq!(home.spool()[0]["ruling"], serde_json::Value::Null);
+        // No binary at all, and one that is not there, are the same.
+        let unset = [(PORT_ENV, port.as_str()), (TOKEN_ENV, "window")];
+        assert_eq!(run(SCRIPT, &[], &home, &unset, COMMAND_ASKED), "{}\n");
+        let missing = [
+            (PORT_ENV, port.as_str()),
+            (TOKEN_ENV, "window"),
+            (crate::permissions::ENV, "/nonexistent/ket"),
+        ];
+        assert_eq!(run(SCRIPT, &[], &home, &missing, COMMAND_ASKED), "{}\n");
+    }
+
+    #[test]
+    fn rules_are_asked_only_for_claude_and_never_for_a_question_or_a_plan() {
+        let home = Home::new("rules-scope");
+        let port = closed_port();
+        let rules = fake_filter(&home, &format!("{RULED_DENY}\n{DENIED}\n"));
+        let codex = [
+            (PORT_ENV, port.as_str()),
+            (TOKEN_ENV, "window"),
+            (crate::permissions::ENV, rules.as_str()),
+            ("KET_AGENT_NAME", "codex"),
+        ];
+        assert_eq!(run(SCRIPT, &[], &home, &codex, COMMAND_ASKED), "{}\n");
+        let claude = [
+            (PORT_ENV, port.as_str()),
+            (TOKEN_ENV, "window"),
+            (crate::permissions::ENV, rules.as_str()),
+        ];
+        for tool in PROMPT_TOOLS {
+            let prompt =
+                COMMAND_ASKED.replace(r#""tool_name":"Bash""#, &format!(r#""tool_name":"{tool}""#));
+            assert_eq!(run(SCRIPT, &[], &home, &claude, &prompt), "{}\n", "{tool}");
+        }
+        // Another event: a finished call is not ruled.
+        assert_eq!(run(SCRIPT, &[], &home, &claude, COMMAND_DONE), "{}\n");
+    }
+
+    /// `envelope` with `ruling` set to `verdict`, around `payload`.
+    fn ruled(payload: &str, verdict: &str) -> serde_json::Value {
+        let payload: serde_json::Value = serde_json::from_str(payload).unwrap();
+        serde_json::json!({
+            "agent": "claude", "worktree": "wt-1", "pane": "pane-1", "token": "t",
+            "ruling": { "verdict": verdict, "scope": "global", "index": 0 },
+            "payload": payload,
+        })
+    }
+
+    fn decoded(envelope: &serde_json::Value) -> HookReport {
+        match decode_envelope(envelope, false, &mut GrokTools::new()) {
+            Some(Post::Report(report)) => *report,
+            _ => panic!("a report"),
+        }
+    }
+
+    #[test]
+    fn a_prompt_a_rule_allowed_arrives_as_the_call_going_ahead() {
+        let asked = COMMAND_ASKED.replace("PreToolUse", "PermissionRequest");
+        let report = decoded(&ruled(&asked, "allow"));
+        assert_eq!(report.event, HookEvent::PreTool);
+        assert!(report.question.is_none(), "nothing left to ask");
+        assert!(report.call.is_some());
+        assert_eq!(
+            report.ruling.map(|ruling| ruling.verdict),
+            Some(crate::permissions::Verdict::Allow)
+        );
+    }
+
+    #[test]
+    fn a_call_a_rule_refused_arrives_as_a_refusal() {
+        assert_eq!(
+            decoded(&ruled(COMMAND_ASKED, "deny")).event,
+            HookEvent::PermissionDenied
+        );
+        let asked = COMMAND_ASKED.replace("PreToolUse", "PermissionRequest");
+        assert_eq!(
+            decoded(&ruled(&asked, "deny")).event,
+            HookEvent::PermissionDenied
+        );
+    }
+
+    #[test]
+    fn an_ask_or_no_ruling_leaves_the_event_as_it_was() {
+        let asked = COMMAND_ASKED.replace("PreToolUse", "PermissionRequest");
+        let report = decoded(&ruled(&asked, "ask"));
+        assert_eq!(report.event, HookEvent::PermissionRequest);
+        assert!(report.question.is_some());
+        assert_eq!(
+            decoded(&ruled(COMMAND_ASKED, "ask")).event,
+            HookEvent::PreTool
+        );
+        let mut plain = ruled(&asked, "allow");
+        plain["ruling"] = serde_json::Value::Null;
+        assert_eq!(decoded(&plain).event, HookEvent::PermissionRequest);
     }
 
     #[test]

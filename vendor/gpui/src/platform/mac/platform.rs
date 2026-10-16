@@ -128,12 +128,25 @@ unsafe fn build_classes() {
                 handle_menu_item as extern "C" fn(&mut Object, Sel, id),
             );
             decl.add_method(
+                sel!(handleGPUIUndo:),
+                handle_gpui_undo as extern "C" fn(&mut Object, Sel, id),
+            );
+            decl.add_method(
+                sel!(handleGPUIRedo:),
+                handle_gpui_redo as extern "C" fn(&mut Object, Sel, id),
+            );
+            decl.add_method(
                 sel!(validateMenuItem:),
                 validate_menu_item as extern "C" fn(&mut Object, Sel, id) -> bool,
             );
             decl.add_method(
                 sel!(menuWillOpen:),
                 menu_will_open as extern "C" fn(&mut Object, Sel, id),
+            );
+            // ket patch: defer menu-bar replacement until AppKit stops tracking.
+            decl.add_method(
+                sel!(menuDidClose:),
+                menu_did_close as extern "C" fn(&mut Object, Sel, id),
             );
             decl.add_method(
                 sel!(applicationDockMenu:),
@@ -171,12 +184,67 @@ pub(crate) struct MacPlatformState {
     menu_command: Option<Box<dyn FnMut(&dyn Action)>>,
     validate_menu_command: Option<Box<dyn FnMut(&dyn Action) -> bool>>,
     will_open_menu: Option<Box<dyn FnMut()>>,
-    menu_actions: Vec<Box<dyn Action>>,
+    // ket patch: retain only installed and preceding menu generations, since
+    // AppKit may send a click after menuDidClose: installs a replacement.
+    menu_actions: MenuActionSet,
+    previous_menu_actions: Option<MenuActionSet>,
+    dock_menu_actions: Option<MenuActionSet>,
+    next_menu_tag: usize,
+    // ket patch: changing state while AppKit tracks a submenu waits for it to close.
+    menu_tracking_depth: usize,
+    pending_menu: Option<PendingMenu>,
     open_urls: Option<Box<dyn FnMut(Vec<String>)>>,
     finish_launching: Option<Box<dyn FnOnce()>>,
     dock_menu: Option<id>,
     menus: Option<Vec<OwnedMenu>>,
     keyboard_mapper: Rc<MacKeyboardMapper>,
+}
+
+// ket patch: a complete replacement held until the tracked menu closes.
+struct PendingMenu {
+    menu: id,
+    tag_offset: usize,
+    actions: Vec<Box<dyn Action>>,
+    enabled: Vec<bool>,
+    menus: Vec<OwnedMenu>,
+}
+
+#[derive(Default)]
+struct MenuActionSet {
+    start: usize,
+    actions: Vec<Box<dyn Action>>,
+    enabled: Vec<bool>,
+}
+
+impl MenuActionSet {
+    fn action(&self, tag: usize) -> Option<&dyn Action> {
+        let index = tag.checked_sub(self.start)?;
+        (self.enabled.get(index) == Some(&true))
+            .then(|| self.actions.get(index).map(|action| action.as_ref()))
+            .flatten()
+    }
+}
+
+impl MacPlatformState {
+    fn menu_action(&self, tag: usize) -> Option<&dyn Action> {
+        self.menu_actions
+            .action(tag)
+            .or_else(|| self.previous_menu_actions.as_ref()?.action(tag))
+            .or_else(|| self.dock_menu_actions.as_ref()?.action(tag))
+    }
+
+    fn install_menu_actions(
+        &mut self,
+        start: usize,
+        actions: Vec<Box<dyn Action>>,
+        enabled: Vec<bool>,
+    ) {
+        self.next_menu_tag = start + actions.len();
+        self.previous_menu_actions = Some(std::mem::replace(
+            &mut self.menu_actions,
+            MenuActionSet { start, actions, enabled },
+        ));
+    }
 }
 
 impl Default for MacPlatform {
@@ -213,6 +281,11 @@ impl MacPlatform {
             validate_menu_command: None,
             will_open_menu: None,
             menu_actions: Default::default(),
+            previous_menu_actions: None,
+            dock_menu_actions: None,
+            next_menu_tag: 0,
+            menu_tracking_depth: 0,
+            pending_menu: None,
             open_urls: None,
             finish_launching: None,
             dock_menu: None,
@@ -241,7 +314,9 @@ impl MacPlatform {
         menus: &Vec<Menu>,
         delegate: id,
         actions: &mut Vec<Box<dyn Action>>,
+        action_enabled: &mut Vec<bool>,
         keymap: &Keymap,
+        tag_offset: usize,
     ) -> id {
         unsafe {
             let application_menu = NSMenu::new(nil).autorelease();
@@ -258,7 +333,9 @@ impl MacPlatform {
                         item_config,
                         delegate,
                         actions,
+                        action_enabled,
                         keymap,
+                        tag_offset,
                     ));
                 }
 
@@ -282,7 +359,9 @@ impl MacPlatform {
         menu_items: Vec<MenuItem>,
         delegate: id,
         actions: &mut Vec<Box<dyn Action>>,
+        action_enabled: &mut Vec<bool>,
         keymap: &Keymap,
+        tag_offset: usize,
     ) -> id {
         unsafe {
             let dock_menu = NSMenu::new(nil);
@@ -292,7 +371,9 @@ impl MacPlatform {
                     &item_config,
                     delegate,
                     actions,
+                    action_enabled,
                     keymap,
+                    tag_offset,
                 ));
             }
 
@@ -304,7 +385,9 @@ impl MacPlatform {
         item: &MenuItem,
         delegate: id,
         actions: &mut Vec<Box<dyn Action>>,
+        action_enabled: &mut Vec<bool>,
         keymap: &Keymap,
+        tag_offset: usize,
     ) -> id {
         static DEFAULT_CONTEXT: OnceLock<Vec<KeyContext>> = OnceLock::new();
 
@@ -315,6 +398,9 @@ impl MacPlatform {
                     name,
                     action,
                     os_action,
+                    key_equivalent,
+                    enabled,
+                    checked,
                 } => {
                     // Note that this is intentionally using earlier bindings, whereas typically
                     // later ones take display precedence. See the discussion on
@@ -344,61 +430,60 @@ impl MacPlatform {
                         Some(crate::OsAction::Copy) => selector("copy:"),
                         Some(crate::OsAction::Paste) => selector("paste:"),
                         Some(crate::OsAction::SelectAll) => selector("selectAll:"),
-                        // "undo:" and "redo:" are always disabled in our case, as
-                        // we don't have a NSTextView/NSTextField to enable them on.
-                        Some(crate::OsAction::Undo) => selector("handleGPUIMenuItem:"),
-                        Some(crate::OsAction::Redo) => selector("handleGPUIMenuItem:"),
+                        // The window's empty undo history would swallow these.
+                        Some(crate::OsAction::Undo) => selector("handleGPUIUndo:"),
+                        Some(crate::OsAction::Redo) => selector("handleGPUIRedo:"),
                         None => selector("handleGPUIMenuItem:"),
                     };
 
+                    let override_stroke = key_equivalent
+                        .as_deref()
+                        .and_then(|chord| crate::Keystroke::parse(chord).ok());
+                    let equivalent = override_stroke
+                        .as_ref()
+                        .map(|stroke| (stroke.key.as_str(), &stroke.modifiers))
+                        .or_else(|| {
+                            keystrokes
+                                .filter(|strokes| strokes.len() == 1)
+                                .map(|strokes| (strokes[0].key(), strokes[0].modifiers()))
+                        });
                     let item;
-                    if let Some(keystrokes) = keystrokes {
-                        if keystrokes.len() == 1 {
-                            let keystroke = &keystrokes[0];
-                            let mut mask = NSEventModifierFlags::empty();
-                            for (modifier, flag) in &[
-                                (
-                                    keystroke.modifiers().platform,
-                                    NSEventModifierFlags::NSCommandKeyMask,
-                                ),
-                                (
-                                    keystroke.modifiers().control,
-                                    NSEventModifierFlags::NSControlKeyMask,
-                                ),
-                                (
-                                    keystroke.modifiers().alt,
-                                    NSEventModifierFlags::NSAlternateKeyMask,
-                                ),
-                                (
-                                    keystroke.modifiers().shift,
-                                    NSEventModifierFlags::NSShiftKeyMask,
-                                ),
-                            ] {
-                                if *modifier {
-                                    mask |= *flag;
-                                }
+                    if let Some((key, modifiers)) = equivalent {
+                        let mut mask = NSEventModifierFlags::empty();
+                        for (modifier, flag) in &[
+                            (
+                                modifiers.platform,
+                                NSEventModifierFlags::NSCommandKeyMask,
+                            ),
+                            (
+                                modifiers.control,
+                                NSEventModifierFlags::NSControlKeyMask,
+                            ),
+                            (
+                                modifiers.alt,
+                                NSEventModifierFlags::NSAlternateKeyMask,
+                            ),
+                            (
+                                modifiers.shift,
+                                NSEventModifierFlags::NSShiftKeyMask,
+                            ),
+                        ] {
+                            if *modifier {
+                                mask |= *flag;
                             }
-
-                            item = NSMenuItem::alloc(nil)
-                                .initWithTitle_action_keyEquivalent_(
-                                    ns_string(name),
-                                    selector,
-                                    ns_string(key_to_native(keystroke.key()).as_ref()),
-                                )
-                                .autorelease();
-                            if Self::os_version() >= SemanticVersion::new(12, 0, 0) {
-                                let _: () = msg_send![item, setAllowsAutomaticKeyEquivalentLocalization: NO];
-                            }
-                            item.setKeyEquivalentModifierMask_(mask);
-                        } else {
-                            item = NSMenuItem::alloc(nil)
-                                .initWithTitle_action_keyEquivalent_(
-                                    ns_string(name),
-                                    selector,
-                                    ns_string(""),
-                                )
-                                .autorelease();
                         }
+
+                        item = NSMenuItem::alloc(nil)
+                            .initWithTitle_action_keyEquivalent_(
+                                ns_string(name),
+                                selector,
+                                ns_string(key_to_native(key).as_ref()),
+                            )
+                            .autorelease();
+                        if Self::os_version() >= SemanticVersion::new(12, 0, 0) {
+                            let _: () = msg_send![item, setAllowsAutomaticKeyEquivalentLocalization: NO];
+                        }
+                        item.setKeyEquivalentModifierMask_(mask);
                     } else {
                         item = NSMenuItem::alloc(nil)
                             .initWithTitle_action_keyEquivalent_(
@@ -409,9 +494,12 @@ impl MacPlatform {
                             .autorelease();
                     }
 
-                    let tag = actions.len() as NSInteger;
+                    let tag = (tag_offset + actions.len()) as NSInteger;
                     let _: () = msg_send![item, setTag: tag];
+                    // ket patch: AppKit asks validateMenuItem for final availability.
+                    let _: () = msg_send![item, setState: if *checked { 1isize } else { 0isize }];
                     actions.push(action.boxed_clone());
+                    action_enabled.push(*enabled);
                     item
                 }
                 MenuItem::Submenu(Menu { name, items }) => {
@@ -419,7 +507,7 @@ impl MacPlatform {
                     let submenu = NSMenu::new(nil).autorelease();
                     submenu.setDelegate_(delegate);
                     for item in items {
-                        submenu.addItem_(Self::create_menu_item(item, delegate, actions, keymap));
+                        submenu.addItem_(Self::create_menu_item(item, delegate, actions, action_enabled, keymap, tag_offset));
                     }
                     item.setSubmenu_(submenu);
                     item.setTitle_(ns_string(name));
@@ -915,8 +1003,33 @@ impl Platform for MacPlatform {
         unsafe {
             let app: id = msg_send![APP_CLASS, sharedApplication];
             let mut state = self.0.lock();
-            let actions = &mut state.menu_actions;
-            let menu = self.create_menu_bar(&menus, NSWindow::delegate(app), actions, keymap);
+            if state.menu_tracking_depth > 0 {
+                // ket patch: prepare the replacement without changing the actions
+                // behind items AppKit is still tracking in an open submenu.
+                // New tags start after installed actions. The closing menu
+                // can still dispatch its old tags after menuDidClose:.
+                let mut actions = Vec::new();
+                let mut enabled = Vec::new();
+                let offset = state.next_menu_tag;
+                let menu = self.create_menu_bar(&menus, NSWindow::delegate(app), &mut actions, &mut enabled, keymap, offset);
+                let _: id = msg_send![menu, retain];
+                if let Some(previous) = state.pending_menu.take() {
+                    let _: () = msg_send![previous.menu, release];
+                }
+                state.pending_menu = Some(PendingMenu {
+                    menu,
+                    tag_offset: offset,
+                    actions,
+                    enabled,
+                    menus: menus.into_iter().map(|menu| menu.owned()).collect(),
+                });
+                return;
+            }
+            let offset = state.next_menu_tag;
+            let mut actions = Vec::new();
+            let mut enabled = Vec::new();
+            let menu = self.create_menu_bar(&menus, NSWindow::delegate(app), &mut actions, &mut enabled, keymap, offset);
+            state.install_menu_actions(offset, actions, enabled);
             drop(state);
             app.setMainMenu_(menu);
         }
@@ -931,8 +1044,12 @@ impl Platform for MacPlatform {
         unsafe {
             let app: id = msg_send![APP_CLASS, sharedApplication];
             let mut state = self.0.lock();
-            let actions = &mut state.menu_actions;
-            let new = self.create_dock_menu(menu, NSWindow::delegate(app), actions, keymap);
+            let offset = state.next_menu_tag;
+            let mut actions = Vec::new();
+            let mut enabled = Vec::new();
+            let new = self.create_dock_menu(menu, NSWindow::delegate(app), &mut actions, &mut enabled, keymap, offset);
+            state.next_menu_tag += actions.len();
+            state.dock_menu_actions = Some(MenuActionSet { start: offset, actions, enabled });
             if let Some(old) = state.dock_menu.replace(new) {
                 CFRelease(old as _)
             }
@@ -1468,16 +1585,49 @@ extern "C" fn open_urls(this: &mut Object, _: Sel, _: id, urls: id) {
     }
 }
 
+// ket patch: forward browser history to the actual AppKit first responder.
+// The window itself has an undo manager but no ket buffer history.
+unsafe fn native_edit_responder(selector: Sel, item: id) -> bool {
+    unsafe {
+        let app: id = msg_send![APP_CLASS, sharedApplication];
+        let window: id = msg_send![app, keyWindow];
+        if window.is_null() {
+            return false;
+        }
+        let responder: id = msg_send![window, firstResponder];
+        if responder.is_null() || responder == window {
+            return false;
+        }
+        let supported: bool = msg_send![responder, respondsToSelector: selector];
+        if !supported {
+            return false;
+        }
+        let _: id = msg_send![responder, performSelector: selector withObject: item];
+        true
+    }
+}
+
+extern "C" fn handle_gpui_undo(this: &mut Object, _: Sel, item: id) {
+    if !unsafe { native_edit_responder(sel!(undo:), item) } {
+        handle_menu_item(this, sel!(handleGPUIMenuItem:), item);
+    }
+}
+
+extern "C" fn handle_gpui_redo(this: &mut Object, _: Sel, item: id) {
+    if !unsafe { native_edit_responder(sel!(redo:), item) } {
+        handle_menu_item(this, sel!(handleGPUIMenuItem:), item);
+    }
+}
+
 extern "C" fn handle_menu_item(this: &mut Object, _: Sel, item: id) {
     unsafe {
         let platform = get_mac_platform(this);
         let mut lock = platform.0.lock();
         if let Some(mut callback) = lock.menu_command.take() {
             let tag: NSInteger = msg_send![item, tag];
-            let index = tag as usize;
-            if let Some(action) = lock.menu_actions.get(index) {
-                let action = action.boxed_clone();
-                drop(lock);
+            let action = lock.menu_action(tag as usize).map(|action| action.boxed_clone());
+            drop(lock);
+            if let Some(action) = action {
                 callback(&*action);
             }
             platform.0.lock().menu_command.get_or_insert(callback);
@@ -1492,10 +1642,9 @@ extern "C" fn validate_menu_item(this: &mut Object, _: Sel, item: id) -> bool {
         let mut lock = platform.0.lock();
         if let Some(mut callback) = lock.validate_menu_command.take() {
             let tag: NSInteger = msg_send![item, tag];
-            let index = tag as usize;
-            if let Some(action) = lock.menu_actions.get(index) {
-                let action = action.boxed_clone();
-                drop(lock);
+            let action = lock.menu_action(tag as usize).map(|action| action.boxed_clone());
+            drop(lock);
+            if let Some(action) = action {
                 result = callback(action.as_ref());
             }
             platform
@@ -1512,11 +1661,34 @@ extern "C" fn menu_will_open(this: &mut Object, _: Sel, _: id) {
     unsafe {
         let platform = get_mac_platform(this);
         let mut lock = platform.0.lock();
+        // ket patch: menu replacement must wait for the tracked stack to close.
+        lock.menu_tracking_depth += 1;
         if let Some(mut callback) = lock.will_open_menu.take() {
             drop(lock);
             callback();
             platform.0.lock().will_open_menu.get_or_insert(callback);
         }
+    }
+}
+
+// ket patch: install the newest menu state only after every tracked submenu closes.
+extern "C" fn menu_did_close(this: &mut Object, _: Sel, _: id) {
+    unsafe {
+        let platform = get_mac_platform(this);
+        let mut state = platform.0.lock();
+        state.menu_tracking_depth = state.menu_tracking_depth.saturating_sub(1);
+        if state.menu_tracking_depth != 0 {
+            return;
+        }
+        let Some(pending) = state.pending_menu.take() else {
+            return;
+        };
+        state.install_menu_actions(pending.tag_offset, pending.actions, pending.enabled);
+        state.menus = Some(pending.menus);
+        drop(state);
+        let app: id = msg_send![APP_CLASS, sharedApplication];
+        app.setMainMenu_(pending.menu);
+        let _: () = msg_send![pending.menu, release];
     }
 }
 
@@ -1664,6 +1836,21 @@ mod tests {
     use crate::ClipboardItem;
 
     use super::*;
+
+    #[test]
+    fn menu_actions_keep_only_current_and_previous_generations() {
+        let platform = build_platform();
+        let mut state = platform.0.lock();
+        for _ in 0..100 {
+            let start = state.next_menu_tag;
+            state.install_menu_actions(start, vec![Box::new(crate::NoAction)], vec![true]);
+        }
+        assert!(state.menu_action(97).is_none());
+        assert!(state.menu_action(98).is_some());
+        assert!(state.menu_action(99).is_some());
+        assert_eq!(state.menu_actions.actions.len(), 1);
+        assert_eq!(state.previous_menu_actions.as_ref().unwrap().actions.len(), 1);
+    }
 
     #[test]
     fn test_clipboard() {

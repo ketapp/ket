@@ -180,7 +180,7 @@ impl Transcript {
     /// Where `agent` keeps session `session`, or `None` for an agent ket
     /// cannot read, or a session that is not there yet.
     pub fn locate(agent: &str, session: &str) -> Option<Self> {
-        match agent.to_ascii_lowercase().as_str() {
+        match crate::agents::harness(agent).to_ascii_lowercase().as_str() {
             "claude" => claude_transcript(session).map(Self::Claude),
             "codex" => codex_transcript(session).map(Self::Codex),
             "grok" => grok_transcript(session).map(Self::Grok),
@@ -198,7 +198,7 @@ impl Transcript {
     /// Whether ket can read `agent`'s sessions at all.
     pub fn readable(agent: &str) -> bool {
         matches!(
-            agent.to_ascii_lowercase().as_str(),
+            crate::agents::harness(agent).to_ascii_lowercase().as_str(),
             "claude" | "codex" | "grok" | "opencode"
         )
     }
@@ -1068,5 +1068,17 @@ fn spoken(name: &str, input: Option<&serde_json::Value>) -> Option<String> {
         }
         "ExitPlanMode" => text(input, "plan").map(str::to_owned),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod local_agent_tests {
+    use super::*;
+
+    #[test]
+    fn a_local_agents_transcript_is_read_as_opencodes() {
+        assert!(Transcript::readable("opencode:ollama/qwen3-coder:30b"));
+        assert!(Transcript::readable("opencode"));
+        assert!(!Transcript::readable("ollama:qwen3:0.6b"));
     }
 }

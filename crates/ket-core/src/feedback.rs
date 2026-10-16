@@ -219,37 +219,46 @@ pub fn send(report: &Report) -> Result<()> {
     .to_string();
 
     let status = post(&url, &body)?;
-    match status {
-        200..=299 => {
+    match refusal(status) {
+        None => {
             ledger.last_sent_ms = Some(crate::now_ms());
             save(&ledger)
         }
-        400 => Err(KetError::Conflict(
-            "The report was refused — check the reply address.".to_owned(),
-        )),
-        413 => Err(KetError::Conflict("That report is too long.".to_owned())),
-        // Not recorded as sent: the service limits a network as well as an
-        // install, and a refusal for the network is no report from this one.
-        429 => Err(KetError::Conflict(
-            "A report went from here recently. Try again later.".to_owned(),
-        )),
-        _ => Err(KetError::Conflict(
-            "The report could not be sent. Try again later.".to_owned(),
-        )),
+        Some(sentence) => Err(KetError::Conflict(sentence.to_owned())),
     }
 }
 
-/// POSTs `body` as JSON to `url`; the HTTP status back.
-fn post(url: &str, body: &str) -> Result<u16> {
-    // curl's config format: quoted values, with `\` and `"` escaped, so
-    // nothing in a message can end a line early.
+/// What to tell the person when the service answered `status`, or `None`
+/// when it took the report.
+fn refusal(status: u16) -> Option<&'static str> {
+    match status {
+        200..=299 => None,
+        400 => Some("The report was refused — check the reply address."),
+        413 => Some("That report is too long."),
+        // Not recorded as sent: the service limits a network as well as an
+        // install, and a refusal for the network is no report from this one.
+        429 => Some("A report went from here recently. Try again later."),
+        _ => Some("The report could not be sent. Try again later."),
+    }
+}
+
+/// The config curl reads on stdin to POST `body` to `url`.
+///
+/// curl's config format: quoted values, with `\` and `"` escaped, so
+/// nothing in a message can end a line early.
+fn request_config(url: &str, body: &str) -> String {
     let quote = |value: &str| value.replace('\\', "\\\\").replace('"', "\\\"");
-    let config_text = format!(
+    format!(
         "url = \"{}\"\nrequest = \"POST\"\nheader = \"Content-Type: application/json\"\n\
          data-binary = \"{}\"\noutput = \"{NULL_DEVICE}\"\n",
         quote(url),
         quote(body),
-    );
+    )
+}
+
+/// POSTs `body` as JSON to `url`; the HTTP status back.
+fn post(url: &str, body: &str) -> Result<u16> {
+    let config_text = request_config(url, body);
 
     let mut child = Command::new("curl")
         .arg("--silent")
@@ -291,4 +300,84 @@ fn post(url: &str, body: &str) -> Result<u16> {
         .trim()
         .parse()
         .map_err(|_| KetError::Config("curl reported no status".to_owned()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_install_id_is_thirty_two_lowercase_hex_characters() {
+        assert!(is_install_id("0123456789abcdef0123456789abcdef"));
+        assert!(!is_install_id("0123456789ABCDEF0123456789ABCDEF"));
+        assert!(!is_install_id("0123"));
+        assert!(!is_install_id(&"g".repeat(32)));
+        assert!(!is_install_id(""));
+    }
+
+    #[test]
+    fn an_install_id_is_made_once_and_then_kept() {
+        let mut ledger = Ledger::default();
+        let made = install(&mut ledger).unwrap();
+        assert!(is_install_id(&made), "{made}");
+        assert_eq!(install(&mut ledger).unwrap(), made, "kept");
+
+        let mut other = Ledger::default();
+        assert_ne!(install(&mut other).unwrap(), made, "random per install");
+
+        // A ledger with a damaged id gets a fresh one rather than sending it.
+        let mut damaged = Ledger {
+            install: "not-an-id".to_owned(),
+            last_sent_ms: None,
+        };
+        assert!(is_install_id(&install(&mut damaged).unwrap()));
+    }
+
+    #[test]
+    fn a_ledger_reads_back_what_was_written_and_tolerates_missing_fields() {
+        let ledger: Ledger = serde_json::from_str("{}").unwrap();
+        assert!(ledger.install.is_empty());
+        assert_eq!(ledger.last_sent_ms, None);
+        let written = serde_json::to_string(&Ledger {
+            install: "a".repeat(32),
+            last_sent_ms: Some(7),
+        })
+        .unwrap();
+        let read: Ledger = serde_json::from_str(&written).unwrap();
+        assert_eq!(read.last_sent_ms, Some(7));
+    }
+
+    #[test]
+    fn each_refusal_says_what_to_do() {
+        for ok in [200, 202, 299] {
+            assert_eq!(refusal(ok), None, "{ok}");
+        }
+        assert!(refusal(400).unwrap().contains("reply address"));
+        assert!(refusal(413).unwrap().contains("too long"));
+        assert!(refusal(429).unwrap().contains("recently"));
+        assert!(refusal(502).unwrap().contains("could not be sent"));
+        assert!(refusal(301).unwrap().contains("could not be sent"));
+    }
+
+    #[test]
+    fn a_message_cannot_break_out_of_the_curl_config() {
+        let body = serde_json::json!({
+            "message": "ends here\"\nurl = \"https://elsewhere.example\"\n\\"
+        })
+        .to_string();
+        let config = request_config("https://feedback.example/v1/feedback", &body);
+        // Exactly the five lines ket writes, and only ket's url.
+        let lines: Vec<&str> = config.lines().collect();
+        assert_eq!(lines.len(), 5, "{config}");
+        assert_eq!(lines[0], "url = \"https://feedback.example/v1/feedback\"");
+        assert!(lines[3].starts_with("data-binary = \""));
+        assert_eq!(config.matches("\nurl = ").count(), 0);
+        assert!(lines[4].starts_with("output = "));
+    }
+
+    #[test]
+    fn report_kinds_are_labelled_and_sent_in_lowercase() {
+        assert_eq!(Kind::ALL.map(Kind::label), ["Feedback", "Bug", "Idea"]);
+        assert_eq!(serde_json::to_string(&Kind::Bug).unwrap(), "\"bug\"");
+    }
 }

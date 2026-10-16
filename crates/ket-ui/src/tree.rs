@@ -11,6 +11,7 @@ use gpui::{
     StyledText, TextRun, Window, div, font, point, prelude::*, px,
 };
 use ket_core::id::{ProjectId, WorktreeId};
+use ket_core::permissions;
 use ket_core::theme::{Color, Theme};
 use ket_core::workspace::Workspace;
 
@@ -1566,6 +1567,7 @@ impl Shell {
         let missing = node.missing;
         let project_id = self.projects[selection.project].id.clone();
         self.selection = Some(selection);
+        self.menu_dirty = true;
         self.project_focus.insert(project_id, id.clone());
         self.menu = None;
         // The strip a rename field is drawn in belongs to the worktree being
@@ -2360,6 +2362,35 @@ impl Shell {
             agent_hooks::HOOK_VERSION.to_owned(),
         );
         env.insert("KET_AGENT_NAME".to_owned(), agent.to_owned());
+        // What the permission hook rules a call with: this binary to ask, the
+        // project whose personal rules apply, its main checkout for the
+        // repository's rules, and the worktree relative patterns start at.
+        // See `ket_core::permissions`.
+        if let Ok(exe) = std::env::current_exe() {
+            env.insert(permissions::ENV.to_owned(), exe.display().to_string());
+        }
+        if let Some((project, node)) = self.projects.iter().find_map(|project| {
+            project
+                .worktrees
+                .iter()
+                .find(|node| &node.id == worktree)
+                .map(|node| (project, node))
+        }) {
+            env.insert(
+                permissions::PROJECT_ID_ENV.to_owned(),
+                project.id.to_string(),
+            );
+            if let Some(primary) = project.worktrees.iter().find(|node| node.primary) {
+                env.insert(
+                    permissions::PROJECT_ROOT_ENV.to_owned(),
+                    primary.path.display().to_string(),
+                );
+            }
+            env.insert(
+                permissions::WORKTREE_ROOT_ENV.to_owned(),
+                node.path.display().to_string(),
+            );
+        }
         env
     }
 

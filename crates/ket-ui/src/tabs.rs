@@ -462,6 +462,136 @@ fn new_tab_menu(
 }
 
 impl Shell {
+    /// The focused document that external applications can open.
+    pub(crate) fn active_open_in_target(&self) -> Option<(SharedString, Option<(u32, u32)>)> {
+        let space = self.space()?;
+        let (_, index) = space.root.leaf(space.focused)?;
+        self.open_in_target(TabContextTarget {
+            pane: space.focused,
+            index,
+        })
+    }
+
+    /// Open the focused document in a detected editor or reveal it in Finder.
+    pub(crate) fn native_open_in(&mut self, program: Option<&std::path::Path>) {
+        let Some((path, at)) = self.active_open_in_target() else {
+            return;
+        };
+        let path = std::path::PathBuf::from(path.as_ref());
+        let outcome = match program {
+            None => ket_core::surface::reveal_in_file_manager(&path)
+                .map(|()| "showed in Finder".to_owned()),
+            Some(program) => {
+                let Some(found) = ket_core::surface::installed_editors()
+                    .iter()
+                    .find(|found| found.program == program)
+                else {
+                    return;
+                };
+                let mut position = Position::file(path);
+                if let Some((line, column)) = at {
+                    position = position.with_line(line).with_column(column);
+                }
+                ExternalSurface::for_program(&found.program, Arc::new(ProcessSpawner))
+                    .reveal(&position)
+                    .map(|()| format!("opened in {}", found.profile.label))
+            }
+        };
+        self.note = Some(match outcome {
+            Ok(message) => message.into(),
+            Err(error) => error.to_string().into(),
+        });
+    }
+    /// Start a named agent from the native menu after checking it still runs.
+    pub(crate) fn new_agent_session_from_menu(
+        &mut self,
+        name: &str,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(pane) = self.tab_creation_target() else {
+            return false;
+        };
+        let Some(spec) = self
+            .runnable_agents()
+            .into_iter()
+            .find(|spec| spec.name == name)
+        else {
+            return false;
+        };
+        self.open_agent_tab_in(pane, &spec.name, cx);
+        self.persist_layout();
+        true
+    }
+
+    /// Open a device from the native menu if its SDK remains installed.
+    pub(crate) fn new_device_tab_from_menu(
+        &mut self,
+        device: crate::app_menu::MenuDevice,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(pane) = self.tab_creation_target() else {
+            return false;
+        };
+        match device {
+            crate::app_menu::MenuDevice::Ios => {
+                #[cfg(target_os = "macos")]
+                if crate::ios_simulator::xcode_installed() {
+                    self.open_ios_simulator_tab_in(pane, cx);
+                } else {
+                    return false;
+                }
+                #[cfg(not(target_os = "macos"))]
+                return false;
+            }
+            crate::app_menu::MenuDevice::Android => {
+                if !ket_core::android::installed() {
+                    return false;
+                }
+                self.open_android_tab_in(pane, cx);
+            }
+        }
+        self.persist_layout();
+        true
+    }
+    /// Apply a native File or Window menu command to the focused tab.
+    pub(crate) fn active_tab_context_action(
+        &mut self,
+        action: TabContextAction,
+        cx: &mut Context<Self>,
+    ) {
+        if self.modal_open() {
+            return;
+        }
+        let Some(space) = self.space() else {
+            return;
+        };
+        let pane = space.focused;
+        let Some((tabs, index)) = space.root.leaf(pane) else {
+            return;
+        };
+        if tabs.get(index).is_none() {
+            return;
+        }
+        let target = TabContextTarget { pane, index };
+        match action {
+            TabContextAction::Close => self.request_close_tab(pane, index, cx),
+            TabContextAction::CloseOthers => self.close_tabs_around(target, |at| at != index, cx),
+            TabContextAction::CloseToRight => self.close_tabs_around(target, |at| at > index, cx),
+            TabContextAction::CloseToLeft => self.close_tabs_around(target, |at| at < index, cx),
+            TabContextAction::PinTab => {
+                let pinned = self
+                    .space()
+                    .and_then(|space| space.root.leaf(pane))
+                    .and_then(|(tabs, _)| tabs.get(index))
+                    .is_some_and(|tab| tab.pinned);
+                self.set_tab_pinned(pane, index, !pinned, cx);
+            }
+            TabContextAction::CopyPath => self.copy_tab_path(target, false, cx),
+            TabContextAction::CopyRelativePath => self.copy_tab_path(target, true, cx),
+            TabContextAction::ChangeTitle => self.begin_tab_rename(target, cx),
+            TabContextAction::OpenIn | TabContextAction::SendSnippet => {}
+        }
+    }
     /// Runs one `+`-menu pick.
     ///
     /// Also where the menu closes, so every path that hands an action back
@@ -577,7 +707,7 @@ impl Shell {
     /// An editor contributes its cursor, because opening at the line you were
     /// reading is the whole point of a precise handoff (see
     /// [`ket_core::surface`]); an audio file has no cursor to send.
-    fn open_in_target(
+    pub(crate) fn open_in_target(
         &self,
         target: TabContextTarget,
     ) -> Option<(SharedString, Option<(u32, u32)>)> {
@@ -632,6 +762,9 @@ impl Shell {
     /// meantime — right-clicking an inactive tab deliberately leaves the
     /// active one alone.
     fn run_tab_context_action(&mut self, action: TabContextAction, cx: &mut Context<Self>) {
+        if self.modal_open() {
+            return;
+        }
         let Some(open) = self.tab_context_menu.as_ref() else {
             return;
         };
@@ -1111,6 +1244,9 @@ impl Shell {
     /// Keys while a tab is being renamed: the field takes its own editing
     /// chords, Enter commits, Escape abandons.
     pub(crate) fn tab_rename_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) -> bool {
+        if self.modal_open() {
+            return false;
+        }
         let Some(input) = self.tab_rename.as_ref().map(|rename| rename.input.clone()) else {
             return false;
         };
@@ -2458,6 +2594,12 @@ impl Default for Space {
 }
 
 impl Space {
+    /// Number of visible panes, for native Close Pane availability.
+    pub(crate) fn pane_count(&self) -> usize {
+        let mut ids = Vec::new();
+        self.root.leaf_ids(&mut ids);
+        ids.len()
+    }
     /// Every terminal open anywhere in this space.
     pub(crate) fn terminal_ids(&self) -> Vec<TerminalId> {
         let mut out = Vec::new();
@@ -2999,8 +3141,14 @@ impl Space {
             Some((tabs, _)) if index < tabs.len() => true,
             _ => false,
         };
-        if should_close_pane {
-            self.close_pane(pane);
+        // The only pane cannot go — the worktree would have none — so it
+        // stays, empty, rather than holding a tab whose terminal is gone.
+        if should_close_pane
+            && !self.close_pane(pane)
+            && let Some((tabs, active)) = self.root.leaf_mut(pane)
+        {
+            tabs.remove(index);
+            *active = 0;
         }
     }
 

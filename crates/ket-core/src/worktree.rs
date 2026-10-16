@@ -542,7 +542,7 @@ impl TokenReduction {
                 },
                 &self.codex,
             )
-        } else if agent.eq_ignore_ascii_case("opencode") {
+        } else if crate::agents::harness(agent).eq_ignore_ascii_case("opencode") {
             (EconomyPolicy::default(), &self.opencode)
         } else if agent.eq_ignore_ascii_case("grok") {
             // No schema-v1 base: those fields were written for Claude, and a
@@ -577,6 +577,12 @@ impl TokenReduction {
         }
         if provider.command_filter.is_some() {
             policy.command_filter = provider.command_filter;
+        }
+        // A local agent's name already says which model it runs, and a
+        // second `--model` from the pack would replace it with one this Mac
+        // may not have.
+        if crate::local_models::model_tag(agent).is_some() {
+            policy.model = None;
         }
         policy
     }
@@ -1453,6 +1459,18 @@ mod tests {
             policy.effort, None,
             "opencode has no schema-v1 base to inherit from"
         );
+    }
+
+    #[test]
+    fn a_local_agent_takes_opencodes_block_but_never_its_model() {
+        let level = level_with_everything();
+        let policy = level.policy_for("opencode:ollama/qwen3-coder:30b");
+        assert_eq!(
+            policy.model, None,
+            "the agent's name already says the model"
+        );
+        let launch = economy_launch("opencode:ollama/qwen3-coder:30b", &level, None, None, None);
+        assert!(!launch.args.iter().any(|arg| arg == "--model"));
     }
 
     #[test]

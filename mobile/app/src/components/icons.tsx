@@ -4,7 +4,7 @@
 import { BacklogPriority } from '@ket/remote';
 import Svg, { Circle, G, Path, Polygon, Rect } from 'react-native-svg';
 
-import { AGENT_COLORS, t } from '../lib/theme';
+import { AGENT_COLORS, agentHarness, t } from '../lib/theme';
 
 type IconProps = { size?: number; color?: string; weight?: number };
 
@@ -20,7 +20,7 @@ export function BrandMark({ size = 18 }: { size?: number }) {
 
 /** An agent's mark in its own colour, or nothing for an agent ket has no mark for. */
 export function AgentMark({ agent, size = 14 }: { agent: string; size?: number }) {
-  const name = agent.toLowerCase();
+  const name = agentHarness(agent);
   const color = AGENT_COLORS[name] ?? t.dim;
   if (name === 'codex') {
     return (

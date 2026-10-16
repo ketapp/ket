@@ -1241,3 +1241,88 @@ impl Shell {
             .into_any_element()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! The card's wording and figures, apart from its drawing.
+
+    use super::*;
+
+    fn usd(micros: i64) -> Money {
+        Money {
+            micros,
+            currency: "USD".to_owned(),
+        }
+    }
+
+    #[test]
+    fn money_rounds_to_cents_and_never_shows_a_spend_as_nothing() {
+        assert_eq!(money(&usd(1_240_000)), "$1.24");
+        assert_eq!(money(&usd(0)), "$0.00");
+        assert_eq!(money(&usd(1)), "<$0.01");
+        assert_eq!(money(&usd(9_999)), "<$0.01");
+        assert_eq!(money(&usd(10_000)), "$0.01");
+        // A currency ket was not taught keeps its own code.
+        assert_eq!(
+            money(&Money {
+                micros: 2_500_000,
+                currency: "EUR".to_owned()
+            }),
+            "2.50 EUR"
+        );
+    }
+
+    #[test]
+    fn a_level_name_drops_its_number_for_use_mid_sentence() {
+        assert_eq!(level_name("4 — No reduction"), "no reduction");
+        assert_eq!(level_name("Heavy reduction"), "heavy reduction");
+        assert_eq!(level_name(""), "");
+    }
+
+    #[test]
+    fn ago_says_just_now_then_seconds_then_a_compact_duration() {
+        let now = 10_000_000;
+        assert_eq!(ago(now, now), "just now");
+        assert_eq!(ago(now, now - 1_999), "just now");
+        assert_eq!(ago(now, now - 45_000), "45s ago");
+        assert_eq!(ago(now, now - 90 * 60_000), "1h 30m ago");
+        // A clock that ran backwards is not a negative age.
+        assert_eq!(ago(now, now + 5_000), "just now");
+    }
+
+    #[test]
+    fn a_long_session_id_keeps_its_two_ends() {
+        assert_eq!(short_session("abc"), "abc");
+        assert_eq!(
+            short_session("0123456789abcdef-0123-4567-89ab-cdef01234567"),
+            "01234567…4567"
+        );
+        // Characters, not bytes: a multi-byte id cannot split a character.
+        let wide = "é".repeat(20);
+        assert_eq!(
+            short_session(&wide),
+            format!("{}…{}", "é".repeat(8), "é".repeat(4))
+        );
+    }
+
+    #[test]
+    fn tokens_are_shown_at_the_width_a_row_can_spare() {
+        assert_eq!(tokens(0), "0");
+        assert_eq!(tokens(999), "999");
+        assert_eq!(tokens(1_000), "1K");
+        assert_eq!(tokens(48_400), "48K");
+        assert_eq!(tokens(1_250_000), "1.2M");
+    }
+
+    #[test]
+    fn a_cache_miss_says_what_caused_it_and_only_warns_when_it_can_be_fixed() {
+        assert_eq!(
+            miss_remedy("ttl_expired_5m"),
+            Some("idle past the five-minute cache lifetime")
+        );
+        assert!(miss_remedy("model_changed").unwrap().contains("own cache"));
+        assert_eq!(miss_remedy("something_new"), None);
+        assert!(avoidable("tools_changed"));
+        assert!(!avoidable("likely_server_side"));
+    }
+}

@@ -9,13 +9,20 @@ import type { ReactNode } from 'react';
 import { Platform, Pressable, StyleSheet, Text, View, type StyleProp, type TextStyle, type ViewStyle } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { READABLE_WIDTH, showBeside, useSplit } from '../lib/layout';
 import { font, size, t, tint } from '../lib/theme';
 import { Back, Check, Chevron, Gauge, Inbox, ListTodo, Sliders, Tree } from './icons';
 
-/** A whole screen: the desk, clear of the status bar. */
-export function Screen({ children, style }: { children: ReactNode; style?: StyleProp<ViewStyle> }) {
+/** A whole screen: the desk, clear of the status bar. On a wide screen its
+ * content is a column no wider than reads well, in the middle; `full` gives
+ * it the whole width instead, for a terminal. */
+export function Screen({ children, style, full }: { children: ReactNode; style?: StyleProp<ViewStyle>; full?: boolean }) {
   const insets = useSafeAreaInsets();
-  return <View style={[styles.screen, { paddingTop: insets.top }, style]}>{children}</View>;
+  return (
+    <View style={[styles.screen, { paddingTop: insets.top }, style]}>
+      {full ? children : <View style={styles.column}>{children}</View>}
+    </View>
+  );
 }
 
 /** The strip along the top, on the desk: back, a title over a detail, actions. */
@@ -34,9 +41,13 @@ export function Bar({
   lead?: ReactNode;
   right?: ReactNode;
 }) {
+  // Beside the sidebar, the first screen of what was picked there has
+  // nothing to go back to: the sidebar is where the rest is.
+  const split = useSplit();
+  const backable = back && !(split && !router.canGoBack());
   return (
     <View style={styles.bar}>
-      {back ? (
+      {backable ? (
         <IconButton label="Back" onPress={() => (router.canGoBack() ? router.back() : router.replace('/'))} style={styles.back}>
           <Back size={20} color={t.text} />
         </IconButton>
@@ -560,9 +571,21 @@ export function Banner({ tone, children, style }: { tone: string; children: Reac
   return <View style={[styles.banner, { backgroundColor: tint(tone, 0.08), borderColor: tint(tone, 0.25) }, style]}>{children}</View>;
 }
 
-/** The three places at the top of the app, as a floating bar at the bottom. */
-export function TabBar({ active, needs }: { active: 'worktrees' | 'needs' | 'usage' | 'settings'; needs: number }) {
+/** The places at the top of the app, as a floating bar at the bottom. On a
+ * wide screen it floats at the foot of the sidebar instead, and the screens
+ * beside it leave theirs out. */
+export function TabBar({
+  active,
+  needs,
+  sidebar,
+}: {
+  active: 'worktrees' | 'needs' | 'usage' | 'settings';
+  needs: number;
+  sidebar?: boolean;
+}) {
   const insets = useSafeAreaInsets();
+  const split = useSplit();
+  if (split && !sidebar) return null;
   const tabs = [
     { key: 'worktrees', label: 'Worktrees', path: '/', icon: Tree },
     { key: 'needs', label: 'Needs you', path: '/needs', icon: Inbox },
@@ -581,7 +604,7 @@ export function TabBar({ active, needs }: { active: 'worktrees' | 'needs' | 'usa
               accessibilityRole="tab"
               accessibilityState={{ selected: on }}
               accessibilityLabel={key === 'needs' && needs > 0 ? `${label}, ${needs}` : label}
-              onPress={() => (on ? undefined : router.replace(path))}
+              onPress={() => (on ? undefined : split ? showBeside(path) : router.replace(path))}
               style={[styles.tab, on && styles.tabOn]}
             >
               <View>
@@ -616,6 +639,7 @@ export const field: TextStyle = {
 
 export const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: t.backdrop },
+  column: { flex: 1, width: '100%', maxWidth: READABLE_WIDTH, alignSelf: 'center' },
   bar: {
     height: size.bar,
     flexDirection: 'row',

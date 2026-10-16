@@ -477,8 +477,12 @@ pub fn cache_path() -> Result<PathBuf> {
 /// header, and [`crate::usage::History::load`], which makes the same bargain
 /// for the same reason.
 pub fn load() -> Option<Pack> {
-    let path = cache_path().ok()?;
-    let bytes = std::fs::read(&path).ok()?;
+    load_from(&cache_path().ok()?)
+}
+
+/// [`load`], from an explicit path.
+fn load_from(path: &Path) -> Option<Pack> {
+    let bytes = std::fs::read(path).ok()?;
     match parse(&bytes) {
         Ok(pack) => Some(pack),
         Err(e) => {
@@ -580,7 +584,12 @@ pub fn staged_path() -> Result<PathBuf> {
 /// `active` is what this run loaded, so a staged copy of the same version — the
 /// ordinary case, a refresh finding nothing new — reads as nothing waiting.
 pub fn staged(active: Option<&Pack>) -> Option<Pack> {
-    let bytes = std::fs::read(staged_path().ok()?).ok()?;
+    staged_from(&staged_path().ok()?, active)
+}
+
+/// [`staged`], from an explicit path.
+fn staged_from(path: &Path, active: Option<&Pack>) -> Option<Pack> {
+    let bytes = std::fs::read(path).ok()?;
     let pack = parse(&bytes).ok()?;
     match active {
         Some(active)
@@ -599,14 +608,17 @@ pub fn staged(active: Option<&Pack>) -> Option<Pack> {
 /// [`crate::worktree::activate_pack`] for why the table in force does not move
 /// while ket is open.
 pub fn promote() -> Result<()> {
-    let staged = staged_path()?;
-    let active = cache_path()?;
+    promote_at(&staged_path()?, &cache_path()?)
+}
+
+/// [`promote`], between explicit paths.
+fn promote_at(staged: &Path, active: &Path) -> Result<()> {
     // Verified once more on the way in: the file has been on disk since the
     // fetch, and adopting something that no longer parses would leave the next
     // launch with no pack rather than the one it had.
-    let bytes = std::fs::read(&staged).map_err(|e| KetError::io(&staged, e))?;
+    let bytes = std::fs::read(staged).map_err(|e| KetError::io(staged, e))?;
     parse(&bytes)?;
-    std::fs::rename(&staged, &active).map_err(|e| KetError::io(&active, e))
+    std::fs::rename(staged, active).map_err(|e| KetError::io(active, e))
 }
 
 /// Fetches, verifies and caches in one step.
@@ -617,15 +629,21 @@ pub fn promote() -> Result<()> {
 /// network.
 pub fn refresh(url: &str) -> Result<Pack> {
     let bytes = fetch(url)?;
-    let pack = parse(&bytes)?;
+    keep_fetched(&bytes, &cache_path()?, &staged_path()?)
+}
+
+/// What [`refresh`] does with what it fetched: verified, then adopted at
+/// `active` when nothing is there yet, else staged at `staged`.
+fn keep_fetched(bytes: &[u8], active: &Path, staged: &Path) -> Result<Pack> {
+    let pack = parse(bytes)?;
 
     // Staged, not adopted. The first pack ever fetched is the exception: there
     // is nothing in force for it to differ from, and asking somebody to adopt
     // the only pack they have is a question with one answer.
-    if cache_path().is_ok_and(|path| path.exists()) {
-        store_at(&staged_path()?, &bytes)?;
+    if active.exists() {
+        store_at(staged, bytes)?;
     } else {
-        store(&bytes)?;
+        store_at(active, bytes)?;
     }
     Ok(pack)
 }
@@ -652,7 +670,12 @@ pub fn sweep_temps() {
     let Ok(dir) = crate::paths::cache_dir() else {
         return;
     };
-    let Ok(entries) = std::fs::read_dir(&dir) else {
+    sweep_temps_in(&dir, TEMP_STALE_AFTER);
+}
+
+/// [`sweep_temps`], in `dir`, counting a temp file abandoned after `stale_after`.
+fn sweep_temps_in(dir: &Path, stale_after: Duration) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
 
@@ -671,7 +694,7 @@ pub fn sweep_temps() {
             .metadata()
             .and_then(|meta| meta.modified())
             .and_then(|at| at.elapsed().map_err(std::io::Error::other))
-            .is_ok_and(|age| age > TEMP_STALE_AFTER);
+            .is_ok_and(|age| age > stale_after);
         if stale {
             tracing::debug!(path = %path.display(), "removing an abandoned pack temp file");
             let _ = std::fs::remove_file(&path);
@@ -748,5 +771,235 @@ mod tests {
     fn is_cache_recognises_only_the_real_cache_path() {
         assert!(is_cache(&cache_path().unwrap()));
         assert!(!is_cache(Path::new("/definitely/not/the/pack/cache.json")));
+    }
+
+    // ---- the cache's lifecycle --------------------------------------------------
+
+    /// A directory under the temp dir, removed when dropped.
+    struct Dir(PathBuf);
+
+    impl Dir {
+        fn new(tag: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "ket-pack-{tag}-{}-{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+
+        fn active(&self) -> PathBuf {
+            self.0.join("pack.json")
+        }
+
+        fn staged(&self) -> PathBuf {
+            self.0.join("pack.staged.json")
+        }
+    }
+
+    impl Drop for Dir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// A pack document with one level, as bytes.
+    fn document(pack_id: &str, version: u32) -> Vec<u8> {
+        serde_json::json!({
+            "schemaVersion": SCHEMA_VERSION,
+            "packId": pack_id,
+            "packVersion": version,
+            "levels": [{"id": "none", "label": "4 — No reduction", "description": "As is."}],
+            "defaultLevel": "none"
+        })
+        .to_string()
+        .into_bytes()
+    }
+
+    #[test]
+    fn the_cached_pack_is_loaded_and_anything_wrong_with_it_is_no_pack() {
+        let dir = Dir::new("load");
+        assert!(load_from(&dir.active()).is_none(), "no file yet");
+
+        std::fs::write(dir.active(), document("team", 3)).unwrap();
+        let pack = load_from(&dir.active()).expect("a good cache loads");
+        assert_eq!((pack.pack_id.as_str(), pack.pack_version), ("team", 3));
+
+        std::fs::write(dir.active(), b"{\"schemaVersion\": 3, \"packId\": ").unwrap();
+        assert!(load_from(&dir.active()).is_none(), "half-written");
+
+        let future = String::from_utf8(document("team", 4)).unwrap().replace(
+            &format!("\"schemaVersion\":{SCHEMA_VERSION}"),
+            "\"schemaVersion\":99",
+        );
+        std::fs::write(dir.active(), future).unwrap();
+        assert!(load_from(&dir.active()).is_none(), "from a newer ket");
+    }
+
+    #[test]
+    fn a_staged_pack_is_waiting_only_when_it_differs_from_the_one_in_force() {
+        let dir = Dir::new("staged");
+        assert!(staged_from(&dir.staged(), None).is_none(), "nothing staged");
+
+        std::fs::write(dir.staged(), document("team", 2)).unwrap();
+        let active = parse(&document("team", 2)).unwrap();
+        assert!(
+            staged_from(&dir.staged(), Some(&active)).is_none(),
+            "the same version is not news"
+        );
+
+        let older = parse(&document("team", 1)).unwrap();
+        assert_eq!(
+            staged_from(&dir.staged(), Some(&older)).map(|p| p.pack_version),
+            Some(2)
+        );
+        let other = parse(&document("someone-else", 2)).unwrap();
+        assert!(
+            staged_from(&dir.staged(), Some(&other)).is_some(),
+            "another pack"
+        );
+        assert!(
+            staged_from(&dir.staged(), None).is_some(),
+            "nothing in force"
+        );
+
+        std::fs::write(dir.staged(), b"not a pack").unwrap();
+        assert!(staged_from(&dir.staged(), None).is_none());
+    }
+
+    #[test]
+    fn promoting_moves_the_staged_pack_into_force() {
+        let dir = Dir::new("promote");
+        std::fs::write(dir.active(), document("team", 1)).unwrap();
+        std::fs::write(dir.staged(), document("team", 2)).unwrap();
+
+        promote_at(&dir.staged(), &dir.active()).unwrap();
+
+        assert!(!dir.staged().exists(), "renamed, not copied");
+        assert_eq!(load_from(&dir.active()).unwrap().pack_version, 2);
+    }
+
+    #[test]
+    fn a_staged_pack_that_no_longer_parses_is_not_promoted() {
+        let dir = Dir::new("promote-broken");
+        std::fs::write(dir.active(), document("team", 1)).unwrap();
+        std::fs::write(dir.staged(), b"{ broken").unwrap();
+
+        assert!(promote_at(&dir.staged(), &dir.active()).is_err());
+        assert_eq!(
+            load_from(&dir.active()).unwrap().pack_version,
+            1,
+            "the pack in force is untouched"
+        );
+
+        std::fs::remove_file(dir.staged()).unwrap();
+        assert!(
+            promote_at(&dir.staged(), &dir.active()).is_err(),
+            "nothing staged"
+        );
+    }
+
+    #[test]
+    fn the_first_pack_fetched_is_adopted_and_later_ones_wait() {
+        let dir = Dir::new("keep");
+        let first = keep_fetched(&document("team", 1), &dir.active(), &dir.staged()).unwrap();
+        assert_eq!(first.pack_version, 1);
+        assert!(dir.active().exists());
+        assert!(
+            !dir.staged().exists(),
+            "nothing to adopt the first one over"
+        );
+
+        keep_fetched(&document("team", 2), &dir.active(), &dir.staged()).unwrap();
+        assert_eq!(
+            load_from(&dir.active()).unwrap().pack_version,
+            1,
+            "still in force"
+        );
+        assert_eq!(
+            staged_from(&dir.staged(), None).unwrap().pack_version,
+            2,
+            "waiting"
+        );
+    }
+
+    #[test]
+    fn a_fetched_document_that_does_not_parse_is_never_kept() {
+        let dir = Dir::new("keep-broken");
+        assert!(keep_fetched(b"<html>404</html>", &dir.active(), &dir.staged()).is_err());
+        assert!(!dir.active().exists());
+        assert!(!dir.staged().exists());
+
+        std::fs::write(dir.active(), document("team", 1)).unwrap();
+        assert!(keep_fetched(b"{}", &dir.active(), &dir.staged()).is_err());
+        assert!(!dir.staged().exists());
+    }
+
+    #[test]
+    fn abandoned_temp_files_are_swept_and_everything_else_is_left() {
+        let dir = Dir::new("sweep");
+        for name in [
+            "pack.tmp.123",
+            "pack.staged.tmp.456",
+            "pack.json",
+            "pack.staged.json",
+            "other.tmp.1",
+            "pack-notes.txt",
+        ] {
+            std::fs::write(dir.0.join(name), b"x").unwrap();
+        }
+
+        // Young enough to be a live write in another ket: kept.
+        sweep_temps_in(&dir.0, Duration::from_secs(60 * 60));
+        assert!(dir.0.join("pack.tmp.123").exists());
+
+        std::thread::sleep(Duration::from_millis(20));
+        sweep_temps_in(&dir.0, Duration::from_millis(1));
+        let left: std::collections::BTreeSet<String> = std::fs::read_dir(&dir.0)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            left,
+            [
+                "other.tmp.1",
+                "pack-notes.txt",
+                "pack.json",
+                "pack.staged.json"
+            ]
+            .map(str::to_owned)
+            .into()
+        );
+
+        sweep_temps_in(Path::new("/nonexistent/ket/cache"), Duration::ZERO);
+    }
+
+    #[test]
+    fn a_pack_is_only_fetched_over_https_and_a_failed_fetch_says_so() {
+        for url in [
+            "http://example.com/pack.json",
+            "file:///etc/passwd",
+            "ftp://x/pack",
+        ] {
+            let err = fetch(url).unwrap_err().to_string();
+            assert!(err.contains("must be https"), "{url}: {err}");
+        }
+        // Nothing listens on port 1: refused at once, without the network.
+        let err = fetch("https://127.0.0.1:1/pack.json")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("fetching the pack failed"), "{err}");
+    }
+
+    #[test]
+    fn an_output_cap_above_a_million_is_refused() {
+        assert!(validate_output_limit("claude", Some(1_000_000)).is_ok());
+        let err = validate_output_limit("codex", Some(1_000_001))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("at most 1000000 tokens"), "{err}");
     }
 }

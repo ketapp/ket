@@ -1089,3 +1089,138 @@ fn command_output_line(total: &WorktreeSavings) -> Option<String> {
     }
     Some(line)
 }
+
+#[cfg(test)]
+mod tests {
+    //! The arithmetic and wording behind the savings figures, apart from
+    //! their drawing.
+
+    use super::*;
+
+    fn savings(measured: usize, cost: i64, saved: i64) -> WorktreeSavings {
+        WorktreeSavings {
+            measured,
+            cost_micros: cost,
+            saved_micros: saved,
+            ..WorktreeSavings::default()
+        }
+    }
+
+    #[test]
+    fn a_period_reaches_back_its_own_length_and_all_reaches_back_to_zero() {
+        let now = 100 * DAY_MS;
+        assert_eq!(SavingsPeriod::Week.since_ms(now), 93 * DAY_MS);
+        assert_eq!(SavingsPeriod::Month.since_ms(now), 70 * DAY_MS);
+        assert_eq!(SavingsPeriod::All.since_ms(now), 0);
+        // Never below zero on a clock that has barely started.
+        assert_eq!(SavingsPeriod::Month.since_ms(DAY_MS), 0);
+    }
+
+    #[test]
+    fn a_period_round_trips_through_its_stored_name() {
+        for period in [
+            SavingsPeriod::Week,
+            SavingsPeriod::Month,
+            SavingsPeriod::All,
+        ] {
+            assert_eq!(SavingsPeriod::from_name(period.name()), period);
+        }
+        assert_eq!(SavingsPeriod::from_name("fortnight"), SavingsPeriod::Week);
+        assert_eq!(SavingsPeriod::Week.short(), "7d");
+        assert_eq!(SavingsPeriod::Month.short(), "30d");
+        assert_eq!(SavingsPeriod::All.short(), "All");
+    }
+
+    #[test]
+    fn the_saving_is_a_share_of_what_it_would_have_cost_without_economy() {
+        // Spent $3, saved $1: $4 without Economy, so a quarter less.
+        assert_eq!(
+            percent(&savings(2, 3_000_000, 1_000_000)).as_deref(),
+            Some("25% less")
+        );
+        // Nothing measured, or nothing to divide by: no figure at all.
+        assert_eq!(percent(&savings(0, 3_000_000, 1_000_000)), None);
+        assert_eq!(percent(&savings(1, 0, 0)), None);
+    }
+
+    #[test]
+    fn an_estimate_says_it_is_one() {
+        assert_eq!(estimated(1_250_000), "≈$1.25");
+        assert_eq!(estimated(1), "≈<$0.01");
+    }
+
+    #[test]
+    fn sessions_are_counted_in_words() {
+        assert_eq!(sessions(1), "1 session");
+        assert_eq!(sessions(0), "0 sessions");
+        assert_eq!(sessions(3), "3 sessions");
+    }
+
+    #[test]
+    fn a_figure_with_no_saving_says_why() {
+        let none = WorktreeSavings::default();
+        assert_eq!(unmeasured(&none), "no sessions yet");
+
+        let unpriced = WorktreeSavings {
+            unmeasured: 2,
+            unreduced: 5,
+            ..WorktreeSavings::default()
+        };
+        // Unpriced sessions are the more useful thing to say.
+        assert_eq!(unmeasured(&unpriced), "2 sessions not priced");
+
+        let default_level = WorktreeSavings {
+            unreduced: 1,
+            ..WorktreeSavings::default()
+        };
+        let said = unmeasured(&default_level);
+        assert!(said.starts_with("1 session at "), "{said}");
+    }
+
+    #[test]
+    fn a_clause_is_capitalised_at_the_start_of_a_sentence() {
+        assert_eq!(capitalise("no sessions yet"), "No sessions yet");
+        assert_eq!(capitalise(""), "");
+        assert_eq!(capitalise("élan"), "Élan");
+    }
+
+    #[test]
+    fn command_output_is_only_reported_once_something_was_measured() {
+        assert_eq!(command_output_line(&WorktreeSavings::default()), None);
+
+        let measured = WorktreeSavings {
+            input_tokens: 40_000,
+            command_output_tokens: 10_000,
+            ..WorktreeSavings::default()
+        };
+        assert_eq!(
+            command_output_line(&measured).as_deref(),
+            Some("Command output \u{2248}10K tokens \u{b7} 25% of fresh input")
+        );
+
+        let filtered = WorktreeSavings {
+            filter_saved_tokens: 2_500,
+            ..measured
+        };
+        assert_eq!(
+            command_output_line(&filtered).as_deref(),
+            Some(
+                "Command output \u{2248}10K tokens \u{b7} 25% of fresh input \
+                 \u{b7} filter trimmed \u{2248}2K"
+            )
+        );
+    }
+
+    #[test]
+    fn a_rollup_is_off_until_something_was_reduced() {
+        assert!(Savings::default().is_off());
+        let removed = Savings {
+            removed: WorktreeSavings {
+                measured: 1,
+                ..WorktreeSavings::default()
+            },
+            ..Savings::default()
+        };
+        assert!(!removed.is_off());
+    }
+}

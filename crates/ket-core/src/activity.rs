@@ -680,8 +680,10 @@ impl Tracker {
         let Some(Foreground::Running(command)) = self.observed.get(&worktree) else {
             return false;
         };
+        // A local agent's process is OpenCode's, whatever model it was
+        // named after.
         self.match_agent(command)
-            .is_some_and(|agent| agent.eq_ignore_ascii_case(&pane.agent))
+            .is_some_and(|agent| agent.eq_ignore_ascii_case(crate::agents::harness(&pane.agent)))
     }
 
     /// What one pane's agent is doing, and the signal it earns with its
@@ -741,6 +743,18 @@ impl Tracker {
             Some((activity, _)) => activity,
             None => self.inferred(worktree, now_ms),
         }
+    }
+
+    /// One pane's latest report, whether or not it still stands: what a
+    /// caller wants for a fact that outlives the state, such as the last
+    /// prompt a person answered.
+    pub fn pane_status(&self, pane: &str) -> Option<&crate::agent_status::PaneAgentStatus> {
+        self.local.get(pane).or_else(|| {
+            self.hosted
+                .iter()
+                .flat_map(|snapshot| snapshot.panes.iter())
+                .find(|entry| entry.pane == pane)
+        })
     }
 
     /// What one pane's agent is doing and the signal it earns, while its own

@@ -293,6 +293,18 @@ impl SimctlDevice {
 }
 
 impl Shell {
+    /// Save's native menu route while the Simulator owns the keyboard.
+    pub(crate) fn save_focused_simulator(&mut self, cx: &mut Context<Self>) -> bool {
+        if self
+            .attached_ios_simulator()
+            .is_some_and(private::NativeSimulator::has_keyboard)
+        {
+            self.capture_device(crate::device_capture::DeviceKind::Iphone, cx);
+            true
+        } else {
+            false
+        }
+    }
     /// Opens or focuses the one simulator tab allowed in this process.
     pub(crate) fn open_ios_simulator_tab_in(&mut self, pane: PaneId, cx: &mut Context<Self>) {
         if let Some(worktree) = self

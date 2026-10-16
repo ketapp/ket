@@ -53,6 +53,30 @@ impl Default for Find {
 }
 
 impl Shell {
+    /// Step through the focused editor's open find query.
+    pub(crate) fn find_active_step(&mut self, backward: bool, cx: &mut Context<Self>) -> bool {
+        let Some(key) = self.active_editor_key() else {
+            return false;
+        };
+        if !self
+            .editors
+            .get(key.as_ref())
+            .is_some_and(|state| state.find.open)
+        {
+            return false;
+        }
+        self.find_step(key.as_ref(), backward, cx);
+        cx.notify();
+        true
+    }
+    /// Open local find for the editor in the focused pane.
+    pub(crate) fn find_active_editor(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(key) = self.active_editor_key() else {
+            return false;
+        };
+        self.open_find(key.as_ref(), cx);
+        true
+    }
     /// Whether any editor's find bar is open, and so holding the keyboard.
     ///
     /// Asked by `Shell::typing`, which is what keeps the window from taking

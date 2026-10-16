@@ -1,14 +1,14 @@
 # gpui 0.2.2, patched for ket
 
-This is gpui 0.2.2 exactly as published on crates.io, with three changes
-applied: frame pacing, movable traffic lights, and a text truncation fix.
+This is gpui 0.2.2 exactly as published on crates.io, with four changes
+applied: frame pacing, movable traffic lights, a text truncation fix, and native menu state.
 `Cargo.toml` at the workspace root points `gpui` here through
 `[patch.crates-io]`, and excludes this directory from the workspace so ket's
 own lints do not apply to Zed's code. `ket.patch` is the whole change as a
 unified diff against the published crate's `src/`, for re-applying on an
 upgrade (`patch -p1 < ket.patch` from a fresh copy of the crate).
 
-Every changed line is marked `ket patch` in a comment.
+Patch-specific behavior is marked `ket patch` in nearby comments.
 
 ## Frame pacing
 
@@ -69,3 +69,16 @@ than once per frame, and a layout cut for the first width was reused for the
 second. Each measurement also cuts from a fresh copy of the element's runs:
 `truncate_line` shortens the runs it is given, and reusing the shortened runs
 could end a run inside a character, which panics.
+
+## Native menu state
+
+`MenuItem` carries optional checkmarks, explicit availability and dynamic key
+equivalents, while its
+existing constructors keep their prior defaults (`src/platform/app_menu.rs`).
+The macOS adapter combines explicit availability with GPUI action validation,
+sets native checkmarks, and waits for tracked menus to close before installing
+replacements (`src/platform/mac/platform.rs`). Action tags remain stable across
+replacements because AppKit can deliver a click after `menuDidClose:`. Only the
+current and preceding menu action sets are retained, so repeated rebuilds do
+not grow the command list. Undo and Redo dispatch GPUI actions instead of
+being swallowed by the window's empty native undo history.

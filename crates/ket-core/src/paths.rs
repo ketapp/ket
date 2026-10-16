@@ -95,6 +95,16 @@ pub fn snippets_file() -> Result<PathBuf> {
     Ok(config_dir()?.join("snippets.toml"))
 }
 
+/// Path to `permissions.toml`, a person's permission rules — see
+/// [`crate::permissions`].
+///
+/// Its own file for the reasons snippets have one, and one more: the hook
+/// reads it on every tool call an agent makes, so it stays small and holds
+/// nothing but rules.
+pub fn permissions_file() -> Result<PathBuf> {
+    Ok(config_dir()?.join("permissions.toml"))
+}
+
 /// Directory for things ket generates and can regenerate.
 ///
 /// Separate from [`data_dir`] because the distinction is what protects the

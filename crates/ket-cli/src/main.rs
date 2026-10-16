@@ -466,6 +466,9 @@ fn main() -> ExitCode {
     ket_core::host::serve_if_asked();
     // And the hook that trims a command's output — see `ket_core::filter`.
     ket_core::filter::serve_if_asked();
+    // Likewise the permission hook, which rules every tool call an agent
+    // makes and so has to answer in milliseconds — see `ket_core::permissions`.
+    ket_core::permissions::serve_if_asked();
 
     let cli = Cli::parse();
     // `filter` and `recall` print for a model to read, and a stray warning

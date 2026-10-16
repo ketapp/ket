@@ -22,7 +22,7 @@ use crate::ui::toast::Tone;
 /// How long a new agent is given to start before its prompt is typed. Its
 /// input is read from the terminal once its interface is up; typed sooner,
 /// the prompt lands in the shell it is starting from.
-const AGENT_START: Duration = Duration::from_secs(4);
+pub(crate) const AGENT_START: Duration = Duration::from_secs(4);
 
 /// How long a new worktree's tabs are given to open their terminals before
 /// landing gives up on finding its agent.
@@ -151,17 +151,33 @@ impl Shell {
         });
 
         let asked = agent.clone();
+        // What the work will run on, asked or the project's own — so a task
+        // bound for a local agent never has its prompt sent to Jev.
+        let runnable: Vec<String> = self
+            .runnable_agents()
+            .iter()
+            .map(|spec| spec.name.clone())
+            .collect();
         let project = work.project.clone();
         let branch = work.branch.clone();
         let prompt = work.prompt.clone();
         let base = work.base.clone();
         let picked = work.economy;
         let created = cx.background_executor().spawn(async move {
+            let workspace = Workspace::open()?;
+            let local = asked
+                .clone()
+                .or_else(|| {
+                    crate::worktree_dialog::preferred_agent(&workspace, &runnable, &project)
+                })
+                .is_some_and(|agent| ket_core::local_models::model_tag(&agent).is_some());
             // Jev's beta, when it is on and nobody picked a level: the level
             // chosen from the prompt, among the pack's own. Anything else —
-            // off, slow, refused — leaves the level to the default, as before.
+            // off, slow, refused, a local agent — leaves the level to the
+            // default, as before.
             let chosen = match picked {
                 Some(_) => None,
+                None if local => None,
                 None => ket_core::config::Config::load()
                     .ok()
                     .and_then(|config| ket_core::jev::economy_for(&config.jev, &prompt)),
@@ -169,7 +185,6 @@ impl Shell {
             let level_id = picked
                 .or(chosen.map(|(level, _)| level))
                 .map(|level| ket_core::worktree::token_reduction(level).id.clone());
-            let workspace = Workspace::open()?;
             let (created, _) = workspace.create_worktree_prepared_with_economy(
                 &project,
                 &branch,
@@ -305,7 +320,7 @@ impl Shell {
             wait_for_images(&shell, terminal, before + attached, cx).await;
             let prompt = with_files(prompt, &left);
             let _ = shell.update(cx, |shell, cx| {
-                shell.submit_to_terminal(terminal, &prompt, cx);
+                shell.submit_or_queue(terminal, &prompt, cx);
                 cx.notify();
             });
         })
@@ -341,7 +356,7 @@ impl Shell {
             wait_for_images(&shell, terminal, before + attached, cx).await;
             let prompt = with_files(prompt, &left);
             let _ = shell.update(cx, |shell, cx| {
-                shell.submit_to_terminal(terminal, &prompt, cx);
+                shell.submit_or_queue(terminal, &prompt, cx);
                 cx.notify();
             });
         })
@@ -449,4 +464,66 @@ pub(crate) fn branch_seeded(prompt: &str, fallback: &str, seed: u64) -> String {
         })
         .collect();
     format!("{stem}-{tag}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_branch_is_the_prompts_first_words_and_a_tag() {
+        let branch = branch_seeded("Fix the login redirect, please now", "work", 0);
+        assert_eq!(branch, "fix-the-login-redirect-please-0000");
+    }
+
+    #[test]
+    fn the_tag_is_four_base_36_digits_from_the_seed() {
+        // 36^0 digit first: 1 → "1000", 36 → "0100", 35 → "z000".
+        assert_eq!(branch_seeded("x", "work", 1), "x-1000");
+        assert_eq!(branch_seeded("x", "work", 36), "x-0100");
+        assert_eq!(branch_seeded("x", "work", 35), "x-z000");
+        // The same seed gives the same name: shown first, made later.
+        assert_eq!(
+            branch_seeded("Add a retry", "work", 123_456),
+            branch_seeded("Add a retry", "work", 123_456)
+        );
+    }
+
+    #[test]
+    fn punctuation_and_case_do_not_reach_the_branch() {
+        assert_eq!(
+            branch_seeded("Don't break `main`!", "work", 0),
+            "don-t-break-main-0000"
+        );
+    }
+
+    #[test]
+    fn a_long_prompt_is_cut_without_a_trailing_hyphen() {
+        let branch = branch_seeded(
+            "supercalifragilisticexpialidocious antidisestablishmentarianism words",
+            "work",
+            0,
+        );
+        let stem = branch.strip_suffix("-0000").unwrap();
+        assert!(stem.len() <= 40, "{stem}");
+        assert!(!stem.ends_with('-'), "{stem}");
+    }
+
+    #[test]
+    fn a_prompt_with_no_words_falls_back() {
+        assert_eq!(branch_seeded("!!! ???", "phone", 0), "phone-0000");
+        assert_eq!(branch_seeded("", "phone", 0), "phone-0000");
+    }
+
+    #[test]
+    fn files_the_agent_could_not_be_handed_are_listed_after_the_prompt() {
+        assert_eq!(with_files("Look".to_owned(), &[]), "Look");
+        assert_eq!(
+            with_files(
+                "Look".to_owned(),
+                &[PathBuf::from("/tmp/a.png"), PathBuf::from("/tmp/b.pdf")]
+            ),
+            "Look\n\nAttached files:\n- /tmp/a.png\n- /tmp/b.pdf"
+        );
+    }
 }

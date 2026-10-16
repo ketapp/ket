@@ -352,13 +352,13 @@ impl Store {
 
 /// An advisory lock held for the lifetime of the guard.
 #[derive(Debug)]
-struct LockGuard {
+pub(crate) struct LockGuard {
     path: PathBuf,
 }
 
 impl LockGuard {
     /// Acquires the lock, waiting for a live holder and stealing a stale one.
-    fn acquire(path: PathBuf) -> Result<Self> {
+    pub(crate) fn acquire(path: PathBuf) -> Result<Self> {
         let started = Instant::now();
 
         loop {

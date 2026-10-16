@@ -425,6 +425,11 @@ impl Workspace {
             Ok(())
         })?;
 
+        // Its personal permission rules go with it: a project added again
+        // starts with none. A failure here is not a reason to keep the project.
+        if let Err(e) = crate::permissions::prune_project(id.as_str()) {
+            tracing::warn!(%e, "permissions: could not drop a removed project's rules");
+        }
         self.bus.publish(Event::ProjectRemoved { project_id: id });
         Ok(())
     }

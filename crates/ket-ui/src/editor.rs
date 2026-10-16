@@ -129,6 +129,7 @@ mod syntax;
 use gpui::{Pixels, px};
 
 pub(crate) use self::geometry::code_cell_width;
+pub(crate) use self::keys::NativeEdit;
 pub(crate) use self::state::EditorState;
 
 /// Width of the gutter where it carries line numbers: room for four digits

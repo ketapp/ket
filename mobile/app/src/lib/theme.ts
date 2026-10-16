@@ -258,9 +258,18 @@ export const AGENT_COLORS: Record<string, string> = {
   grok: t.text,
 };
 
+/** The program behind an agent's name: `opencode:ollama/<model>` is OpenCode,
+ * `ollama:<model>` is Ollama. What a mark or a colour is looked up by. */
+export function agentHarness(agent: string): string {
+  return agent.split(':', 1)[0].toLowerCase();
+}
+
 /** An agent's name as people write it — "OpenCode", not "Opencode" — as the
  * desktop's labels have it. An agent ket has no spelling for is capitalised. */
 export function agentLabel(agent: string): string {
+  // OpenCode driving a local model: the model, then the harness.
+  const local = /^opencode:ollama\/(.+)$/i.exec(agent.trim());
+  if (local) return `${local[1]} · OpenCode`;
   const known: Record<string, string> = {
     claude: 'Claude',
     codex: 'Codex',

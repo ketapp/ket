@@ -11,6 +11,14 @@ use crate::Shell;
 use super::syntax::SyntaxIndex;
 
 impl Shell {
+    /// Save the editor displayed in the focused pane.
+    pub(crate) fn save_active_editor(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(key) = self.active_editor_key() else {
+            return false;
+        };
+        self.save_editor(key.as_ref(), cx);
+        true
+    }
     /// Saves an existing file, or asks for an Untitled buffer's first path.
     pub(super) fn save_editor(&mut self, key: &str, cx: &mut Context<Self>) {
         let Some(state) = self.editors.get_mut(key) else {

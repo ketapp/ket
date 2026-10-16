@@ -68,6 +68,8 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = [
 ] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = [
     "std",
+    # The identifiers of a notification taken back — see `src/notify.rs`.
+    "NSArray",
     "NSBundle",
     "NSData",
     "NSError",
@@ -84,6 +86,18 @@ objc2-web-kit = { version = "0.3.2", default-features = false, features = [
     "objc2-app-kit",
     "WKWebView",
     "WKSnapshotConfiguration",
+] }
+# A notification when a worktree's agent stops to ask for something while
+# ket is not in front. See `src/notify.rs`. The one new crate; every call it
+# makes is a safe binding, and it keeps to the classes named.
+objc2-user-notifications = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "block2",
+    "UNNotificationContent",
+    "UNNotificationRequest",
+    "UNNotificationSound",
+    "UNNotificationTrigger",
+    "UNUserNotificationCenter",
 ] }
 # Voice input in the quick prompt: Apple's Speech framework, fed from the
 # microphone through AVAudioEngine. See `src/voice.rs`. `objc2-avf-audio` and

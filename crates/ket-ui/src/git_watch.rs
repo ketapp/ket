@@ -383,3 +383,103 @@ fn watch(id: WorktreeId, path: PathBuf, cx: &mut Context<Shell>) -> Watched {
         _signal: signal,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+    use std::process::Command;
+
+    use super::*;
+
+    fn git(dir: &Path, args: &[&str]) {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// A repository with one commit, removed when dropped.
+    struct Repo(std::path::PathBuf);
+
+    impl Repo {
+        fn new(tag: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "ket-git-watch-{tag}-{}-{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).unwrap();
+            git(&path, &["init", "--quiet", "--initial-branch=main"]);
+            git(&path, &["config", "user.email", "t@example.com"]);
+            git(&path, &["config", "user.name", "t"]);
+            std::fs::write(path.join("a.txt"), "one\n").unwrap();
+            git(&path, &["add", "."]);
+            git(&path, &["commit", "--quiet", "-m", "one"]);
+            Self(path)
+        }
+    }
+
+    impl Drop for Repo {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn build_output_dependencies_and_git_itself_do_not_wake_the_watcher() {
+        let root = Path::new("/repo");
+        for blind in [
+            "/repo/target/debug/ket",
+            "/repo/web/node_modules/x/index.js",
+            "/repo/.git/index",
+        ] {
+            assert!(status_blind(root, Path::new(blind)), "{blind}");
+        }
+        for seen in [
+            "/repo/src/main.rs",
+            "/repo/targets.md",
+            "/repo/docs/target.md",
+        ] {
+            assert!(!status_blind(root, Path::new(seen)), "{seen}");
+        }
+    }
+
+    #[test]
+    fn a_clean_tree_reads_as_clean_without_counting_lines() {
+        let repo = Repo::new("clean");
+        let row = read_row(&repo.0);
+        assert!(!row.missing);
+        assert!(!row.dirty);
+        assert_eq!(row.changes, 0);
+        assert_eq!(row.line_changes, None);
+        assert!(row.in_progress.is_none());
+    }
+
+    #[test]
+    fn a_dirty_tree_counts_its_changed_paths_and_lines() {
+        let repo = Repo::new("dirty");
+        std::fs::write(repo.0.join("a.txt"), "one\ntwo\nthree\n").unwrap();
+        std::fs::write(repo.0.join("b.txt"), "new\n").unwrap();
+        let row = read_row(&repo.0);
+        assert!(row.dirty);
+        assert_eq!(row.changes, 2);
+        let (added, removed) = row.line_changes.expect("lines counted for a dirty tree");
+        assert!(added >= 2, "{added}");
+        assert_eq!(removed, 0);
+    }
+
+    #[test]
+    fn a_tree_that_is_gone_reads_as_missing() {
+        let row = read_row(Path::new("/nonexistent/ket/worktree"));
+        assert!(row.missing);
+        assert!(!row.dirty);
+    }
+}

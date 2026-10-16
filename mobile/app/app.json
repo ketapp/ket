@@ -10,7 +10,7 @@
     "backgroundColor": "#0d0c0b",
     "ios": {
       "icon": "./assets/expo.icon",
-      "supportsTablet": false,
+      "supportsTablet": true,
       "bundleIdentifier": "dev.ketapp.ket",
       "buildNumber": "1",
       "config": {

@@ -17,6 +17,7 @@ import Svg, { Circle, Defs, LinearGradient, Path, Rect, Stop as GradientStop } f
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { CommandMenu } from '../../../components/Commands';
+import { KeyCommands } from '../../../components/KeyCommands';
 import { RiskBadge } from '../../../components/Risk';
 import { AgentMark, Bookmark, Branch, Check, ChevronDown, Send, Stop, TerminalGlyph } from '../../../components/icons';
 import { Bar, Button, Choice, Dot, IconButton, Prose, Screen, field } from '../../../components/ui';
@@ -602,7 +603,7 @@ export default function Session() {
             ))}
           </ScrollView>
         ) : null}
-        <View style={[styles.composer, { paddingBottom: rest }]}>
+        <KeyCommands title="Send" onSend={() => void send()} style={[styles.composer, { paddingBottom: rest }]}>
           <TextInput
             ref={input}
             value={message}
@@ -640,7 +641,7 @@ export default function Session() {
               <Send size={18} color={message.trim() ? t.onBrand : t.faint} weight={2.3} />
             </Pressable>
           )}
-        </View>
+        </KeyCommands>
         </KeyboardStickyView>
       </View>
     </Screen>

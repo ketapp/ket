@@ -562,9 +562,16 @@ const ICON_PX: u32 = 32;
 /// and the menu that asks for this is opened from a right-click. Warm it off
 /// the window's thread — see the shell's own startup — or the first opening of
 /// that menu pays for it.
+static INSTALLED_EDITORS: OnceLock<Vec<InstalledEditor>> = OnceLock::new();
+
+/// Editors already detected by a background warm-up, if it has finished.
+pub fn cached_installed_editors() -> Option<&'static [InstalledEditor]> {
+    INSTALLED_EDITORS.get().map(Vec::as_slice)
+}
+
+/// Detect and cache GUI editors found on the login shell's path.
 pub fn installed_editors() -> &'static [InstalledEditor] {
-    static CACHE: OnceLock<Vec<InstalledEditor>> = OnceLock::new();
-    CACHE.get_or_init(|| {
+    INSTALLED_EDITORS.get_or_init(|| {
         PROFILES
             .iter()
             .filter(|profile| profile.gui)

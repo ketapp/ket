@@ -32,6 +32,7 @@ use gpui::{
     AnyElement, Context, KeyDownEvent, Pixels, Point, Rgba, SharedString, Window, div, prelude::*,
     px, relative,
 };
+use ket_core::KetError;
 use ket_core::id::ProjectId;
 use ket_core::keybinding::Chord;
 use ket_core::storage::format_bytes;
@@ -40,11 +41,13 @@ use ket_core::workspace::Workspace;
 
 use crate::Shell;
 use crate::paint::paint;
+use crate::ui::banner::banner;
 use crate::ui::button::button;
 use crate::ui::chip::{caption, kbd};
 use crate::ui::dialog::{body, card, centered, footer, header};
 use crate::ui::icon::{Icon, sized_icon};
 use crate::ui::menu::{MenuEntry, MenuItem, MenuKey, OpenMenu};
+use crate::ui::toast::Tone;
 use form::FormKey;
 
 /// The badge colours a project can pick from, with the name the picker shows
@@ -232,9 +235,33 @@ pub(crate) struct RemoveConfirm {
     pub(crate) name: SharedString,
     /// How many ket-managed worktrees go with it.
     pub(crate) worktrees: usize,
+    /// Why the last press stopped short, when a worktree would have lost
+    /// uncommitted work. The next press removes anyway.
+    pub(crate) blocked: Option<SharedString>,
+    /// Why the last press failed for any other reason.
+    pub(crate) error: Option<SharedString>,
 }
 
 impl Shell {
+    /// Run a Project menu command for the project containing the current selection.
+    pub(crate) fn native_project_action(&mut self, action: ProjectAction, cx: &mut Context<Self>) {
+        let Some(selection) = self.selection else {
+            return;
+        };
+        let Some(node) = self.projects.get(selection.project) else {
+            return;
+        };
+        let id = node.id.clone();
+        match action {
+            ProjectAction::NewWorktree => self.open_new_worktree(selection.project, false, cx),
+            ProjectAction::Backlog => self.open_backlog(&id, cx),
+            ProjectAction::Settings => self.open_project_settings(&id, Field::Name, cx),
+            ProjectAction::ToggleDiscovered => self.toggle_discovered_worktrees(&id, cx),
+            ProjectAction::Remove => self.confirm_remove_project(&id),
+            ProjectAction::Storage | ProjectAction::Economy => {}
+        }
+        cx.notify();
+    }
     /// Flips whether a project shows worktrees ket did not create.
     ///
     /// Written straight through rather than via the dialog: it is a one-click
@@ -267,6 +294,8 @@ impl Shell {
             id: id.clone(),
             name: node.name.clone(),
             worktrees: node.worktrees.len(),
+            blocked: None,
+            error: None,
         });
     }
 
@@ -278,28 +307,72 @@ impl Shell {
     /// agent's afternoon. The project is only deregistered once every
     /// worktree is gone, so a refusal leaves a project with fewer worktrees
     /// rather than orphaned directories nothing knows how to clean up.
+    ///
+    /// A refusal keeps the dialog up and says which worktree stopped it — the
+    /// dialog closing on a note nobody could see read as Remove doing
+    /// nothing. The press after a refusal removes anyway, the way Delete
+    /// worktree's does.
     pub(crate) fn remove_project_confirmed(&mut self, cx: &mut Context<Self>) {
-        let Some(confirm) = self.confirm_remove.take() else {
+        let Some(confirm) = self.confirm_remove.as_mut() else {
             return;
         };
+        let force = confirm.blocked.take().is_some();
+        confirm.error = None;
+        let (id, name) = (confirm.id.clone(), confirm.name.clone());
 
-        let result = Workspace::open().and_then(|workspace| {
-            for worktree in workspace.worktrees(Some(&confirm.id))? {
-                workspace.remove_worktree(&worktree.id, false, true)?;
-            }
-            workspace.remove_project(&confirm.id, false)
-        });
-
-        match result {
-            Ok(()) => {
-                self.note = Some(format!("removed {}", confirm.name).into());
-                self.reload(cx);
-            }
+        let workspace = match Workspace::open() {
+            Ok(workspace) => workspace,
             Err(e) => {
-                self.note = Some(format!("could not remove {}: {e}", confirm.name).into());
-                self.reload(cx);
+                return self.remove_project_failed(format!("Could not remove {name}: {e}"), cx);
+            }
+        };
+        let worktrees = match workspace.worktrees(Some(&id)) {
+            Ok(worktrees) => worktrees,
+            Err(e) => {
+                return self.remove_project_failed(format!("Could not remove {name}: {e}"), cx);
+            }
+        };
+        for worktree in worktrees {
+            match workspace.remove_worktree(&worktree.id, force, true) {
+                Ok(_) => {}
+                // Work that would be lost: say whose, and offer to go on.
+                Err(KetError::Conflict(_)) if !force => {
+                    if let Some(confirm) = self.confirm_remove.as_mut() {
+                        confirm.blocked = Some(
+                            format!(
+                                "{} has uncommitted changes. Remove anyway deletes them.",
+                                worktree.branch
+                            )
+                            .into(),
+                        );
+                    }
+                    self.reload(cx);
+                    return;
+                }
+                Err(e) => {
+                    return self.remove_project_failed(
+                        format!("Could not remove {}: {e}", worktree.branch),
+                        cx,
+                    );
+                }
             }
         }
+        match workspace.remove_project(&id, false) {
+            Ok(()) => {
+                self.confirm_remove = None;
+                self.toast(Tone::Success, format!("Removed {name}"), cx);
+                self.reload(cx);
+            }
+            Err(e) => self.remove_project_failed(format!("Could not remove {name}: {e}"), cx),
+        }
+    }
+
+    /// Keeps the remove dialog up with `message` in it.
+    fn remove_project_failed(&mut self, message: String, cx: &mut Context<Self>) {
+        if let Some(confirm) = self.confirm_remove.as_mut() {
+            confirm.error = Some(message.into());
+        }
+        self.reload(cx);
     }
 
     // ---- keys -----------------------------------------------------------------
@@ -517,6 +590,18 @@ impl Shell {
                 card("confirm-remove", px(440.0), t)
                     .child(header(format!("Remove {}?", confirm.name), t))
                     .child(body(explanation, t))
+                    .children(
+                        confirm
+                            .blocked
+                            .clone()
+                            .map(|why| banner("confirm-remove-blocked", Tone::Warning, why, t)),
+                    )
+                    .children(
+                        confirm
+                            .error
+                            .clone()
+                            .map(|why| banner("confirm-remove-error", Tone::Error, why, t)),
+                    )
                     .child(
                         footer()
                             .child(
@@ -529,14 +614,23 @@ impl Shell {
                                     })),
                             )
                             .child(
-                                button("confirm-remove-go", "Remove")
-                                    .danger()
-                                    .leading(Icon::Trash)
-                                    .render(t)
-                                    .on_click(cx.listener(|this, _, _, cx| {
+                                button(
+                                    "confirm-remove-go",
+                                    if confirm.blocked.is_some() {
+                                        "Remove anyway"
+                                    } else {
+                                        "Remove"
+                                    },
+                                )
+                                .danger()
+                                .leading(Icon::Trash)
+                                .render(t)
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
                                         this.remove_project_confirmed(cx);
                                         cx.notify();
-                                    })),
+                                    },
+                                )),
                             ),
                     ),
             )

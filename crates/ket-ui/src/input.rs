@@ -957,6 +957,69 @@ fn laid_out(input: &Entity<TextInput>, style: &Style<'_>, cx: &App) -> TextEleme
 /// cannot drift apart in what a mouse does to them.
 fn wired(element: Stateful<Div>, input: &Entity<TextInput>) -> Stateful<Div> {
     element
+        .on_action({
+            let input = input.clone();
+            move |_: &crate::EditUndo, _, cx| {
+                input.update(cx, |input, cx| {
+                    input.buffer.undo();
+                    cx.notify();
+                });
+                cx.stop_propagation();
+            }
+        })
+        .on_action({
+            let input = input.clone();
+            move |_: &crate::EditRedo, _, cx| {
+                input.update(cx, |input, cx| {
+                    input.buffer.redo();
+                    cx.notify();
+                });
+                cx.stop_propagation();
+            }
+        })
+        .on_action({
+            let input = input.clone();
+            move |_: &crate::EditCut, _, cx| {
+                input.update(cx, |input, cx| {
+                    if input.buffer.has_selection() && !input.masked {
+                        input.copy(cx);
+                        input.buffer.backspace();
+                        cx.notify();
+                    }
+                });
+                cx.stop_propagation();
+            }
+        })
+        .on_action({
+            let input = input.clone();
+            move |_: &crate::EditCopy, _, cx| {
+                input.update(cx, |input, cx| input.copy(cx));
+                cx.stop_propagation();
+            }
+        })
+        .on_action({
+            let input = input.clone();
+            move |_: &crate::EditPaste, _, cx| {
+                let pasted = cx.read_from_clipboard().and_then(|item| item.text());
+                if let Some(text) = pasted {
+                    input.update(cx, |input, cx| {
+                        input.buffer.insert(&flatten(&text));
+                        cx.notify();
+                    });
+                }
+                cx.stop_propagation();
+            }
+        })
+        .on_action({
+            let input = input.clone();
+            move |_: &crate::EditSelectAll, _, cx| {
+                input.update(cx, |input, cx| {
+                    input.select_all();
+                    cx.notify();
+                });
+                cx.stop_propagation();
+            }
+        })
         // Click to place the caret, drag to select — the two things the old
         // field could not do at all, because nothing knew where a character
         // was.

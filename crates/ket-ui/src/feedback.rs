@@ -128,7 +128,7 @@ impl Shell {
     // ---- opening ---------------------------------------------------------------
 
     /// Opens the popover, or closes it when it is up.
-    fn toggle_feedback(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn toggle_feedback(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.feedback.open {
             self.close_feedback(window);
             return;
@@ -364,6 +364,36 @@ impl Shell {
             WIDTH,
             window,
             &self.theme,
+        )
+    }
+
+    /// The same feedback panel centred when the status bar has no anchor.
+    pub(crate) fn feedback_overlay(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if self.status_bar_open || !self.feedback.open || self.modal_open() {
+            return None;
+        }
+        let panel = self.feedback_panel(window, cx);
+        let t = &self.theme;
+        let close = crate::ui::dialog::footer().child(
+            button("feedback-overlay-close", "Close")
+                .ghost()
+                .render(t)
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.close_feedback(window);
+                    cx.notify();
+                })),
+        );
+        Some(
+            crate::ui::dialog::centered(
+                crate::ui::dialog::card("feedback-overlay", WIDTH, t)
+                    .child(panel)
+                    .child(close),
+            )
+            .into_any_element(),
         )
     }
 

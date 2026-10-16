@@ -974,3 +974,321 @@ fn rate_limited(sentence: &str, wait: Duration) -> Response<Full<Bytes>> {
         .insert(header::RETRY_AFTER, HeaderValue::from(seconds));
     response
 }
+
+#[cfg(test)]
+mod tests {
+    //! The checks a report passes, the email it becomes, and the limits it
+    //! counts against. `tests/serve.rs` runs the same contract over HTTP.
+
+    use std::net::Ipv4Addr;
+
+    use super::*;
+
+    const INSTALL: &str = "0123456789abcdef0123456789abcdef";
+
+    fn submission(message: &str) -> Submission {
+        Submission {
+            kind: Some("bug".to_owned()),
+            message: Some(message.to_owned()),
+            reply_to: Some("someone@example.com".to_owned()),
+            app_version: Some("0.1.0".to_owned()),
+            os: Some("macOS 27.0".to_owned()),
+            install: Some(INSTALL.to_owned()),
+        }
+    }
+
+    fn refused(submission: Submission) -> &'static str {
+        match Report::check(submission) {
+            Ok(_) => panic!("should have been refused"),
+            Err(sentence) => sentence,
+        }
+    }
+
+    #[test]
+    fn a_whole_report_passes_with_its_fields_tidied() {
+        let mut sent = submission("  It crashed.\r\nTwice.\u{1b}[31m  ");
+        sent.app_version = Some(" 0.1.0\u{7} ".to_owned());
+        let report = Report::check(sent).unwrap();
+        assert_eq!(report.message, "It crashed.\nTwice.\u{FFFD}[31m");
+        assert_eq!(report.app_version, "0.1.0\u{FFFD}");
+        assert_eq!(report.os.as_deref(), Some("macOS 27.0"));
+        assert_eq!(
+            report.reply_to.as_ref().map(|a| a.to_string()).as_deref(),
+            Some("someone@example.com")
+        );
+        assert_eq!(
+            report.install_key(),
+            0x0123_4567_89ab_cdef_0123_4567_89ab_cdef
+        );
+    }
+
+    #[test]
+    fn each_field_out_of_contract_gets_its_own_sentence() {
+        let mut kind = submission("x");
+        kind.kind = Some("rant".to_owned());
+        assert!(refused(kind).contains("feedback, bug or idea"));
+
+        assert_eq!(refused(submission("   ")), "The message is empty.");
+        assert!(refused(submission(&"x".repeat(MAX_MESSAGE + 1))).contains("10,000"));
+
+        for bad in [
+            "not-an-address",
+            "a@b@c",
+            "a b@c.d",
+            "@c.d",
+            "a@",
+            "a@b.c\r\nBcc: x",
+        ] {
+            let mut reply = submission("x");
+            reply.reply_to = Some(bad.to_owned());
+            assert!(
+                refused(reply).contains("reply address"),
+                "{bad:?} should not be a reply address"
+            );
+        }
+        let mut long_reply = submission("x");
+        long_reply.reply_to = Some(format!("{}@example.com", "a".repeat(250)));
+        assert!(refused(long_reply).contains("254"));
+
+        let mut no_version = submission("x");
+        no_version.app_version = None;
+        assert!(refused(no_version).contains("which version"));
+        let mut long_version = submission("x");
+        long_version.app_version = Some("9".repeat(65));
+        assert!(refused(long_version).contains("64"));
+
+        let mut long_os = submission("x");
+        long_os.os = Some("m".repeat(129));
+        assert!(refused(long_os).contains("128"));
+
+        for bad in [
+            "",
+            "0123",
+            "0123456789ABCDEF0123456789ABCDEF",
+            &"g".repeat(32),
+        ] {
+            let mut install = submission("x");
+            install.install = Some(bad.to_owned());
+            assert!(refused(install).contains("32 lowercase"), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn optional_fields_may_be_absent_or_blank() {
+        let mut sent = submission("Fine");
+        sent.reply_to = Some("   ".to_owned());
+        sent.os = None;
+        let report = Report::check(sent).unwrap();
+        assert!(report.reply_to.is_none());
+        assert!(report.os.is_none());
+    }
+
+    #[test]
+    fn the_email_carries_a_short_subject_and_a_footer_after_the_signature_mark() {
+        let long_first_line = "a".repeat(80);
+        let mut sent = submission(&format!("{long_first_line}\nsecond line"));
+        sent.os = None;
+        let email = Report::check(sent)
+            .unwrap()
+            .email(UNIX_EPOCH + Duration::from_secs(86_400));
+        assert_eq!(
+            email.subject,
+            format!("[ket] Bug: {}…", "a".repeat(SUBJECT_CHARS))
+        );
+        assert!(
+            email
+                .body
+                .starts_with(&format!("{long_first_line}\nsecond line\n\n-- \n"))
+        );
+        assert!(email.body.contains("Kind: Bug\n"));
+        assert!(email.body.contains("App version: 0.1.0\n"));
+        assert!(email.body.contains("OS: not shared\n"));
+        assert!(email.body.contains(&format!("Install: {INSTALL}\n")));
+        assert!(email.body.ends_with("Received: 1970-01-02T00:00:00Z\n"));
+
+        let preview = email.preview();
+        assert!(preview.starts_with("Subject: [ket] Bug: "));
+        assert!(preview.contains("\nReply-To: someone@example.com\n"));
+    }
+
+    #[test]
+    fn an_empty_app_version_reads_as_not_given() {
+        let mut sent = submission("Short");
+        sent.app_version = Some("  ".to_owned());
+        let email = Report::check(sent).unwrap().email(UNIX_EPOCH);
+        assert_eq!(email.subject, "[ket] Bug: Short");
+        assert!(email.body.contains("App version: not given\n"));
+    }
+
+    #[test]
+    fn times_are_written_as_rfc_3339_in_utc() {
+        assert_eq!(rfc3339(UNIX_EPOCH), "1970-01-01T00:00:00Z");
+        // A leap day, and the turn of a century.
+        assert_eq!(
+            rfc3339(UNIX_EPOCH + Duration::from_secs(951_782_400 + 3_723)),
+            "2000-02-29T01:02:03Z"
+        );
+        assert_eq!(
+            rfc3339(UNIX_EPOCH + Duration::from_secs(1_791_936_000)),
+            "2026-10-14T00:00:00Z"
+        );
+    }
+
+    #[test]
+    fn a_server_url_is_shown_without_its_credentials() {
+        assert_eq!(
+            without_credentials("smtps://user:pa%40ss@smtp.example.com:465"),
+            "smtps://smtp.example.com:465"
+        );
+        assert_eq!(
+            without_credentials("smtp://u:p@mail.example.com:587/helo.example.com?tls=required"),
+            "smtp://mail.example.com:587 (tls=required)"
+        );
+        assert_eq!(
+            without_credentials("mail.example.com"),
+            "smtp://mail.example.com"
+        );
+    }
+
+    #[test]
+    fn message_ids_are_unique_and_under_the_from_domain() {
+        let one = message_id("example.com");
+        let two = message_id("example.com");
+        assert_ne!(one, two);
+        assert!(one.starts_with("<ket-feedback.") && one.ends_with("@example.com>"));
+    }
+
+    #[test]
+    fn a_mailer_refuses_a_bad_address_or_server_before_dialling() {
+        assert!(
+            Mailer::new("not an address", "ket@example.com", "smtp://localhost")
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("KET_FEEDBACK_TO")
+        );
+        assert!(
+            Mailer::new("to@example.com", "nope", "smtp://localhost")
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("KET_FEEDBACK_FROM")
+        );
+        assert!(Mailer::new("to@example.com", "ket@example.com", "ftp://x").is_err());
+    }
+
+    #[test]
+    fn the_summary_names_the_delivery_and_never_the_password() {
+        let log = Config {
+            delivery: Delivery::Log,
+            trust_proxy: false,
+        };
+        assert_eq!(
+            log.summary(),
+            "log mode (KET_FEEDBACK_TO is unset): reports are printed, not sent; \
+             client address from the socket"
+        );
+
+        let mailer = Mailer::new(
+            "to@example.com",
+            "ket <from@example.com>",
+            "smtps://user:secret@smtp.example.com:465",
+        )
+        .unwrap();
+        let smtp = Config {
+            delivery: Delivery::Smtp(Box::new(mailer)),
+            trust_proxy: true,
+        };
+        let summary = smtp.summary();
+        assert!(
+            summary.contains("emailing reports to to@example.com"),
+            "{summary}"
+        );
+        assert!(
+            summary.contains("smtps://smtp.example.com:465"),
+            "{summary}"
+        );
+        assert!(summary.contains("X-Forwarded-For"), "{summary}");
+        assert!(!summary.contains("secret"), "{summary}");
+    }
+
+    // ---- limits ----------------------------------------------------------------
+
+    fn v4(last: u8) -> IpAddr {
+        IpAddr::V4(Ipv4Addr::new(192, 0, 2, last))
+    }
+
+    #[test]
+    fn an_install_gets_one_report_a_week() {
+        let mut limits = Limits::default();
+        let now = Instant::now();
+        limits.reserve(1, v4(1), now).ok().unwrap();
+        match limits.reserve(1, v4(2), now + Duration::from_secs(60)) {
+            Err(Refusal::Install(wait)) => {
+                assert_eq!(wait, INSTALL_INTERVAL - Duration::from_secs(60));
+            }
+            _ => panic!("a second report in the week is refused"),
+        }
+        assert!(limits.reserve(1, v4(3), now + INSTALL_INTERVAL).is_ok());
+    }
+
+    #[test]
+    fn an_address_gets_ten_reports_a_day_then_a_new_window() {
+        let mut limits = Limits::default();
+        let now = Instant::now();
+        for install in 0..u128::from(ADDRESS_REPORTS) {
+            limits.reserve(install, v4(1), now).ok().unwrap();
+        }
+        assert!(matches!(
+            limits.reserve(99, v4(1), now + Duration::from_secs(1)),
+            Err(Refusal::Address(_))
+        ));
+        // Another address is not affected, and the next day starts over.
+        assert!(limits.reserve(100, v4(2), now).is_ok());
+        assert!(limits.reserve(101, v4(1), now + ADDRESS_WINDOW).is_ok());
+        assert_eq!(limits.addresses[&v4(1)].count, 1);
+    }
+
+    #[test]
+    fn a_report_that_was_not_sent_hands_its_place_back() {
+        let mut limits = Limits::default();
+        let now = Instant::now();
+        let reservation = limits.reserve(7, v4(1), now).ok().unwrap();
+        limits.release(&reservation);
+        assert!(limits.installs.is_empty());
+        assert!(limits.addresses.is_empty());
+        // So the same install can try again at once.
+        assert!(limits.reserve(7, v4(1), now).is_ok());
+    }
+
+    #[test]
+    fn handing_back_an_old_reservation_leaves_a_newer_one_alone() {
+        let mut limits = Limits::default();
+        let now = Instant::now();
+        let old = limits.reserve(7, v4(1), now).ok().unwrap();
+        let later = now + INSTALL_INTERVAL;
+        limits.reserve(7, v4(1), later).ok().unwrap();
+        limits.release(&old);
+        assert_eq!(limits.installs.get(&7), Some(&later));
+    }
+
+    #[test]
+    fn ipv6_addresses_count_by_their_slash_64_and_mapped_v4_as_v4() {
+        let one: IpAddr = "2001:db8:1:2:aaaa::1".parse().unwrap();
+        let two: IpAddr = "2001:db8:1:2:bbbb::9".parse().unwrap();
+        let other: IpAddr = "2001:db8:1:3::1".parse().unwrap();
+        assert_eq!(address_key(one), address_key(two));
+        assert_ne!(address_key(one), address_key(other));
+        let mapped: IpAddr = "::ffff:192.0.2.7".parse().unwrap();
+        assert_eq!(address_key(mapped), v4(7));
+    }
+
+    #[test]
+    fn a_wait_is_rounded_up_to_whole_seconds() {
+        let response = rate_limited("Slow down.", Duration::from_millis(1_500));
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.headers()[header::RETRY_AFTER], "2");
+        let exact = rate_limited("Slow down.", Duration::from_secs(3));
+        assert_eq!(exact.headers()[header::RETRY_AFTER], "3");
+    }
+}

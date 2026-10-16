@@ -13,7 +13,7 @@
 
 use std::collections::HashMap;
 
-use gpui::Context;
+use gpui::{AnyElement, Context, KeyDownEvent, div, prelude::*, px};
 use ket_core::id::{ProjectId, WorktreeId};
 use ket_core::storage::Footprint;
 use ket_core::workspace::Workspace;
@@ -21,6 +21,70 @@ use ket_core::workspace::Workspace;
 use crate::Shell;
 
 impl Shell {
+    /// A persistent readout of measured sizes for one project.
+    pub(crate) fn storage_dialog_view(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let id = self.storage_dialog.as_ref()?;
+        let project = self.projects.iter().find(|project| &project.id == id)?;
+        let t = &self.theme;
+        let rows = project.worktrees.iter().map(|worktree| {
+            let size = self.footprint(&worktree.id);
+            let text = match size {
+                Some(size) => format!(
+                    "{}: {} total · {} build output",
+                    worktree.label(),
+                    ket_core::storage::format_bytes(size.total),
+                    ket_core::storage::format_bytes(size.build)
+                ),
+                None => format!("{}: measuring…", worktree.label()),
+            };
+            crate::ui::dialog::body(text, t)
+        });
+        let content = div()
+            .id("project-storage-rows")
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .max_h(px(360.0))
+            .overflow_y_scroll()
+            .children(rows);
+        let close = crate::ui::dialog::footer().child(
+            crate::ui::button::button("storage-close", "Close")
+                .primary()
+                .render(t)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.storage_dialog = None;
+                    cx.notify();
+                })),
+        );
+        Some(
+            crate::ui::dialog::centered(
+                crate::ui::dialog::card("project-storage", px(460.0), t)
+                    .child(crate::ui::dialog::header(
+                        format!("{} Storage", project.name),
+                        t,
+                    ))
+                    .child(content)
+                    .child(close),
+            )
+            .into_any_element(),
+        )
+    }
+
+    /// Keep keyboard events in the storage dialog until it closes.
+    pub(crate) fn storage_dialog_key(
+        &mut self,
+        event: &KeyDownEvent,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.storage_dialog.is_none() {
+            return false;
+        }
+        if event.keystroke.key == "escape" {
+            self.storage_dialog = None;
+            cx.notify();
+        }
+        true
+    }
     /// What a worktree costs, when that has been measured.
     pub(crate) fn footprint(&self, id: &WorktreeId) -> Option<Footprint> {
         self.sizes.get(id).copied()

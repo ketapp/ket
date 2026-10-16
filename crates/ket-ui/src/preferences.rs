@@ -96,6 +96,8 @@ pub(crate) enum Section {
     Economy,
     /// Saved prompt snippets.
     Snippets,
+    /// What agents may run without asking.
+    Permissions,
     /// Theme, fonts, density.
     Appearance,
     /// The tweak editor.
@@ -115,8 +117,9 @@ pub(crate) enum Section {
 impl Section {
     /// Every section, in the order the rail shows them: [`Section::GROUPS`]
     /// run together, which is the order the arrow keys walk.
-    pub(crate) const ALL: [Section; 11] = [
+    pub(crate) const ALL: [Section; 12] = [
         Section::Agents,
+        Section::Permissions,
         Section::Economy,
         Section::Snippets,
         Section::Merge,
@@ -137,6 +140,7 @@ impl Section {
             "Agents",
             &[
                 Section::Agents,
+                Section::Permissions,
                 Section::Economy,
                 Section::Snippets,
                 Section::Merge,
@@ -169,6 +173,7 @@ impl Section {
             Section::Agents => "Agents",
             Section::Economy => "Economy",
             Section::Snippets => "Snippets",
+            Section::Permissions => "Permissions",
             Section::Keybindings => "Keybindings",
         }
     }
@@ -186,6 +191,7 @@ impl Section {
             Section::Agents => Icon::Orbit,
             Section::Economy => Icon::Gauge,
             Section::Snippets => Icon::MessageBookmark,
+            Section::Permissions => Icon::ShieldCheck,
             Section::Keybindings => Icon::Command,
         }
     }
@@ -199,6 +205,10 @@ impl Section {
                  priced against your own with Economy off."
             }
             Section::Snippets => "Prompts you keep, ready to send to any worktree\u{2019}s agent.",
+            Section::Permissions => {
+                "What agents may run without asking, what they must ask about, and what they \
+                 may never do."
+            }
             Section::Merge => {
                 "What the sidebar\u{2019}s merge button commits, and what it leaves behind."
             }
@@ -229,6 +239,7 @@ impl Section {
             | Section::Terminal
             | Section::Merge
             | Section::GitHub
+            | Section::Permissions
             | Section::Keybindings => Frame::Rows,
         }
     }
@@ -241,6 +252,7 @@ impl Section {
             Section::Agents => t.quota.hot,
             Section::Economy => t.diff.added,
             Section::Snippets => t.diff.modified,
+            Section::Permissions => t.status.attention,
             Section::Merge => t.status.merging,
             Section::Appearance => t.terminal.ansi.magenta,
             Section::Editor => t.terminal.ansi.cyan,
@@ -304,6 +316,9 @@ pub(crate) struct Preferences {
     pub(crate) agents: Catalogue,
     /// The provider whose launch details are expanded.
     pub(crate) expanded_agent: Option<String>,
+    /// Which half of the Agents pane shows: cloud agents or the models on
+    /// this Mac.
+    agents_tab: AgentsTab,
     /// Whether the OpenCode Go account card is expanded.
     usage_expanded: bool,
     /// The OpenCode Go credentials, as they are being edited.
@@ -360,6 +375,8 @@ pub(crate) struct Preferences {
     /// The Phones pane: the pairing code, the paired phones, and the clock
     /// that keeps both current. Dropped with the view, which stops it.
     pub(crate) phones: crate::phones::PhonesPane,
+    /// Settings → Agents' Local models section — see `crate::local_models`.
+    pub(crate) local_models: crate::local_models::LocalModelsPane,
     /// The Snippets pane: what is saved, and the card being edited.
     pub(crate) snippets: crate::snippets::SnippetsPane,
     /// General's Remove from your agents, as far as it has got.
@@ -767,6 +784,7 @@ impl Shell {
             config,
             agents,
             expanded_agent: None,
+            agents_tab: AgentsTab::Cloud,
             usage_expanded: false,
             usage,
             jev_key,
@@ -784,10 +802,12 @@ impl Shell {
             worktree_dir_menu: None,
             update_menu: None,
             phones: crate::phones::PhonesPane::default(),
+            local_models: Default::default(),
             snippets: crate::snippets::SnippetsPane::load(),
             unhook: Unhook::Idle,
         });
         self.phones_shown(cx);
+        self.local_models_shown(cx);
     }
 
     /// Saves an Agents setting, keeping the modal open with an actionable error.
@@ -873,7 +893,8 @@ impl Shell {
         let update = view.update_menu.take().is_some();
         let ui_font = view.ui_font_menu.take().is_some();
         let code_font = view.code_font_menu.take().is_some();
-        theme || dir || update || ui_font || code_font
+        let local_model = view.local_models.menu.take().is_some();
+        theme || dir || update || ui_font || code_font || local_model
     }
 
     /// Opens or closes the Worktree directory dropdown.
@@ -1546,7 +1567,7 @@ impl Shell {
     }
 
     /// Changes whether one provider is offered by selectors and launch resolution.
-    fn set_agent_enabled(&mut self, name: &str, enabled: bool) {
+    pub(crate) fn set_agent_enabled(&mut self, name: &str, enabled: bool) {
         let Some(view) = self.preferences.as_mut() else {
             return;
         };
@@ -1574,7 +1595,7 @@ impl Shell {
     }
 
     /// Changes the fallback used when a project has no preferred agent.
-    fn set_default_agent(&mut self, default: DefaultAgent) {
+    pub(crate) fn set_default_agent(&mut self, default: DefaultAgent) {
         let Some(view) = self.preferences.as_mut() else {
             return;
         };
@@ -2066,6 +2087,7 @@ impl Shell {
                     };
                 }
                 self.phones_shown(cx);
+                self.local_models_shown(cx);
             }
             // Everything else is swallowed. A modal takes every key it is
             // given, so a stray chord cannot drive the shell behind it. The
@@ -2321,6 +2343,7 @@ impl Shell {
                             Section::Agents
                             | Section::Economy
                             | Section::Snippets
+                            | Section::Permissions
                             | Section::General
                             | Section::Appearance
                             | Section::Editor
@@ -2358,6 +2381,7 @@ impl Shell {
             Section::GitHub => self.github_settings(t, cx),
             Section::Appearance => self.appearance_settings(t, window, cx),
             Section::General => self.general_settings(t, cx),
+            Section::Permissions => self.permission_settings(t, cx),
             section => rows(section, t),
         }
     }
@@ -2643,6 +2667,7 @@ impl Shell {
         // A dropdown belongs to the pane it was opened in.
         self.close_preference_menus();
         self.phones_shown(cx);
+        self.local_models_shown(cx);
     }
 
     /// Empties the filter. Returns whether there was anything in it, so
@@ -2897,7 +2922,6 @@ impl Shell {
         let default = &view.config.agent.default;
         let preset = view.config.agent.permissions.preset();
         let entries = view.agents.entries();
-        let installed = entries.iter().filter(|entry| entry.installed).count();
         let default_group = button_group("agent-default")
                 .child(
                     segment("agent-default-auto", "Auto")
@@ -2963,7 +2987,9 @@ impl Shell {
             // Hand-edited permissions are neither answer, and the group
             // shows neither as selected while this is beside it.
             .children((preset == PermissionPreset::Custom).then(|| tag("Custom", t)));
-        let mut content = vec![
+        // Global, so they head the Cloud tab; a local agent is made the
+        // default on its own row.
+        let globals = vec![
             together(
                 "Default Agent Used when neither the worktree nor its project names an agent. Auto No agent blank terminal",
                 [
@@ -2988,36 +3014,75 @@ impl Shell {
                 ],
             ),
             Entry::layout(div().h(px(18.0))),
-            Entry::setting(
-                "Agents detected installed refresh",
-                div()
-                    .flex()
-                    .items_center()
-                    .child(
-                        div()
-                            .text_size(LABEL)
-                            .text_color(paint(t.text.primary))
-                            .child("Agents"),
-                    )
-                    .child(
-                        div()
-                            .ml(px(7.0))
-                            .child(tag(format!("{installed} detected"), t)),
-                    )
-                    .child(div().flex_grow())
-                    .child(
-                        button("refresh-agents", "Refresh")
-                            .ghost()
-                            .leading(Icon::Refresh)
-                            .render(t)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.refresh_agents();
-                                cx.notify();
-                            })),
-                    ),
-            ),
         ];
 
+        // Drawn before the cards, which hold the context for the rest of
+        // the pane.
+        let local_models = self.local_models_entries(t, cx);
+        // A search looks through both tabs, so it shows both and no tabs.
+        let searching = !view.search.read(cx).text().trim().is_empty();
+        let tab = view.agents_tab;
+        let mut content = Vec::new();
+        if !searching {
+            let local = entries
+                .iter()
+                .filter(|entry| ket_core::local_models::model_tag(&entry.name).is_some())
+                .count();
+            let cloud = entries
+                .iter()
+                .filter(|entry| {
+                    entry.installed && ket_core::local_models::model_tag(&entry.name).is_none()
+                })
+                .count();
+            content.push(Entry::layout(
+                div().flex().child(
+                    button_group("agents-tab")
+                        .child(
+                            segment("agents-tab-cloud", "Cloud")
+                                .glyph(Icon::Cloud)
+                                .count(cloud.to_string())
+                                .selected(tab == AgentsTab::Cloud)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.show_agents_tab(AgentsTab::Cloud);
+                                    cx.notify();
+                                })),
+                        )
+                        .child(
+                            match tab {
+                                AgentsTab::Local => segment("agents-tab-local", "On this Mac")
+                                    .leading(Icon::Laptop, paint(t.status.running)),
+                                AgentsTab::Cloud => {
+                                    segment("agents-tab-local", "On this Mac").glyph(Icon::Laptop)
+                                }
+                            }
+                            .count(local.to_string())
+                            .selected(tab == AgentsTab::Local)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.show_agents_tab(AgentsTab::Local);
+                                cx.notify();
+                            })),
+                        )
+                        .render(t),
+                ),
+            ));
+            content.push(Entry::layout(div().h(px(14.0))));
+            if tab == AgentsTab::Local {
+                content.extend(local_models);
+                return content;
+            }
+        }
+        content.extend(globals);
+        // For someone who has just installed an agent, or edited the alias
+        // that runs one. Made before the cards, which hold the context.
+        let check_again = button("refresh-agents", "Check again")
+            .ghost()
+            .small()
+            .leading(Icon::Refresh)
+            .render(t)
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.refresh_agents();
+                cx.notify();
+            }));
         let mut card = |index: usize, entry: &ket_core::agents::AgentEntry| {
             let name = entry.name.clone();
             let expanded = view.expanded_agent.as_deref() == Some(&name);
@@ -3073,10 +3138,14 @@ impl Shell {
             );
             Entry::setting(words, card)
         };
-        let (ollama_entries, other_entries): (Vec<_>, Vec<_>) = entries
+        // Local agents are drawn on the On this Mac tab, not as cards. An
+        // `ollama:` agent written into the config by hand is a card like any
+        // other configured agent.
+        let other_entries: Vec<_> = entries
             .iter()
             .enumerate()
-            .partition(|(_, entry)| entry.name.starts_with("ollama:"));
+            .filter(|(_, entry)| ket_core::local_models::model_tag(&entry.name).is_none())
+            .collect();
         content.extend(
             other_entries
                 .iter()
@@ -3087,61 +3156,6 @@ impl Shell {
                 .filter(|(_, entry)| entry.installed || expanded_is(view, &entry.name))
                 .map(|(index, entry)| card(*index, entry)),
         );
-
-        // Local models are shown as their own group — contiguous already,
-        // since `entries` sorts by name and every one is spelled
-        // `ollama:<tag>` — with messaging for the two states a missing group
-        // can't tell apart on its own: not installed at all (handled by the
-        // "Available to install" footer below, same as any other agent) vs
-        // installed but with nothing to show right now.
-        match ket_core::ollama::status(&ShellProber) {
-            ket_core::ollama::Status::NotInstalled => {}
-            ket_core::ollama::Status::NotRunning => {
-                content.push(Entry::layout(div().h(px(12.0))));
-                content.push(Entry::layout(
-                    div()
-                        .text_size(LABEL)
-                        .text_color(paint(t.text.dim))
-                        .child("Local models"),
-                ));
-                content.push(Entry::layout(caption(
-                    "Ollama is installed but not running. Start it, then Refresh.",
-                    t,
-                )));
-            }
-            ket_core::ollama::Status::Models(models) => {
-                content.push(Entry::layout(div().h(px(12.0))));
-                content.push(Entry::layout(
-                    div()
-                        .flex()
-                        .items_center()
-                        .child(
-                            div()
-                                .text_size(LABEL)
-                                .text_color(paint(t.text.dim))
-                                .child("Local models"),
-                        )
-                        .child(
-                            div()
-                                .ml(px(7.0))
-                                .child(tag(format!("{} pulled", models.len()), t)),
-                        ),
-                ));
-                if models.is_empty() {
-                    content.push(Entry::layout(caption(
-                        "No models pulled yet — run `ollama pull qwen2.5-coder` to add one.",
-                        t,
-                    )));
-                } else {
-                    content.extend(
-                        ollama_entries
-                            .iter()
-                            .filter(|(_, entry)| entry.installed || expanded_is(view, &entry.name))
-                            .map(|(index, entry)| card(*index, entry)),
-                    );
-                }
-            }
-        }
 
         let missing = entries
             .iter()
@@ -3159,7 +3173,9 @@ impl Shell {
                             .text_color(paint(t.text.dim))
                             .child("Available to install"),
                     )
-                    .child(div().ml(px(7.0)).child(tag(format!("{missing} agents"), t))),
+                    .child(div().ml(px(7.0)).child(tag(format!("{missing} agents"), t)))
+                    .child(div().flex_grow())
+                    .child(check_again),
             ));
             content.extend(
                 entries
@@ -3177,7 +3193,20 @@ impl Shell {
             )
             .mt(px(10.0)),
         ));
+        if searching {
+            content.extend(local_models);
+        }
         content
+    }
+
+    /// Switches the Agents pane between its two tabs. The models on this
+    /// Mac are asked for again on the way in; they change outside ket.
+    fn show_agents_tab(&mut self, tab: AgentsTab) {
+        let Some(view) = self.preferences.as_mut() else {
+            return;
+        };
+        view.agents_tab = tab;
+        view.local_models.menu = None;
     }
 
     /// The OpenCode Go credentials, in their own card.
@@ -3506,6 +3535,7 @@ impl Shell {
         let writable = view.writable;
         let open_terminal = view.config.general.open_terminal;
         let confirm_delete = view.config.general.confirm_delete;
+        let notify_waiting = view.config.general.notify_waiting;
         let check = view.config.updates.check;
         let dir = view
             .config
@@ -3615,6 +3645,24 @@ impl Shell {
                                 this.save_setting(|config| {
                                     config.general.confirm_delete = !confirm_delete;
                                 });
+                                cx.notify();
+                            }))
+                    })
+                    .into_any_element(),
+                t,
+            ),
+            setting(
+                "Notify when an agent is waiting",
+                "A macOS notification when an agent stops on a permission prompt while ket is in the background.",
+                switch("general-notify-waiting", notify_waiting, t)
+                    .when(writable, |el| {
+                        el.cursor_pointer()
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.save_setting(|config| {
+                                    config.general.notify_waiting = !notify_waiting;
+                                });
+                                // Turned on: macOS asks the first time.
+                                crate::notify::prepare();
                                 cx.notify();
                             }))
                     })
@@ -4614,7 +4662,7 @@ fn unhook_summary(removed: &[ket_core::agent_hooks::Removed]) -> String {
     said
 }
 
-fn setting(name: &str, description: &str, control: AnyElement, t: &Theme) -> Entry {
+pub(crate) fn setting(name: &str, description: &str, control: AnyElement, t: &Theme) -> Entry {
     Entry::setting(
         format!("{name} {description}"),
         row(name, description, control, t),
@@ -4628,6 +4676,15 @@ fn setting(name: &str, description: &str, control: AnyElement, t: &Theme) -> Ent
 /// nothing on screen.
 fn together(words: impl Into<String>, parts: impl IntoIterator<Item = AnyElement>) -> Entry {
     Entry::setting(words, div().flex().flex_col().gap(px(2.0)).children(parts))
+}
+
+/// The two halves of the Agents pane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgentsTab {
+    /// Agents that run elsewhere: Claude, Codex, OpenCode with a provider.
+    Cloud,
+    /// Models Ollama runs on this Mac — see `crate::local_models`.
+    Local,
 }
 
 /// Whether every word of `query` appears in `words` or in the section's
@@ -4856,6 +4913,7 @@ fn rows(section: Section, t: &Theme) -> Vec<Entry> {
         Section::Agents
         | Section::Economy
         | Section::Snippets
+        | Section::Permissions
         | Section::General
         | Section::Appearance
         | Section::Editor

@@ -5,12 +5,22 @@ import Needs from './app/needs';
 import Settings from './app/settings';
 import Usage from './app/usage';
 import Worktrees from './app/index';
+import { WorktreeList } from './components/WorktreeList';
+import { SplitContext } from './lib/layout';
 import Host from './app/host/[host]';
 import NewTask from './app/new/[host]';
 import Worktree from './app/worktree/[host]/[worktree]';
 import type { HostConnection } from './lib/connection';
 
-const mockRouter = { push: jest.fn(), back: jest.fn(), replace: jest.fn(), canGoBack: jest.fn(() => true) };
+const mockRouter = {
+  push: jest.fn(),
+  back: jest.fn(),
+  replace: jest.fn(),
+  canGoBack: jest.fn(() => true),
+  canDismiss: jest.fn(() => true),
+  dismissAll: jest.fn(),
+};
+let mockPath = '/';
 let mockParams: Record<string, string> = {};
 let mockConns: HostConnection[] = [];
 let mockHost: HostConnection | null = null;
@@ -27,9 +37,12 @@ jest.mock('expo-router', () => {
       back: () => mockRouter.back(),
       replace: (path: string) => mockRouter.replace(path),
       canGoBack: () => mockRouter.canGoBack(),
+      canDismiss: () => mockRouter.canDismiss(),
+      dismissAll: () => mockRouter.dismissAll(),
     },
     useFocusEffect: (callback: () => void) => mockUseEffect(callback, [callback]),
     useIsFocused: () => true,
+    usePathname: () => mockPath,
     useLocalSearchParams: () => mockParams,
   };
 });
@@ -106,6 +119,7 @@ const connection = (projects: object[], usage: object[] = []) =>
 beforeEach(() => {
   jest.clearAllMocks();
   mockParams = {};
+  mockPath = '/';
   mockConns = [];
   mockHost = null;
 });
@@ -143,6 +157,36 @@ describe('top-level screens', () => {
     await fireEvent.press(view.getByLabelText('Switch desktop'));
     await fireEvent.press(view.getByText('Other Mac'));
     await view.unmount();
+  });
+
+  test('Worktrees, beside the sidebar, waits for a pick; the sidebar opens beside itself', async () => {
+    mockConns = [connection([project([tree('waiting', 4, { question: { subject: 'Approve', terminalId: 9n } }), tree('quiet', 0)])])];
+    const empty = await render(
+      <SplitContext.Provider value>
+        <Worktrees />
+      </SplitContext.Provider>,
+    );
+    expect(empty.getByText('Pick a worktree to follow its agent.')).toBeTruthy();
+    expect(empty.queryByText('Studio Mac')).toBeNull();
+    await empty.unmount();
+
+    mockPath = '/session/host/7';
+    const sidebar = await render(
+      <SplitContext.Provider value>
+        <WorktreeList sidebar refresh={mockPath} />
+      </SplitContext.Provider>,
+    );
+    await fireEvent.press(sidebar.getByText('quiet'));
+    expect(mockRouter.dismissAll).toHaveBeenCalled();
+    expect(mockRouter.replace).toHaveBeenCalledWith('/session/host/7');
+    expect(mockRouter.push).not.toHaveBeenCalled();
+    await fireEvent.press(sidebar.getByText('Answer'));
+    expect(mockRouter.replace).toHaveBeenLastCalledWith('/session/host/9');
+    // Its tab bar is the one drawn, with the open screen's tab lit.
+    expect(sidebar.getByLabelText('Worktrees').props.accessibilityState).toEqual({ selected: true });
+    await fireEvent.press(sidebar.getByLabelText('Usage'));
+    expect(mockRouter.replace).toHaveBeenLastCalledWith('/usage');
+    await sidebar.unmount();
   });
 
   test('Needs shows empty, waiting, and failed states', async () => {

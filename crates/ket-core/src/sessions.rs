@@ -944,8 +944,8 @@ fn codex_titles() -> BTreeMap<String, String> {
 /// Read through the `sqlite3` binary rather than by linking a SQLite crate.
 /// Two reasons, and the second is the important one: it keeps a C dependency
 /// out of `ket-core` for one query, and it makes the read a literal statement
-/// naming four columns of one table — so there is no code path here that
-/// could reach the `credential` table even by mistake.
+/// naming its columns of the session tables — so there is no code path here
+/// that could reach the `credential` table even by mistake.
 pub struct OpencodeSessions {
     /// The database file.
     database: PathBuf,
@@ -993,20 +993,40 @@ impl SessionSource for OpencodeSessions {
             .collect::<Vec<_>>()
             .join(", ");
 
-        // Read-only, explicit columns, one table, parameter passed as an
-        // argument rather than pasted into the statement.
-        let output = std::process::Command::new("sqlite3")
-            .arg("-readonly")
-            .arg("-json")
-            .arg(&self.database)
-            .arg(format!(
+        // Read-only, explicit columns, one table. OpenCode 2 keeps sessions
+        // in `session_v2`, with the model each one runs; OpenCode 1 in
+        // `session`, without. A subagent's session and an archived one are
+        // not what anyone means by "where I left off".
+        let limit = MAX_SESSIONS_PER_SOURCE * directories.len();
+        let query = |statement: String| {
+            std::process::Command::new("sqlite3")
+                .arg("-readonly")
+                .arg("-json")
+                .arg(&self.database)
+                .arg(statement)
+                .output()
+                .map_err(|e| crate::KetError::io(&self.database, e))
+        };
+        // A session whose model came from config rather than a flag — a
+        // local agent's — leaves `model` empty and records it on each reply;
+        // only that field of the newest reply is read, never its content.
+        let mut output = query(format!(
+            "SELECT id, title, directory, time_updated, \
+             json_extract(chosen, '$.providerID') AS provider, \
+             json_extract(chosen, '$.id') AS model FROM ( \
+             SELECT id, title, directory, time_updated, parent_id, time_archived, \
+             COALESCE(model, (SELECT json_extract(data, '$.model') FROM session_message \
+             WHERE session_id = session_v2.id AND type = 'assistant' \
+             ORDER BY seq DESC LIMIT 1)) AS chosen FROM session_v2) \
+             WHERE directory IN ({list}) AND parent_id IS NULL AND time_archived IS NULL \
+             ORDER BY time_updated DESC LIMIT {limit};"
+        ))?;
+        if !output.status.success() {
+            output = query(format!(
                 "SELECT id, title, directory, time_updated FROM session \
-                 WHERE directory IN ({list}) ORDER BY time_updated DESC LIMIT {};",
-                MAX_SESSIONS_PER_SOURCE * directories.len()
-            ))
-            .output()
-            .map_err(|e| crate::KetError::io(&self.database, e))?;
-
+                 WHERE directory IN ({list}) ORDER BY time_updated DESC LIMIT {limit};"
+            ))?;
+        }
         if !output.status.success() {
             return Ok(Vec::new());
         }
@@ -1017,8 +1037,18 @@ impl SessionSource for OpencodeSessions {
         Ok(rows
             .into_iter()
             .filter_map(|row| {
+                // A session on a local model is that local agent's, so it is
+                // only ever resumed on this Mac — never by a cloud OpenCode,
+                // which would send its history to a provider.
+                let local = (row.get("provider").and_then(|p| p.as_str()) == Some("ollama"))
+                    .then(|| row.get("model").and_then(|m| m.as_str()))
+                    .flatten()
+                    .map(|model| {
+                        let tag = model.strip_suffix("-ket").unwrap_or(model);
+                        crate::local_models::agent_name(tag)
+                    });
                 Some(DiscoveredSession {
-                    agent: "opencode".to_owned(),
+                    agent: local.unwrap_or_else(|| "opencode".to_owned()),
                     id: row.get("id")?.as_str()?.to_owned(),
                     title: row.get("title").and_then(|t| t.as_str()).map(str::to_owned),
                     explicit_title: None,

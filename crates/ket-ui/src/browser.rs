@@ -6,6 +6,8 @@
 //! compositor, so this module explicitly hides them when a different tab or
 //! an overlay is visible.
 
+#[cfg(target_os = "macos")]
+use gpui::FontWeight;
 use gpui::{
     AnyElement, ClipboardItem, Context, Entity, KeyDownEvent, Pixels, Point, SharedString, Window,
     div, prelude::*, px,
@@ -14,11 +16,17 @@ use gpui::{
 use crate::Shell;
 #[cfg(target_os = "macos")]
 use crate::browser_view::NativeBrowser;
+#[cfg(target_os = "macos")]
+use crate::fonts::Prose as _;
 use crate::input::{Style, TextInput, is_text, text_field};
 use crate::paint::paint;
 use crate::tabs::{PaneId, Tab, TabKind};
+#[cfg(target_os = "macos")]
+use crate::ui::TITLE;
 use crate::ui::button::{button, icon_button};
 use crate::ui::icon::Icon;
+#[cfg(target_os = "macos")]
+use crate::ui::icon::sized_icon;
 use crate::ui::menu::{MenuEntry, MenuItem, MenuKey, OpenMenu};
 
 /// Process-local identity for one browser tab.
@@ -55,6 +63,11 @@ pub(crate) struct BrowserHandle {
     /// on macOS.
     #[cfg(target_os = "macos")]
     blank: bool,
+    /// The host the address last entered names, when it does not exist: the
+    /// pane shows a not-found page in place of the page — see
+    /// [`Shell::look_up_host`].
+    #[cfg(target_os = "macos")]
+    unreachable: Option<String>,
     error: Option<SharedString>,
 }
 
@@ -109,8 +122,17 @@ impl BrowserHandle {
             still: Still::None,
             #[cfg(target_os = "macos")]
             blank,
+            #[cfg(target_os = "macos")]
+            unreachable: None,
             error: None,
         }
+    }
+
+    /// Whether there is a page to show: something has loaded, and the
+    /// address last entered exists.
+    #[cfg(target_os = "macos")]
+    fn has_page(&self) -> bool {
+        !self.blank && self.unreachable.is_none()
     }
 }
 
@@ -340,7 +362,7 @@ impl Shell {
                     browser.still = Still::None;
                 } else if matches!(browser.still, Still::None)
                     && browser.view.is_some()
-                    && !browser.blank
+                    && browser.has_page()
                 {
                     browser.still = Still::Taking;
                     stills.push(*id);
@@ -355,7 +377,7 @@ impl Shell {
                 // way, and while the still settles in underneath it — and
                 // never while it has nothing to show.
                 let should_show = visible
-                    && !browser.blank
+                    && browser.has_page()
                     && (!occluded || matches!(browser.still, Still::Taking | Still::Settling(..)));
                 if browser.shown == should_show {
                     continue;
@@ -486,6 +508,7 @@ impl Shell {
         #[cfg(target_os = "macos")]
         if let Some(browser) = self.browsers.get_mut(&id) {
             browser.blank = false;
+            browser.unreachable = None;
         }
         let Some(browser) = self.browsers.get(&id) else {
             return;
@@ -501,11 +524,64 @@ impl Shell {
             }
             self.focus_browser_page(id);
         }
+        #[cfg(target_os = "macos")]
+        self.look_up_host(id, url, cx);
+    }
+
+    /// Looks up the host `url` names, off the main thread, and puts the
+    /// not-found page up in browser `id` if there is no such host. WebKit
+    /// tells only its delegate when a load fails, and Wry's never listens, so
+    /// without this a mistyped address left the tab white.
+    #[cfg(target_os = "macos")]
+    fn look_up_host(&self, id: BrowserId, url: String, cx: &mut Context<Self>) {
+        let Some(host) = url_host(&url) else {
+            return;
+        };
+        let lookup = cx.background_executor().spawn({
+            let host = host.clone();
+            async move {
+                use std::net::ToSocketAddrs as _;
+                (host.as_str(), 80).to_socket_addrs().is_ok()
+            }
+        });
+        cx.spawn(async move |this: gpui::WeakEntity<Shell>, cx| {
+            if lookup.await {
+                return;
+            }
+            let _ = this.update(cx, |shell, cx| {
+                let Some(browser) = shell.browsers.get_mut(&id) else {
+                    return;
+                };
+                // The tab has moved on: this answer is for an address it left.
+                if browser.address.read(cx).text() != url {
+                    return;
+                }
+                browser.unreachable = Some(host);
+                shell.sync_browser_visibility(cx);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Back or forward in the page's own history. Through the page, since
     /// Wry offers no such call; at either end of the history it does nothing.
     fn browser_history(&mut self, id: BrowserId, back: bool) {
+        // The not-found page stands where a new entry would: back from it is
+        // the page under it, or the blank tab if there was none — with the
+        // mistyped address left in the field to fix.
+        #[cfg(target_os = "macos")]
+        if back
+            && let Some(browser) = self.browsers.get_mut(&id)
+            && browser.unreachable.take().is_some()
+        {
+            match browser.page.as_mut() {
+                Some((_, shown)) => *shown = false,
+                None => browser.blank = true,
+            }
+            return;
+        }
+
         #[cfg(target_os = "macos")]
         if let Some(view) = self
             .browsers
@@ -536,6 +612,7 @@ impl Shell {
         };
         if url.as_deref().is_some_and(|url| url != "about:blank") {
             browser.blank = false;
+            browser.unreachable = None;
         }
         let url = match url {
             Some(url) => url,
@@ -553,7 +630,18 @@ impl Shell {
         cx.notify();
     }
 
-    fn reload_browser(&mut self, id: BrowserId) {
+    fn reload_browser(&mut self, id: BrowserId, cx: &mut Context<Self>) {
+        // Nothing loaded to reload: look the address up again.
+        #[cfg(target_os = "macos")]
+        if self
+            .browsers
+            .get(&id)
+            .is_some_and(|browser| browser.unreachable.is_some())
+        {
+            self.navigate_browser(id, cx);
+            return;
+        }
+
         #[cfg(target_os = "macos")]
         if let Some(view) = self
             .browsers
@@ -565,7 +653,7 @@ impl Shell {
         }
 
         #[cfg(not(target_os = "macos"))]
-        let _ = id;
+        let _ = (id, cx);
     }
 
     fn focus_browser_page(&self, id: BrowserId) {
@@ -588,6 +676,24 @@ impl Shell {
             TabKind::Browser(id) => Some(id),
             _ => None,
         }
+    }
+
+    /// Apply Edit menu history to editable content in the focused browser tab.
+    pub(crate) fn browser_edit_history(&self, redo: bool) {
+        #[cfg(target_os = "macos")]
+        if let Some(view) = self
+            .active_browser_tab()
+            .and_then(|id| self.browsers.get(&id))
+            .and_then(|browser| browser.view.as_ref())
+        {
+            let command = if redo { "redo" } else { "undo" };
+            let _ = view
+                .raw()
+                .evaluate_script(&format!("document.execCommand('{command}')"));
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        let _ = redo;
     }
 
     /// Asks the page in browser `id` what is selected on it, and hands the
@@ -741,10 +847,15 @@ impl Shell {
                         }
                     }
                 });
-                if let Some(browser) = self.browsers.get_mut(&id) {
+                let initial = self.browsers.get_mut(&id).and_then(|browser| {
                     browser.view = Some(view);
                     browser.shown = show;
                     browser.loads = Some(watch);
+                    browser.initial.clone()
+                });
+                // A tab opened on a link checks its host like a typed address.
+                if let Some(url) = initial {
+                    self.look_up_host(id, url, cx);
                 }
             }
             Err(error) => {
@@ -785,6 +896,8 @@ impl Shell {
         let error = browser.error.clone();
         #[cfg(target_os = "macos")]
         let view = browser.view.clone();
+        #[cfg(target_os = "macos")]
+        let unreachable = browser.unreachable.clone();
         #[cfg(target_os = "macos")]
         let still = match &browser.still {
             Still::Settling(image, _) | Still::Shown(image) => Some(image.clone()),
@@ -832,7 +945,7 @@ impl Shell {
                     .small()
                     .render(&theme)
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.reload_browser(id);
+                        this.reload_browser(id, cx);
                         cx.notify();
                     })),
             )
@@ -891,6 +1004,7 @@ impl Shell {
                         .size_full()
                         .object_fit(gpui::ObjectFit::Fill)
                 }))
+                .children(unreachable.map(|host| not_found(&theme, id, &host, cx)))
                 .into_any_element(),
             (None, Some(error)) => browser_message(&theme, error),
             (None, None) => browser_message(&theme, "Opening browser…"),
@@ -948,6 +1062,71 @@ fn normalize_url(value: &str) -> String {
     } else {
         format!("http://{value}")
     }
+}
+
+/// The host an address names, without its scheme, credentials or port.
+/// `None` for an address with no host, such as `about:blank`.
+#[cfg(target_os = "macos")]
+fn url_host(url: &str) -> Option<String> {
+    let rest = url.split_once("://")?.1;
+    let authority = rest.split(['/', '?', '#']).next()?;
+    let host = authority.rsplit('@').next()?;
+    let host = match host.strip_prefix('[') {
+        Some(v6) => v6.split(']').next()?,
+        None => host.split(':').next()?,
+    };
+    (!host.is_empty()).then(|| host.to_owned())
+}
+
+/// What a browser pane shows in place of the page when the address entered
+/// names a host that does not exist.
+#[cfg(target_os = "macos")]
+fn not_found(
+    theme: &ket_core::theme::Theme,
+    id: BrowserId,
+    host: &str,
+    cx: &mut Context<Shell>,
+) -> AnyElement {
+    div()
+        .absolute()
+        .inset_0()
+        .flex()
+        .flex_col()
+        .justify_center()
+        .items_start()
+        .gap(px(12.0))
+        .px(px(48.0))
+        .bg(paint(theme.surface))
+        .prose()
+        .child(sized_icon(
+            Icon::TriangleAlert,
+            px(32.0),
+            paint(theme.text.dim),
+        ))
+        .child(
+            div()
+                .text_size(TITLE)
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(paint(theme.text.primary))
+                .child("This site can\u{2019}t be reached"),
+        )
+        .child(
+            div()
+                .text_size(px(13.0))
+                .text_color(paint(theme.text.dim))
+                .child(format!("Check if there is a typo in {host}.")),
+        )
+        .child(
+            // Secondary: the toolbar's Go is this surface's primary.
+            button(("browser-retry", id.0), "Reload")
+                .leading(Icon::Refresh)
+                .render(theme)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.navigate_browser(id, cx);
+                    cx.notify();
+                })),
+        )
+        .into_any_element()
 }
 
 fn browser_message(theme: &ket_core::theme::Theme, message: impl Into<SharedString>) -> AnyElement {
@@ -1014,5 +1193,25 @@ mod tests {
             MenuKey::Run(LinkAction::Copy)
         ));
         assert_eq!(link.clipboard_item().text(), Some(uri.to_owned()));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn url_host_drops_scheme_credentials_port_and_path() {
+        assert_eq!(
+            url_host("http://example.com").as_deref(),
+            Some("example.com")
+        );
+        assert_eq!(
+            url_host("https://user:pw@example.com:8443/a?b#c").as_deref(),
+            Some("example.com")
+        );
+        assert_eq!(
+            url_host("http://localhost:3000/").as_deref(),
+            Some("localhost")
+        );
+        assert_eq!(url_host("http://[::1]:8080/").as_deref(), Some("::1"));
+        assert_eq!(url_host("about:blank"), None);
+        assert_eq!(url_host("file:///tmp/a.html"), None);
     }
 }

@@ -96,3 +96,78 @@ fn parse(text: &str) -> Vec<Release> {
     }
     releases
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn releases_groups_items_and_continuations_are_read() {
+        let text = "# Changelog\n\nProse for people.\n\n## Unreleased\n\n### New\n\n- A thing\n  that wraps.\n- Another\n\n### Fixed\n\n* A star item\n\n## 0.4.2 — 2026-10-14\n\n- Ungrouped item\n\n## 0.4.1 - 2026-10-01\n";
+        let releases = parse(text);
+        assert_eq!(releases.len(), 3);
+
+        let unreleased = &releases[0];
+        assert_eq!(unreleased.name, UNRELEASED);
+        assert_eq!(unreleased.date, None);
+        assert_eq!(unreleased.groups.len(), 2);
+        assert_eq!(unreleased.groups[0].kind, "New");
+        assert_eq!(
+            unreleased.groups[0].items,
+            ["A thing that wraps.", "Another"]
+        );
+        assert_eq!(unreleased.groups[1].items, ["A star item"]);
+
+        let dated = &releases[1];
+        assert_eq!(dated.name, "0.4.2");
+        assert_eq!(dated.date.as_deref(), Some("2026-10-14"));
+        // An item before any heading gets a group of its own, unnamed.
+        assert_eq!(dated.groups[0].kind, "");
+        assert_eq!(dated.groups[0].items, ["Ungrouped item"]);
+
+        let hyphen = &releases[2];
+        assert_eq!(hyphen.date.as_deref(), Some("2026-10-01"));
+        assert!(hyphen.is_empty());
+    }
+
+    #[test]
+    fn prose_before_the_first_release_and_stray_indented_lines_are_skipped() {
+        let releases = parse("- not in a release\n  nor this\n## 1.0\n  orphan continuation\n");
+        assert_eq!(releases.len(), 1);
+        assert!(releases[0].is_empty());
+    }
+
+    #[test]
+    fn the_shipped_changelog_reads_cleanly() {
+        // What the app's "What's new" and the release notes are made from.
+        let releases = parse(TEXT);
+        assert_eq!(
+            releases.first().map(|r| r.name.as_str()),
+            Some(UNRELEASED),
+            "Unreleased comes first"
+        );
+        for release in &releases {
+            for group in &release.groups {
+                assert!(
+                    ["New", "Improved", "Fixed"].contains(&group.kind.as_str()),
+                    "{} has a group called {:?}",
+                    release.name,
+                    group.kind
+                );
+                for item in &group.items {
+                    assert!(!item.is_empty(), "{}: an empty item", release.name);
+                }
+            }
+            if release.name != UNRELEASED {
+                let date = release.date.as_deref().unwrap_or_default();
+                assert!(
+                    date.len() == 10 && date.as_bytes()[4] == b'-' && date.as_bytes()[7] == b'-',
+                    "{} is dated {date:?}",
+                    release.name
+                );
+            }
+        }
+        assert!(release(UNRELEASED).is_some());
+        assert!(release("no-such-version").is_none());
+    }
+}

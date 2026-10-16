@@ -70,6 +70,15 @@ pub enum MenuItem {
         /// The OS Action that corresponds to this action, if any
         /// See [`OsAction`] for more information
         os_action: Option<OsAction>,
+
+        /// An optional key equivalent for a dynamic action.
+        key_equivalent: Option<String>,
+
+        /// Whether this item may be selected in addition to action availability.
+        enabled: bool,
+
+        /// Whether the native menu shows a checkmark beside this item.
+        checked: bool,
     },
 }
 
@@ -98,6 +107,9 @@ impl MenuItem {
             name: name.into(),
             action: Box::new(action),
             os_action: None,
+            key_equivalent: None,
+            enabled: true,
+            checked: false,
         }
     }
 
@@ -111,7 +123,34 @@ impl MenuItem {
             name: name.into(),
             action: Box::new(action),
             os_action: Some(os_action),
+            key_equivalent: None,
+            enabled: true,
+            checked: false,
         }
+    }
+
+    /// Sets the explicit availability of an action item.
+    pub fn enabled(mut self, value: bool) -> Self {
+        if let Self::Action { enabled, .. } = &mut self {
+            *enabled = value;
+        }
+        self
+    }
+
+    /// Sets a key equivalent for an action created at runtime.
+    pub fn key_equivalent(mut self, chord: impl Into<String>) -> Self {
+        if let Self::Action { key_equivalent, .. } = &mut self {
+            *key_equivalent = Some(chord.into());
+        }
+        self
+    }
+
+    /// Sets the native checkmark of an action item.
+    pub fn checked(mut self, value: bool) -> Self {
+        if let Self::Action { checked, .. } = &mut self {
+            *checked = value;
+        }
+        self
     }
 
     /// Create an OwnedMenuItem from this MenuItem
@@ -123,10 +162,16 @@ impl MenuItem {
                 name,
                 action,
                 os_action,
+                key_equivalent,
+                enabled,
+                checked,
             } => OwnedMenuItem::Action {
                 name: name.into(),
                 action,
                 os_action,
+                key_equivalent,
+                enabled,
+                checked,
             },
             MenuItem::SystemMenu(os_menu) => OwnedMenuItem::SystemMenu(os_menu.owned()),
         }
@@ -177,6 +222,12 @@ pub enum OwnedMenuItem {
         /// The OS Action that corresponds to this action, if any
         /// See [`OsAction`] for more information
         os_action: Option<OsAction>,
+        /// An optional key equivalent for a dynamic action.
+        key_equivalent: Option<String>,
+        /// Explicit availability, combined with GPUI action availability.
+        enabled: bool,
+        /// Native checkmark state.
+        checked: bool,
     },
 }
 
@@ -189,10 +240,16 @@ impl Clone for OwnedMenuItem {
                 name,
                 action,
                 os_action,
+                key_equivalent,
+                enabled,
+                checked,
             } => OwnedMenuItem::Action {
                 name: name.clone(),
                 action: action.boxed_clone(),
                 os_action: *os_action,
+                key_equivalent: key_equivalent.clone(),
+                enabled: *enabled,
+                checked: *checked,
             },
             OwnedMenuItem::SystemMenu(os_menu) => OwnedMenuItem::SystemMenu(os_menu.clone()),
         }
@@ -249,4 +306,22 @@ pub(crate) fn init_app_menus(platform: &dyn Platform, cx: &App) {
             cx.update(|cx| cx.dispatch_action(action)).log_err();
         }
     }));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn menu_action_defaults_and_owned_state() {
+        let normal = MenuItem::action("Normal", crate::NoAction);
+        assert!(matches!(normal, MenuItem::Action { enabled: true, checked: false, .. }));
+
+        let changed = MenuItem::action("Changed", crate::NoAction)
+            .enabled(false)
+            .checked(true)
+            .key_equivalent("cmd-alt-1")
+            .owned();
+        assert!(matches!(changed, OwnedMenuItem::Action { enabled: false, checked: true, key_equivalent: Some(chord), .. } if chord == "cmd-alt-1"));
+    }
 }

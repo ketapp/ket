@@ -56,12 +56,16 @@ BIN_FILE="${BIN_FILE:-${PACKAGE}}"
 
 echo "building ${PACKAGE} (${PROFILE})"
 cargo build -p "${PACKAGE}" "${CARGO_FLAGS[@]+"${CARGO_FLAGS[@]}"}"
+if [[ "${PACKAGE}" != "ket-cli" ]]; then
+    cargo build -p ket-cli "${CARGO_FLAGS[@]+"${CARGO_FLAGS[@]}"}"
+fi
 
 echo "assembling ${APP}"
 rm -rf "${APP}"
-mkdir -p "${APP}/Contents/MacOS" "${APP}/Contents/Resources"
+mkdir -p "${APP}/Contents/MacOS" "${APP}/Contents/Resources/bin"
 
 cp "target/${PROFILE}/${BIN_FILE}" "${APP}/Contents/MacOS/ket"
+cp "target/${PROFILE}/ket" "${APP}/Contents/Resources/bin/ket"
 
 # LSMinimumSystemVersion is 11.0 because gpui draws through Metal and targets
 # Big Sur upward; claiming anything lower would let it install and then fail.

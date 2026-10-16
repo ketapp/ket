@@ -4,7 +4,8 @@
 //! On the device where the Mac supports it, which every Apple-silicon Mac
 //! does for the common languages — so nothing that is said leaves the
 //! machine. Where it does not, the framework falls back to Apple's servers,
-//! the same as the system's own Dictation.
+//! the same as the system's own Dictation — except for a prompt bound for a
+//! local agent, which is refused instead (see [`Dictation::start`]).
 //!
 //! # Why this is `unsafe`
 //!
@@ -189,7 +190,10 @@ mod mac {
         /// Opens the microphone and starts transcribing into `heard`.
         ///
         /// [`authorize`] first: this assumes both permissions are granted.
-        pub(crate) fn start(heard: Transcript) -> Result<Self, String> {
+        /// `on_device_only` is for a prompt bound for a local agent: there
+        /// the words must not leave the Mac either, so a language the Mac
+        /// cannot transcribe itself is refused instead of sent to Apple.
+        pub(crate) fn start(heard: Transcript, on_device_only: bool) -> Result<Self, String> {
             // SAFETY: every call below is a plain message to an object this
             // function created and owns, in the order Apple's documentation
             // for live transcription gives; the blocks are 'static and touch
@@ -205,6 +209,10 @@ mod mac {
                 request.setShouldReportPartialResults(true);
                 if recognizer.supportsOnDeviceRecognition() {
                     request.setRequiresOnDeviceRecognition(true);
+                } else if on_device_only {
+                    return Err("This Mac can't transcribe your language on its own, and a \
+                                local agent keeps your words here. Type the prompt instead."
+                        .into());
                 }
                 if objc2::available!(macos = 13.0) {
                     request.setAddsPunctuation(true);
@@ -331,7 +339,7 @@ mod elsewhere {
     pub(crate) struct Dictation;
 
     impl Dictation {
-        pub(crate) fn start(_heard: Transcript) -> Result<Self, String> {
+        pub(crate) fn start(_heard: Transcript, _on_device_only: bool) -> Result<Self, String> {
             Err(UNSUPPORTED.into())
         }
 

@@ -2133,6 +2133,9 @@ fn conversation(host: &Host, terminal_id: u64, after: u64) -> proto::Conversatio
 /// is not answered until its menu is checked.
 fn answer_keys(agent: &str, tool: &str, choice: proto::answer::Choice) -> Option<&'static [u8]> {
     use proto::answer::Choice;
+    // A local agent is OpenCode with a model named after it; its menu is
+    // OpenCode's.
+    let agent = crate::agents::harness(agent);
     if agent.eq_ignore_ascii_case("codex") {
         return codex_keys(tool, choice);
     }
@@ -2381,12 +2384,13 @@ fn snapshot(host: &Host, phones: &Phones) -> proto::HostSnapshot {
                             .is_some(),
                         id: question.id,
                         terminal_id: terminal.unwrap_or_default(),
-                        // Nothing to weigh: it asks for no access at all.
-                        risk: question
-                            .prompt
-                            .is_none()
-                            .then(|| risk_read(question))
-                            .flatten(),
+                        // Nothing to weigh: it asks for no access at all. And
+                        // never for a local agent, whose commands stay on
+                        // the Mac: Jev's read would send them to TypeSafe.
+                        risk: (question.prompt.is_none()
+                            && crate::local_models::model_tag(&pane.agent).is_none())
+                        .then(|| risk_read(question))
+                        .flatten(),
                         asks: match &question.prompt {
                             Some(Prompt::Ask { questions }) => questions
                                 .iter()
@@ -2699,6 +2703,9 @@ mod tests {
             .args(["--exact", "--test-threads=1", "--nocapture"])
             .env(SANDBOXED, "1")
             .env("XDG_DATA_HOME", &data)
+            // Snippets and settings are read from the config directory;
+            // the sandbox's own, so the person's never are.
+            .env("XDG_CONFIG_HOME", data.join("config"))
             .env_remove(super::super::RELAY_ENV)
             .output()
             .expect("the test runs again");
@@ -3259,5 +3266,619 @@ mod tests {
             ..asked
         };
         assert_eq!(decision(&permission, &verdict(true, "")), None);
+    }
+
+    // ---- what a paired phone asks for -----------------------------------------
+
+    /// A project in the sandbox's store with one worktree in it, the
+    /// worktree holding one uncommitted change. Returns the project's id,
+    /// the worktree's id, and the repository.
+    fn place() -> (String, String, std::path::PathBuf) {
+        let data = std::env::var_os("XDG_DATA_HOME").expect("sandboxed");
+        let root = std::path::PathBuf::from(data);
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |args: &[&str]| {
+            let out = Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        git(&["init", "--initial-branch=main", "--quiet"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "user.name", "ket test"]);
+        std::fs::write(repo.join("README.md"), "# fixture\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "--quiet", "-m", "initial"]);
+
+        let workspace = crate::workspace::Workspace::with_paths(
+            crate::store::Store::open_default().unwrap(),
+            root.join("worktrees"),
+        );
+        let project = workspace.add_project(&repo).unwrap();
+        let worktree = workspace
+            .create_worktree(&project.id, "phone-work", None, None)
+            .unwrap();
+        std::fs::write(worktree.path.join("README.md"), "# fixture\nfrom a phone\n").unwrap();
+        std::fs::write(worktree.path.join("new.txt"), "one\ntwo\n").unwrap();
+        (project.id.to_string(), worktree.id.to_string(), repo)
+    }
+
+    /// A key per request, so each is applied rather than taken as a retry.
+    fn change(session: &mut PhoneSession, id: u64, payload: Payload) -> proto::Envelope {
+        ask(session, id, payload)
+    }
+
+    fn message(reply: &proto::Envelope) -> String {
+        match &reply.payload {
+            Some(Payload::Error(error)) => error.message.clone(),
+            other => panic!("not an error: {other:?}"),
+        }
+    }
+
+    fn backlog_of(reply: &proto::Envelope) -> &proto::Backlog {
+        match &reply.payload {
+            Some(Payload::Backlog(backlog)) => backlog,
+            other => panic!("not a backlog: {other:?}"),
+        }
+    }
+
+    fn edit(
+        project: &str,
+        note: &str,
+        action: proto::edit_backlog::Action,
+        title: &str,
+    ) -> Payload {
+        Payload::EditBacklog(proto::EditBacklog {
+            project_id: project.to_owned(),
+            note_id: note.to_owned(),
+            action: action as i32,
+            title: title.to_owned(),
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn the_first_snapshot_lists_the_desktops_projects_and_worktrees() {
+        if rerun_sandboxed("the_first_snapshot_lists_the_desktops_projects_and_worktrees") {
+            return;
+        }
+        let (project, worktree, _) = place();
+        let rig = rig();
+        // A phone is shown the worktrees that have a terminal open.
+        let spec = TerminalSpec {
+            command: "/bin/sleep".into(),
+            args: vec!["30".to_owned()],
+            cwd: std::env::temp_dir(),
+            env: std::collections::BTreeMap::new(),
+            env_remove: Vec::new(),
+            size: TerminalSize::new(80, 24),
+            key: None,
+            adopt: false,
+        };
+        let filed = rig.host.file_keyed_for_tests(
+            LocalTerminal::open(&spec).unwrap(),
+            Some(format!("{worktree}|shell|1")),
+        );
+        let mut session = pair(&rig, &Keypair::generate().unwrap());
+        let code = pending(&mut session);
+        decide(&rig, &code, true);
+        assert!(matches!(
+            next(&mut session).payload,
+            Some(Payload::Welcome(_))
+        ));
+        let Some(Payload::Snapshot(snapshot)) = next(&mut session).payload else {
+            panic!("no snapshot");
+        };
+        let listed = snapshot
+            .projects
+            .iter()
+            .find(|p| p.id == project)
+            .unwrap_or_else(|| panic!("the project is listed: {:?}", snapshot.projects));
+        assert_eq!(listed.name, "repo");
+        let shown = listed
+            .worktrees
+            .iter()
+            .find(|w| w.id == worktree)
+            .expect("the worktree with a terminal is listed");
+        assert_eq!(shown.branch, "phone-work");
+        assert_eq!(shown.base, "main");
+        assert_eq!(shown.terminals.len(), 1);
+        assert_eq!(shown.terminals[0].id, filed);
+        // Its uncommitted work, counted for the phone's row.
+        assert_eq!(shown.files_changed, 2);
+        rig.host.find(filed).unwrap().kill();
+    }
+
+    #[test]
+    fn a_change_without_an_idempotency_key_is_refused_and_a_retry_is_not_applied_twice() {
+        if rerun_sandboxed(
+            "a_change_without_an_idempotency_key_is_refused_and_a_retry_is_not_applied_twice",
+        ) {
+            return;
+        }
+        let (project, _, _) = place();
+        let rig = rig();
+        let (mut session, _) = paired(&rig, &Keypair::generate().unwrap());
+        let save = edit(
+            &project,
+            "",
+            proto::edit_backlog::Action::Save,
+            "From the phone",
+        );
+
+        session
+            .send_envelope(&ket_remote::envelope(1, save.clone()))
+            .unwrap();
+        assert_eq!(
+            error_code(&next(&mut session)),
+            Some(proto::ErrorCode::StaleRequest)
+        );
+
+        let first = change(&mut session, 2, save.clone());
+        assert_eq!(backlog_of(&first).notes.len(), 1);
+        // The same key again, as after a reconnect: acknowledged, not redone.
+        assert!(is_ack(&change(&mut session, 2, save)));
+        let listed = ask(
+            &mut session,
+            3,
+            Payload::GetBacklog(proto::GetBacklog {
+                project_id: project,
+            }),
+        );
+        assert_eq!(backlog_of(&listed).notes.len(), 1, "saved once");
+    }
+
+    #[test]
+    fn a_phone_edits_a_backlog_note_through_its_whole_life() {
+        if rerun_sandboxed("a_phone_edits_a_backlog_note_through_its_whole_life") {
+            return;
+        }
+        use proto::edit_backlog::Action;
+        let (project, _, _) = place();
+        let rig = rig();
+        let (mut session, _) = paired(&rig, &Keypair::generate().unwrap());
+
+        let saved = change(
+            &mut session,
+            1,
+            edit(&project, "", Action::Save, "Fix the login"),
+        );
+        let note = backlog_of(&saved).notes[0].id.clone();
+
+        let mut urgent = proto::EditBacklog {
+            project_id: project.clone(),
+            note_id: note.clone(),
+            action: Action::Save as i32,
+            title: "Fix the login redirect".to_owned(),
+            body: "It loops.".to_owned(),
+            priority: proto::BacklogPriority::Urgent as i32,
+        };
+        let renamed = change(&mut session, 2, Payload::EditBacklog(urgent.clone()));
+        let renamed = &backlog_of(&renamed).notes[0];
+        assert_eq!(renamed.title, "Fix the login redirect");
+        assert_eq!(renamed.body, "It loops.");
+        assert_eq!(renamed.priority, proto::BacklogPriority::Urgent as i32);
+
+        // A save that names no priority keeps the note's.
+        urgent.priority = proto::BacklogPriority::Unspecified as i32;
+        urgent.title = "Fix the login redirect, again".to_owned();
+        let kept = change(&mut session, 3, Payload::EditBacklog(urgent));
+        assert_eq!(
+            backlog_of(&kept).notes[0].priority,
+            proto::BacklogPriority::Urgent as i32
+        );
+
+        let done = change(&mut session, 4, edit(&project, &note, Action::Done, ""));
+        assert!(backlog_of(&done).notes[0].done_ms > 0);
+        let reopened = change(&mut session, 5, edit(&project, &note, Action::Reopen, ""));
+        assert_eq!(backlog_of(&reopened).notes[0].done_ms, 0);
+        let removed = change(&mut session, 6, edit(&project, &note, Action::Remove, ""));
+        assert!(backlog_of(&removed).notes.is_empty());
+    }
+
+    #[test]
+    fn a_backlog_edit_that_does_not_fit_is_refused_with_a_reason() {
+        if rerun_sandboxed("a_backlog_edit_that_does_not_fit_is_refused_with_a_reason") {
+            return;
+        }
+        use proto::edit_backlog::Action;
+        let (project, _, _) = place();
+        let rig = rig();
+        let (mut session, _) = paired(&rig, &Keypair::generate().unwrap());
+
+        let empty = change(&mut session, 1, edit(&project, "", Action::Save, "  "));
+        assert!(message(&empty).contains("write what the work is first"));
+
+        let missing = change(&mut session, 2, edit(&project, "no-such", Action::Done, ""));
+        assert_eq!(error_code(&missing), Some(proto::ErrorCode::NotFound));
+
+        let unknown = change(
+            &mut session,
+            3,
+            edit(&project, "", Action::Unspecified, "x"),
+        );
+        assert_eq!(error_code(&unknown), Some(proto::ErrorCode::NotFound));
+
+        let elsewhere = change(
+            &mut session,
+            4,
+            edit("not-a-project", "", Action::Save, "x"),
+        );
+        assert!(message(&elsewhere).contains("no such project"));
+        let read = ask(
+            &mut session,
+            5,
+            Payload::GetBacklog(proto::GetBacklog {
+                project_id: String::new(),
+            }),
+        );
+        assert_eq!(error_code(&read), Some(proto::ErrorCode::NotFound));
+    }
+
+    #[test]
+    fn starting_work_is_checked_then_handed_to_a_window() {
+        if rerun_sandboxed("starting_work_is_checked_then_handed_to_a_window") {
+            return;
+        }
+        use proto::edit_backlog::Action;
+        let (project, _, _) = place();
+        let rig = rig();
+        let (mut session, _) = paired(&rig, &Keypair::generate().unwrap());
+        let work = |project: &str, prompt: &str| {
+            Payload::StartWork(proto::StartWork {
+                project_id: project.to_owned(),
+                prompt: prompt.to_owned(),
+                agent: String::new(),
+            })
+        };
+
+        assert!(message(&change(&mut session, 1, work(&project, "  "))).contains("say what"));
+        assert!(
+            message(&change(&mut session, 2, work("elsewhere", "Fix it")))
+                .contains("no such project")
+        );
+        // Everything checks out, and no window is open to do it.
+        assert!(
+            message(&change(&mut session, 3, work(&project, "Fix it")))
+                .contains("open ket on your Mac")
+        );
+
+        // A note: unknown, done, and then a good one.
+        let start = |note: &str| {
+            Payload::StartNote(proto::StartNote {
+                project_id: project.clone(),
+                note_id: note.to_owned(),
+            })
+        };
+        assert_eq!(
+            error_code(&change(&mut session, 4, start("no-such"))),
+            Some(proto::ErrorCode::NotFound)
+        );
+        let saved = change(&mut session, 5, edit(&project, "", Action::Save, "A note"));
+        let note = backlog_of(&saved).notes[0].id.clone();
+        change(&mut session, 6, edit(&project, &note, Action::Done, ""));
+        assert!(message(&change(&mut session, 7, start(&note))).contains("already been started"));
+        change(&mut session, 8, edit(&project, &note, Action::Reopen, ""));
+        assert!(message(&change(&mut session, 9, start(&note))).contains("open ket on your Mac"));
+    }
+
+    #[test]
+    fn a_phone_reads_a_worktrees_changes_and_diffs_and_asks_a_window_to_merge() {
+        if rerun_sandboxed("a_phone_reads_a_worktrees_changes_and_diffs_and_asks_a_window_to_merge")
+        {
+            return;
+        }
+        let (project, worktree, _) = place();
+        let rig = rig();
+        let (mut session, _) = paired(&rig, &Keypair::generate().unwrap());
+
+        let Some(Payload::Changes(changes)) = ask(
+            &mut session,
+            1,
+            Payload::GetChanges(proto::GetChanges {
+                worktree_id: worktree.clone(),
+            }),
+        )
+        .payload
+        else {
+            panic!("no changes");
+        };
+        assert!(changes.error.is_empty(), "{}", changes.error);
+        assert_eq!(changes.base, "main");
+        let paths: Vec<&str> = changes.files.iter().map(|f| f.path.as_str()).collect();
+        assert!(
+            paths.contains(&"README.md") && paths.contains(&"new.txt"),
+            "{paths:?}"
+        );
+        let added = changes.files.iter().find(|f| f.path == "new.txt").unwrap();
+        assert_eq!(added.added, 2);
+
+        let Some(Payload::Diff(diff)) = ask(
+            &mut session,
+            2,
+            Payload::GetDiff(proto::GetDiff {
+                worktree_id: worktree.clone(),
+                path: "README.md".to_owned(),
+            }),
+        )
+        .payload
+        else {
+            panic!("no diff");
+        };
+        assert!(diff.text.contains("+from a phone"), "{}", diff.text);
+
+        for (n, payload) in [
+            Payload::GetChanges(proto::GetChanges {
+                worktree_id: "nowhere".to_owned(),
+            }),
+            Payload::GetDiff(proto::GetDiff {
+                worktree_id: "nowhere".to_owned(),
+                path: "README.md".to_owned(),
+            }),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let reply = ask(&mut session, 10 + n as u64, payload);
+            let error = match reply.payload {
+                Some(Payload::Changes(c)) => c.error,
+                Some(Payload::Diff(d)) => d.error,
+                other => panic!("{other:?}"),
+            };
+            assert!(error.contains("no such worktree"), "{error}");
+        }
+
+        let merge = |worktree: &str| {
+            Payload::MergeWorktree(proto::MergeWorktree {
+                worktree_id: worktree.to_owned(),
+            })
+        };
+        assert_eq!(
+            error_code(&change(&mut session, 20, merge("nowhere"))),
+            Some(proto::ErrorCode::NotFound)
+        );
+        assert!(
+            message(&change(
+                &mut session,
+                21,
+                merge(&format!("primary-{project}"))
+            ))
+            .contains("nothing to merge into")
+        );
+        assert!(
+            message(&change(&mut session, 22, merge(&worktree))).contains("open ket on your Mac")
+        );
+    }
+
+    #[test]
+    fn expensive_requests_are_rate_limited_per_phone() {
+        if rerun_sandboxed("expensive_requests_are_rate_limited_per_phone") {
+            return;
+        }
+        let (_, worktree, _) = place();
+        let rig = rig();
+        let (mut session, _) = paired(&rig, &Keypair::generate().unwrap());
+        let read = || {
+            Payload::GetChanges(proto::GetChanges {
+                worktree_id: worktree.clone(),
+            })
+        };
+        // A burst of sixty units at three each is twenty reads.
+        let mut refused = None;
+        for n in 1..=40 {
+            let reply = ask(&mut session, n, read());
+            if error_code(&reply) == Some(proto::ErrorCode::Backpressure) {
+                refused = Some(n);
+                break;
+            }
+        }
+        let refused = refused.expect("the budget ran out");
+        assert!((20..=22).contains(&refused), "refused at {refused}");
+        // Cheap requests are not budgeted.
+        let devices = ask(
+            &mut session,
+            100,
+            Payload::ListDevices(proto::ListDevices {}),
+        );
+        assert!(matches!(devices.payload, Some(Payload::Devices(_))));
+    }
+
+    #[test]
+    fn a_phone_lists_the_paired_devices_and_cannot_revoke_one_that_is_not_there() {
+        if rerun_sandboxed(
+            "a_phone_lists_the_paired_devices_and_cannot_revoke_one_that_is_not_there",
+        ) {
+            return;
+        }
+        let rig = rig();
+        let (mut session, _) = paired(&rig, &Keypair::generate().unwrap());
+        let Some(Payload::Devices(list)) =
+            ask(&mut session, 1, Payload::ListDevices(proto::ListDevices {})).payload
+        else {
+            panic!("no devices");
+        };
+        assert_eq!(list.devices.len(), 1);
+        assert!(list.devices[0].this_device);
+        assert!(list.devices[0].connected);
+        assert_eq!(list.devices[0].name, "Test phone");
+
+        let revoke = Payload::RevokeDevice(proto::RevokeDevice {
+            id: "not-a-device".to_owned(),
+        });
+        assert_eq!(
+            error_code(&change(&mut session, 2, revoke)),
+            Some(proto::ErrorCode::NotFound)
+        );
+
+        let Some(Payload::Snippets(_)) =
+            ask(&mut session, 3, Payload::GetSnippets(proto::GetSnippets {})).payload
+        else {
+            panic!("no snippets");
+        };
+    }
+
+    #[test]
+    fn a_subscribed_phone_is_sent_the_terminals_screen_and_must_hold_it_to_resize() {
+        if rerun_sandboxed(
+            "a_subscribed_phone_is_sent_the_terminals_screen_and_must_hold_it_to_resize",
+        ) {
+            return;
+        }
+        let rig = rig();
+        let (id, terminal) = terminal(&rig, "/bin/echo", &["ket-on-screen"]);
+        let (mut session, _) = paired(&rig, &Keypair::generate().unwrap());
+
+        let missing = ask(
+            &mut session,
+            1,
+            Payload::Subscribe(proto::Subscribe { terminal_id: 999 }),
+        );
+        assert_eq!(error_code(&missing), Some(proto::ErrorCode::NotFound));
+
+        let mut subscribe =
+            ket_remote::envelope(2, Payload::Subscribe(proto::Subscribe { terminal_id: id }));
+        subscribe.idempotency_key = "test-2".to_owned();
+        session.send_envelope(&subscribe).unwrap();
+        let deadline = Instant::now() + WAIT;
+        let mut screen = String::new();
+        while !screen.contains("ket-on-screen") {
+            assert!(
+                Instant::now() < deadline,
+                "the screen never came: {screen:?}"
+            );
+            match next(&mut session).payload {
+                Some(Payload::Checkpoint(checkpoint)) => {
+                    assert_eq!(checkpoint.terminal_id, id);
+                    screen.push_str(&String::from_utf8_lossy(&checkpoint.ansi));
+                }
+                Some(Payload::Chunk(chunk)) => {
+                    screen.push_str(&String::from_utf8_lossy(&chunk.bytes));
+                }
+                _ => {}
+            }
+        }
+
+        // Below the floor on purpose: clamped, not refused. With nobody
+        // holding the terminal, the phone watching it may fit it.
+        let size = Payload::Resize(proto::Resize {
+            terminal_id: id,
+            cols: 1,
+            rows: 1,
+        });
+        assert!(is_ack(&reply_to(&mut session, 3, size.clone())));
+        let lease = |action: proto::lease::Action| {
+            Payload::Lease(proto::Lease {
+                terminal_id: id,
+                action: action as i32,
+            })
+        };
+        assert!(is_ack(&reply_to(
+            &mut session,
+            4,
+            lease(proto::lease::Action::Acquire)
+        )));
+        assert!(is_ack(&reply_to(&mut session, 5, size)));
+        assert!(is_ack(&reply_to(
+            &mut session,
+            6,
+            lease(proto::lease::Action::Release)
+        )));
+        let off = Payload::Unsubscribe(proto::Unsubscribe { terminal_id: id });
+        session
+            .send_envelope(&ket_remote::envelope(7, off))
+            .unwrap();
+        terminal.kill();
+    }
+
+    /// Sends a keyed request and reads on, past any terminal stream, to the
+    /// envelope that answers it.
+    fn reply_to(session: &mut PhoneSession, id: u64, payload: Payload) -> proto::Envelope {
+        let mut request = ket_remote::envelope(id, payload);
+        request.idempotency_key = format!("test-{id}");
+        session.send_envelope(&request).expect("the request");
+        let deadline = Instant::now() + WAIT;
+        loop {
+            let reply = next(session);
+            if reply.request_id == id {
+                return reply;
+            }
+            assert!(Instant::now() < deadline, "no answer to request {id}");
+        }
+    }
+
+    #[test]
+    fn answering_a_prompt_that_is_not_there_says_why() {
+        if rerun_sandboxed("answering_a_prompt_that_is_not_there_says_why") {
+            return;
+        }
+        let rig = rig();
+        let (id, terminal) = terminal(&rig, "/bin/sleep", &["30"]);
+        let (mut session, _) = paired(&rig, &Keypair::generate().unwrap());
+
+        let answer = |terminal_id: u64| {
+            Payload::Answer(proto::Answer {
+                terminal_id,
+                choice: proto::answer::Choice::AllowOnce as i32,
+                question_id: 1,
+            })
+        };
+        let gone = change(&mut session, 1, answer(999));
+        assert!(message(&gone).contains("closed"), "{}", message(&gone));
+        let unasked = change(&mut session, 2, answer(id));
+        assert!(matches!(unasked.payload, Some(Payload::Error(_))));
+
+        let Some(Payload::Conversation(conversation)) = ask(
+            &mut session,
+            3,
+            Payload::GetConversation(proto::GetConversation {
+                terminal_id: id,
+                after: 0,
+            }),
+        )
+        .payload
+        else {
+            panic!("no conversation");
+        };
+        assert_eq!(conversation.terminal_id, id);
+        assert!(
+            !conversation.supported,
+            "a plain program has no conversation"
+        );
+        assert!(conversation.turns.is_empty());
+        terminal.kill();
+    }
+
+    #[test]
+    fn every_role_allows_what_the_roles_below_it_do() {
+        use DeviceRole::{Administrator, Controller, Operator, Viewer};
+        let ladder = [Viewer, Controller, Operator, Administrator];
+        for (i, held) in ladder.iter().enumerate() {
+            for (j, needed) in ladder.iter().enumerate() {
+                assert_eq!(held.allows(*needed), i >= j, "{held:?} allows {needed:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_local_agent_is_answered_with_opencodes_keys() {
+        use proto::answer::Choice;
+        let local = "opencode:ollama/qwen3-coder:30b";
+        assert_eq!(
+            answer_keys(local, "bash", Choice::AllowOnce),
+            answer_keys("opencode", "bash", Choice::AllowOnce)
+        );
+        assert_eq!(
+            answer_keys(local, "bash", Choice::Deny),
+            answer_keys("opencode", "bash", Choice::Deny)
+        );
+        assert!(answer_keys(local, "bash", Choice::AllowOnce).is_some());
     }
 }

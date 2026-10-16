@@ -1,10 +1,11 @@
 import { describe, expect, jest, test } from '@jest/globals';
 import { fireEvent, render } from '@testing-library/react-native';
-import { Text, View } from 'react-native';
+import { StyleSheet, Text, View } from 'react-native';
 import type { Risk } from '@ket/remote';
 import { CommandMenu } from './Commands';
 import * as Icons from './icons';
 import { RiskBadge } from './Risk';
+import { READABLE_WIDTH, SplitContext } from '../lib/layout';
 import {
   Badge,
   Banner,
@@ -28,13 +29,15 @@ import {
   Value,
 } from './ui';
 
-const mockRouter = { canGoBack: jest.fn(() => true), back: jest.fn(), replace: jest.fn() };
+const mockRouter = { canGoBack: jest.fn(() => true), back: jest.fn(), replace: jest.fn(), canDismiss: jest.fn(() => false), dismissAll: jest.fn() };
 
 jest.mock('expo-router', () => ({
   router: {
     canGoBack: () => mockRouter.canGoBack(),
     back: () => mockRouter.back(),
     replace: (path: string) => mockRouter.replace(path),
+    canDismiss: () => mockRouter.canDismiss(),
+    dismissAll: () => mockRouter.dismissAll(),
   },
 }));
 jest.mock('react-native-safe-area-context', () => ({ useSafeAreaInsets: () => ({ top: 12, bottom: 24 }) }));
@@ -121,6 +124,56 @@ describe('shared UI controls', () => {
     expect(getByLabelText('Needs you, 3')).toBeTruthy();
     await fireEvent.press(getByLabelText('Worktrees'));
     expect(mockRouter.replace).toHaveBeenCalledWith('/');
+    await view.unmount();
+  });
+
+  test('beside the sidebar, leaves out its tab bar and a Back with nowhere to go', async () => {
+    mockRouter.canGoBack.mockReturnValue(false);
+    const view = await render(
+      <SplitContext.Provider value>
+        <Screen>
+          <Bar back title="First" />
+          <TabBar active="needs" needs={0} />
+        </Screen>
+      </SplitContext.Provider>,
+    );
+    expect(view.queryByLabelText('Back')).toBeNull();
+    expect(view.queryByLabelText('Needs you')).toBeNull();
+    await view.unmount();
+
+    mockRouter.canGoBack.mockReturnValue(true);
+    const deeper = await render(
+      <SplitContext.Provider value>
+        <Bar back title="Deeper" />
+        <TabBar active="needs" needs={0} sidebar />
+      </SplitContext.Provider>,
+    );
+    expect(deeper.getByLabelText('Back')).toBeTruthy();
+    expect(deeper.getByLabelText('Needs you')).toBeTruthy();
+    await deeper.unmount();
+  });
+
+  test('draws a terminal across the whole width and everything else in a column', async () => {
+    const view = await render(
+      <View>
+        <Screen>
+          <Text>Column</Text>
+        </Screen>
+        <Screen full>
+          <Text>Full</Text>
+        </Screen>
+      </View>,
+    );
+    // The nearest narrower box around the text, if any.
+    const widthOf = (text: string) => {
+      for (let node = view.getByText(text).parent; node; node = node.parent) {
+        const maxWidth = StyleSheet.flatten(node.props.style)?.maxWidth;
+        if (maxWidth !== undefined) return maxWidth;
+      }
+      return undefined;
+    };
+    expect(widthOf('Column')).toBe(READABLE_WIDTH);
+    expect(widthOf('Full')).toBeUndefined();
     await view.unmount();
   });
 });

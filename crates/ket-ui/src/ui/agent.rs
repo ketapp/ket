@@ -88,6 +88,15 @@ pub(crate) fn agent_label(name: &str) -> String {
         // than a friendly-name table ket would have to keep up with every
         // model anyone pulls.
         other if other.starts_with("ollama:") => other["ollama:".len()..].to_owned(),
+        // OpenCode driving a local model: the model as Settings → Agents
+        // names it, `Qwen3 Coder 30B`.
+        other if let Some(tag) = ket_core::local_models::model_tag(other) => {
+            let pretty = ket_core::local_models::pretty(tag);
+            match pretty.size {
+                Some(size) => format!("{} {size}", pretty.name),
+                None => pretty.name,
+            }
+        }
         other => other.to_owned(),
     }
 }
@@ -133,4 +142,19 @@ pub(crate) fn provider(agent: &str, t: &Theme) -> (Icon, Rgba) {
 pub(crate) fn mark(agent: &str, t: &Theme) -> gpui::Svg {
     let (which, tint) = provider(agent, t);
     sized_icon(which, MARK, tint)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_local_agent_reads_as_its_model() {
+        assert_eq!(
+            agent_label("opencode:ollama/qwen3-coder:30b"),
+            "Qwen3 Coder 30B"
+        );
+        assert_eq!(agent_label("ollama:qwen3:0.6b"), "qwen3:0.6b");
+        assert_eq!(agent_label("opencode"), "OpenCode");
+    }
 }

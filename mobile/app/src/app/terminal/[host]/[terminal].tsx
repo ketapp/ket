@@ -210,7 +210,7 @@ export default function TerminalScreen() {
   const tabs = located ? located.worktree.terminals.filter((x) => !x.closed || x.id === terminalId) : [];
 
   return (
-    <Screen>
+    <Screen full>
       <KeyboardAvoidingView style={styles.fill} behavior="padding">
         <Bar
           back

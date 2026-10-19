@@ -724,3 +724,55 @@ fn queued_on_a_missing_file_is_an_error() {
     let path = sandbox.path("does-not-exist.jsonl");
     assert!(queued(&path).is_err());
 }
+
+// ---- images a person sent --------------------------------------------------
+
+#[test]
+fn a_message_with_images_counts_them_and_leaves_their_marks_out_of_its_text() {
+    let sandbox = Sandbox::new("conv-images");
+    let path = sandbox.path("t.jsonl");
+    let image = serde_json::json!({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}});
+    write(
+        &path,
+        &jsonl(&[
+            serde_json::json!({"type": "user", "message": {"content": [
+                {"type": "text", "text": "[Image #1] [Image #2] The tab bar still sits on top."},
+                image.clone(),
+                image.clone(),
+            ]}}),
+            // Images alone, with no words.
+            serde_json::json!({"type": "user", "message": {"content": [{"type": "text", "text": "[Image #3]"}, image]}}),
+            user("no images here, [Image] is just a word"),
+        ]),
+    );
+
+    let found = read(&path, 0).unwrap();
+    assert_eq!(found.turns.len(), 3);
+    assert_eq!(found.turns[0].text, "The tab bar still sits on top.");
+    assert_eq!(found.turns[0].images, 2);
+    assert_eq!(found.turns[1].kind, TurnKind::User);
+    assert_eq!(found.turns[1].text, "");
+    assert_eq!(found.turns[1].images, 1);
+    assert_eq!(
+        found.turns[2].text,
+        "no images here, [Image] is just a word"
+    );
+    assert_eq!(found.turns[2].images, 0);
+}
+
+#[test]
+fn an_image_inside_a_tool_result_is_not_counted_as_the_persons() {
+    let sandbox = Sandbox::new("conv-tool-image");
+    let path = sandbox.path("t.jsonl");
+    write(
+        &path,
+        &jsonl(
+            &[serde_json::json!({"type": "user", "message": {"content": [
+                {"type": "tool_result", "content": [{"type": "image", "source": {}}]}
+            ]}})],
+        ),
+    );
+
+    let found = read(&path, 0).unwrap();
+    assert!(found.turns.is_empty(), "{:?}", found.turns);
+}

@@ -10,6 +10,7 @@
 // time, so most tasks are typed and started without touching either.
 
 import { router, useLocalSearchParams } from 'expo-router';
+import type { StartOptions } from '@ket/remote';
 import { type ReactNode, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import {
   Dimensions,
@@ -42,7 +43,7 @@ import { getLastWork, saveLastWork } from '../../lib/store';
 import { agentLabel, font, size, t } from '../../lib/theme';
 
 /** Which dropdown is open. */
-type Which = 'project' | 'agent';
+type Which = 'project' | 'target' | 'agent' | 'base' | 'model' | 'effort' | 'kind';
 
 /** Where a dropdown's field sits in the sheet, for its menu to open above. */
 interface Place {
@@ -51,7 +52,7 @@ interface Place {
 }
 
 export default function NewTask() {
-  const { host: hostId } = useLocalSearchParams<{ host: string }>();
+  const { host: hostId, worktree: initialWorktree } = useLocalSearchParams<{ host: string; worktree?: string }>();
   const conn = useHost(hostId);
   const insets = useSafeAreaInsets();
   // Projects the desktop lists, without "Elsewhere" — the terminals it could
@@ -62,6 +63,12 @@ export default function NewTask() {
   const [picked, setPicked] = useState<string | null>(null);
   // Empty for the project's own agent.
   const [wanted, setWanted] = useState('');
+  const [target, setTarget] = useState(initialWorktree ? decodeURIComponent(initialWorktree) : '');
+  const [kind, setKind] = useState<'agent' | 'shell'>('agent');
+  const [base, setBase] = useState('');
+  const [model, setModel] = useState('');
+  const [effort, setEffort] = useState('');
+  const [options, setOptions] = useState<StartOptions | null>(null);
   const [prompt, setPrompt] = useState('');
   const [sending, setSending] = useState(false);
   const [error, setError] = useState('');
@@ -98,10 +105,23 @@ export default function NewTask() {
   useEffect(() => {
     void getLastWork(hostId).then((last) => {
       if (!last || touched.current) return;
-      setPicked(last.project);
+      if (!initialWorktree) setPicked(last.project);
       setWanted(last.agent);
     });
-  }, [hostId]);
+  }, [hostId, initialWorktree]);
+
+  const project = projects.find((p) => p.id === picked) ?? projects.find((p) => p.worktrees.some((w) => w.id === target)) ?? projects[0];
+  const projectId = project?.id;
+  useEffect(() => {
+    if (!conn || !projectId || conn.hostMinor < 15) return;
+    let active = true;
+    void conn.startOptions(projectId).then((next) => {
+      if (active) setOptions(next);
+    }).catch((reason: unknown) => {
+      if (active) setError(reason instanceof Error ? reason.message : String(reason));
+    });
+    return () => { active = false; };
+  }, [conn, projectId]);
 
   // From the commit, not after paint: the prompt focuses itself as it mounts,
   // and the keyboard's first event must not arrive before anyone listens.
@@ -114,9 +134,13 @@ export default function NewTask() {
     };
   }, []);
 
-  const project = projects.find((p) => p.id === picked) ?? projects[0];
   const agent = agents.includes(wanted) ? wanted : '';
   const choosesAgent = agents.length > 1;
+  const advanced = (conn?.hostMinor ?? 0) >= 15;
+  const existing = advanced ? project?.worktrees.find((w) => w.id === target) : undefined;
+  const currentOptions = options?.projectId === projectId ? options : null;
+  const agentOptions = currentOptions?.agents.find((item) => item.agent === agent);
+  const selectedBase = currentOptions?.localBranches.includes(base) ? base : currentOptions?.defaultBase ?? '';
   // A desktop from before 1.7 can't take new work.
   const tooOld = conn !== null && conn.status === 'connected' && conn.hostMinor < 7;
 
@@ -148,20 +172,32 @@ export default function NewTask() {
   const pickProject = (id: string) => {
     touched.current = true;
     setPicked(id);
+    setTarget('');
+    setKind('agent');
+    setBase('');
+    setModel('');
+    setEffort('');
     setOpen(null);
   };
 
   const pickAgent = (name: string) => {
     touched.current = true;
     setWanted(name);
+    setModel('');
+    setEffort('');
     setOpen(null);
   };
 
   const start = async () => {
-    if (!conn || !project || !prompt.trim()) return;
+    if (!conn || !project || (kind === 'agent' && !existing && !prompt.trim())) return;
     setSending(true);
     setError('');
-    const why = await conn.startWork(project.id, prompt.trim(), agent).catch((e: unknown) => (e instanceof Error ? e.message : String(e)));
+    const why = await (existing
+      ? conn.startSession(existing.id, kind === 'shell' ? '' : agent, kind === 'shell' ? '' : prompt.trim(), model, effort)
+      : advanced
+        ? conn.startWork(project.id, prompt.trim(), agent, { base: selectedBase, model, effort })
+        : conn.startWork(project.id, prompt.trim(), agent)
+    ).catch((e: unknown) => (e instanceof Error ? e.message : String(e)));
     setSending(false);
     if (why) {
       setError(why.charAt(0).toUpperCase() + why.slice(1));
@@ -199,7 +235,10 @@ export default function NewTask() {
         <View style={styles.room} pointerEvents="box-none" onLayout={(e) => setRoom({ width: e.nativeEvent.layout.width, height: e.nativeEvent.layout.height })}>
           <KeyboardStickyView offset={{ opened: tucked }}>
             <Animated.View
-              style={[styles.sheet, { paddingBottom: foot }, sliding]}
+              style={[styles.sheet, {
+                paddingBottom: foot,
+                maxHeight: room.height ? (typing ? Math.max(300, room.height * 0.58) : room.height - insets.top - 8) : undefined,
+              }, sliding]}
               onLayout={(e) => arrive(e.nativeEvent.layout.height)}
             >
               <View style={styles.grabber} />
@@ -217,7 +256,8 @@ export default function NewTask() {
                 </Pressable>
               </View>
 
-              <View style={styles.fields} onLayout={(e) => setRowY(e.nativeEvent.layout.y)}>
+              <ScrollView style={styles.sheetContent} keyboardShouldPersistTaps="handled" bounces={false}>
+              <View style={styles.fields} onLayout={(e) => setRowY(e.nativeEvent.layout.y + 72)}>
                 <Field
                   label="Project"
                   open={open === 'project'}
@@ -227,30 +267,62 @@ export default function NewTask() {
                   lead={project ? <Badge name={project.name} color={projectColor(project)} size={18} /> : null}
                   value={project?.name ?? 'No projects'}
                 />
-                {choosesAgent ? (
+                {advanced ? (
+                  <Field
+                    label="Worktree"
+                    open={open === 'target'}
+                    onPress={() => toggle('target')}
+                    onLayout={placed('target')}
+                    lead={null}
+                    value={existing?.name ?? 'New worktree'}
+                  />
+                ) : null}
+                {existing ? (
+                  <Field
+                    label="Open"
+                    open={open === 'kind'}
+                    onPress={() => toggle('kind')}
+                    onLayout={placed('kind')}
+                    lead={null}
+                    value={kind === 'shell' ? 'Shell' : 'Agent session'}
+                  />
+                ) : null}
+                {(choosesAgent || advanced) && kind === 'agent' ? (
                   <Field
                     label="Agent"
                     open={open === 'agent'}
                     onPress={() => toggle('agent')}
                     onLayout={placed('agent')}
                     lead={<AgentMark agent={agent} size={15} />}
-                    value={agent ? agentLabel(agent) : 'Default'}
+                    value={agent ? agentLabel(agent) : existing ? 'Choose agent' : 'Default'}
                   />
+                ) : null}
+                {advanced && !existing && currentOptions && currentOptions.localBranches.length > 0 ? (
+                  <Field label="Base branch" open={open === 'base'} onPress={() => toggle('base')}
+                    onLayout={placed('base')} lead={null} value={selectedBase || 'Default'} />
+                ) : null}
+                {advanced && kind === 'agent' && agentOptions && agentOptions.models.length > 0 ? (
+                  <Field label="Model" open={open === 'model'} onPress={() => toggle('model')}
+                    onLayout={placed('model')} lead={null} value={model || 'Default'} />
+                ) : null}
+                {advanced && kind === 'agent' && agentOptions && agentOptions.efforts.length > 0 ? (
+                  <Field label="Effort" open={open === 'effort'} onPress={() => toggle('effort')}
+                    onLayout={placed('effort')} lead={null} value={effort || 'Default'} />
                 ) : null}
               </View>
 
-              <KeyCommands title="Start task" onSend={() => (sending || tooOld ? undefined : void start())}>
+              {kind === 'shell' ? null : <KeyCommands title="Start task" onSend={() => (sending || tooOld ? undefined : void start())}>
                 <TextInput
                   value={prompt}
                   onChangeText={setPrompt}
                   onFocus={() => setOpen(null)}
-                  placeholder="What should the agent do?"
+                  placeholder={existing ? 'Optional task for the new session' : 'What should the agent do?'}
                   placeholderTextColor={t.faint}
                   multiline
                   autoFocus
                   style={styles.prompt}
                 />
-              </KeyCommands>
+              </KeyCommands>}
 
               {projects.length === 0 ? (
                 <Prose style={styles.note}>No projects on this desktop yet.</Prose>
@@ -270,11 +342,12 @@ export default function NewTask() {
               <View style={styles.actions}>
                 <Button
                   kind="brand"
-                  title={sending ? 'Starting…' : 'Start task'}
-                  disabled={sending || tooOld || !project || !prompt.trim()}
+                  title={sending ? 'Starting…' : existing ? kind === 'shell' ? 'Open shell' : 'Start session' : 'Start task'}
+                  disabled={sending || tooOld || !project || (!existing && !prompt.trim()) || (advanced && !currentOptions) || (existing && kind === 'agent' && !agent)}
                   onPress={() => void start()}
                 />
               </View>
+              </ScrollView>
             </Animated.View>
           </KeyboardStickyView>
 
@@ -299,15 +372,15 @@ export default function NewTask() {
                         />
                       ))}
                     </>
-                  ) : (
+                  ) : open === 'agent' ? (
                     <>
-                      <Item
+                      {!existing ? <Item
                         on={agent === ''}
                         lead={<AgentMark agent="" size={16} />}
                         label="Default"
                         note={project ? `Whatever ket uses for ${project.name}` : 'Whatever ket uses for the project'}
                         onPress={() => pickAgent('')}
-                      />
+                      /> : null}
                       {agents.map((name) => (
                         <Item
                           key={name}
@@ -316,6 +389,36 @@ export default function NewTask() {
                           label={agentLabel(name)}
                           onPress={() => pickAgent(name)}
                         />
+                      ))}
+                    </>
+                  ) : open === 'target' ? (
+                    <>
+                      <Item on={!existing} lead={null} label="New worktree" onPress={() => { setTarget(''); setKind('agent'); setOpen(null); }} />
+                      {project?.worktrees.map((worktree) => (
+                        <Item key={worktree.id} on={worktree.id === target} lead={null} label={worktree.name}
+                          onPress={() => { setTarget(worktree.id); setOpen(null); }} />
+                      ))}
+                    </>
+                  ) : open === 'kind' ? (
+                    <>
+                      <Item on={kind === 'agent'} lead={null} label="Agent session" onPress={() => { setKind('agent'); setOpen(null); }} />
+                      <Item on={kind === 'shell'} lead={null} label="Shell" onPress={() => { setKind('shell'); setModel(''); setEffort(''); setOpen(null); }} />
+                    </>
+                  ) : (
+                    <>
+                      {(open === 'base' ? [currentOptions?.defaultBase ?? ''] : ['']).map((value) => (
+                        <Item key={`default-${open}`} on={(open === 'base' ? selectedBase : open === 'model' ? model : effort) === value}
+                          lead={null} label={open === 'base' ? `Default (${value})` : 'Default'} onPress={() => {
+                            if (open === 'base') setBase(''); else if (open === 'model') setModel(''); else setEffort('');
+                            setOpen(null);
+                          }} />
+                      ))}
+                      {(open === 'base' ? currentOptions?.localBranches ?? [] : open === 'model' ? agentOptions?.models ?? [] : agentOptions?.efforts ?? []).map((value) => (
+                        <Item key={value} on={(open === 'base' ? selectedBase : open === 'model' ? model : effort) === value}
+                          lead={null} label={value} onPress={() => {
+                            if (open === 'base') setBase(value); else if (open === 'model') setModel(value); else setEffort(value);
+                            setOpen(null);
+                          }} />
                       ))}
                     </>
                   )}
@@ -420,15 +523,16 @@ const styles = StyleSheet.create({
     shadowRadius: 25,
     shadowOffset: { width: 0, height: -20 },
   },
+  sheetContent: { flexShrink: 1 },
   grabber: { width: 36, height: 5, borderRadius: 3, backgroundColor: t.border, alignSelf: 'center', marginTop: 8, marginBottom: 6 },
   head: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingTop: 4, paddingBottom: 14, paddingLeft: 16, paddingRight: 12 },
   headText: { flex: 1, minWidth: 0, gap: 1 },
   title: { fontFamily: font.proseSemibold, fontSize: size.value, color: t.text },
   host: { fontFamily: font.prose, fontSize: 12, color: t.dim },
   close: { width: 32, height: 32, borderRadius: 16, backgroundColor: t.sunken, alignItems: 'center', justifyContent: 'center' },
-  fields: { flexDirection: 'row', gap: 8, paddingHorizontal: 12 },
+  fields: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, paddingHorizontal: 12 },
   field: {
-    flex: 1,
+    width: '48%',
     minWidth: 0,
     height: 56,
     borderRadius: size.radiusLg,

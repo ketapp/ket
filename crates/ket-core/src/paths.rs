@@ -143,6 +143,14 @@ pub fn backlog_dir() -> Result<PathBuf> {
     Ok(data_dir()?.join("backlog"))
 }
 
+/// Directory holding the photos and files phones send with a message, each
+/// message's in a directory of its own — see [`crate::attachments::keep`].
+/// Outside every worktree, so what a phone sends never shows up in `git
+/// status`.
+pub fn phone_uploads_dir() -> Result<PathBuf> {
+    Ok(data_dir()?.join("phone-uploads"))
+}
+
 /// Directory holding user-defined themes — `<config_dir>/themes`.
 ///
 /// A theme only needs to exist to override the shipped dark or light default,

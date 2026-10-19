@@ -101,6 +101,9 @@ impl Shell {
         // thing worth knowing before switching to look.
         let switch = crate::ui::group::button_group("panel-views")
             .fill()
+            // The small track: the strip is the tab bar's height, and a
+            // full one would stand taller than the tabs it lines up with.
+            .small()
             .children(PanelView::ALL.map(|view| {
                 let active = self.panel_view == view;
                 let segment = crate::ui::group::segment(
@@ -129,7 +132,7 @@ impl Shell {
             .flex_none()
             .items_center()
             .h(crate::tree::TOP_STRIP)
-            .px(px(8.0))
+            .px(px(4.0))
             .child(switch)
             .into_any_element()
     }

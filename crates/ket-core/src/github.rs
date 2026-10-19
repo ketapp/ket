@@ -202,6 +202,327 @@ fn read_pull_requests(out: &str) -> Result<Vec<PullRequestLink>> {
         .map_err(|e| failed(format!("could not read gh's list of pull requests: {e}")))
 }
 
+/// Most open pull requests one [`open_pull_requests`] reads.
+const PULL_REQUEST_LIMIT: usize = 100;
+
+/// A pull request open from one of the repository's own branches, with what
+/// GitHub says of it now: whether it is a draft, where its review stands,
+/// and its checks.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PullRequestStatus {
+    /// Its number in the repository.
+    pub number: u64,
+    /// Its page on GitHub.
+    pub url: String,
+    /// The branch it is open from.
+    pub branch: String,
+    /// Whether it is still a draft.
+    pub draft: bool,
+    /// What its reviewers have decided, as far as they have.
+    pub review: Review,
+    /// Its checks, in GitHub's order.
+    pub checks: Vec<Check>,
+}
+
+/// Where a pull request's review stands.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Review {
+    /// None is needed, or none has been given.
+    #[default]
+    None,
+    /// Approved.
+    Approved,
+    /// A reviewer asked for changes.
+    ChangesRequested,
+    /// The repository's rules want a review it does not have yet.
+    Required,
+}
+
+/// One check on a pull request: a GitHub Actions job, or a status another
+/// service posted on its commit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Check {
+    /// What GitHub calls it: the job's name, or the status's context.
+    pub name: String,
+    /// How it stands.
+    pub state: CheckState,
+    /// Its page — the job's log, or wherever the service points. Empty when
+    /// it gave none.
+    pub url: String,
+}
+
+/// How a check stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckState {
+    /// It passed, or finished with nothing to say against the change.
+    Passed,
+    /// It failed, errored or timed out.
+    Failed,
+    /// Queued or running.
+    Pending,
+    /// Skipped, cancelled or superseded: it says nothing either way.
+    Skipped,
+}
+
+impl PullRequestStatus {
+    /// The link a worktree keeps to it.
+    pub fn link(&self) -> PullRequestLink {
+        PullRequestLink {
+            number: self.number,
+            url: self.url.clone(),
+        }
+    }
+
+    /// Its checks taken together: failed if any failed, else pending if any
+    /// is still going, else passed if any passed. `None` when it has no
+    /// check that says anything.
+    pub fn checks_state(&self) -> Option<CheckState> {
+        let any = |state| self.checks.iter().any(|check| check.state == state);
+        [CheckState::Failed, CheckState::Pending, CheckState::Passed]
+            .into_iter()
+            .find(|&state| any(state))
+    }
+
+    /// The checks that failed.
+    pub fn failed(&self) -> impl Iterator<Item = &Check> {
+        self.checks
+            .iter()
+            .filter(|check| check.state == CheckState::Failed)
+    }
+
+    /// Its checks in a few words, as a tooltip or a detail line says them:
+    /// "2 of 9 checks failing", "3 checks running", "all 9 checks passed".
+    /// Empty when it has none that say anything.
+    pub fn checks_summary(&self) -> String {
+        let counted: Vec<&Check> = self
+            .checks
+            .iter()
+            .filter(|check| check.state != CheckState::Skipped)
+            .collect();
+        let total = counted.len();
+        let count = |state| counted.iter().filter(|check| check.state == state).count();
+        let checks = |n: usize| if n == 1 { "check" } else { "checks" };
+        match self.checks_state() {
+            None => String::new(),
+            Some(CheckState::Failed) => {
+                let failed = count(CheckState::Failed);
+                if failed == total {
+                    format!("{failed} {} failing", checks(failed))
+                } else {
+                    format!("{failed} of {total} {} failing", checks(total))
+                }
+            }
+            Some(CheckState::Pending) => {
+                let pending = count(CheckState::Pending);
+                format!("{pending} {} running", checks(pending))
+            }
+            Some(CheckState::Passed | CheckState::Skipped) if total == 1 => {
+                "1 check passed".to_owned()
+            }
+            Some(CheckState::Passed | CheckState::Skipped) => {
+                format!("all {total} checks passed")
+            }
+        }
+    }
+}
+
+/// The open pull requests of the repository `at` is a checkout of, with
+/// their checks — one call for every worktree of a project, matched to them
+/// by branch. Opened by ket or by an agent that ran `gh pr create` itself.
+///
+/// Pull requests from forks are left out: a fork's branch names are
+/// someone else's, and a fork's `fix-typo` is not this repository's.
+pub fn open_pull_requests(at: &Checkout) -> Result<Vec<PullRequestStatus>> {
+    let limit = PULL_REQUEST_LIMIT.to_string();
+    let out = run(
+        at,
+        &[
+            "pr",
+            "list",
+            "--state",
+            "open",
+            "--limit",
+            &limit,
+            "--json",
+            "number,url,headRefName,isDraft,isCrossRepository,reviewDecision,statusCheckRollup",
+        ],
+        None,
+    )?;
+    read_pull_request_statuses(&out)
+}
+
+/// The pull requests [`open_pull_requests`] had `gh` print, forks left out.
+fn read_pull_request_statuses(out: &str) -> Result<Vec<PullRequestStatus>> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Listed {
+        number: u64,
+        url: String,
+        head_ref_name: String,
+        #[serde(default)]
+        is_draft: bool,
+        #[serde(default)]
+        is_cross_repository: bool,
+        #[serde(default)]
+        review_decision: Option<String>,
+        #[serde(default)]
+        status_check_rollup: Option<Vec<Rolled>>,
+    }
+
+    /// One entry of `statusCheckRollup`: a check run, or a commit status.
+    #[derive(Deserialize)]
+    #[serde(tag = "__typename")]
+    enum Rolled {
+        CheckRun(CheckRun),
+        StatusContext(StatusContext),
+        #[serde(other)]
+        Other,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct CheckRun {
+        #[serde(default)]
+        name: String,
+        #[serde(default)]
+        status: String,
+        #[serde(default)]
+        conclusion: String,
+        #[serde(default)]
+        details_url: String,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct StatusContext {
+        #[serde(default)]
+        context: String,
+        #[serde(default)]
+        state: String,
+        #[serde(default)]
+        target_url: String,
+    }
+
+    let listed: Vec<Listed> = serde_json::from_str(out)
+        .map_err(|e| failed(format!("could not read gh's list of pull requests: {e}")))?;
+    Ok(listed
+        .into_iter()
+        .filter(|pr| !pr.is_cross_repository)
+        .map(|pr| PullRequestStatus {
+            number: pr.number,
+            url: pr.url,
+            branch: pr.head_ref_name,
+            draft: pr.is_draft,
+            review: match pr.review_decision.as_deref() {
+                Some("APPROVED") => Review::Approved,
+                Some("CHANGES_REQUESTED") => Review::ChangesRequested,
+                Some("REVIEW_REQUIRED") => Review::Required,
+                _ => Review::None,
+            },
+            checks: pr
+                .status_check_rollup
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|rolled| match rolled {
+                    Rolled::CheckRun(run) => Some(Check {
+                        state: match (run.status.as_str(), run.conclusion.as_str()) {
+                            ("COMPLETED", "SUCCESS" | "NEUTRAL") => CheckState::Passed,
+                            (
+                                "COMPLETED",
+                                "FAILURE" | "TIMED_OUT" | "STARTUP_FAILURE" | "ACTION_REQUIRED",
+                            ) => CheckState::Failed,
+                            ("COMPLETED", _) => CheckState::Skipped,
+                            _ => CheckState::Pending,
+                        },
+                        name: run.name,
+                        url: run.details_url,
+                    }),
+                    Rolled::StatusContext(status) => Some(Check {
+                        state: match status.state.as_str() {
+                            "SUCCESS" => CheckState::Passed,
+                            "FAILURE" | "ERROR" => CheckState::Failed,
+                            _ => CheckState::Pending,
+                        },
+                        name: status.context,
+                        url: status.target_url,
+                    }),
+                    Rolled::Other => None,
+                })
+                .collect(),
+        })
+        .collect())
+}
+
+/// What `check`'s failed steps printed, when it is a GitHub Actions job —
+/// its page names the job — else `None`: another service's status keeps its
+/// log on that service. Tidied for reading: the job's name and each line's
+/// timestamp taken off, and a heading wherever the step changes.
+pub fn failed_log(at: &Checkout, check: &Check) -> Result<Option<String>> {
+    let Some(job) = job_of(&check.url) else {
+        return Ok(None);
+    };
+    let job = job.to_string();
+    let out = run(at, &["run", "view", "--job", &job, "--log-failed"], None)?;
+    Ok(Some(readable_log(&out)))
+}
+
+/// The Actions job a check's page is, from an address like
+/// `https://github.com/o/r/actions/runs/123/job/456`.
+fn job_of(url: &str) -> Option<u64> {
+    let (_, rest) = url.split_once("/actions/runs/")?;
+    let (_, job) = rest.split_once("/job/")?;
+    job.split(['/', '?', '#']).next()?.parse().ok()
+}
+
+/// `gh run view --log-failed`'s output for a person or an agent to read:
+/// each line is `job<TAB>step<TAB>timestamp text`, and only the text and a
+/// heading where the step changes are kept. `UNKNOWN STEP` is what `gh`
+/// says when it could not tell the steps apart, which is no heading.
+fn readable_log(out: &str) -> String {
+    let mut readable = String::with_capacity(out.len());
+    let mut step: Option<&str> = None;
+    for line in out.lines() {
+        let mut parts = line.splitn(3, '\t');
+        let (Some(_job), Some(this_step), Some(rest)) = (parts.next(), parts.next(), parts.next())
+        else {
+            readable.push_str(line);
+            readable.push('\n');
+            continue;
+        };
+        if step != Some(this_step) {
+            if this_step != "UNKNOWN STEP" {
+                if !readable.is_empty() {
+                    readable.push('\n');
+                }
+                readable.push_str("== ");
+                readable.push_str(this_step);
+                readable.push_str(" ==\n");
+            }
+            step = Some(this_step);
+        }
+        let rest = rest.trim_start_matches('\u{feff}');
+        let text = match rest.split_once(' ') {
+            Some((stamp, text)) if is_timestamp(stamp) => text,
+            _ if is_timestamp(rest) => "",
+            _ => rest,
+        };
+        readable.push_str(text);
+        readable.push('\n');
+    }
+    readable
+}
+
+/// Whether `word` is an Actions log line's timestamp,
+/// `2026-10-15T20:31:18.1053761Z`.
+fn is_timestamp(word: &str) -> bool {
+    word.len() >= 20
+        && word.ends_with('Z')
+        && word.as_bytes().get(10) == Some(&b'T')
+        && word.as_bytes()[..4].iter().all(u8::is_ascii_digit)
+}
+
 /// The thing `gh … create` says it made, from what it printed: its number
 /// and its address. `what` names it in the error when it printed neither.
 fn link_in_output(out: &str, what: &str) -> Result<(u64, String)> {
@@ -982,5 +1303,167 @@ mod tests {
             login_code("! Failed to copy one-time code to clipboard"),
             None
         );
+    }
+
+    /// `gh pr list --json …,statusCheckRollup` for one pull request, as
+    /// ketapp/ket's #17 printed it, trimmed to the fields ket reads.
+    const LISTED: &str = r#"[
+      {"number": 17, "url": "https://github.com/ketapp/ket/pull/17",
+       "headRefName": "deps-expo", "isDraft": false, "isCrossRepository": false,
+       "reviewDecision": "",
+       "statusCheckRollup": [
+         {"__typename": "CheckRun", "name": "rust-advisories-and-licenses",
+          "status": "COMPLETED", "conclusion": "FAILURE", "workflowName": "Dependency security",
+          "detailsUrl": "https://github.com/ketapp/ket/actions/runs/38802060258/job/116653348974"},
+         {"__typename": "CheckRun", "name": "rust", "status": "COMPLETED", "conclusion": "SUCCESS",
+          "detailsUrl": "https://github.com/ketapp/ket/actions/runs/38802060369/job/116653349453"},
+         {"__typename": "CheckRun", "name": "mobile", "status": "IN_PROGRESS", "conclusion": "",
+          "detailsUrl": "https://github.com/ketapp/ket/actions/runs/38802060369/job/116653349181"},
+         {"__typename": "CheckRun", "name": "docs", "status": "COMPLETED", "conclusion": "SKIPPED",
+          "detailsUrl": ""},
+         {"__typename": "StatusContext", "context": "ci/circleci", "state": "ERROR",
+          "targetUrl": "https://circleci.com/gh/o/r/1"},
+         {"__typename": "SomethingNew", "name": "ignored"}
+       ]},
+      {"number": 18, "url": "https://github.com/ketapp/ket/pull/18",
+       "headRefName": "fix-typo", "isDraft": true, "isCrossRepository": true,
+       "reviewDecision": "APPROVED", "statusCheckRollup": []},
+      {"number": 19, "url": "https://github.com/ketapp/ket/pull/19",
+       "headRefName": "quiet", "isDraft": true, "isCrossRepository": false,
+       "reviewDecision": "CHANGES_REQUESTED", "statusCheckRollup": null}
+    ]"#;
+
+    #[test]
+    fn open_pull_requests_are_read_with_their_checks_and_forks_left_out() {
+        let read = read_pull_request_statuses(LISTED).unwrap();
+        assert_eq!(read.len(), 2, "the fork's #18 is not this repository's");
+
+        let deps = &read[0];
+        assert_eq!(deps.number, 17);
+        assert_eq!(deps.branch, "deps-expo");
+        assert!(!deps.draft);
+        assert_eq!(deps.review, Review::None);
+        let states: Vec<(&str, CheckState)> = deps
+            .checks
+            .iter()
+            .map(|check| (check.name.as_str(), check.state))
+            .collect();
+        assert_eq!(
+            states,
+            [
+                ("rust-advisories-and-licenses", CheckState::Failed),
+                ("rust", CheckState::Passed),
+                ("mobile", CheckState::Pending),
+                ("docs", CheckState::Skipped),
+                ("ci/circleci", CheckState::Failed),
+            ]
+        );
+        assert_eq!(deps.checks[4].url, "https://circleci.com/gh/o/r/1");
+
+        let quiet = &read[1];
+        assert!(quiet.draft);
+        assert_eq!(quiet.review, Review::ChangesRequested);
+        assert!(quiet.checks.is_empty(), "a null rollup is no checks");
+        assert_eq!(quiet.checks_state(), None);
+        assert_eq!(quiet.checks_summary(), "");
+    }
+
+    fn with_checks(states: &[CheckState]) -> PullRequestStatus {
+        PullRequestStatus {
+            number: 1,
+            url: "https://github.com/o/r/pull/1".to_owned(),
+            branch: "b".to_owned(),
+            draft: false,
+            review: Review::None,
+            checks: states
+                .iter()
+                .enumerate()
+                .map(|(at, &state)| Check {
+                    name: format!("check {at}"),
+                    state,
+                    url: String::new(),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn checks_are_failed_before_pending_before_passed_and_skipped_says_nothing() {
+        use CheckState::{Failed, Passed, Pending, Skipped};
+        assert_eq!(
+            with_checks(&[Passed, Pending, Failed]).checks_state(),
+            Some(Failed)
+        );
+        assert_eq!(
+            with_checks(&[Passed, Pending]).checks_state(),
+            Some(Pending)
+        );
+        assert_eq!(with_checks(&[Passed, Skipped]).checks_state(), Some(Passed));
+        assert_eq!(with_checks(&[Skipped]).checks_state(), None);
+    }
+
+    #[test]
+    fn checks_are_summed_up_in_a_few_words() {
+        use CheckState::{Failed, Passed, Pending, Skipped};
+        assert_eq!(
+            with_checks(&[Failed, Passed, Pending, Skipped]).checks_summary(),
+            "1 of 3 checks failing"
+        );
+        assert_eq!(
+            with_checks(&[Failed, Failed]).checks_summary(),
+            "2 checks failing"
+        );
+        assert_eq!(with_checks(&[Failed]).checks_summary(), "1 check failing");
+        assert_eq!(
+            with_checks(&[Pending, Passed]).checks_summary(),
+            "1 check running"
+        );
+        assert_eq!(
+            with_checks(&[Passed, Passed, Skipped]).checks_summary(),
+            "all 2 checks passed"
+        );
+        assert_eq!(with_checks(&[Passed]).checks_summary(), "1 check passed");
+    }
+
+    #[test]
+    fn an_actions_job_is_read_off_its_page() {
+        assert_eq!(
+            job_of("https://github.com/ketapp/ket/actions/runs/38802060258/job/116653348974"),
+            Some(116_653_348_974)
+        );
+        assert_eq!(
+            job_of("https://github.com/o/r/actions/runs/1/job/2?pr=17"),
+            Some(2)
+        );
+        assert_eq!(job_of("https://circleci.com/gh/o/r/1"), None);
+        assert_eq!(job_of("https://github.com/o/r/actions/runs/1"), None);
+        assert_eq!(job_of(""), None);
+    }
+
+    #[test]
+    fn a_failed_log_loses_its_job_names_and_timestamps_and_gains_step_headings() {
+        let out = "lint\tSet up job\t\u{feff}2026-10-15T20:31:18.1053761Z Current runner version: '2.337.0'\n\
+                   lint\tRun clippy\t2026-10-15T20:31:19.0000000Z error: unused variable `x`\n\
+                   lint\tRun clippy\t2026-10-15T20:31:19.1000000Z\n\
+                   lint\tRun clippy\t2026-10-15T20:31:20.0000000Z ##[error]Process completed with exit code 1.\n\
+                   a line gh printed without the columns\n";
+        assert_eq!(
+            readable_log(out),
+            "== Set up job ==\n\
+             Current runner version: '2.337.0'\n\
+             \n\
+             == Run clippy ==\n\
+             error: unused variable `x`\n\
+             \n\
+             ##[error]Process completed with exit code 1.\n\
+             a line gh printed without the columns\n"
+        );
+    }
+
+    #[test]
+    fn a_log_whose_steps_gh_could_not_tell_apart_has_no_headings() {
+        let out = "job\tUNKNOWN STEP\t2026-10-15T20:31:18.1053761Z one\n\
+                   job\tUNKNOWN STEP\t2026-10-15T20:31:18.1053762Z two\n";
+        assert_eq!(readable_log(out), "one\ntwo\n");
     }
 }

@@ -620,6 +620,7 @@ impl Shell {
                         kind,
                         renamed: false,
                         pinned: false,
+                        preview: false,
                     });
                 }
             }

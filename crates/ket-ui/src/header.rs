@@ -13,8 +13,8 @@
 //! savings came up from the status bar, which keeps the key hints.
 
 use gpui::{
-    AnyElement, Context, Div, FontWeight, MouseButton, Pixels, SharedString, Window,
-    WindowControlArea, div, prelude::*, px,
+    AnyElement, AvailableSpace, Context, Div, FontWeight, MouseButton, Pixels, SharedString,
+    Window, WindowControlArea, canvas, div, prelude::*, px, size,
 };
 use ket_core::activity::Signal;
 use ket_core::build_info::{self, Channel};
@@ -30,25 +30,31 @@ use crate::ui::icon::{Icon, sized_icon};
 use crate::ui::{CAPTION, LABEL};
 
 /// The desk showing between two cards, and around the edge of the window.
-pub(crate) const GUTTER: Pixels = px(10.0);
+///
+/// Six rather than the ten it was: at ten the desk was the widest thing
+/// between any two pieces of text in the window, and the cards read as
+/// islands with water between them rather than as one surface divided.
+pub(crate) const GUTTER: Pixels = px(6.0);
 
-/// A card's corner.
-pub(crate) const CARD_RADIUS: Pixels = px(12.0);
+/// A card's corner: a step under what it was, with the gutter, so a corner
+/// does not round off more than the desk beside it shows.
+pub(crate) const CARD_RADIUS: Pixels = px(10.0);
 
 /// The header card's height.
 pub(crate) const HEADER_H: Pixels = px(56.0);
 
 /// Where the traffic lights sit, in window coordinates: inside the header's
 /// left end, centred on its height. AppKit places the buttons by their
-/// top-left corner, and they are about 12px tall.
-pub(crate) const TRAFFIC_LIGHTS: (f32, f32) = (26.0, 32.0);
+/// top-left corner, and they are about 12px tall — so this is the
+/// [`GUTTER`] plus half the header, less half a button.
+pub(crate) const TRAFFIC_LIGHTS: (f32, f32) = (22.0, 28.0);
 
 /// The compact strip's height — see [`Shell::header_compact`].
-pub(crate) const COMPACT_H: Pixels = px(32.0);
+pub(crate) const COMPACT_H: Pixels = px(28.0);
 
 /// Where the traffic lights sit when the header is the compact strip:
-/// centred on its 32px, a little further in.
-const TRAFFIC_LIGHTS_COMPACT: (f32, f32) = (22.0, 20.0);
+/// centred on its 28px, a little further in.
+const TRAFFIC_LIGHTS_COMPACT: (f32, f32) = (18.0, 14.0);
 
 /// Room the traffic lights take at the compact strip's left end.
 const COMPACT_LIGHTS_INSET: Pixels = px(74.0);
@@ -60,7 +66,7 @@ const LIGHTS_INSET: Pixels = px(90.0);
 const STAT_GAP: Pixels = px(26.0);
 
 /// Space between two read-outs in the compact strip.
-const COMPACT_GAP: Pixels = px(6.0);
+const COMPACT_GAP: Pixels = px(4.0);
 
 /// The hover padding around a clickable figure. The trigger takes it back
 /// as negative margin, so its fill spills into the gaps and its figures sit
@@ -78,9 +84,10 @@ const VALUE: Pixels = px(14.0);
 /// all the way to its own edges — a terminal's background, an editor's.
 ///
 /// gpui clips to rectangles, not rounded ones, so a square fill flush with
-/// the border covers the card's corners. Four pixels is the least that keeps
-/// a square corner inside an 11px inner radius: 11 × (1 − 1/√2) ≈ 3.2.
-pub(crate) const CARD_INSET: Pixels = px(4.0);
+/// the border covers the card's corners. Three pixels is the least that keeps
+/// a square corner inside a 9px inner radius: 9 × (1 − 1/√2) ≈ 2.6. Tie it
+/// to [`CARD_RADIUS`] when that moves.
+pub(crate) const CARD_INSET: Pixels = px(3.0);
 
 /// The frame every card shares.
 pub(crate) fn card(t: &Theme) -> Div {
@@ -138,6 +145,18 @@ fn divider(gap: Pixels, height: Pixels, t: &Theme) -> Div {
         .bg(paint(t.rule))
 }
 
+/// How far the header's content stands in from its left edge: past the
+/// traffic lights.
+fn lights_inset(compact: bool, window: &Window) -> Pixels {
+    match (window.is_fullscreen(), compact) {
+        // Fullscreen hides the traffic lights, so the room kept for them
+        // goes back to the content rather than sitting empty.
+        (true, _) => px(12.0),
+        (false, true) => COMPACT_LIGHTS_INSET,
+        (false, false) => LIGHTS_INSET,
+    }
+}
+
 /// A run of the header that moves the window.
 fn drag_area() -> Div {
     div()
@@ -162,8 +181,15 @@ impl Shell {
     /// The header card.
     pub(crate) fn window_header(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let t = &self.theme;
-        let now = ket_core::now_ms();
-        let compact = self.header_compact;
+        // The full header unless it was asked to be compact, or the window has
+        // no room for it: past what the window holds, the full one clipped its
+        // own right end, and the layout switches went first. Its width is
+        // measured off screen every frame — see [`Shell::header_probe`] — so it
+        // comes back as soon as the window is wide enough, and goes again if a
+        // figure grows past the room.
+        let room = window.viewport_size().width - GUTTER * 2.0;
+        let cramped = self.header_need.get().is_some_and(|need| need > room);
+        let compact = self.header_compact || cramped;
         // The lights follow the header's height. Moved only when it changes:
         // AppKit relays the title bar out on every move.
         if self.lights_placed.get() != Some(compact) {
@@ -175,6 +201,52 @@ impl Shell {
             window.set_traffic_light_position(gpui::point(px(x), px(y)));
             self.lights_placed.set(Some(compact));
         }
+        let figures = self.header_figures(compact, window, cx);
+        let probe = self.header_probe(window, cx);
+
+        card(t)
+            .id("window-header")
+            .flex()
+            .flex_none()
+            .items_center()
+            .when(compact, |el| {
+                el.gap(COMPACT_GAP)
+                    .h(COMPACT_H)
+                    .rounded(px(8.0))
+                    .pr(px(3.0))
+            })
+            .when(!compact, |el| el.gap(STAT_GAP).h(HEADER_H).pr(px(10.0)))
+            .pl(lights_inset(compact, window))
+            // Everything but the layout switches, in a run of its own that
+            // clips: a header longer than the window loses the end of its
+            // last figure rather than the switches that would make room.
+            .child(
+                div()
+                    .flex()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .items_center()
+                    .overflow_hidden()
+                    .gap(if compact { COMPACT_GAP } else { STAT_GAP })
+                    .children(figures)
+                    .child(drag_area().flex_1().h_full()),
+            )
+            .child(self.header_cluster(compact, cramped, cx))
+            .child(probe)
+            .into_any_element()
+    }
+
+    /// What the header carries between the traffic lights and the layout
+    /// switches, in order.
+    fn header_figures(
+        &self,
+        compact: bool,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let t = &self.theme;
+        let now = ket_core::now_ms();
         let selected = self.selection.and_then(|selection| {
             let project = self.projects.get(selection.project)?;
             Some((project, project.worktrees.get(selection.worktree)?))
@@ -408,13 +480,77 @@ impl Shell {
         };
         let logo = self.release_mark(logo.into_any_element(), window, cx);
 
-        let inset = match (window.is_fullscreen(), compact) {
-            // Fullscreen hides the traffic lights, so the room kept for them
-            // goes back to the content rather than sitting empty.
-            (true, _) => px(12.0),
-            (false, true) => COMPACT_LIGHTS_INSET,
-            (false, false) => LIGHTS_INSET,
+        let divider = match compact {
+            true => divider(COMPACT_GAP, px(16.0), t),
+            false => divider(STAT_GAP, px(28.0), t),
         };
+        let mut figures = vec![
+            logo,
+            // The account's quota first, beside the mark: it is the figure
+            // that decides whether there is room to start anything else.
+            usage,
+            divider.into_any_element(),
+            identity.into_any_element(),
+        ];
+        figures.extend(changes.map(IntoElement::into_any_element));
+        figures.extend([agents.into_any_element(), merge, economy]);
+        figures
+    }
+
+    /// The full header, laid out off screen at its natural width and never
+    /// painted, so [`Shell::window_header`] knows whether it fits even while
+    /// it shows the compact strip instead. The same figures and switches in
+    /// the same row as the real one, so the two cannot disagree; a change in
+    /// its width asks for one more frame.
+    fn header_probe(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        let mut row = div()
+            .id("header-measure")
+            .flex()
+            .items_center()
+            .gap(STAT_GAP)
+            .pl(lights_inset(false, window))
+            .pr(px(10.0))
+            .border_1()
+            .children(self.header_figures(false, window, cx))
+            // The figures' run ends in an empty stretch, which costs a gap
+            // even at no width.
+            .child(div())
+            .child(self.header_cluster(false, false, cx))
+            .into_any_element();
+        let shell = cx.entity();
+        canvas(
+            move |_, window, cx| {
+                let need = row
+                    .layout_as_root(
+                        size(AvailableSpace::MaxContent, AvailableSpace::MaxContent),
+                        window,
+                        cx,
+                    )
+                    .width;
+                shell.update(cx, |this, cx| {
+                    if this.header_need.get() != Some(need) {
+                        this.header_need.set(Some(need));
+                        cx.notify();
+                    }
+                });
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .size_0()
+        .into_any_element()
+    }
+
+    /// The header's own fold, then the two panels' switches: one cluster of
+    /// the window's layout, each lit while its thing is folded or open.
+    ///
+    /// `cramped` is a window too narrow for the full header. The fold then
+    /// shows the header as folded, which it is, and cannot be pressed: there
+    /// is nothing it could unfold to, and a press that changed a setting
+    /// with nothing on screen moving would read as a broken button.
+    fn header_cluster(&self, compact: bool, cramped: bool, cx: &mut Context<Self>) -> AnyElement {
+        let t = &self.theme;
+        let folded = self.header_compact || cramped;
         let cluster = icon_cluster("header-panels");
         let cluster = if compact { cluster.small() } else { cluster };
         // Each switch says what it will do, and the chord that does it too:
@@ -455,101 +591,71 @@ impl Shell {
         )
         .into();
 
-        card(t)
-            .id("window-header")
-            .flex()
-            .flex_none()
-            .items_center()
-            .when(compact, |el| {
-                el.gap(COMPACT_GAP)
-                    .h(COMPACT_H)
-                    .rounded(px(9.0))
-                    .pr(px(3.0))
-            })
-            .when(!compact, |el| el.gap(STAT_GAP).h(HEADER_H).pr(px(10.0)))
-            .pl(inset)
-            // The account's quota first, beside the mark: it is the figure
-            // that decides whether there is room to start anything else.
-            .child(logo)
-            .child(usage)
-            .child(match compact {
-                true => divider(COMPACT_GAP, px(16.0), t),
-                false => divider(STAT_GAP, px(28.0), t),
-            })
-            .child(identity)
-            .children(changes)
-            .child(agents)
-            .child(merge)
-            .child(economy)
-            .child(drag_area().flex_1().h_full())
-            // The header's own fold, then the two panels' switches: one
-            // cluster of the window's layout, each lit while its thing is
-            // folded or open.
-            .child(
-                cluster
-                    .cell(
-                        icon_button(
-                            "header-compact",
-                            if compact {
-                                Icon::UnfoldVertical
-                            } else {
-                                Icon::FoldVertical
-                            },
-                        )
-                        .pressed(compact)
-                        .indicator(compact),
-                        |cell| {
-                            tip(
-                                "header-compact-tip",
-                                cell.on_click(cx.listener(|this, _, _, cx| {
-                                    this.header_compact = !this.header_compact;
-                                    this.persist_view();
-                                    cx.notify();
-                                }))
-                                .into_any_element(),
-                                if compact {
-                                    "Expand header".into()
-                                } else {
-                                    "Compact header".into()
-                                },
-                            )
+        cluster
+            .cell(
+                icon_button(
+                    "header-compact",
+                    if folded {
+                        Icon::UnfoldVertical
+                    } else {
+                        Icon::FoldVertical
+                    },
+                )
+                .pressed(folded)
+                .indicator(folded)
+                .enabled(!cramped),
+                |cell| {
+                    tip(
+                        "header-compact-tip",
+                        cell.when(!cramped, |cell| {
+                            cell.on_click(cx.listener(|this, _, _, cx| {
+                                this.header_compact = !this.header_compact;
+                                this.persist_view();
+                                cx.notify();
+                            }))
+                        })
+                        .into_any_element(),
+                        match (cramped, folded) {
+                            (true, _) => "Not enough room for the full header".into(),
+                            (false, true) => "Expand header".into(),
+                            (false, false) => "Compact header".into(),
                         },
                     )
-                    .cell(
-                        icon_button("header-sidebar", Icon::Sidebar)
-                            .pressed(self.sidebar_open)
-                            .indicator(self.sidebar_open),
-                        |cell| {
-                            tip(
-                                "header-sidebar-tip",
-                                cell.on_click(cx.listener(|this, _, _, cx| {
-                                    this.dispatch("shell.toggle_sidebar", cx);
-                                    cx.notify();
-                                }))
-                                .into_any_element(),
-                                sidebar_label,
-                            )
-                        },
-                    )
-                    .cell(
-                        icon_button("header-panel", Icon::PanelRight)
-                            .pressed(self.panel_open)
-                            .indicator(self.panel_open),
-                        |cell| {
-                            tip(
-                                "header-panel-tip",
-                                cell.on_click(cx.listener(|this, _, _, cx| {
-                                    this.dispatch("shell.toggle_panel", cx);
-                                    cx.notify();
-                                }))
-                                .into_any_element(),
-                                panel_label,
-                            )
-                        },
-                    )
-                    .render(t),
+                },
             )
-            .into_any_element()
+            .cell(
+                icon_button("header-sidebar", Icon::Sidebar)
+                    .pressed(self.sidebar_open)
+                    .indicator(self.sidebar_open),
+                |cell| {
+                    tip(
+                        "header-sidebar-tip",
+                        cell.on_click(cx.listener(|this, _, _, cx| {
+                            this.dispatch("shell.toggle_sidebar", cx);
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                        sidebar_label,
+                    )
+                },
+            )
+            .cell(
+                icon_button("header-panel", Icon::PanelRight)
+                    .pressed(self.panel_open)
+                    .indicator(self.panel_open),
+                |cell| {
+                    tip(
+                        "header-panel-tip",
+                        cell.on_click(cx.listener(|this, _, _, cx| {
+                            this.dispatch("shell.toggle_panel", cx);
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                        panel_label,
+                    )
+                },
+            )
+            .render(t)
     }
 }
 

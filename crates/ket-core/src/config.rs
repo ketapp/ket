@@ -779,7 +779,8 @@ pub struct HookConfig {
     pub agent_started: Vec<HookSpec>,
     /// Run when an agent session finishes.
     pub agent_finished: Vec<HookSpec>,
-    /// Run when an agent asks to use a tool and policy did not settle it.
+    /// Run when Claude Code would ask a person; a non-zero exit or timeout
+    /// refuses the call with the hook's output as the reason.
     pub agent_permission_requested: Vec<HookSpec>,
 }
 
@@ -871,7 +872,11 @@ impl Default for ThemeConfig {
 pub const FONT_SIZE_RANGE: std::ops::RangeInclusive<u16> = 6..=72;
 
 /// Default point size for the code face.
-pub const DEFAULT_CODE_FONT_SIZE: u16 = 12;
+///
+/// Eleven, with the window's compact spacing: the terminal is most of the
+/// window, and a point off its type is a row in every seven and a column in
+/// every eleven that it gains.
+pub const DEFAULT_CODE_FONT_SIZE: u16 = 11;
 
 /// Reads a line height written either way round.
 ///
@@ -915,9 +920,9 @@ pub const DEFAULT_LINE_HEIGHT: f32 = 1.5;
 
 /// Default base size for the window's chrome.
 ///
-/// Matches what macOS uses for its own chrome, which is what the shell's
-/// typography was picked against.
-pub const DEFAULT_UI_FONT_SIZE: u16 = 15;
+/// Thirteen, the size macOS sets its own body text at, which is what the
+/// shell's typography was picked against.
+pub const DEFAULT_UI_FONT_SIZE: u16 = 13;
 
 /// Everything ket reads from the user's config file.
 ///
@@ -1445,7 +1450,20 @@ pub(crate) fn default_agents() -> Vec<AgentSpec> {
             ],
             env: BTreeMap::new(),
             env_remove: Vec::new(),
-            launch: None,
+            // The same trap as OpenCode 2's below. Codex's TUI hands its
+            // session to a shared app-server daemon whenever one is already
+            // running — the desktop app keeps one up — and hooks run in the
+            // daemon, with the environment it was started in rather than the
+            // pane's. Without `KET_PANE_KEY` or a launch token every report
+            // fell to the spool: the phone never heard of a prompt, and could
+            // not read the conversation because no session was ever named.
+            // `--no-daemon` keeps the session in the pane's own process.
+            // Checked against Codex CLI 0.162.1, where `resume` takes it too;
+            // an older Codex that does not list it gets the bare line.
+            launch: Some(AgentLaunch {
+                command: "codex".to_owned(),
+                args: vec!["--no-daemon".to_owned()],
+            }),
         },
         AgentSpec {
             name: "opencode".to_owned(),
@@ -1751,11 +1769,11 @@ mod tests {
     }
 
     #[test]
-    fn the_shipped_code_size_is_twelve() {
+    fn the_shipped_code_size_is_eleven() {
         // The size the window opens at for anyone who never edits a config
         // file, which is nearly everyone.
         let config = Config::default();
-        assert_eq!(config.theme.code_font_size, 12);
+        assert_eq!(config.theme.code_font_size, 11);
         assert_eq!(config.theme.ui_font_size, DEFAULT_UI_FONT_SIZE);
     }
 

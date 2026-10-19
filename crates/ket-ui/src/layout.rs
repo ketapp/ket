@@ -94,6 +94,16 @@ enum SavedTab {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         pinned: bool,
     },
+    /// A lasting Git diff, including the comparison it was opened against.
+    Diff {
+        root: String,
+        rel: String,
+        base: Option<(String, String)>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        pinned: bool,
+    },
     Audio {
         path: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -236,10 +246,16 @@ impl SavedPane {
     fn capture(pane: &Pane, shell: &Shell, owed: &[PaneId], restores: &[SavedTerminal]) -> Self {
         match pane {
             Pane::Leaf { id, tabs, active } => {
-                let mut saved: Vec<SavedTab> = tabs
-                    .iter()
-                    .filter_map(|tab| SavedTab::capture(tab, shell))
-                    .collect();
+                let mut saved = Vec::new();
+                let mut saved_active = 0;
+                for (index, tab) in tabs.iter().enumerate() {
+                    if let Some(captured) = SavedTab::capture(tab, shell) {
+                        if index <= *active {
+                            saved_active = saved.len();
+                        }
+                        saved.push(captured);
+                    }
+                }
                 // Terminals still waiting to be reattached, for the same reason.
                 saved.extend(
                     restores
@@ -262,7 +278,7 @@ impl SavedPane {
                     active: if saved.is_empty() {
                         0
                     } else {
-                        (*active).min(saved.len() - 1)
+                        saved_active.min(saved.len() - 1)
                     },
                     tabs: saved,
                 }
@@ -369,6 +385,9 @@ impl SavedPane {
 
 impl SavedTab {
     fn capture(tab: &Tab, shell: &Shell) -> Option<Self> {
+        if tab.preview {
+            return None;
+        }
         // Only a title somebody typed is worth saving: every other one is
         // derived from the path, and a stored copy of a derived name is one
         // more thing that can go stale.
@@ -418,8 +437,16 @@ impl SavedTab {
             #[cfg(target_os = "macos")]
             TabKind::IosSimulator => None,
             TabKind::Android => None,
-            // A diff is a view of a moment; the Git view reopens one in a click.
-            TabKind::Diff(_) => None,
+            TabKind::Diff(key) => Some(Self::Diff {
+                root: key.root.to_string(),
+                rel: key.rel.to_string(),
+                base: key
+                    .base
+                    .as_ref()
+                    .map(|(label, rev)| (label.to_string(), rev.to_string())),
+                title,
+                pinned,
+            }),
         }
     }
 
@@ -435,6 +462,26 @@ impl SavedTab {
                 title,
                 pinned,
             } => Some(named(title, pinned, path, TabKind::Editor)),
+            Self::Diff {
+                root,
+                rel,
+                base,
+                title,
+                pinned,
+            } => Some(Tab {
+                title: title
+                    .as_ref()
+                    .map_or_else(|| format!("{} (diff)", filename(&rel)), Clone::clone)
+                    .into(),
+                kind: TabKind::Diff(crate::diff_view::DiffKey {
+                    root: root.into(),
+                    rel: rel.into(),
+                    base: base.map(|(label, rev)| (label.into(), rev.into())),
+                }),
+                renamed: title.is_some(),
+                pinned,
+                preview: false,
+            }),
             Self::Audio {
                 path,
                 title,
@@ -476,6 +523,7 @@ fn named(
     Tab {
         renamed: title.is_some(),
         pinned,
+        preview: false,
         title: title.map_or_else(|| filename(&path), SharedString::from),
         kind: kind(path.into()),
     }
@@ -608,6 +656,30 @@ impl Shell {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lasting_diff_round_trips_with_its_comparison() {
+        let saved = SavedTab::Diff {
+            root: "/repo".to_owned(),
+            rel: "src/file.rs".to_owned(),
+            base: Some(("main".to_owned(), "abc123".to_owned())),
+            title: None,
+            pinned: false,
+        };
+        let json = serde_json::to_string(&saved).unwrap();
+        let restored = serde_json::from_str::<SavedTab>(&json)
+            .unwrap()
+            .restore()
+            .unwrap();
+        let TabKind::Diff(key) = restored.kind else {
+            panic!("restored tab is not a diff");
+        };
+        assert_eq!(key.root.as_ref(), "/repo");
+        assert_eq!(key.rel.as_ref(), "src/file.rs");
+        assert_eq!(key.base, Some(("main".into(), "abc123".into())));
+        assert!(!restored.preview);
+        assert_eq!(restored.title.as_ref(), "file.rs (diff)");
+    }
 
     #[test]
     fn a_nontrivial_space_round_trips_through_json() {

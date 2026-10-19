@@ -275,10 +275,17 @@ impl Activity {
             // thing making progress is the checkout, not an agent, and it is
             // worth telling apart from a turn at a glance. Any other busy
             // command — a build, a test run, a read-only `git status` — makes
-            // no claim ket has evidence for, so it stays uncoloured like an
-            // agent it could only observe.
+            // no claim ket has evidence for, so it stays uncoloured.
             Activity::Busy { mutating: true, .. } => Signal::Merging,
-            Activity::Observed { .. } | Activity::Busy { .. } => Signal::Running,
+            Activity::Busy { .. } => Signal::Running,
+            // An agent's process with no report from it: open, and nothing
+            // more is known. Most often it is sitting at its own prompt — a
+            // session resumed after a restart that has not been given a turn
+            // yet, or one whose hooks were installed after it started — and
+            // "busy" said otherwise for as long as it stayed open. The cost:
+            // an agent ket has no hooks for that really is mid-task reads
+            // quiet too, until it reports.
+            Activity::Observed { .. } => Signal::Quiet,
             // An agent's own `git rebase` earns the same state a rebase in
             // the terminal does. The tool call is indistinguishable from any
             // other from the outside — Claude sends "read the dialog
@@ -367,12 +374,11 @@ impl Activity {
         match self {
             Activity::Idle => String::new(),
             Activity::Session { state, note, .. } => doing(*state, note.as_deref()),
-            // Running, and that is the whole of what is known about it. An
+            // Open, and that is the whole of what is known about it. An
             // agent that has reported says what it is doing and arrives as
             // `Session`; one that has not is a live process and no more, so
-            // the word matches `signal()`'s uncoloured `Signal::Running`
-            // rather than claiming a turn nobody has evidence of.
-            Activity::Observed { .. } => "running".to_owned(),
+            // the word claims no turn nobody has evidence of.
+            Activity::Observed { .. } => "open".to_owned(),
             Activity::Busy { command, .. } => command.clone(),
             Activity::Recorded { title, .. } => match title {
                 Some(title) => title.clone(),

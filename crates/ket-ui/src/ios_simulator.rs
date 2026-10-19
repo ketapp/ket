@@ -334,6 +334,7 @@ impl Shell {
                     title: "iOS Simulator".into(),
                     renamed: false,
                     pinned: false,
+                    preview: false,
                     kind: TabKind::IosSimulator,
                 },
             )

@@ -176,6 +176,32 @@ pub enum Request {
         /// Each agent's name, in the window's order.
         names: Vec<String>,
     },
+    /// The pull requests this window's worktrees are open as, with their
+    /// checks, for the host to pass on to phones. Sent on connecting and
+    /// whenever a read of GitHub changes them; the newest from any window
+    /// wins.
+    PullRequests {
+        /// Each worktree's id, and its pull request.
+        pull_requests: Vec<(String, crate::github::PullRequestStatus)>,
+    },
+    /// The result of handing a phone's failed checks to an agent. The host
+    /// waits for this before answering the phone.
+    FixChecksResult {
+        /// The request named in [`Reply::FixChecks`].
+        req: u64,
+        /// Why the agent could not be started, or `None` once it has the
+        /// prompt.
+        error: Option<String>,
+    },
+    /// The result of sending a phone's review to an agent. The host waits
+    /// for this before answering the phone.
+    SendReviewResult {
+        /// The request named in [`Reply::SendReview`].
+        req: u64,
+        /// Why it was not sent, as the desktop's own Send to agent says it,
+        /// or `None` once the agent has it.
+        error: Option<String>,
+    },
     /// The theme this window is drawn in, for phones to draw in too. Sent on
     /// connecting and whenever it changes; the newest from any window wins.
     Theme {
@@ -190,6 +216,31 @@ pub enum Request {
         /// guess — see [`crate::agent_status`].
         cancel: bool,
     },
+    /// New work asked for from a terminal — `ket start`, `ket backlog
+    /// start` — handed to one window as [`Reply::StartWork`], the way a
+    /// phone's is. Answered with [`Reply::WorkTaken`].
+    StartWork {
+        /// The project's id.
+        project: String,
+        /// What the agent is to do.
+        prompt: String,
+        /// Which agent, by name; `None` for the project's own.
+        agent: Option<String>,
+        /// The backlog note this is, for the window to build the work from.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+    },
+}
+
+/// Who asked for work a window is handed: who its messages name.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkSource {
+    /// A paired phone. What a host from before this field means.
+    #[default]
+    Phone,
+    /// `ket start` or `ket backlog start`, run in a terminal.
+    Cli,
 }
 
 /// A phone waiting for a person to approve its pairing, on the local wire.
@@ -203,6 +254,20 @@ pub struct PendingPairing {
     pub code: String,
     /// Seconds left to decide.
     pub expires_in: u64,
+}
+
+/// One of a phone's review comments, on the local wire — see
+/// [`Reply::SendReview`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PhoneReviewComment {
+    /// The file, slash-separated from the worktree's root.
+    pub rel: String,
+    /// Which lines: `lines 12–18`.
+    pub lines: String,
+    /// The lines themselves, each with its `+`, `-` or space.
+    pub text: String,
+    /// What should change.
+    pub comment: String,
 }
 
 /// A paired phone, on the local wire.
@@ -292,9 +357,10 @@ pub enum Reply {
         /// Why it could not be done.
         error: Option<String>,
     },
-    /// A phone asked for new work: a worktree in `project` whose agent
-    /// starts on `prompt`. Sent to one window, which makes the worktree the
-    /// way its own dialog does — see `ket_ui`'s `start_phone_work`.
+    /// A phone or a terminal asked for new work: a worktree in `project`
+    /// whose agent starts on `prompt`. Sent to one window, which makes the
+    /// worktree the way its own dialog does — see `ket_ui`'s
+    /// `start_phone_work`.
     StartWork {
         /// The project's id.
         project: String,
@@ -308,12 +374,65 @@ pub enum Reply {
         /// starts `prompt`, which the host writes from the note.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         note: Option<String>,
+        /// Who asked. A host from before it sends none, which is a phone.
+        #[serde(default)]
+        from: WorkSource,
+        /// A phone's selected base; absent for the project default.
+        #[serde(default)]
+        base: Option<String>,
+        /// Session-only launch choices.
+        #[serde(default)]
+        model: Option<String>,
+        /// Session-only effort.
+        #[serde(default)]
+        effort: Option<String>,
+        /// Existing worktree to open a fresh session in.
+        #[serde(default)]
+        worktree: Option<String>,
+        /// Open a plain shell rather than an agent.
+        #[serde(default)]
+        shell: bool,
+    },
+    /// The answer to [`Request::StartWork`].
+    WorkTaken {
+        /// Whether a window was open to hand it to.
+        taken: bool,
     },
     /// A phone asked for a worktree to be merged, as ket's Merge does. Sent to
     /// one window, which runs its own merge on it.
     MergeWork {
         /// The worktree's id.
         worktree: String,
+    },
+    /// A phone asked for a worktree's failed checks to go to its agent, as
+    /// the worktree menu's Fix checks with agent does. The host has read
+    /// them, so that it could tell the phone if that failed; sent to one
+    /// window, which types the message into the agent.
+    FixChecks {
+        /// Used to return the result once the agent has the prompt.
+        req: u64,
+        /// The worktree's id.
+        worktree: String,
+        /// What the agent is told — see [`crate::checks::hand_over`].
+        prompt: String,
+    },
+    /// A phone's comments on a worktree's diff, for its agent, as the Review
+    /// section's Send to agent sends them. Sent to one window, which writes
+    /// them into one message and types it into the agent.
+    SendReview {
+        /// Used to return the result.
+        req: u64,
+        /// The worktree's id.
+        worktree: String,
+        /// The branch the phone's diff was read against; `None` for a
+        /// checkout's uncommitted changes.
+        base: Option<String>,
+        /// The comments, in the order they were written.
+        comments: Vec<PhoneReviewComment>,
+        /// Unix milliseconds after which the phone has been told the review
+        /// did not go: a window that takes it later drops it, so asking again
+        /// does not send it twice.
+        until_ms: u64,
     },
     /// The answer to [`Request::Pairings`]; empty when phones are off.
     Pairings {

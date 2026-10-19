@@ -79,11 +79,11 @@ fn bare_row(id: impl Into<ElementId>, selected: bool, height: Pixels, t: &Theme)
 /// Named because something else has to know it: the subagent tree under a
 /// worktree hangs its guide from the centre of the row's mark, and that centre
 /// is this, plus half the mark.
-pub(crate) const BLOCK_LEAD: Pixels = px(12.0);
+pub(crate) const BLOCK_LEAD: Pixels = px(8.0);
 
 /// [`block_row`]'s vertical padding, for the same reason as [`BLOCK_LEAD`]:
 /// the tree's guide leaves the row through it.
-pub(crate) const BLOCK_PAD_Y: Pixels = px(9.0);
+pub(crate) const BLOCK_PAD_Y: Pixels = px(5.0);
 
 /// A row that holds more than one line — a worktree's branch above its
 /// detail — as a rounded fill with air around it rather than a cell split
@@ -104,7 +104,7 @@ pub(crate) fn block_row(id: impl Into<ElementId>, selected: bool, t: &Theme) -> 
         .flex_col()
         .flex_none()
         .pl(BLOCK_LEAD)
-        .pr(px(10.0))
+        .pr(px(7.0))
         .py(BLOCK_PAD_Y)
         .rounded(ROW_RADIUS)
         .text_size(LABEL)
@@ -122,4 +122,4 @@ pub(crate) fn block_row(id: impl Into<ElementId>, selected: bool, t: &Theme) -> 
 
 /// A list row's corner: a step rounder than a control, a step squarer than a
 /// float.
-pub(crate) const ROW_RADIUS: Pixels = px(8.0);
+pub(crate) const ROW_RADIUS: Pixels = px(6.0);

@@ -187,6 +187,24 @@ enum Cmd {
         prompt: String,
     },
 
+    /// Start work in a new worktree, as a tab in the ket window.
+    ///
+    /// The open ket window makes the worktree the way its own dialogs do,
+    /// opens the agent there and hands it the prompt, so the work shows in
+    /// the sidebar like any other. Returns once the window has it; `ket
+    /// worktree list` shows the worktree once it exists. Unlike `ket run`,
+    /// which runs an agent here and waits for it, this needs ket open.
+    Start {
+        /// What the agent is to do. Use `-` to read it from stdin.
+        prompt: String,
+        /// Agent to run. Defaults to the project's preferred agent.
+        #[arg(long, short)]
+        agent: Option<String>,
+        /// Project id or name. Defaults to the current directory's project.
+        #[arg(long, short)]
+        project: Option<String>,
+    },
+
     /// Run a command and print its output trimmed, the way an Economy
     /// level's filter trims it for an agent: a successful run loses its
     /// progress and per-test lines, a failed run is printed whole, and the
@@ -355,6 +373,21 @@ enum BacklogCmd {
         /// `private` or `repo`.
         #[arg(value_parser = ["private", "repo"])]
         location: String,
+        /// Project id or name. Defaults to the current directory's project.
+        #[arg(long, short)]
+        project: Option<String>,
+    },
+    /// Start a note in a new worktree, as the backlog's Start does.
+    ///
+    /// The open ket window makes a worktree named after the note, opens the
+    /// agent there with the note and its files, and marks the note done once
+    /// the worktree exists. Needs ket open.
+    Start {
+        /// Note id, from `ket backlog list`.
+        note: String,
+        /// Agent to run. Defaults to the project's preferred agent.
+        #[arg(long, short)]
+        agent: Option<String>,
         /// Project id or name. Defaults to the current directory's project.
         #[arg(long, short)]
         project: Option<String>,
@@ -614,6 +647,14 @@ impl Cmd {
                     .flag("all", all)
                     .maybe_text("tag", tag)
                     .maybe_text("search", search),
+                BacklogCmd::Start {
+                    note,
+                    agent,
+                    project,
+                } => Invocation::new("backlog.start")
+                    .maybe_text("project", project)
+                    .text("note", note)
+                    .maybe_text("agent", agent),
                 BacklogCmd::Done { note, project } => Invocation::new("backlog.done")
                     .maybe_text("project", project)
                     .text("note", note),
@@ -688,6 +729,15 @@ impl Cmd {
 
             Cmd::Run { agent, on, prompt } => Invocation::new("agent.run")
                 .maybe_text("worktree", on)
+                .text("prompt", prompt)
+                .maybe_text("agent", agent),
+
+            Cmd::Start {
+                prompt,
+                agent,
+                project,
+            } => Invocation::new("work.start")
+                .maybe_text("project", project)
                 .text("prompt", prompt)
                 .maybe_text("agent", agent),
 
@@ -801,6 +851,43 @@ fn registry() -> Result<Registry, KetError> {
     registry.bind("host.pair", |_, _| {
         println!("{}", ket_core::host::pairing_code()?);
         Ok(())
+    })?;
+
+    // Starting work in the window is the CLI's alone as well: inside the app,
+    // the quick prompt and the backlog's Start already do it.
+    registry.register(
+        command::Command::new(
+            "work.start",
+            "Start work in a new worktree, as a tab in the ket window",
+            Category::Agent,
+        )
+        .arg(command::Arg::optional("project", command::ArgKind::Project))
+        .arg(command::Arg::required("prompt", command::ArgKind::Text))
+        .arg(command::Arg::optional("agent", command::ArgKind::Text)),
+    )?;
+    registry.register(
+        command::Command::new(
+            "backlog.start",
+            "Start a backlog note in a new worktree, as a tab in the ket window",
+            Category::Backlog,
+        )
+        .arg(command::Arg::optional("project", command::ArgKind::Project))
+        .arg(command::Arg::required("note", command::ArgKind::Text))
+        .arg(command::Arg::optional("agent", command::ArgKind::Text)),
+    )?;
+    registry.bind("work.start", |invocation, _| {
+        start_work(
+            invocation.text_of("project"),
+            invocation.require_text("prompt")?,
+            invocation.text_of("agent"),
+        )
+    })?;
+    registry.bind("backlog.start", |invocation, _| {
+        backlog_start(
+            invocation.text_of("project"),
+            invocation.require_text("note")?,
+            invocation.text_of("agent"),
+        )
     })?;
 
     // The filter's commands are the CLI's alone too: they print for whoever
@@ -1280,6 +1367,27 @@ fn cwd() -> PathBuf {
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"))
 }
 
+/// Handles `ket start`: the prompt to the open window, which makes the
+/// worktree and starts its agent in a tab.
+fn start_work(project: Option<&str>, prompt: &str, agent: Option<&str>) -> Result<(), KetError> {
+    let prompt = if prompt == "-" {
+        std::io::read_to_string(std::io::stdin()).map_err(|e| KetError::io("stdin", e))?
+    } else {
+        prompt.to_owned()
+    };
+    let prompt = prompt.trim();
+    if prompt.is_empty() {
+        return Err(KetError::Conflict("say what the agent is to do".to_owned()));
+    }
+    let resolved = Workspace::open()?.resolve_project(project, &cwd())?;
+    ket_core::host::start_work(resolved.id.as_str(), prompt, agent, None)?;
+    println!(
+        "starting in {} — `ket worktree list` shows the worktree once ket has made it",
+        resolved.name
+    );
+    Ok(())
+}
+
 /// Handles `ket project ...`.
 fn add_project(path: &str) -> Result<(), KetError> {
     let project = Workspace::open()?.add_project(std::path::Path::new(path))?;
@@ -1522,6 +1630,32 @@ fn backlog_done(project: Option<&str>, note: &str) -> Result<(), KetError> {
     find_note(&resolved.id, note)?;
     Backlog::mark_done(&resolved.id, note, Done::by_hand())?;
     println!("done {note}");
+    Ok(())
+}
+
+/// Handles `ket backlog start`: the note's brief to the open window, which
+/// builds the work from the note itself, files and all.
+fn backlog_start(project: Option<&str>, note: &str, agent: Option<&str>) -> Result<(), KetError> {
+    let resolved = Workspace::open()?.resolve_project(project, &cwd())?;
+    let backlog = Backlog::load(&resolved.id)?;
+    let Some(found) = backlog.notes.iter().find(|candidate| candidate.id == note) else {
+        return Err(KetError::Conflict(format!("no backlog note {note}")));
+    };
+    if found.done.is_some() {
+        return Err(KetError::Conflict(format!(
+            "{note} is already started or done; `ket backlog reopen {note}` puts it back"
+        )));
+    }
+    let Some(brief) = found.brief() else {
+        return Err(KetError::Conflict(format!(
+            "{note} says nothing to hand an agent yet"
+        )));
+    };
+    ket_core::host::start_work(resolved.id.as_str(), &brief, agent, Some(note))?;
+    println!(
+        "starting {note} in {} — `ket worktree list` shows its worktree once ket has made it",
+        resolved.name
+    );
     Ok(())
 }
 
@@ -2234,6 +2368,16 @@ mod tests {
     const ARGV: &[&[&str]] = &[
         &["ket", "doctor"],
         &["ket", "commands"],
+        &["ket", "start", "fix the flaky test"],
+        &[
+            "ket",
+            "start",
+            "fix the flaky test",
+            "--agent",
+            "codex",
+            "--project",
+            "ket",
+        ],
         &["ket", "commands", "--applicable", "--category", "worktree"],
         &["ket", "config", "show"],
         &["ket", "config", "path"],
@@ -2287,6 +2431,8 @@ mod tests {
         ],
         &["ket", "backlog", "list"],
         &["ket", "backlog", "list", "--all"],
+        &["ket", "backlog", "start", "note-1"],
+        &["ket", "backlog", "start", "note-1", "--agent", "codex"],
         &["ket", "backlog", "done", "note-1"],
         &["ket", "backlog", "reopen", "note-1"],
         &["ket", "backlog", "rm", "note-1"],

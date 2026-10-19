@@ -335,9 +335,12 @@ impl Shell {
             (self.feedback.open && !self.modal_open()).then(|| self.feedback_panel(window, cx));
         let bar = self.theme.on_backdrop();
         let open = self.feedback.open;
+        // Dense: the status bar is 20 tall, and the smallest well that still
+        // leaves air round a glyph overhangs it by two pixels a side, which
+        // the desk under the bar has room for.
         let bubble = icon_button("feedback", Icon::MessageSquare)
             .bare()
-            .small()
+            .dense()
             .pressed(open)
             .render(&bar)
             .on_click(cx.listener(|this, _, window, cx| {

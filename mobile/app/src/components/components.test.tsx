@@ -1,6 +1,6 @@
 import { describe, expect, jest, test } from '@jest/globals';
 import { fireEvent, render } from '@testing-library/react-native';
-import { StyleSheet, Text, View } from 'react-native';
+import { ScrollView, StyleSheet, Text, View } from 'react-native';
 import type { Risk } from '@ket/remote';
 import { CommandMenu } from './Commands';
 import * as Icons from './icons';
@@ -24,6 +24,7 @@ import {
   Screen,
   Segmented,
   TabBar,
+  TabStrip,
   Tag,
   Toggle,
   Value,
@@ -124,6 +125,53 @@ describe('shared UI controls', () => {
     expect(getByLabelText('Needs you, 3')).toBeTruthy();
     await fireEvent.press(getByLabelText('Worktrees'));
     expect(mockRouter.replace).toHaveBeenCalledWith('/');
+    await view.unmount();
+  });
+
+  test('a tab strip scrolls to the chosen tab, fades where there is more, and names a state', async () => {
+    const change = jest.fn();
+    const tabs = [
+      { key: 'a', label: 'Claude', icon: <Text>c</Text> },
+      { key: 'b', label: 'npm run start' },
+      { key: 'c', label: 'Review changes', icon: <Text>x</Text>, state: { word: 'running', color: '#4cd08a' } },
+    ];
+    // React Native's ScrollView mock keeps one scrollTo for every instance.
+    const scrollTo = jest.mocked(ScrollView.prototype.scrollTo);
+    scrollTo.mockClear();
+    const view = await render(<TabStrip label="Terminals in main" tabs={tabs} value="c" onChange={change} />);
+    const [strip] = view.container.queryAll((x) => x.type === 'RCTScrollView');
+    // The fades are the strip's only views that let touches through.
+    const fades = () => view.container.queryAll((x) => x.props.pointerEvents === 'none').length;
+
+    expect(view.getByLabelText('Terminals in main')).toBeTruthy();
+    expect(view.getByLabelText('Review changes, running').props.accessibilityState).toEqual({ selected: true });
+    expect(view.getByLabelText('Claude').props.accessibilityState).toEqual({ selected: false });
+
+    // Three tabs 120 wide in a strip 200 wide: the chosen one, last, is
+    // scrolled to once it and the strip are laid out, at once.
+    await fireEvent(view.getByLabelText('Claude'), 'layout', { nativeEvent: { layout: { x: 3, width: 120 } } });
+    await fireEvent(view.getByLabelText('npm run start'), 'layout', { nativeEvent: { layout: { x: 125, width: 120 } } });
+    await fireEvent(view.getByLabelText('Review changes, running'), 'layout', { nativeEvent: { layout: { x: 247, width: 120 } } });
+    await fireEvent(strip, 'contentSizeChange', 370, 40);
+    await fireEvent(strip, 'layout', { nativeEvent: { layout: { width: 200 } } });
+    expect(scrollTo).toHaveBeenCalledWith({ x: 195, animated: false });
+    expect(fades()).toBe(1);
+
+    // Scrolled to the middle: a fade at each end. Once revealed, the same
+    // choice is not scrolled to again.
+    await fireEvent.scroll(strip, { nativeEvent: { contentOffset: { x: 80 } } });
+    expect(fades()).toBe(2);
+    await fireEvent(strip, 'layout', { nativeEvent: { layout: { width: 200 } } });
+    expect(scrollTo).toHaveBeenCalledTimes(1);
+
+    // A new choice glides back to the first tab.
+    await view.rerender(<TabStrip label="Terminals in main" tabs={tabs} value="a" onChange={change} />);
+    expect(scrollTo).toHaveBeenLastCalledWith({ x: 0, animated: true });
+    await fireEvent.scroll(strip, { nativeEvent: { contentOffset: { x: 0 } } });
+    expect(fades()).toBe(1);
+
+    await fireEvent.press(view.getByText('npm run start'));
+    expect(change).toHaveBeenCalledWith('b');
     await view.unmount();
   });
 

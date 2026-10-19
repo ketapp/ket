@@ -5,8 +5,9 @@
 // signal. Every screen builds from these; none draws its own control.
 
 import { router } from 'expo-router';
-import type { ReactNode } from 'react';
-import { Platform, Pressable, StyleSheet, Text, View, type StyleProp, type TextStyle, type ViewStyle } from 'react-native';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { Platform, Pressable, ScrollView, StyleSheet, Text, View, type StyleProp, type TextStyle, type ViewStyle } from 'react-native';
+import Svg, { Defs, LinearGradient, Rect, Stop } from 'react-native-svg';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { READABLE_WIDTH, showBeside, useSplit } from '../lib/layout';
@@ -25,13 +26,16 @@ export function Screen({ children, style, full }: { children: ReactNode; style?:
   );
 }
 
-/** The strip along the top, on the desk: back, a title over a detail, actions. */
+/** The strip along the top, on the desk: back, a title over a detail, actions.
+ * `tabs` stands under the detail in the title's place — a {@link TabStrip} —
+ * and the bar grows to hold it, Back lined up with the tabs. */
 export function Bar({
   back,
   title,
   detail,
   detailColor,
   lead,
+  tabs,
   right,
 }: {
   back?: boolean;
@@ -39,6 +43,7 @@ export function Bar({
   detail?: ReactNode;
   detailColor?: string;
   lead?: ReactNode;
+  tabs?: ReactNode;
   right?: ReactNode;
 }) {
   // Beside the sidebar, the first screen of what was picked there has
@@ -46,7 +51,7 @@ export function Bar({
   const split = useSplit();
   const backable = back && !(split && !router.canGoBack());
   return (
-    <View style={styles.bar}>
+    <View style={[styles.bar, tabs ? styles.barTabs : null]}>
       {backable ? (
         <IconButton label="Back" onPress={() => (router.canGoBack() ? router.back() : router.replace('/'))} style={styles.back}>
           <Back size={20} color={t.text} />
@@ -64,6 +69,7 @@ export function Bar({
             {title}
           </Text>
         ) : null}
+        {tabs ? <View style={styles.barTabStrip}>{tabs}</View> : null}
       </View>
       {right}
     </View>
@@ -244,7 +250,7 @@ export interface Segment<K extends string> {
   key: K;
   label: string;
   count?: number;
-  /** A mark before the label: an agent's, for a session tab. */
+  /** A mark before the label. */
   icon?: ReactNode;
 }
 
@@ -256,24 +262,31 @@ export function Segmented<K extends string>({
   segments,
   value,
   onChange,
+  disabled,
+  tall,
   style,
 }: {
   segments: Segment<K>[];
   value: K;
   onChange: (key: K) => void;
+  /** Kept in place at 55%, as a disabled button is. */
+  disabled?: boolean;
+  /** As tall as a field, for a track set among fields. */
+  tall?: boolean;
   style?: StyleProp<ViewStyle>;
 }) {
   return (
-    <View style={[styles.track, style]}>
+    <View style={[styles.track, disabled && { opacity: 0.55 }, style]}>
       {segments.map((segment) => {
         const on = segment.key === value;
         return (
           <Pressable
             key={segment.key}
             accessibilityRole="button"
-            accessibilityState={{ selected: on }}
+            accessibilityState={{ selected: on, disabled }}
+            disabled={disabled}
             onPress={() => onChange(segment.key)}
-            style={[styles.segment, on && styles.segmentOn]}
+            style={[styles.segment, tall && styles.segmentTall, on && styles.segmentOn]}
           >
             {segment.icon}
             <Text style={[styles.segmentText, on && { color: t.text }]} numberOfLines={1}>
@@ -285,6 +298,157 @@ export function Segmented<K extends string>({
           </Pressable>
         );
       })}
+    </View>
+  );
+}
+
+/** One tab in a {@link TabStrip}. */
+export interface StripTab<K extends string> {
+  key: K;
+  label: string;
+  /** The tab's mark: an agent's, or a terminal's glyph. */
+  icon?: ReactNode;
+  /** What the tab's agent is doing, as a dot on its mark. */
+  state?: { word: string; color: string };
+}
+
+/** How far from the strip's ends a tab is scrolled to, clear of the fade. */
+const STRIP_FADE = 28;
+
+/**
+ * A strip of tabs: the segmented track, but each tab hugs its label and the
+ * strip scrolls sideways when they outgrow it, fading at whichever end has
+ * more past it. The chosen tab is scrolled into view — at once when the
+ * strip first draws, gliding after — and the agent's state rides on its
+ * mark, as the desktop's tab strip draws it.
+ */
+export function TabStrip<K extends string>({
+  tabs,
+  value,
+  onChange,
+  label,
+  style,
+}: {
+  tabs: StripTab<K>[];
+  value: K;
+  onChange: (key: K) => void;
+  /** What the strip holds, for a screen reader: "Terminals in main". */
+  label: string;
+  style?: StyleProp<ViewStyle>;
+}) {
+  const scroller = useRef<ScrollView>(null);
+  // Where each tab sits in the scrolled row, and how much of the row shows.
+  const spans = useRef(new Map<K, { x: number; width: number }>());
+  const shown = useRef({ offset: 0, width: 0, content: 0 });
+  // The tab last scrolled to: each choice is brought into view once, so the
+  // strip stays where a thumb left it while titles change under it.
+  const revealed = useRef<K | null>(null);
+  const [edges, setEdges] = useState({ start: false, end: false });
+
+  const measure = () => {
+    const { offset, width, content } = shown.current;
+    const start = offset > 1;
+    const end = offset + width < content - 1;
+    setEdges((was) => (was.start === start && was.end === end ? was : { start, end }));
+  };
+
+  const reveal = () => {
+    const span = spans.current.get(value);
+    const { offset, width } = shown.current;
+    if (!span || !width || revealed.current === value) return;
+    const animated = revealed.current !== null;
+    revealed.current = value;
+    const from = span.x - STRIP_FADE;
+    const to = span.x + span.width + STRIP_FADE - width;
+    if (offset > from) scroller.current?.scrollTo({ x: Math.max(0, from), animated });
+    else if (offset < to) scroller.current?.scrollTo({ x: to, animated });
+  };
+
+  // A choice made elsewhere — the screen switching terminals — is revealed
+  // here; one made before the tabs were laid out waits for their layout.
+  useEffect(reveal);
+
+  return (
+    <View style={[styles.strip, style]} accessibilityRole="tablist" accessibilityLabel={label}>
+      <ScrollView
+        ref={scroller}
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        contentContainerStyle={styles.stripRow}
+        scrollEventThrottle={32}
+        onScroll={(e) => {
+          shown.current.offset = e.nativeEvent.contentOffset.x;
+          measure();
+        }}
+        onLayout={(e) => {
+          shown.current.width = e.nativeEvent.layout.width;
+          measure();
+          reveal();
+        }}
+        onContentSizeChange={(width) => {
+          shown.current.content = width;
+          measure();
+        }}
+      >
+        {tabs.map((tab) => {
+          const on = tab.key === value;
+          return (
+            <Pressable
+              key={tab.key}
+              accessibilityRole="tab"
+              accessibilityLabel={tab.state ? `${tab.label}, ${tab.state.word}` : tab.label}
+              accessibilityState={{ selected: on }}
+              hitSlop={{ top: 3, bottom: 3 }}
+              onPress={() => onChange(tab.key)}
+              onLayout={(e) => {
+                spans.current.set(tab.key, { x: e.nativeEvent.layout.x, width: e.nativeEvent.layout.width });
+                if (on) reveal();
+              }}
+              style={({ pressed }) => [styles.stripTab, on ? styles.segmentOn : pressed && { backgroundColor: t.hover }]}
+            >
+              {tab.icon ? (
+                <Marked dot={tab.state?.color} ring={on ? t.selection : t.sunken}>
+                  {tab.icon}
+                </Marked>
+              ) : null}
+              <Text style={[styles.stripLabel, on && { color: t.text }]} numberOfLines={1}>
+                {tab.label}
+              </Text>
+            </Pressable>
+          );
+        })}
+      </ScrollView>
+      {edges.start ? <StripFade side="start" /> : null}
+      {edges.end ? <StripFade side="end" /> : null}
+    </View>
+  );
+}
+
+/** A strip's end, faded into its well while there is more past it. */
+function StripFade({ side }: { side: 'start' | 'end' }) {
+  const id = `strip-fade-${side}`;
+  return (
+    <View pointerEvents="none" style={[styles.stripFade, side === 'start' ? { left: 0 } : { right: 0 }]}>
+      <Svg width="100%" height="100%">
+        <Defs>
+          <LinearGradient id={id} x1={side === 'start' ? 1 : 0} y1={0} x2={side === 'start' ? 0 : 1} y2={0}>
+            <Stop offset={0} stopColor={t.sunken} stopOpacity={0} />
+            <Stop offset={1} stopColor={t.sunken} stopOpacity={1} />
+          </LinearGradient>
+        </Defs>
+        <Rect width="100%" height="100%" fill={`url(#${id})`} />
+      </Svg>
+    </View>
+  );
+}
+
+/** A mark with a state's dot on its corner, ringed in the colour it sits
+ * on so the two read apart. No dot, just the mark. */
+export function Marked({ children, dot, ring }: { children: ReactNode; dot?: string; ring: string }) {
+  return (
+    <View>
+      {children}
+      {dot ? <View style={[styles.markDot, { backgroundColor: dot, borderColor: ring }]} /> : null}
     </View>
   );
 }
@@ -641,12 +805,15 @@ export const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: t.backdrop },
   column: { flex: 1, width: '100%', maxWidth: READABLE_WIDTH, alignSelf: 'center' },
   bar: {
-    height: size.bar,
+    minHeight: size.bar,
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
     paddingHorizontal: size.gutter,
   },
+  // Back and the tabs share a bottom edge, both 40 tall, so they line up.
+  barTabs: { alignItems: 'flex-end', paddingBottom: 6 },
+  barTabStrip: { marginTop: 2 },
   back: { marginLeft: -6 },
   barText: { flex: 1, minWidth: 0, gap: 1 },
   barTitle: { fontFamily: font.proseSemibold, fontSize: size.value, color: t.text },
@@ -712,9 +879,23 @@ export const styles = StyleSheet.create({
     gap: 6,
     paddingHorizontal: 4,
   },
+  segmentTall: { height: size.control - 6 },
   segmentOn: { backgroundColor: t.selection },
   segmentText: { fontFamily: font.proseMedium, fontSize: size.label, color: t.dim },
   segmentCount: { fontFamily: font.chrome, fontSize: 11, color: t.faint },
+  strip: { backgroundColor: t.sunken, borderRadius: size.radius, overflow: 'hidden' },
+  stripRow: { padding: 3, gap: 2 },
+  stripTab: {
+    height: 34,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 7,
+    paddingHorizontal: 11,
+    borderRadius: size.radiusSm,
+  },
+  stripLabel: { maxWidth: 150, fontFamily: font.proseMedium, fontSize: size.label, color: t.dim },
+  stripFade: { position: 'absolute', top: 0, bottom: 0, width: STRIP_FADE },
+  markDot: { position: 'absolute', right: -5, bottom: -5, width: 11, height: 11, borderRadius: 5.5, borderWidth: 2 },
   statsRow: { flexDirection: 'row', gap: 4 },
   stat: { flex: 1, minWidth: 0, gap: 3, paddingVertical: 7, paddingHorizontal: 9, borderRadius: size.radiusRow },
   statOn: { backgroundColor: t.selection },

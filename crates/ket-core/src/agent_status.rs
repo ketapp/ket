@@ -121,6 +121,11 @@ pub struct PaneAgentStatus {
     /// window offers to remember as a rule. See [`Answered`].
     #[serde(default)]
     pub answered: Option<Answered>,
+    /// The prompt a screen-read dialog is covering, kept to put back when
+    /// the dialog goes — see [`StatusStore::screen_dialog`]. The host's
+    /// own; never sent on.
+    #[serde(skip)]
+    pub(crate) covered: Option<PermissionQuestion>,
     pub(crate) roster: Roster,
 }
 
@@ -170,6 +175,7 @@ impl PaneAgentStatus {
             last_tool: None,
             question: None,
             answered: None,
+            covered: None,
             roster: Roster::default(),
         }
     }
@@ -228,6 +234,7 @@ impl PaneAgentStatus {
         self.state = AgentState::Idle;
         self.note = None;
         self.question = None;
+        self.covered = None;
         self.mutating_git = false;
         self.at_ms = at_ms;
         // Whatever it was running belonged to the turn that has just ended,
@@ -517,6 +524,20 @@ impl StatusStore {
             entry.cancel = None;
         }
 
+        // A dialog read off the screen stands in for the prompt only while
+        // the agent says nothing. Its own word — a call starting or
+        // finishing, a new prompt, a stop — is about the prompt underneath,
+        // so that one comes back before the report is read against it. The
+        // next tick reads the screen afresh.
+        if entry
+            .question
+            .as_ref()
+            .is_some_and(|question| question.tool == crate::screen::DIALOG_TOOL)
+            && report.event != HookEvent::Notification
+        {
+            entry.question = entry.covered.take();
+        }
+
         // Another call's news while the lead waits on a person. Claude runs
         // calls that need no permission beside the one that does, and one of
         // those starting or finishing says nothing about the prompt still on
@@ -607,10 +628,79 @@ impl StatusStore {
                 }),
             _ => None,
         };
+        // A report that replaced the dialog's question, or took the wait
+        // away, took what it covered with it: the screen is read afresh.
+        if entry
+            .question
+            .as_ref()
+            .is_none_or(|question| question.tool != crate::screen::DIALOG_TOOL)
+        {
+            entry.covered = None;
+        }
         entry.state = state;
         entry.note.clone_from(&report.note);
         entry.mutating_git = report.mutating_git;
         entry.at_ms = at_ms;
+        true
+    }
+
+    /// What `pane`'s screen shows drawn over its prompt, or `None` when the
+    /// screen shows the prompt again — see [`crate::screen`].
+    ///
+    /// A dialog takes the question's place while it is up, under
+    /// [`crate::screen::DIALOG_TOOL`] with the dialog's own options, and the
+    /// covered prompt comes back when it goes. Only a pane already waiting
+    /// is read, so a dialog is never invented for a pane at work. Returns
+    /// whether anything changed.
+    pub fn screen_dialog(
+        &mut self,
+        pane: &str,
+        dialog: Option<crate::screen::Dialog>,
+        now_ms: u64,
+    ) -> bool {
+        let Some(entry) = self.panes.get_mut(pane) else {
+            return false;
+        };
+        let showing_dialog = entry
+            .question
+            .as_ref()
+            .is_some_and(|question| question.tool == crate::screen::DIALOG_TOOL);
+        match dialog {
+            Some(dialog) => {
+                if entry.state != AgentState::AwaitingPermission {
+                    return false;
+                }
+                let same = showing_dialog
+                    && entry.question.as_ref().and_then(|q| q.subject.as_deref())
+                        == Some(dialog.question.as_str());
+                if same {
+                    return false;
+                }
+                if !showing_dialog {
+                    entry.covered = entry.question.take();
+                }
+                tracing::debug!(pane, agent = %entry.agent, title = %dialog.title, "dialog on screen");
+                entry.question = Some(PermissionQuestion {
+                    tool: crate::screen::DIALOG_TOOL.to_owned(),
+                    subject: Some(dialog.question),
+                    id: next_question_id(),
+                    prompt: Some(crate::agent_hooks::Prompt::Dialog {
+                        title: dialog.title,
+                        options: dialog.options,
+                    }),
+                });
+                entry.at_ms = now_ms;
+            }
+            None => {
+                if !showing_dialog {
+                    return false;
+                }
+                tracing::debug!(pane, agent = %entry.agent, "dialog gone from screen");
+                entry.question = entry.covered.take();
+                entry.at_ms = now_ms;
+            }
+        }
+        self.revision += 1;
         true
     }
 
@@ -642,6 +732,32 @@ impl StatusStore {
             return false;
         };
         tracing::debug!(pane, agent = %entry.agent, "turn stopped: escape");
+        entry.stop(now_ms);
+        self.revision += 1;
+        true
+    }
+
+    /// The prompt `question` has left the screen without a word from the
+    /// agent: its held hook's script died while this store still showed the
+    /// pane waiting on it.
+    ///
+    /// Claude sends no event for a question dismissed unanswered — Stop
+    /// hooks do not fire on an interrupt — and a waiting state is settled,
+    /// so without this the row would say "waiting" until the next prompt
+    /// was typed. The same guess `escape` makes: Idle, because a dismissal
+    /// ends the turn, and a desk answer whose hook Claude also killed is put
+    /// right by the tool result that follows it within a second. Returns
+    /// whether it applied: only to a pane waiting on that very question.
+    pub fn prompt_gone(&mut self, pane: &str, question: &PermissionQuestion, now_ms: u64) -> bool {
+        let Some(entry) = self.panes.get_mut(pane).filter(|e| {
+            e.state == AgentState::AwaitingPermission
+                && e.question
+                    .as_ref()
+                    .is_some_and(|asked| answers(asked, question))
+        }) else {
+            return false;
+        };
+        tracing::debug!(pane, agent = %entry.agent, tool = %question.tool, "prompt gone: hook ended");
         entry.stop(now_ms);
         self.revision += 1;
         true

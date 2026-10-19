@@ -29,7 +29,7 @@ use ket_core::agent_hooks::{self, Listener};
 use ket_core::subagents::{Subagent, SubagentState};
 
 use crate::fonts::Prose;
-use crate::ui::{ICON, ICON_GAP, WELL_XS};
+use crate::ui::{CAPTION, ICON, ICON_GAP, LABEL, WELL_XS};
 
 /// How often the usage history is written.
 ///
@@ -85,7 +85,7 @@ pub(crate) const DIVIDER_LINE: Pixels = px(0.5);
 
 /// Height of the strip along the top of a card — the tab bar and the right
 /// panel's view strip share it so the two read as one line.
-pub(crate) const TOP_STRIP: Pixels = px(46.0);
+pub(crate) const TOP_STRIP: Pixels = px(32.0);
 
 /// How far a worktree row is inset from its project.
 ///
@@ -106,14 +106,14 @@ const INDENT: Pixels = px(8.0);
 /// Nothing, so a row's hairline runs the full width of the sidebar. An inset
 /// line stops short of both edges and reads as an underline under the text
 /// rather than as a division of the panel.
-const COLUMN_INSET: Pixels = px(8.0);
+const COLUMN_INSET: Pixels = px(4.0);
 
 /// How far a washed project group's ground reaches past its rows on each
 /// side, taken out of [`COLUMN_INSET`] so the rows do not move.
 const OVERRIDE_PAD: Pixels = px(4.0);
 
 /// How far a mark's well reaches past the mark's column on each side: a
-/// [`BADGE`]-wide column (20) in a [`WELL_XS`] well (24).
+/// [`BADGE`]-wide column (16) in a 20px well.
 const MARK_WELL_BLEED: Pixels = px(2.0);
 
 /// How far apart one project's rows sit.
@@ -123,10 +123,13 @@ const MARK_WELL_BLEED: Pixels = px(2.0);
 /// line centres itself on the edge either way — see [`insertion_line`] — and
 /// the drop target's slack going to zero is correct now that there is no dead
 /// space between two rows to be in.
-const ROW_GAP: Pixels = px(2.0);
+const ROW_GAP: Pixels = px(1.0);
 
 /// How far apart one project's group sits from the next.
-const GROUP_GAP: Pixels = px(12.0);
+///
+/// A step over [`ROW_GAP`] rather than a band: a collapsed project is one
+/// heading, and a list of them spaced for groups read as a list with gaps.
+const GROUP_GAP: Pixels = px(4.0);
 
 /// How wide the caps on an insertion line are, which is also how tall it draws.
 const CAP: Pixels = px(6.0);
@@ -150,7 +153,7 @@ const RAIL_INSET: Pixels = px(8.0);
 ///
 /// The search field above them sits at 8, not here — it is a bordered box,
 /// and its inset is measured to the box, not to the ink inside it.
-const LEAD: Pixels = px(12.0);
+const LEAD: Pixels = px(8.0);
 
 /// The trailing column, measured from the sidebar's right edge to the
 /// *centre* of whatever ends a row: the strip's `+`, a project's `+`, a
@@ -161,12 +164,16 @@ const LEAD: Pixels = px(12.0);
 /// a worktree — and one shared padding would put their centres up to five
 /// pixels apart, which is a column of plusses with a bend in it. Each row
 /// derives its own right padding from this instead. The worktree rows'
-/// [`block_row`] already pads 9, which is this minus half the ring.
-const TRAIL_AXIS: Pixels = px(16.0);
+/// [`block_row`] already pads 7, which is this minus half the ring.
+const TRAIL_AXIS: Pixels = px(14.0);
 
 /// A project heading's name size at rest: the same as the branch names under
 /// it, since the badge is what marks the row as the heading.
-const NAME: Pixels = px(13.5);
+const NAME: Pixels = px(12.5);
+
+/// A project heading's height: a [`WELL_XS`] tall, so the caret at its end
+/// fills it and nothing else in the row sets the pitch of the list.
+const HEADING_H: Pixels = WELL_XS;
 
 #[derive(Clone, Copy)]
 pub(crate) struct SidebarResize;
@@ -1038,24 +1045,46 @@ impl Shell {
         });
 
         // The pull request the branch is open as, when there is one: a mark
-        // that opens its page, since that is where its state now lives.
-        let pull_request = node.pull_request.as_ref().map(|open| {
+        // that opens its page, where the rest of its state lives. Its checks
+        // tint it — failed when one failed, running ink when they all
+        // passed — and while they run it keeps its own ink, as a row at rest
+        // does. Read from GitHub when it has been; else the one ket opened.
+        let live = self.pull_requests.of(&node.id);
+        let link = live
+            .map(ket_core::github::PullRequestStatus::link)
+            .or_else(|| node.pull_request.clone());
+        let pull_request = link.map(|open| {
+            use ket_core::github::CheckState;
             let url = open.url.clone();
             let hovered = self.hovered_pull_request.as_ref() == Some(&node.id);
             let node_id = node.id.clone();
             let mark = icon_button(("worktree-pull-request-button", row), Icon::GitHub)
                 .bare()
-                .dense()
+                .dense();
+            let mark = match live.and_then(ket_core::github::PullRequestStatus::checks_state) {
+                Some(CheckState::Failed) => mark.tint(paint(t.status.failed)),
+                Some(CheckState::Passed) => mark.tint(paint(t.status.running)),
+                _ => mark,
+            };
+            let mark = mark
                 .render(t)
                 .on_click(move |_, _, cx| {
                     cx.open_url(&url);
                     cx.stop_propagation();
                 })
                 .into_any_element();
+            let checks = live
+                .map(ket_core::github::PullRequestStatus::checks_summary)
+                .unwrap_or_default();
+            let words = if checks.is_empty() {
+                format!("#{} on GitHub", open.number)
+            } else {
+                format!("#{} on GitHub \u{b7} {checks}", open.number)
+            };
             crate::ui::tooltip::tooltip(
                 ("worktree-pull-request", row),
                 mark,
-                format!("#{} on GitHub", open.number),
+                words,
                 crate::ui::tooltip::Side::Top,
                 hovered,
                 t,
@@ -1602,7 +1631,8 @@ impl Shell {
         };
         // Settings → General can turn this off. Asked last, so arriving at a
         // worktree that already has a terminal never reads the file.
-        let needs_terminal = !missing
+        let needs_terminal = !self.suppress_auto_session
+            && !missing
             && !restores.iter().any(|restore| restore.agent.is_some())
             && self
                 .spaces
@@ -1643,8 +1673,17 @@ impl Shell {
         // none: coming back to a worktree that already has one should give you
         // back your arrangement, not stack another terminal on it.
         self.note = None;
-        self.open_owed_terminals(needs_terminal, &owed, cx);
-        self.restore_terminals(restores, cx);
+        if self.suppress_auto_session {
+            if !restores.is_empty() {
+                self.owed_restores.insert(id.clone(), restores);
+            }
+            if !owed.is_empty() {
+                self.owed_terminals.insert(id, owed);
+            }
+        } else {
+            self.open_owed_terminals(needs_terminal, &owed, cx);
+            self.restore_terminals(restores, cx);
+        }
     }
 
     /// Takes a discovered worktree into its project, then opens it.
@@ -2043,7 +2082,7 @@ impl Shell {
 
         let now = ket_core::now_ms();
         let mut counted = Vec::new();
-        let mut codex_seen = std::collections::BTreeSet::new();
+        let mut codex_seen = std::collections::BTreeMap::new();
         for mut report in local.into_iter().chain(hosted) {
             self.activity.route(&mut report);
             // Turns and tool calls, which no status line reports: they are what
@@ -2051,10 +2090,17 @@ impl Shell {
             // sizes can be compared at all.
             // Codex has no status line, so a hook report is the only sign that
             // there is a rollout worth following in this worktree.
+            // The newest report's session wins: a second Codex session in the
+            // same worktree is a different rollout file.
             if report.agent.eq_ignore_ascii_case("codex")
                 && let Some(worktree) = report.worktree.as_deref()
             {
-                codex_seen.insert(WorktreeId::new(worktree.to_owned()));
+                let seen = codex_seen
+                    .entry(WorktreeId::new(worktree.to_owned()))
+                    .or_insert(None);
+                if report.session.is_some() {
+                    *seen = report.session.clone();
+                }
             }
             if let (Some(session), Some(worktree)) =
                 (report.session.clone(), report.worktree.clone())
@@ -2137,10 +2183,21 @@ impl Shell {
             );
         }
 
-        for worktree in codex_seen {
-            self.follow_codex(&worktree);
+        // Where each worktree is, asked only when there is a store to walk.
+        let projects = &self.projects;
+        let directory = |worktree: &WorktreeId| {
+            projects
+                .iter()
+                .flat_map(|project| project.worktrees.iter())
+                .find(|node| &node.id == worktree)
+                .map(|node| node.path.clone())
+        };
+        for (worktree, session) in codex_seen {
+            self.codex
+                .follow(&worktree, session.as_deref(), now, || directory(&worktree));
         }
         if full {
+            self.codex.look_again(now, directory);
             self.weigh_context();
             self.poll_codex_rollouts(now);
         }
@@ -2216,28 +2273,6 @@ impl Shell {
         }
     }
 
-    /// Starts following a worktree's Codex rollout, if it is not already.
-    ///
-    /// The walk of Codex's dated store happens once per worktree here, not per
-    /// poll: the tailer keeps the path it found.
-    fn follow_codex(&mut self, worktree: &WorktreeId) {
-        if self.codex_rollouts.contains_key(worktree) {
-            return;
-        }
-        let Some(path) = self
-            .projects
-            .iter()
-            .flat_map(|project| project.worktrees.iter())
-            .find(|node| &node.id == worktree)
-            .map(|node| node.path.clone())
-        else {
-            return;
-        };
-        if let Some(rollout) = ket_core::sessions::CodexRollout::for_directory(&path) {
-            self.codex_rollouts.insert(worktree.clone(), rollout);
-        }
-    }
-
     /// Reads whatever each followed rollout has appended, and files it the same
     /// way a status line's reading is filed.
     ///
@@ -2248,7 +2283,7 @@ impl Shell {
     /// fill in, and why those stay empty rather than zero.
     fn poll_codex_rollouts(&mut self, now: u64) {
         let mut filed = Vec::new();
-        for (worktree, rollout) in self.codex_rollouts.iter_mut() {
+        for (worktree, rollout) in self.codex.iter_mut() {
             let Some(tokens) = rollout.poll() else {
                 continue;
             };
@@ -2410,6 +2445,7 @@ impl Shell {
         self.take_phone_work(cx);
         self.refresh_backlog_counts();
         self.refresh_backlog_issues(cx);
+        self.refresh_pull_requests(cx);
 
         // A worktree can have several terminals now, so its foreground is the
         // busiest of them: one pane running a build is the worktree being busy,
@@ -2863,6 +2899,7 @@ impl Shell {
 
         let chosen = self.sidebar_filter;
         let filter = button_group("sidebar-filter")
+            .small()
             .dense()
             .children(SidebarFilter::ALL.map(|which| {
                 let count = counts[which as usize];
@@ -2904,6 +2941,7 @@ impl Shell {
         };
         let view_toggle = if self.sidebar_width >= SORT_UNFOLDS_AT {
             button_group("view-toggle")
+                .small()
                 .child(
                     segment("view-status", "")
                         .glyph(Icon::ViewStatus)
@@ -2962,10 +3000,8 @@ impl Shell {
             .flex()
             .flex_none()
             .flex_col()
-            .gap(px(8.0))
-            .px(px(10.0))
-            .pt(px(10.0))
-            .pb(px(12.0))
+            .gap(px(6.0))
+            .p(px(6.0))
             .child(
                 div()
                     .relative()
@@ -3195,6 +3231,7 @@ impl Shell {
                             )
                             // The badge starts where "Projects" does, and the caret
                             // at the far end lands on the trailing axis.
+                            .h(HEADING_H)
                             .pl(LEAD)
                             .pr(TRAIL_AXIS - WELL_XS / 2.0)
                             // The same size as the branch names under it: the
@@ -3525,12 +3562,11 @@ impl Shell {
                                         block_row(("worktree", pi * 1000 + wi), is_selected, t)
                                             .group(row_group.clone())
                                             .relative()
-                                            // A step and a half under `LABEL`: a worktree row
-                                            // carries a branch name, a status line and a run
-                                            // of tags at once, and that density reads better
-                                            // small. The sidebar as a whole was brought down a
-                                            // size or two from the design's numbers on request.
-                                            .text_size(px(13.5))
+                                            // `LABEL`, as the project names above it are: a
+                                            // worktree row carries a branch name, a status
+                                            // line and a run of tags at once, and that density
+                                            // reads better small.
+                                            .text_size(LABEL)
                                             // The rail stands in the row's own leading
                                             // padding, so the bar itself costs no width — and
                                             // what it frees is the slot the light used to
@@ -3687,9 +3723,9 @@ impl Shell {
                                                             // twice is how a sidebar comes to
                                                             // look unconsidered.
                                                             //
-                                                            // A step under `CAPTION`, to sit
-                                                            // beneath the branch line rather
-                                                            // than beside it.
+                                                            // `CAPTION`, a step and a half
+                                                            // under the branch line, to sit
+                                                            // beneath it rather than beside it.
                                                             //
                                                             // And prose, where the branch name
                                                             // above it is not. This line is the
@@ -3701,8 +3737,8 @@ impl Shell {
                                                             // room, in the one place a reader
                                                             // skims rather than compares.
                                                             .prose()
-                                                            .mt(px(2.0))
-                                                            .text_size(px(12.0))
+                                                            .mt(px(1.0))
+                                                            .text_size(CAPTION)
                                                             .when(!show, |el| el.invisible())
                                                             .child(if !show {
                                                                 div()
@@ -4025,10 +4061,11 @@ impl Shell {
         div()
             .flex()
             .flex_none()
-            .p(px(10.0))
+            .p(px(6.0))
             .child(
                 button("sidebar-new-worktree", label)
                     .leading(Icon::Plus)
+                    .small()
                     .render(t)
                     .flex_1()
                     .justify_center()

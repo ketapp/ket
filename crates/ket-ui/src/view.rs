@@ -104,7 +104,7 @@ impl Default for WindowView {
             sidebar_open: true,
             status_bar_open: true,
             panel_open: true,
-            sidebar_width: 300.0,
+            sidebar_width: 270.0,
             panel_width: 280.0,
             panel_view: String::new(),
             window: None,

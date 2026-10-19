@@ -227,7 +227,7 @@ fn reset_process() {
     }
 }
 
-pub use wire::{DeviceEntry, DeviceRole};
+pub use wire::{DeviceEntry, DeviceRole, PhoneReviewComment, WorkSource};
 
 /// The phones paired with this data directory's host.
 ///
@@ -326,6 +326,42 @@ pub fn decide_pairing(id: u64, role: Option<DeviceRole>, scoped_roles: bool) -> 
     })
 }
 
+/// Hands new work to the open ket window, as a phone's is: it makes a
+/// worktree in `project`, opens the agent there in a tab and gives it
+/// `prompt`, or builds the work from backlog `note` when there is one.
+///
+/// Returns once a window has it, not once the worktree exists. Fails when
+/// no host is running or no window is open to take it.
+pub fn start_work(
+    project: &str,
+    prompt: &str,
+    agent: Option<&str>,
+    note: Option<&str>,
+) -> Result<()> {
+    let Some((stream, _, _)) = client::peek()? else {
+        return Err(KetError::Conflict(
+            "ket is not open; open it, then try again".to_owned(),
+        ));
+    };
+    let request = wire::Request::StartWork {
+        project: project.to_owned(),
+        prompt: prompt.to_owned(),
+        agent: agent.map(str::to_owned),
+        note: note.map(str::to_owned),
+    };
+    let taken = client::ask(stream, &request, |reply| match reply {
+        wire::Reply::WorkTaken { taken } => Some(taken),
+        _ => None,
+    })?;
+    if taken {
+        Ok(())
+    } else {
+        Err(KetError::Conflict(
+            "no ket window is open to start it in".to_owned(),
+        ))
+    }
+}
+
 /// Stops accepting a phone, and ends its session if it has one. `false` if
 /// no phone by that id is paired.
 pub fn revoke(id: &str) -> Result<bool> {
@@ -368,6 +404,16 @@ pub struct Status {
 /// Never starts one.
 pub fn status() -> Result<Option<Status>> {
     Ok(client::peek()?.map(|(_, build, live)| Status { build, live }))
+}
+
+/// The pid of the host this process is connected to, for measuring it — see
+/// [`crate::overhead`].
+///
+/// Only a connection already made: never connects, never starts a host. So
+/// `None` before this process has opened a terminal, after its host has gone,
+/// and with `KET_HOST=0`.
+pub fn host_pid() -> Option<i32> {
+    client::current_pid()
 }
 
 /// Asks the running host to exit, which it does only if no terminal is
@@ -437,6 +483,18 @@ pub struct PhoneWork {
     /// The backlog note it is, when a phone started one — see
     /// `wire::Reply::StartWork`.
     pub note: Option<String>,
+    /// Who asked for it: a phone, or `ket start` in a terminal.
+    pub from: WorkSource,
+    /// Selected base for a new worktree.
+    pub base: Option<String>,
+    /// Session-only model and effort.
+    pub model: Option<String>,
+    /// Session-only effort.
+    pub effort: Option<String>,
+    /// An existing worktree, when opening a fresh tab.
+    pub worktree: Option<String>,
+    /// Whether the fresh tab is a plain shell.
+    pub shell: bool,
 }
 
 /// The work phones have asked this window to start since the last call. The
@@ -456,6 +514,58 @@ pub fn take_phone_merge() -> Option<String> {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     (!merges.is_empty()).then(|| merges.remove(0))
+}
+
+/// The oldest of a phone's Fix checks with agent for this window: the
+/// worktree, and the message the host made of its failed checks, to type
+/// into its agent.
+pub fn take_phone_fix_checks() -> Option<(u64, String, String)> {
+    let mut asked = client::PHONE_FIX_CHECKS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    (!asked.is_empty()).then(|| asked.remove(0))
+}
+
+/// Answers the host's waiting phone once its failed checks reached an agent,
+/// or says why the window could not start one.
+pub fn finish_phone_fix_checks(req: u64, error: Option<String>) {
+    if let Some(conn) = client::current() {
+        let _ = conn.request(&wire::Request::FixChecksResult { req, error });
+    }
+}
+
+/// A phone's comments on a worktree's diff, for this window to send to the
+/// worktree's agent as one review — see [`take_phone_review`].
+#[derive(Debug, Clone)]
+pub struct PhoneReview {
+    /// Answered with [`finish_phone_review`].
+    pub req: u64,
+    /// The worktree's id.
+    pub worktree: String,
+    /// The branch the phone's diff was read against; `None` for a
+    /// checkout's uncommitted changes.
+    pub base: Option<String>,
+    /// The comments, in the order they were written.
+    pub comments: Vec<PhoneReviewComment>,
+    /// Unix milliseconds after which the phone has been told it did not go,
+    /// and it is dropped rather than sent.
+    pub until_ms: u64,
+}
+
+/// The oldest of the reviews phones asked this window to send.
+pub fn take_phone_review() -> Option<PhoneReview> {
+    let mut asked = client::PHONE_REVIEWS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    (!asked.is_empty()).then(|| asked.remove(0))
+}
+
+/// Answers the host's waiting phone once its review reached the agent, or
+/// says why it could not.
+pub fn finish_phone_review(req: u64, error: Option<String>) {
+    if let Some(conn) = client::current() {
+        let _ = conn.request(&wire::Request::SendReviewResult { req, error });
+    }
 }
 
 /// The host's newest agent status snapshot, if one has arrived since the last
@@ -521,6 +631,26 @@ pub fn publish_agents(names: Vec<String>) {
     }
     if let Some(conn) = client::current() {
         let _ = conn.request(&wire::Request::Agents { names });
+    }
+}
+
+/// Tells the host the pull requests this window's worktrees are open as,
+/// for phones — see [`wire::Request::PullRequests`]. Kept and sent again on
+/// every new connection; sent now only if they changed and a host is
+/// connected. The first is always sent, even when there are none: the host
+/// may still hold what a window before this one told it.
+pub fn publish_pull_requests(pull_requests: Vec<(String, crate::github::PullRequestStatus)>) {
+    {
+        let mut published = client::PULL_REQUESTS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if published.as_ref() == Some(&pull_requests) {
+            return;
+        }
+        *published = Some(pull_requests.clone());
+    }
+    if let Some(conn) = client::current() {
+        let _ = conn.request(&wire::Request::PullRequests { pull_requests });
     }
 }
 

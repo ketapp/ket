@@ -56,6 +56,9 @@ pub struct Turn {
     pub text: String,
     /// For a tool, its name: `Bash`, `Edit`.
     pub tool: String,
+    /// For the person, how many images the message carried. The agent's
+    /// marks for them in the text, "[Image #1]", are left out of it.
+    pub images: u32,
 }
 
 /// What one read found.
@@ -488,10 +491,11 @@ pub fn queued(path: &Path) -> Result<Vec<String>> {
             _ => {}
         }
     }
-    // Task notifications and the like queue too; only what a person typed.
+    // Task notifications and the like queue too; only what a person typed,
+    // as the conversation will show it once it is read.
     Ok(waiting
         .into_iter()
-        .map(|text| text.trim().to_owned())
+        .map(|text| without_image_marks(&text).trim().to_owned())
         .filter(|text| !text.is_empty() && !text.starts_with('<'))
         .map(|text| clip(&text))
         .collect())
@@ -538,6 +542,8 @@ fn turns_of(record: &serde_json::Value, turns: &mut Vec<Turn>) {
     match content {
         serde_json::Value::String(text) => push_text(turns, kind, text),
         serde_json::Value::Array(blocks) => {
+            let from = turns.len();
+            let mut images = 0;
             for block in blocks {
                 match block.get("type").and_then(|t| t.as_str()) {
                     Some("text") => {
@@ -545,6 +551,7 @@ fn turns_of(record: &serde_json::Value, turns: &mut Vec<Turn>) {
                             push_text(turns, kind, text);
                         }
                     }
+                    Some("image") => images += 1,
                     Some("tool_use") => {
                         let name = block.get("name").and_then(|n| n.as_str()).unwrap_or("Tool");
                         if let Some(said) = spoken(name, block.get("input")) {
@@ -554,16 +561,75 @@ fn turns_of(record: &serde_json::Value, turns: &mut Vec<Turn>) {
                                 kind: TurnKind::Tool,
                                 text: tool_line(name, block.get("input")),
                                 tool: name.to_owned(),
+                                images: 0,
                             });
                         }
                     }
-                    // Thinking, tool results, images: not the conversation.
+                    // Thinking and tool results: not the conversation.
                     _ => {}
                 }
+            }
+            if kind == TurnKind::User {
+                carried(turns, from, images);
             }
         }
         _ => {}
     }
+}
+
+/// Gives the person's turn among `turns[from..]` — what one record added —
+/// the `images` that record carried, or a turn of its own when it held
+/// images and no words.
+fn carried(turns: &mut Vec<Turn>, from: usize, images: u32) {
+    if images == 0 {
+        return;
+    }
+    match turns
+        .get_mut(from..)
+        .and_then(|added| added.iter_mut().find(|turn| turn.kind == TurnKind::User))
+    {
+        Some(turn) => turn.images += images,
+        None => turns.push(Turn {
+            kind: TurnKind::User,
+            text: String::new(),
+            tool: String::new(),
+            images,
+        }),
+    }
+}
+
+/// Whether a content block is an image, by its type: Claude's `image`,
+/// Codex's `local_image` and `input_image`.
+fn is_image(block: &serde_json::Value) -> bool {
+    block
+        .get("type")
+        .and_then(|t| t.as_str())
+        .is_some_and(|kind| kind == "image" || kind.ends_with("_image"))
+}
+
+/// `text` without the marks an agent writes into a message for each image
+/// in it — Claude Code's and Codex's "[Image #1]", OpenCode's "[Image 1]" —
+/// which [`Turn::images`] counts instead, and the space after each.
+fn without_image_marks(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find("[Image ") {
+        let after = &rest[at + "[Image ".len()..];
+        let number = after.strip_prefix('#').unwrap_or(after);
+        let digits = number.bytes().take_while(u8::is_ascii_digit).count();
+        match number[digits..].strip_prefix(']') {
+            Some(tail) if digits > 0 => {
+                out.push_str(&rest[..at]);
+                rest = tail.strip_prefix(' ').unwrap_or(tail);
+            }
+            _ => {
+                out.push_str(&rest[..at + 1]);
+                rest = &rest[at + 1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// The turns one Codex rollout record holds.
@@ -612,10 +678,22 @@ fn codex_turns_of(record: &serde_json::Value, turns: &mut Vec<Turn>) {
             kind: TurnKind::Tool,
             text: tool_line(name, Some(&input)),
             tool: name.to_owned(),
+            images: 0,
         });
     };
     match item.get("type").and_then(|t| t.as_str()) {
-        Some("UserMessage") => push_text(turns, TurnKind::User, &words()),
+        Some("UserMessage") => {
+            let from = turns.len();
+            push_text(turns, TurnKind::User, &words());
+            let images = item
+                .get("content")
+                .and_then(|c| c.as_array())
+                .into_iter()
+                .flatten()
+                .filter(|block| is_image(block))
+                .count();
+            carried(turns, from, u32::try_from(images).unwrap_or(u32::MAX));
+        }
         Some("AgentMessage") => push_text(turns, TurnKind::Assistant, &words()),
         Some("CommandExecution") => {
             // `["/bin/zsh", "-lc", "<the command>"]`: the script is what was
@@ -669,6 +747,12 @@ fn codex_turns_of(record: &serde_json::Value, turns: &mut Vec<Turn>) {
 fn grok_turns_of(record: &serde_json::Value, turns: &mut Vec<Turn>) {
     match record.get("type").and_then(|t| t.as_str()) {
         Some("user") if record.get("prompt_index").is_some() => {
+            let images = match record.get("content") {
+                Some(serde_json::Value::Array(blocks)) => {
+                    blocks.iter().filter(|b| is_image(b)).count()
+                }
+                _ => 0,
+            };
             let words = match record.get("content") {
                 Some(serde_json::Value::String(text)) => text.clone(),
                 Some(serde_json::Value::Array(blocks)) => blocks
@@ -682,7 +766,9 @@ fn grok_turns_of(record: &serde_json::Value, turns: &mut Vec<Turn>) {
             // Grok wraps what was typed in `<user_query>`, which would read
             // as the harness talking.
             let words = tagged(&words, "user_query").unwrap_or(&words);
+            let from = turns.len();
             push_text(turns, TurnKind::User, words);
+            carried(turns, from, u32::try_from(images).unwrap_or(u32::MAX));
         }
         Some("assistant") => {
             if let Some(text) = record.get("content").and_then(|c| c.as_str()) {
@@ -710,6 +796,7 @@ fn grok_turns_of(record: &serde_json::Value, turns: &mut Vec<Turn>) {
                     kind: TurnKind::Tool,
                     text: tool_line(name, Some(&input)),
                     tool: name.to_owned(),
+                    images: 0,
                 });
             }
         }
@@ -753,6 +840,7 @@ fn opencode_turns_of(
                         kind: TurnKind::Tool,
                         text: tool_line(name, input.as_ref()),
                         tool: name.to_owned(),
+                        images: 0,
                     });
                 }
             }
@@ -762,6 +850,7 @@ fn opencode_turns_of(
                     kind: TurnKind::Tool,
                     text: tool_line("Task", Some(&input)),
                     tool: "Task".to_owned(),
+                    images: 0,
                 });
             }
             _ => {}
@@ -815,6 +904,7 @@ fn absorbed(record: &serde_json::Value, turns: &mut Vec<Turn>) {
     match attachment.get("prompt") {
         Some(serde_json::Value::String(text)) => push_text(turns, TurnKind::User, text),
         Some(serde_json::Value::Array(blocks)) => {
+            let from = turns.len();
             for block in blocks {
                 if block.get("type").and_then(|t| t.as_str()) == Some("text")
                     && let Some(text) = block.get("text").and_then(|t| t.as_str())
@@ -822,6 +912,8 @@ fn absorbed(record: &serde_json::Value, turns: &mut Vec<Turn>) {
                     push_text(turns, TurnKind::User, text);
                 }
             }
+            let images = blocks.iter().filter(|block| is_image(block)).count();
+            carried(turns, from, u32::try_from(images).unwrap_or(u32::MAX));
         }
         _ => {}
     }
@@ -835,13 +927,20 @@ fn absorbed(record: &serde_json::Value, turns: &mut Vec<Turn>) {
 /// `!` command, which Claude files as `<bash-input>`, with what it printed as
 /// a `<bash-stdout>` record of its own.
 fn push_text(turns: &mut Vec<Turn>, kind: TurnKind, text: &str) {
-    let text = text.trim();
+    let unmarked;
+    let text = if kind == TurnKind::User && text.contains("[Image ") {
+        unmarked = without_image_marks(text);
+        unmarked.trim()
+    } else {
+        text.trim()
+    };
     if kind == TurnKind::User {
         if let Some(command) = slash_command(text) {
             turns.push(Turn {
                 kind: TurnKind::User,
                 text: clip(&command),
                 tool: String::new(),
+                images: 0,
             });
             return;
         }
@@ -854,6 +953,7 @@ fn push_text(turns: &mut Vec<Turn>, kind: TurnKind, text: &str) {
                 kind: TurnKind::User,
                 text: clip(&format!("!{command}")),
                 tool: String::new(),
+                images: 0,
             });
             return;
         }
@@ -869,6 +969,7 @@ fn push_text(turns: &mut Vec<Turn>, kind: TurnKind, text: &str) {
                     kind: TurnKind::Tool,
                     text: clip(&printed.join("\n")),
                     tool: "Bash".to_owned(),
+                    images: 0,
                 });
             }
             return;
@@ -880,6 +981,7 @@ fn push_text(turns: &mut Vec<Turn>, kind: TurnKind, text: &str) {
                     kind: TurnKind::Tool,
                     text: clip(line),
                     tool: "Command".to_owned(),
+                    images: 0,
                 });
             }
             return;
@@ -901,6 +1003,7 @@ fn push_text(turns: &mut Vec<Turn>, kind: TurnKind, text: &str) {
         kind,
         text: clip(text),
         tool: String::new(),
+        images: 0,
     });
 }
 

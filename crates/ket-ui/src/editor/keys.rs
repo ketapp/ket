@@ -218,6 +218,18 @@ impl Shell {
             _ => self.handle_buffer_key(editor_key, keystroke),
         }
 
+        if self
+            .editors
+            .get(editor_key)
+            .is_some_and(|state| state.is_dirty())
+            && let Some(id) = self.selected_id()
+            && self.spaces.get_mut(&id).is_some_and(|space| {
+                space.promote_preview(&crate::tabs::TabKind::Editor(editor_key.to_owned().into()))
+            })
+        {
+            self.persist_layout();
+        }
+
         // Every path that reaches here may have changed the text, and the ones
         // that cannot — a cursor move, a selection — cost only the timer, which
         // the next keystroke replaces anyway.

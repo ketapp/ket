@@ -455,6 +455,7 @@ pub(crate) struct IconButton {
     primary: bool,
     overlay: Option<SharedString>,
     count: Option<SharedString>,
+    enabled: bool,
 }
 
 /// An icon button in a well — a filled, bordered rounded square.
@@ -473,6 +474,7 @@ pub(crate) fn icon_button(id: impl Into<ElementId>, which: Icon) -> IconButton {
         primary: false,
         overlay: None,
         count: None,
+        enabled: true,
     }
 }
 
@@ -527,6 +529,15 @@ impl IconButton {
         self
     }
 
+    /// Whether it can be pressed. A disabled one keeps its state — a held
+    /// toggle still reads as held — with its glyph faded, and neither lights
+    /// under the pointer nor offers a hand; the caller attaches no handler,
+    /// as with [`Button::enabled`].
+    pub(crate) fn enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
     /// Held down: the button is a toggle and its mode is on. Drawn in the
     /// selection ground with the icon at full ink, so it reads as a chosen
     /// row does — and stays that way under the pointer, where a plain hover
@@ -578,6 +589,7 @@ impl IconButton {
 
     /// Builds the element. Attach `on_click` to what comes back.
     pub(crate) fn render(self, t: &Theme) -> Stateful<Div> {
+        let enabled = self.enabled;
         if self.primary {
             return div()
                 .id(self.id)
@@ -588,16 +600,30 @@ impl IconButton {
                 .size(self.size)
                 .when(self.round, |el| el.rounded_full())
                 .when(!self.round, |el| el.rounded(self.radius))
-                .cursor_pointer()
-                .bg(paint(t.accent))
-                .hover(|style| style.bg(paint(t.accent_hover)))
+                .bg(match enabled {
+                    true => paint(t.accent),
+                    false => Rgba {
+                        a: 0.4,
+                        ..paint(t.accent)
+                    },
+                })
+                .when(enabled, |el| {
+                    el.cursor_pointer()
+                        .hover(|style| style.bg(paint(t.accent_hover)))
+                })
                 .child(super::icon::sized_icon(
                     self.which,
                     self.glyph,
                     paint(t.on_accent),
                 ));
         }
-        let rest = paint(t.text.dim);
+        let rest = match enabled {
+            true => paint(t.text.dim),
+            false => Rgba {
+                a: 0.55,
+                ..paint(t.text.dim)
+            },
+        };
         let active = self.tint.unwrap_or_else(|| paint(t.text.primary));
         let hovered = paint(t.hover);
         let well = self.well;
@@ -618,20 +644,21 @@ impl IconButton {
             .when(self.round, |el| el.rounded_full())
             .when(!self.round, |el| el.rounded(self.radius))
             .text_color(rest)
-            .cursor_pointer()
             .when(well, |el| el.border_1().border_color(border))
             .when(pressed, |el| el.bg(held))
-            .hover(move |style| {
-                style
-                    .bg(if pressed { held } else { hovered })
-                    .text_color(active)
+            .when(enabled, |el| {
+                el.cursor_pointer().hover(move |style| {
+                    style
+                        .bg(if pressed { held } else { hovered })
+                        .text_color(active)
+                })
             })
             .children(
                 self.count
                     .map(|count| div().text_size(px(10.0)).text_color(rest).child(count)),
             )
             .child({
-                let ink = if pressed { active } else { rest };
+                let ink = if pressed && enabled { active } else { rest };
                 let glyph = super::icon::sized_icon(self.which, self.glyph, ink);
                 match self.overlay {
                     // The figure sits inside the glyph's own box and centres

@@ -69,6 +69,19 @@ pub const VERSION_ENV: &str = "KET_HOOK_VERSION";
 /// pane the conversation originally ran in rather than the pane it is in now.
 pub const RESUME_SESSION_ENV: &str = "KET_RESUME_SESSION_ID";
 
+/// Environment variable carrying [`CLI_NOTE`]. Set where ket puts its own
+/// CLI on a terminal's `PATH`, so a session is told about `ket` only where
+/// it can run it.
+pub const CLI_NOTE_ENV: &str = "KET_CLI_NOTE";
+
+/// What an agent in a ket pane is told about the `ket` command as its session
+/// starts, after the Economy note. Kept short: it stays in the context for
+/// the whole session.
+pub const CLI_NOTE: &str = "You are running inside ket, which manages this project's worktrees \
+     and agents. The `ket` command on your PATH drives it: `ket backlog list` reads the \
+     project's backlog, `ket backlog start <note>` or `ket start '<prompt>'` starts work in a \
+     new worktree as a tab in the ket window, and `ket --help` lists the rest.";
+
 /// The hook contract's version. Bumped when the payload's shape changes.
 pub const HOOK_VERSION: &str = "1";
 
@@ -437,6 +450,15 @@ pub enum Prompt {
     },
     /// A plan. Its text is in the conversation; the prompt only asks to go.
     Plan,
+    /// A dialog the agent's TUI drew over its prompt, read off the screen —
+    /// see [`crate::screen`]. Answered with a number and Enter, not through
+    /// a hook: the TUI said nothing to one.
+    Dialog {
+        /// Its heading.
+        title: String,
+        /// Its numbered options in order, without the numbers.
+        options: Vec<String>,
+    },
 }
 
 /// One question an `AskUserQuestion` asks.
@@ -2112,11 +2134,12 @@ pub fn install_script() -> Result<PathBuf> {
 /// On `SessionStart` it does one more thing: it hands Claude Code back
 /// whatever [`crate::worktree::TOKEN_REDUCTION_NOTE_ENV`] holds as
 /// `hookSpecificOutput.additionalContext`, telling it how tersely to work for
-/// the rest of the session. ket set that variable on the launched process from
-/// the worktree's own level — the script deliberately knows nothing about
-/// which level means what, so the table in [`crate::worktree`] stays the only
-/// copy. That field is the one place a `SessionStart` hook can talk back;
-/// every other event still gets the same inert `{}`.
+/// the rest of the session, followed by [`CLI_NOTE_ENV`]'s word on the `ket`
+/// command. ket set both variables on the launched process — the script
+/// deliberately knows nothing about which level means what, so the table in
+/// [`crate::worktree`] stays the only copy. That field is the one place a
+/// `SessionStart` hook can talk back; every other event still gets the same
+/// inert `{}`.
 ///
 /// On `PostToolUse` for the shell tool it does one more, and only when the
 /// launch set [`crate::filter::ENV`]: it hands the payload to that binary's
@@ -2132,7 +2155,8 @@ pub fn install_script() -> Result<PathBuf> {
 /// envelope as `ruling`. Questions and plans are never ruled.
 const SCRIPT: &str = r#"#!/bin/sh
 # ket-agent-hook — installed by ket. Reports an agent's lifecycle back to it,
-# and on session start, tells Claude how tersely this worktree asked it to work.
+# and on session start, tells Claude how tersely this worktree asked it to work
+# and that the `ket` command is there to drive ket with.
 #
 # Removing ket's entries from the agent's settings is what uninstalls this;
 # the file itself is inert without them.
@@ -2293,10 +2317,10 @@ if [ "$delivered" -eq 0 ] && [ -n "${HOME:-}" ]; then
 fi
 
 # Only a SessionStart hook's output can steer the session, and only a session
-# ket handed a note has anything to say — the level-to-sentence table lives in
-# ket, not here, so there is one copy of it. Every other event, and an empty
-# note, gets the same `{}` as before: this is additive, not a replacement for
-# the report above.
+# ket handed a note has anything to say — the level-to-sentence table and the
+# word on the CLI live in ket, not here, so there is one copy of each. Every
+# other event, and no note, gets the same `{}` as before: this is additive,
+# not a replacement for the report above.
 case "$payload" in
   *'"hook_event_name":"SessionStart"'*)
     # Flattened before it is escaped: `escape` covers the backslashes and
@@ -2304,6 +2328,8 @@ case "$payload" in
     # literal one inside a string — invalid JSON, and an error the reader sees
     # instead of a session.
     context=$(printf '%s' "${KET_TOKEN_REDUCTION_NOTE:-}" | tr '\n\r\t' '   ')
+    cli=$(printf '%s' "${KET_CLI_NOTE:-}" | tr '\n\r\t' '   ')
+    if [ -n "$cli" ]; then context="${context:+$context }$cli"; fi
     if [ -n "$context" ]; then
       # Each agent's own documented way of taking context from a hook, chosen
       # by the name ket launched it under. Claude Code reads a JSON object with
@@ -2612,18 +2638,36 @@ impl Waiters {
     }
 
     /// Lets go of every held hook `keep` does not want, once it has had
-    /// [`PARK_GRACE`] to be reported. `keep` is asked with the pane and the
-    /// prompt the hook holds.
-    pub fn release_unless(&self, keep: impl Fn(&str, &PermissionQuestion) -> bool) {
+    /// [`PARK_GRACE`] to be reported, and of every one whose script has
+    /// gone. `keep` is asked with the pane and the prompt the hook holds.
+    ///
+    /// Returns the pane and prompt of each hook let go because its script
+    /// had gone while `keep` still wanted it. Claude kills the script when
+    /// the dialog closes, answered or dismissed, and sends no event for a
+    /// dismissal — so a dead script under a prompt the status still shows is
+    /// the only word that the prompt is no longer up. Hooks let go only
+    /// because `keep` said no are not reported: the status already moved.
+    pub fn release_unless(
+        &self,
+        keep: impl Fn(&str, &PermissionQuestion) -> bool,
+    ) -> Vec<(String, PermissionQuestion)> {
         let mut parked = lock_waiters(&self.parked);
         if parked.is_empty() {
-            return;
+            return Vec::new();
         }
+        let mut dismissed = Vec::new();
         let gone: Vec<String> = parked
             .iter()
             .filter(|(pane, waiter)| {
-                waiter.parked_at.elapsed() >= PARK_GRACE
-                    && (!waiter.alive() || !keep(pane, &waiter.asked))
+                if waiter.parked_at.elapsed() < PARK_GRACE {
+                    return false;
+                }
+                let alive = waiter.alive();
+                let wanted = keep(pane, &waiter.asked);
+                if !alive && wanted {
+                    dismissed.push(((*pane).clone(), waiter.asked.clone()));
+                }
+                !alive || !wanted
             })
             .map(|(pane, _)| pane.clone())
             .collect();
@@ -2632,6 +2676,7 @@ impl Waiters {
                 waiter.send("");
             }
         }
+        dismissed
     }
 }
 
@@ -2660,6 +2705,9 @@ pub enum Decision {
     Approve,
     /// Not yet: keep planning, with this to go on.
     KeepPlanning(String),
+    /// Which of a screen-read dialog's options to press, counted from zero.
+    /// Typed, never handed to a hook — see [`Prompt::Dialog`].
+    Pick(usize),
 }
 
 impl Decision {
@@ -2701,6 +2749,8 @@ impl Decision {
                 }
                 serde_json::json!({ "behavior": "deny", "message": feedback, "interrupt": false })
             }
+            // Keys, not a hook's answer.
+            Self::Pick(_) => return None,
         };
         serde_json::to_string(&serde_json::json!({
             "hookSpecificOutput": {

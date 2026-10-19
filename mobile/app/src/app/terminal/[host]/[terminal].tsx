@@ -3,11 +3,11 @@
 // A terminal on the desktop, drawn on the phone.
 //
 // View-only until the phone types: focusing the message line, sending, or a
-// key from the key row takes control, with no button to press first. A line
-// at the bottom sends a whole message; the keys a phone keyboard lacks sit
-// behind a button beside it. The desktop can take control back with a
-// keystroke, and the phone says so. Interrupting needs no control: stopping an
-// agent is always the phone's to do.
+// key from the key row takes control, with no button to press first, and
+// leaving the screen lets it go. A line at the bottom sends a whole message;
+// the keys a phone keyboard lacks sit behind a button beside it. The desktop
+// can take control back with a keystroke, and the phone says so. Interrupting
+// needs no control: stopping an agent is always the phone's to do.
 
 import { router, useLocalSearchParams } from 'expo-router';
 import { useEffect, useRef, useState } from 'react';
@@ -18,8 +18,8 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { CommandMenu } from '../../../components/Commands';
 import { TerminalView, type TerminalHandle } from '../../../components/TerminalView';
 import { AgentMark, Keyboard, Send, TerminalGlyph } from '../../../components/icons';
-import { Bar, Card, Dot, Prose, Readout, Screen, Segmented } from '../../../components/ui';
-import { agentTerminal, everyWorktree, railColor, stateOf } from '../../../lib/activity';
+import { Bar, Card, Marked, Prose, Screen, TabStrip } from '../../../components/ui';
+import { agentTerminal, everyWorktree, stateOf, terminalName } from '../../../lib/activity';
 import { type Command, commandsFor, matching } from '../../../lib/commands';
 import { useHost } from '../../../lib/hosts';
 import { getFit } from '../../../lib/store';
@@ -72,8 +72,10 @@ export default function TerminalScreen() {
     .map((l) => ({ ...l, terminal: l.worktree.terminals.find((x) => x.id === terminalId) }))
     .find((l) => l.terminal);
   const summary = located?.terminal;
-  const isAgent = located ? agentTerminal(located.worktree)?.id === terminalId : false;
-  const stateColor = located && isAgent ? railColor(located.worktree.activity) : undefined;
+  // The worktree's state belongs to its agent's terminal, and rides on that
+  // terminal's mark — in the tabs, or beside the title when there is one.
+  const agentId = located ? agentTerminal(located.worktree)?.id : undefined;
+  const stateFor = (id: bigint) => (located && id === agentId ? stateOf(located.worktree.activity) : undefined);
 
   // Subscribe once the page can draw, and again after every reconnect.
   useEffect(() => {
@@ -161,12 +163,6 @@ export default function TerminalScreen() {
     return false;
   };
 
-  const release = () => {
-    conn?.releaseControl(terminalId);
-    held.current = false;
-    setControl(false);
-  };
-
   // The text, then Enter as a keystroke of its own. Sent together, an agent's
   // prompt reads the chunk as a paste and the Enter as a new line in it, so
   // the message sits in the box on the desktop unsent.
@@ -206,7 +202,10 @@ export default function TerminalScreen() {
     if (command.args) setMessage(`${command.name} `);
     else void send(command.name);
   };
-  const name = summary?.title || agent || 'Terminal';
+  const name = summary ? terminalName(summary) : 'Terminal';
+  const state = stateFor(terminalId);
+  // With more than one, the tabs stand in the bar in the title's place: the
+  // chosen tab already names the terminal shown.
   const tabs = located ? located.worktree.terminals.filter((x) => !x.closed || x.id === terminalId) : [];
 
   return (
@@ -215,49 +214,37 @@ export default function TerminalScreen() {
         <Bar
           back
           detail={located?.worktree.name}
-          lead={
-            <View style={styles.titleLine}>
-              {agent ? <AgentMark agent={agent} size={14} /> : <TerminalGlyph size={14} />}
-              <Text style={styles.title} numberOfLines={1}>
-                {name}
-              </Text>
-            </View>
+          tabs={
+            tabs.length > 1 ? (
+              <TabStrip
+                label={`Terminals in ${located?.worktree.name ?? 'this worktree'}`}
+                tabs={tabs.map((x) => ({
+                  key: x.id.toString(),
+                  label: terminalName(x),
+                  icon: x.agent ? <AgentMark agent={x.agent} size={12} /> : <TerminalGlyph size={12} color={t.dim} />,
+                  state: stateFor(x.id),
+                }))}
+                value={terminal}
+                onChange={(key) => router.replace(`/terminal/${hostId}/${key}`)}
+              />
+            ) : undefined
           }
-          right={
-            <View style={styles.barRight}>
-            {control ? (
-              <Pressable accessibilityRole="button" accessibilityLabel="Let go of control" onPress={release}>
-                <Readout style={styles.lease}>
-                  <Dot size={6} color={t.running} />
-                  <Text style={styles.leaseText}>you have control</Text>
-                </Readout>
-              </Pressable>
-            ) : stateColor && located ? (
-              <Readout style={styles.lease}>
-                <Dot size={6} color={stateColor} />
-                <Text style={[styles.leaseText, { color: t.dim }]} numberOfLines={1}>
-                  {stateOf(located.worktree.activity)?.word}
+          lead={
+            tabs.length > 1 ? undefined : (
+              <View style={styles.titleLine} accessible accessibilityLabel={state ? `${name}, ${state.word}` : name}>
+                <Marked dot={state?.color} ring={t.backdrop}>
+                  {agent ? <AgentMark agent={agent} size={14} /> : <TerminalGlyph size={14} />}
+                </Marked>
+                <Text style={styles.title} numberOfLines={1}>
+                  {name}
                 </Text>
-              </Readout>
-            ) : null}
-            </View>
+              </View>
+            )
           }
         />
 
         <View style={styles.body}>
           <Card style={styles.terminalCard}>
-            {tabs.length > 1 ? (
-              <Segmented
-                segments={tabs.map((x) => ({
-                  key: x.id.toString(),
-                  label: x.title || x.agent || 'shell',
-                  icon: x.agent ? <AgentMark agent={x.agent} size={12} /> : <TerminalGlyph size={12} color={t.dim} />,
-                }))}
-                value={terminal}
-                onChange={(key) => router.replace(`/terminal/${hostId}/${key}`)}
-                style={styles.tabs}
-              />
-            ) : null}
             <View style={styles.fill}>
               <TerminalView ref={view} onReady={() => setReady(true)} onInput={(data) => void type(data)} onSize={fitTo} />
               {drawn ? null : (
@@ -360,11 +347,8 @@ const styles = StyleSheet.create({
   waiting: { position: 'absolute', top: 12, left: 12, right: 12 },
   titleLine: { flexDirection: 'row', alignItems: 'center', gap: 7 },
   title: { fontFamily: font.proseSemibold, fontSize: size.value, color: t.text },
-  lease: { height: 30 },
-  leaseText: { fontFamily: font.chrome, fontSize: 12, color: t.text },
   body: { flex: 1, paddingHorizontal: size.gutter, gap: size.gutter },
-  terminalCard: { flex: 1, padding: 8, gap: 8 },
-  tabs: { flexGrow: 0 },
+  terminalCard: { flex: 1, padding: 8 },
   panel: { padding: 8, gap: 8 },
   small: { fontSize: size.detail, lineHeight: 17, paddingHorizontal: 4 },
   keys: { flexDirection: 'row', gap: 5 },
@@ -400,7 +384,6 @@ const styles = StyleSheet.create({
   },
   // Something to send: ket's own green, as in the chat.
   sendReady: { backgroundColor: t.brand },
-  barRight: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   // Round, beside the round field and Send.
   menu: {
     width: size.control,

@@ -137,6 +137,11 @@ pub struct ClaudeRateLimitSource {
     /// The `claude` binary to run — a name resolved against `PATH`, matching
     /// how every other agent invocation in this codebase names its binary.
     binary: OsString,
+    /// Where that name resolves, asked of the login shell on first use —
+    /// see [`Self::resolved_binary`]. Pre-filled by [`Self::with_harness`] so
+    /// a test asks no shell: a login shell started under a loaded test run
+    /// could spend the whole fetch's timeout before the fake is reached.
+    resolved: OnceLock<OsString>,
     /// The `CLAUDE_CONFIG_DIR` in force, or `None` for a default install.
     ///
     /// Resolved once and never re-read: a fetch that consults ambient state is
@@ -167,6 +172,7 @@ impl ClaudeRateLimitSource {
         Self {
             config_dir: OnceLock::new(),
             credentials_file: OnceLock::new(),
+            resolved: OnceLock::new(),
             ..Self::with_harness(Arc::new(RealProcessHarness))
         }
     }
@@ -176,6 +182,7 @@ impl ClaudeRateLimitSource {
         Self {
             harness,
             binary: OsString::from("claude"),
+            resolved: OnceLock::from(OsString::from("claude")),
             config_dir: OnceLock::from(None),
             credentials_file: OnceLock::from(None),
             retry_at: Arc::new(Mutex::new(None)),
@@ -242,9 +249,13 @@ impl ClaudeRateLimitSource {
     /// The `claude` binary, resolved the same way ket resolves it for an
     /// agent — `PATH` first, then the user's own login shell.
     fn resolved_binary(&self) -> OsString {
-        crate::shell::probe(&self.binary.to_string_lossy())
-            .map(OsString::from)
-            .unwrap_or_else(|| self.binary.clone())
+        self.resolved
+            .get_or_init(|| {
+                crate::shell::probe(&self.binary.to_string_lossy())
+                    .map(OsString::from)
+                    .unwrap_or_else(|| self.binary.clone())
+            })
+            .clone()
     }
 
     /// Reads the OAuth token Claude Code is already holding.

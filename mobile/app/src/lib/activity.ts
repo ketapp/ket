@@ -2,9 +2,9 @@
 // it, the colour its detail line takes, and a phrase when the agent said
 // nothing.
 
-import { Activity, type HostSnapshot, type ProjectSummary, type WorktreeSummary } from '@ket/remote';
+import { Activity, type HostSnapshot, type ProjectSummary, type TerminalSummary, type WorktreeSummary } from '@ket/remote';
 
-import { PROJECT_COLORS, t } from './theme';
+import { PROJECT_COLORS, agentLabel, t } from './theme';
 
 /**
  * The word a row ends in, in its colour — the desktop sidebar's words
@@ -105,6 +105,13 @@ export function everyWorktree(snapshot: HostSnapshot | null): Located[] {
   return (snapshot?.projects ?? []).flatMap((project) => project.worktrees.map((worktree) => ({ project, worktree })));
 }
 
+/** The agent a worktree's row is marked with: the one whose state it
+ * reports, else the agent in one of its terminals — an agent that has not
+ * said anything yet still runs in one. Empty for a worktree of shells. */
+export function agentOf(worktree: WorktreeSummary): string {
+  return worktree.agent || agentTerminal(worktree)?.agent || '';
+}
+
 /** The terminal running a worktree's reporting agent, if there is one. */
 export function agentTerminal(worktree: WorktreeSummary) {
   const agent = worktree.agent.toLowerCase();
@@ -112,4 +119,19 @@ export function agentTerminal(worktree: WorktreeSummary) {
     worktree.terminals.find((x) => !x.closed && agent !== '' && x.agent.toLowerCase() === agent) ??
     worktree.terminals.find((x) => !x.closed && x.agent !== '')
   );
+}
+
+/** The glyphs an agent leads its title with, and the space after them:
+ * Claude Code's ✳, a spinner's braille frame, a bullet, an emoji. Symbols
+ * and punctuation from U+2000 to U+2BFF and the astral emoji, never ASCII,
+ * so a title that starts `~/` or `[1]` keeps its first character. */
+const LEADING_GLYPHS = /^\s*(?:[\u2000-\u2bff\ufe0f\u200d]|[\ud83c-\ud83e][\udc00-\udfff])+\s+/;
+
+/** What a terminal is called: the title its program set, else its agent's
+ * name. An agent's title loses the glyph it leads with, since the agent's
+ * mark already stands there and a spinner's frames would make the label
+ * flicker. */
+export function terminalName(terminal: TerminalSummary): string {
+  const title = terminal.agent ? terminal.title.replace(LEADING_GLYPHS, '') : terminal.title;
+  return title.trim() || (terminal.agent ? agentLabel(terminal.agent) : 'Terminal');
 }

@@ -337,6 +337,11 @@ impl Shell {
                     self.open_project_settings(&id, crate::projects::Field::Name, cx);
                 }
                 Intent::ConfirmRemoveProject(id) => self.confirm_remove_project(&id),
+                Intent::SendReview => {
+                    if let Some(id) = self.selected_id() {
+                        self.send_review(id, cx);
+                    }
+                }
             }
         }
         if layout_changed {

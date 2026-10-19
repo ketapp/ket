@@ -60,6 +60,26 @@ impl Shell {
     /// Opens `abs_path` as an editor tab in the active space, loading its
     /// buffer the first time or focusing the existing tab and buffer after.
     pub(crate) fn open_editor_tab(&mut self, abs_path: PathBuf, cx: &mut Context<Self>) {
+        self.open_editor_tab_with(abs_path, false, false, cx);
+    }
+
+    /// Opens an editable Git conflict in the pane's preview slot.
+    pub(crate) fn open_editor_preview(&mut self, abs_path: PathBuf, cx: &mut Context<Self>) {
+        self.open_editor_tab_with(abs_path, true, false, cx);
+    }
+
+    /// Opens the file from a diff, taking that preview's place.
+    pub(crate) fn open_editor_from_diff(&mut self, abs_path: PathBuf, cx: &mut Context<Self>) {
+        self.open_editor_tab_with(abs_path, false, true, cx);
+    }
+
+    fn open_editor_tab_with(
+        &mut self,
+        abs_path: PathBuf,
+        preview: bool,
+        replace_preview: bool,
+        cx: &mut Context<Self>,
+    ) {
         if crate::audio::is_audio_path(&abs_path) {
             self.open_audio_tab(abs_path);
             return;
@@ -78,12 +98,21 @@ impl Shell {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "untitled".to_owned());
-        space.open_tab(Tab {
+        let tab = Tab {
             title: title.into(),
             kind: TabKind::Editor(key.clone()),
             renamed: false,
             pinned: false,
-        });
+            preview,
+        };
+        if replace_preview {
+            space.open_tab_replacing_preview(tab);
+        } else if preview {
+            space.open_preview_tab(tab);
+        } else {
+            space.open_tab(tab);
+        }
+        self.prune_diffs();
 
         // A state outlives its tab, so this is as often a file opened earlier
         // in the session as a new one — and disk may have moved on since,
@@ -267,6 +296,7 @@ impl Shell {
             kind: TabKind::Editor(key.clone()),
             renamed: false,
             pinned: false,
+            preview: false,
         };
         let Some(space) = self.spaces.get_mut(&worktree_id) else {
             return;

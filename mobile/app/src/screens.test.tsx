@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, jest, test } from '@jest/globals';
 import { fireEvent, render, waitFor } from '@testing-library/react-native';
 import { useEffect as mockUseEffect } from 'react';
+import { Linking } from 'react-native';
 import Needs from './app/needs';
 import Settings from './app/settings';
 import Usage from './app/usage';
@@ -51,7 +52,9 @@ jest.mock('./components/Unpaired', () => ({ Unpaired: () => null }));
 jest.mock('@ket/remote', () => ({
   Activity: { QUIET: 0, RUNNING: 1, WORKING: 2, MERGING: 3, BLOCKED: 4, FAILED: 5 },
   Answer_Choice: { ALLOW_ONCE: 1, ALLOW_ALWAYS: 2, DENY: 3 },
+  CheckSummary_State: { STATE_UNSPECIFIED: 0, PASSED: 1, FAILED: 2, PENDING: 3, SKIPPED: 4 },
   FileChange_Status: { ADDED: 1, DELETED: 2 },
+  PullRequestSummary_Review: { REVIEW_UNSPECIFIED: 0, APPROVED: 1, CHANGES_REQUESTED: 2, REVIEW_REQUIRED: 3 },
   SubagentSummary_State: { WORKING: 1, BLOCKED: 2, IDLE: 3 },
   UsageStatus: { UNSPECIFIED: 0, FRESH: 1, STALE: 2, UNAVAILABLE: 3, UNSUPPORTED: 4 },
 }));
@@ -100,6 +103,7 @@ const tree = (id: string, activity: number, extra: object = {}) => ({
   commitsAhead: 1,
   base: 'main',
   subagents: [],
+  questions: [],
   ...extra,
 });
 const project = (worktrees: object[]) => ({ id: 'project', name: 'Project', color: '#22c55e', worktrees });
@@ -197,7 +201,7 @@ describe('top-level screens', () => {
     mockConns = [
       connection([
         project([
-          tree('waiting', 4, { question: { subject: 'Run command', terminalId: 9n } }),
+          tree('waiting', 4, { question: { id: 1n, subject: 'Run command', terminalId: 9n } }),
           tree('failed', 5),
         ]),
       ]),
@@ -284,6 +288,140 @@ describe('work screens', () => {
     await waitFor(() => expect(mockConfirmIdentity).toHaveBeenCalled());
     await fireEvent.press(view.getByText('Open the terminal'));
     expect(mockRouter.push).toHaveBeenCalledWith('/terminal/host/7');
+    await view.unmount();
+  });
+
+  const pullRequest = {
+    number: 17n,
+    url: 'https://github.com/o/r/pull/17',
+    draft: true,
+    review: 2,
+    checks: [
+      { name: 'rust', state: 1, url: 'https://github.com/o/r/actions/runs/1/job/1' },
+      { name: 'clippy', state: 2, url: 'https://github.com/o/r/actions/runs/1/job/2' },
+      { name: 'docs', state: 4, url: '' },
+    ],
+  };
+
+  test('shows a worktree’s pull request and hands its failed checks to the agent', async () => {
+    mockParams = { host: 'host', worktree: 'pr' };
+    const conn = Object.assign(connection([project([tree('pr', 0, { pullRequest })])]), {
+      hostMinor: 11,
+      fixChecks: jest.fn(async (_worktree: string) => ({ starting: false })),
+    });
+    mockHost = conn;
+    const open = jest.spyOn(Linking, 'openURL').mockResolvedValue(true);
+    const view = await render(<Worktree />);
+    expect(view.getByText('#17')).toBeTruthy();
+    expect(view.getByText('Draft · changes requested · 1 of 2 checks failing')).toBeTruthy();
+    // What failed is listed; what passed or said nothing waits behind a tap.
+    expect(view.getByText('clippy')).toBeTruthy();
+    expect(view.queryByText('rust')).toBeNull();
+    await fireEvent.press(view.getByText('Show 2 more checks'));
+    expect(view.getByText('rust')).toBeTruthy();
+    expect(view.getByText('skipped')).toBeTruthy();
+    await fireEvent.press(view.getByText('clippy'));
+    expect(open).toHaveBeenCalledWith('https://github.com/o/r/actions/runs/1/job/2');
+    await fireEvent.press(view.getByText('Open on GitHub'));
+    expect(open).toHaveBeenCalledWith('https://github.com/o/r/pull/17');
+    // One tap sends them, and the agent's conversation opens.
+    await fireEvent.press(view.getByText('Fix checks with agent'));
+    await waitFor(() => expect(conn.fixChecks).toHaveBeenCalledWith('pr'));
+    await waitFor(() => expect(mockRouter.push).toHaveBeenCalledWith('/session/host/7'));
+    await view.unmount();
+    open.mockRestore();
+  });
+
+  test('says why checks could not be fixed, and offers no fix to a desktop too old for one', async () => {
+    mockParams = { host: 'host', worktree: 'pr' };
+    const conn = Object.assign(connection([project([tree('pr', 0, { pullRequest, terminals: [] })])]), {
+      hostMinor: 11,
+      fixChecks: jest.fn(async (_worktree: string) => ({ why: 'open ket on your Mac to fix checks from here' })),
+    });
+    mockHost = conn;
+    const view = await render(<Worktree />);
+    await fireEvent.press(view.getByText('Fix checks with agent'));
+    await waitFor(() => expect(view.getByText('open ket on your Mac to fix checks from here')).toBeTruthy());
+    expect(mockRouter.push).not.toHaveBeenCalled();
+    await view.unmount();
+
+    // An agent still starting is not a failure, and nothing is opened yet.
+    mockHost = Object.assign(connection([project([tree('pr', 0, { pullRequest })])]), {
+      hostMinor: 11,
+      fixChecks: jest.fn(async (_worktree: string) => ({ starting: true })),
+    });
+    const starting = await render(<Worktree />);
+    await fireEvent.press(starting.getByText('Fix checks with agent'));
+    await waitFor(() => expect(starting.getByText(/is still starting the agent/)).toBeTruthy());
+    expect(mockRouter.push).not.toHaveBeenCalled();
+    await starting.unmount();
+
+    mockHost = connection([project([tree('pr', 0, { pullRequest })])]);
+    const old = await render(<Worktree />);
+    expect(old.getByText('Open on GitHub')).toBeTruthy();
+    expect(old.queryByText('Fix checks with agent')).toBeNull();
+    await old.unmount();
+  });
+
+  test('a worktree row wears its pull request in its checks’ colour', async () => {
+    mockConns = [connection([project([tree('pr', 1, { pullRequest })])])];
+    const view = await render(<WorktreeList />);
+    await waitFor(() => expect(view.getByText('#17')).toBeTruthy());
+    expect(view.getByText('#17')).toHaveStyle({ color: '#ef6a74' });
+    await view.unmount();
+  });
+
+  test('opens a shell in an existing worktree without a prompt', async () => {
+    mockParams = { host: 'host', worktree: 'existing' };
+    const startSession = jest.fn(async () => null);
+    mockHost = Object.assign(connection([project([tree('existing', 0)])]), {
+      hostMinor: 15,
+      startSession,
+      startOptions: jest.fn(async () => ({ projectId: 'project', defaultBase: 'main', localBranches: ['main'], agents: [{ agent: 'codex', models: ['gpt-6.1-sol'], efforts: ['high'] }] })),
+      snapshot: { projects: [project([tree('existing', 0)])], usage: [], agents: ['codex'] },
+    });
+    const view = await render(<NewTask />);
+    await waitFor(() => expect(view.getByText('Agent session')).toBeTruthy());
+    await fireEvent(view.getByLabelText('Open: Agent session'), 'layout', { nativeEvent: { layout: { x: 10, width: 200 } } });
+    await fireEvent.press(view.getByLabelText('Open: Agent session'));
+    await fireEvent.press(view.getByText('Shell'));
+    await waitFor(() => expect(view.getByText('Open shell')).toBeTruthy());
+    await fireEvent.press(view.getByText('Open shell'));
+    await waitFor(() => expect(startSession).toHaveBeenCalledWith('existing', '', '', '', ''));
+    await waitFor(() => expect(mockRouter.back).toHaveBeenCalled());
+    await view.unmount();
+  });
+
+  test('sends the selected base, model, and effort for new work', async () => {
+    mockParams = { host: 'host' };
+    const startWork = jest.fn(async () => null);
+    mockHost = Object.assign(connection([project([])]), {
+      hostMinor: 15,
+      startWork,
+      startOptions: jest.fn(async () => ({
+        projectId: 'project', defaultBase: 'main', localBranches: ['main', 'release'],
+        agents: [{ agent: 'codex', models: ['gpt-6.1-sol'], efforts: ['high'] }],
+      })),
+      snapshot: { projects: [project([])], usage: [], agents: ['codex'] },
+    });
+    const view = await render(<NewTask />);
+    await waitFor(() => expect(view.getByLabelText('Base branch: main')).toBeTruthy());
+    const choose = async (field: string, value: string) => {
+      const control = view.getByLabelText(new RegExp(`^${field}:`));
+      await fireEvent(control, 'layout', { nativeEvent: { layout: { x: 10, width: 200 } } });
+      await fireEvent.press(control);
+      await fireEvent.press(view.getByText(value));
+      await waitFor(() => expect(view.getByLabelText(`${field}: ${value}`)).toBeTruthy());
+    };
+    await choose('Agent', 'Codex');
+    await choose('Base branch', 'release');
+    await choose('Model', 'gpt-6.1-sol');
+    await choose('Effort', 'high');
+    await fireEvent.changeText(view.getByPlaceholderText('What should the agent do?'), 'build it');
+    await fireEvent.press(view.getByText('Start task'));
+    await waitFor(() => expect(startWork).toHaveBeenCalledWith('project', 'build it', 'codex', {
+      base: 'release', model: 'gpt-6.1-sol', effort: 'high',
+    }));
     await view.unmount();
   });
 });

@@ -17,14 +17,15 @@
 //! pretending their controls have saved anything.
 
 use gpui::{
-    AnyElement, App, Context, Entity, KeyDownEvent, MouseButton, PathPromptOptions, Window, div,
-    prelude::*, px, relative,
+    AnyElement, App, ClipboardItem, Context, Entity, KeyDownEvent, MouseButton, PathPromptOptions,
+    Window, div, prelude::*, px, relative,
 };
 use ket_core::agents::{Catalogue, DefaultAgent, PermissionPreset, ShellProber};
 use ket_core::config::{
     AgentLaunch, Config, DEFAULT_CODE_FONT_SIZE, DEFAULT_LINE_HEIGHT, DEFAULT_UI_FONT_SIZE,
     FONT_SIZE_RANGE, LINE_HEIGHT_RANGE, OpenCodeGoConfig, UpdateCheck,
 };
+use ket_core::id::WorktreeId;
 use ket_core::rate_limits::Provider;
 use ket_core::theme::{Appearance, AppearancePreference, Color, Theme};
 
@@ -305,6 +306,8 @@ impl Preferences {
 
 /// The settings view while it is open.
 pub(crate) struct Preferences {
+    /// Explicit MCP checks and the worktree each result belongs to.
+    mcp: McpState,
     /// Which section the right-hand side is showing.
     pub(crate) section: Section,
     /// The filter across the top. An entity because a text field is one —
@@ -381,6 +384,43 @@ pub(crate) struct Preferences {
     pub(crate) snippets: crate::snippets::SnippetsPane,
     /// General's Remove from your agents, as far as it has got.
     unhook: Unhook,
+}
+
+/// A CLI result is only shown for the worktree that produced it. The default
+/// state also means opening Settings never starts a check.
+#[derive(Default)]
+struct McpState {
+    checking: Option<WorktreeId>,
+    report: Option<(WorktreeId, ket_core::mcp::Report)>,
+}
+
+impl McpState {
+    fn begin(&mut self, id: WorktreeId) -> bool {
+        if self.checking.is_some() {
+            return false;
+        }
+        self.checking = Some(id);
+        self.report = None;
+        true
+    }
+
+    fn finish(&mut self, id: WorktreeId, report: ket_core::mcp::Report) -> bool {
+        if self.checking.as_ref() != Some(&id) {
+            return false;
+        }
+        self.checking = None;
+        self.report = Some((id, report));
+        true
+    }
+
+    fn is_checking(&self, id: &WorktreeId) -> bool {
+        self.checking.as_ref() == Some(id)
+    }
+
+    fn report_for(&self, selected: Option<&WorktreeId>) -> Option<&ket_core::mcp::Report> {
+        let (id, report) = self.report.as_ref()?;
+        (selected == Some(id)).then_some(report)
+    }
 }
 
 /// Taking ket out of the agents it puts its hooks into, for uninstalling it
@@ -779,6 +819,7 @@ impl Shell {
         self.watch_field(&code_font_size, cx);
         self.popup = None;
         self.preferences = Some(Preferences {
+            mcp: McpState::default(),
             section,
             search,
             config,
@@ -2906,7 +2947,7 @@ impl Shell {
             ),
             setting(
                 "Show the status bar",
-                "Agent quota and the selected worktree's state, along the bottom. The View menu toggles it too.",
+                "Key hints, the memory and CPU ket and your agents use, and the feedback button, along the bottom. The View menu toggles it too.",
                 status_bar,
                 t,
             ),
@@ -3186,6 +3227,7 @@ impl Shell {
             );
         }
         content.extend(self.opencode_go_settings(t, window, cx));
+        content.extend(self.mcp_settings(t, cx));
         content.push(Entry::layout(
             caption(
                 "Agent authentication stays with each CLI; ket never reads their credential files. OpenCode Go uses only the credentials entered in its card, or OPENCODE_API_KEY. Local models need no credentials at all.",
@@ -3197,6 +3239,218 @@ impl Shell {
             content.extend(local_models);
         }
         content
+    }
+
+    /// Current selection, including the checkout path the CLIs must use.
+    fn mcp_worktree(&self) -> Option<(WorktreeId, String, std::path::PathBuf)> {
+        let selection = self.selection?;
+        let node = self
+            .projects
+            .get(selection.project)?
+            .worktrees
+            .get(selection.worktree)?;
+        Some((
+            node.id.clone(),
+            node.name.as_ref().unwrap_or(&node.branch).to_string(),
+            node.path.clone(),
+        ))
+    }
+
+    /// Runs only after Check servers is pressed, off the window thread.
+    fn check_mcp_servers(&mut self, cx: &mut Context<Self>) {
+        let Some((id, _, path)) = self.mcp_worktree() else {
+            return;
+        };
+        let Some(view) = self.preferences.as_mut() else {
+            return;
+        };
+        if !view.mcp.begin(id.clone()) {
+            return;
+        }
+        let checking = cx
+            .background_executor()
+            .spawn(async move { ket_core::mcp::check(&path) });
+        cx.spawn(async move |this, cx| {
+            let report = checking.await;
+            let _ = this.update(cx, |this, cx| {
+                if let Some(view) = this.preferences.as_mut()
+                    && view.mcp.finish(id, report)
+                {
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Current CLI configuration, ket's historical observations, and native help.
+    fn mcp_settings(&self, t: &Theme, cx: &mut Context<Self>) -> Vec<Entry> {
+        const CLAUDE_DOCS: &str = "https://code.claude.com/docs/en/mcp";
+        const CODEX_DOCS: &str = "https://developers.openai.com/codex/mcp";
+        let Some(view) = self.preferences.as_ref() else {
+            return Vec::new();
+        };
+        let mut rows = vec![
+            Entry::layout(div().h(px(22.0))),
+            Entry::setting(
+                "MCP servers selected worktree",
+                subsection(
+                    "MCP servers",
+                    "Configuration and observed use for the selected worktree.",
+                    t,
+                ),
+            ),
+        ];
+        let Some((id, name, _)) = self.mcp_worktree() else {
+            rows.push(Entry::setting(
+                "MCP select a worktree",
+                caption("Select a worktree to see its MCP servers.", t),
+            ));
+            return rows;
+        };
+        let checking = view.mcp.is_checking(&id);
+        rows.push(Entry::setting(
+            format!("MCP {name} Check servers"),
+            div()
+                .flex()
+                .items_center()
+                .gap(px(12.0))
+                .child(caption(format!("Worktree: {name}"), t))
+                .child(
+                    button("mcp-check", "Check servers")
+                        .small()
+                        .enabled(!checking)
+                        .render(t)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.check_mcp_servers(cx);
+                            cx.notify();
+                        })),
+                ),
+        ));
+        rows.push(Entry::layout(caption(
+            "CLI results describe current configuration and checks. They do not prove a server is available in an existing agent session.", t,
+        )));
+        if checking {
+            rows.push(Entry::layout(caption("Checking Claude Code and Codex…", t)));
+        } else if let Some(report) = view.mcp.report_for(Some(&id)) {
+            for (agent, result) in [("Claude Code", &report.claude), ("Codex", &report.codex)] {
+                rows.push(Entry::setting(
+                    format!("MCP {agent} configured servers"),
+                    subsection(agent, "Configured servers and CLI reported state", t),
+                ));
+                match result {
+                    ket_core::mcp::Check::Servers(servers) if servers.is_empty() => rows.push(
+                        Entry::layout(caption("No servers reported by this CLI.", t)),
+                    ),
+                    ket_core::mcp::Check::Servers(servers) => {
+                        for server in servers {
+                            rows.push(Entry::setting(
+                                format!("{} {} {}", agent, server.name, server.status),
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(10.0))
+                                    .child(
+                                        div()
+                                            .text_size(LABEL)
+                                            .text_color(paint(t.text.primary))
+                                            .child(server.name.clone()),
+                                    )
+                                    .child(tag(server.status, t)),
+                            ));
+                        }
+                    }
+                    ket_core::mcp::Check::Error(error) => {
+                        rows.push(Entry::layout(caption(format!("{agent}: {error}"), t)))
+                    }
+                }
+            }
+        } else {
+            rows.push(Entry::layout(caption(
+                "Press Check servers to read the agent CLIs.",
+                t,
+            )));
+        }
+        rows.push(Entry::setting(
+            "Observed in ket sessions MCP calls",
+            subsection(
+                "Observed in ket sessions",
+                "Calls recorded for this worktree; older records cannot always identify the agent.",
+                t,
+            ),
+        ));
+        let observed = self.usage_history.mcp_calls_for_worktree(&id);
+        if observed.is_empty() {
+            rows.push(Entry::layout(caption(
+                "No MCP calls recorded for this worktree.",
+                t,
+            )));
+        } else {
+            for (server, count) in observed {
+                rows.push(Entry::setting(
+                    format!("MCP observed {server}"),
+                    caption(format!("{server}: {count} calls"), t),
+                ));
+            }
+        }
+        rows.push(Entry::setting("MCP setup troubleshooting commands", subsection(
+            "Set up and troubleshoot", "Run these commands in the worktree terminal. ket does not change agent configuration or sign-in.", t,
+        )));
+        for (index, (label, command)) in [
+            (
+                "Claude: add an HTTP server",
+                "claude mcp add --transport http <name> <url>",
+            ),
+            ("Claude: inspect servers", "claude mcp list"),
+            ("Claude: inspect one server", "claude mcp get <name>"),
+            (
+                "Codex: add an HTTP server",
+                "codex mcp add <name> --url <url>",
+            ),
+            ("Codex: inspect servers", "codex mcp list --json"),
+            ("Codex: sign in to a server", "codex mcp login <name>"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            rows.push(Entry::setting(
+                format!("MCP {label} {command}"),
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(caption(format!("{label}: {command}"), t))
+                    .child(
+                        button(("mcp-copy", index), "Copy")
+                            .small()
+                            .render(t)
+                            .on_click(move |_, _, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(command.to_owned()))
+                            }),
+                    ),
+            ));
+        }
+        rows.push(Entry::setting(
+            "MCP Claude Codex documentation",
+            div()
+                .flex()
+                .gap(px(12.0))
+                .child(
+                    button("mcp-claude-docs", "Claude MCP docs")
+                        .link()
+                        .trailing(Icon::ExternalLink)
+                        .render(t)
+                        .on_click(|_, _, cx| cx.open_url(CLAUDE_DOCS)),
+                )
+                .child(
+                    button("mcp-codex-docs", "Codex MCP docs")
+                        .link()
+                        .trailing(Icon::ExternalLink)
+                        .render(t)
+                        .on_click(|_, _, cx| cx.open_url(CODEX_DOCS)),
+                ),
+        ));
+        rows
     }
 
     /// Switches the Agents pane between its two tabs. The models on this
@@ -5188,7 +5442,48 @@ pub(crate) fn placeholder_note(text: &str, t: &Theme, cx: &mut Context<Shell>) -
 
 #[cfg(test)]
 mod tests {
-    use super::{FONT_SIZE_RANGE, font_size_typed, stepped};
+    use super::{FONT_SIZE_RANGE, McpState, font_size_typed, stepped};
+    use ket_core::id::WorktreeId;
+
+    fn empty_mcp_report() -> ket_core::mcp::Report {
+        ket_core::mcp::Report {
+            claude: ket_core::mcp::Check::Servers(Vec::new()),
+            codex: ket_core::mcp::Check::Servers(Vec::new()),
+        }
+    }
+
+    #[test]
+    fn mcp_starts_unchecked_and_needs_a_selection_to_show_a_result() {
+        let mut state = McpState::default();
+        let worktree = WorktreeId::new("one");
+        assert!(!state.is_checking(&worktree));
+        assert!(state.report_for(Some(&worktree)).is_none());
+        assert!(state.report_for(None).is_none());
+
+        assert!(state.begin(worktree.clone()));
+        assert!(state.finish(worktree.clone(), empty_mcp_report()));
+        assert!(state.report_for(None).is_none());
+        assert!(state.report_for(Some(&worktree)).is_some());
+    }
+
+    #[test]
+    fn mcp_result_does_not_follow_a_different_worktree() {
+        let mut state = McpState::default();
+        let first = WorktreeId::new("one");
+        let second = WorktreeId::new("two");
+        assert!(state.begin(first.clone()));
+        assert!(!state.begin(second.clone()));
+        assert!(!state.finish(second.clone(), empty_mcp_report()));
+        assert!(state.is_checking(&first));
+        assert!(state.finish(first.clone(), empty_mcp_report()));
+        assert!(state.report_for(Some(&second)).is_none());
+        assert!(state.report_for(Some(&first)).is_some());
+
+        assert!(state.begin(second.clone()));
+        assert!(state.report_for(Some(&first)).is_none());
+        assert!(state.finish(second.clone(), empty_mcp_report()));
+        assert!(state.report_for(Some(&second)).is_some());
+    }
 
     #[test]
     fn a_step_stays_within_the_sizes_a_font_can_be() {

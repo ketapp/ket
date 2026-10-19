@@ -569,8 +569,10 @@ impl Workspace {
     /// surface as a failure to *run*, not as the typo it is.
     pub fn set_preferred_agent(&self, id: &ProjectId, agent: Option<&str>) -> Result<()> {
         let agent = agent.map(str::trim).filter(|a| !a.is_empty());
+        // A local agent is detected, not configured — see `local_models`.
         if let Some(name) = agent
             && self.config.agent(name).is_none()
+            && crate::local_models::model_tag(name).is_none()
         {
             return Err(KetError::Config(format!(
                 "no agent named {name:?} is configured"
@@ -2528,14 +2530,25 @@ impl Workspace {
             .or_else(|| self.config.agents.first().map(|a| a.name.clone()))
             .ok_or_else(|| KetError::Config("no agents configured".to_owned()))?;
 
+        // A local agent is not in the config: its launch is built from what
+        // Ollama and OpenCode have now, the way every agent list builds it.
+        let local = || {
+            crate::local_models::model_tag(&wanted)?;
+            crate::agents::Catalogue::detect(&self.config, &crate::agents::ShellProber)
+                .get(&wanted)
+                // Turned off in Settings is off here too, whoever asked.
+                .filter(|entry| entry.installed && entry.enabled)
+                .map(|entry| entry.spec.clone())
+        };
         let mut spec = self
             .config
             .agent(&wanted)
+            .cloned()
+            .or_else(local)
             .ok_or_else(|| KetError::Agent {
                 agent: wanted.clone(),
                 why: "not configured; see `ket config show`".to_owned(),
-            })?
-            .clone();
+            })?;
         worktree::apply_economy(&mut spec, &worktree);
 
         let id = SessionId::new(crate::slug::slug_keyed(

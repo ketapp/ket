@@ -38,6 +38,29 @@
 //!    carries its own timeout; a hook that outruns it is killed and treated
 //!    as a blocking failure, never waited on forever.
 //!
+//! # Context
+//!
+//! What each point puts under `context` on the hook's stdin:
+//!
+//! - `worktree.created`: `worktreeId`, `projectId`, `branch`, `base` and
+//!   `path`, once the checkout exists and is registered. A block removes it
+//!   again.
+//! - `worktree.provisioned`: `worktreeId`, `projectId`, `durationMs`, and
+//!   `degraded` when provisioning fell back to a full copy. A block leaves the
+//!   worktree unprovisioned, so a retry picks it up.
+//! - `worktree.removed`: `worktreeId`, `projectId`, `branch` and `path`,
+//!   before anything is torn down. A block leaves the worktree intact.
+//! - `agent.started`: `sessionId`, `worktreeId`, `projectId` and `agent`,
+//!   before the session is registered. A block means it never starts.
+//! - `agent.finished`: the same four and `outcome`, after the session is
+//!   recorded finished. A block reports a problem and undoes nothing.
+//! - `agent.permission_requested`: `sessionId`, `worktreeId`, `projectId`,
+//!   `agent`, `tool`, `input` (the tool's input, as the agent sent it) and
+//!   `cwd`, when Claude Code would ask a person to allow a call and no
+//!   permission rule allowed or refused it — see [`crate::permissions`]. It
+//!   runs before the prompt is reported to ket, so a slow hook delays the
+//!   row's "waiting" by up to its `timeout_secs`.
+//!
 //! # Precedence
 //!
 //! A hook point can be configured twice: once in the project's own
@@ -77,6 +100,14 @@
 //!   execute): [`KetError::Io`], the same mapping [`crate::provision`] uses
 //!   for its post-provision command, because this is an environment problem
 //!   rather than the hook's own decision.
+//!
+//! `agent.permission_requested` reads the same outcomes differently, because
+//! what it gates is a prompt rather than an operation ket is performing. Exit
+//! `0` lets the prompt reach the person; it never allows the call. Any other
+//! exit, a timeout or a signal refuses the call, with the first line the hook
+//! printed as the reason the agent is told. A hook that cannot be spawned
+//! leaves the call to the agent's own settings, as if no hook were
+//! configured: a broken script must not refuse every call an agent makes.
 //!
 //! # Testability
 //!
@@ -164,7 +195,7 @@ impl std::fmt::Display for HookPoint {
 
 /// What a hook process actually did, as reported by a [`HookSpawner`].
 ///
-/// Facts only — whether that counts as "allowed" or "blocked" is [`run`]'s
+/// Facts only — whether that counts as "allowed" or "blocked" is [`check`]'s
 /// call, not the spawner's, so the same policy applies whether the process
 /// really ran or a test faked it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -297,8 +328,49 @@ struct HookPayload<'a> {
     context: &'a serde_json::Value,
 }
 
+/// The hook that refused, and what it did — see [`check`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Blocked {
+    /// Its place in the point's hooks, project ones first, counting entries
+    /// with no command.
+    pub index: usize,
+    /// Its command, joined with spaces.
+    pub command: String,
+    /// How long it was allowed to run.
+    pub timeout_secs: u64,
+    /// What it did.
+    pub exit: HookExit,
+}
+
+impl Blocked {
+    /// What [`run`] fails with: the command, the point, how the hook
+    /// refused, and its output for diagnostics.
+    pub fn message(&self, point: HookPoint) -> String {
+        let command = &self.command;
+        let output = self.exit.stdout.trim();
+        let suffix = if output.is_empty() {
+            String::new()
+        } else {
+            format!(": {output}")
+        };
+
+        if self.exit.timed_out {
+            return format!(
+                "hook `{command}` for {point} timed out after {}s and was killed{suffix}",
+                self.timeout_secs
+            );
+        }
+
+        match self.exit.exit_code {
+            Some(code) => format!("hook `{command}` for {point} exited {code}{suffix}"),
+            None => format!("hook `{command}` for {point} was terminated by a signal{suffix}"),
+        }
+    }
+}
+
 /// Runs every hook configured for `point`, project hooks before global ones,
-/// stopping at the first one that does not allow the operation.
+/// stopping at the first one that does not allow the operation, and says
+/// which one that was.
 ///
 /// `project` and `global` are both consulted and both may contribute hooks
 /// for the same point — see "Precedence" on the module docs for why neither
@@ -306,15 +378,16 @@ struct HookPayload<'a> {
 /// `project` is how a caller with no repo-local configuration says so.
 ///
 /// `context` is serialized to JSON, wrapped with `point`, and written to each
-/// hook's stdin — never appended to its argv. See "Failure policy" on the
-/// module docs for exactly what each outcome maps to.
-pub fn run(
+/// hook's stdin — never appended to its argv. `Ok(None)` when every hook
+/// exited `0`; a hook that exits otherwise, times out or is killed is the
+/// [`Blocked`] returned. A hook that cannot be spawned is an error.
+pub fn check(
     point: HookPoint,
     project: &HookConfig,
     global: &HookConfig,
     context: &serde_json::Value,
     spawner: &dyn HookSpawner,
-) -> Result<()> {
+) -> Result<Option<Blocked>> {
     let payload = HookPayload {
         point: point.as_str(),
         context,
@@ -322,7 +395,8 @@ pub fn run(
     let stdin = serde_json::to_vec(&payload)
         .map_err(|e| KetError::Config(format!("could not encode hook context: {e}")))?;
 
-    for spec in point.hooks_in(project).iter().chain(point.hooks_in(global)) {
+    let hooks = point.hooks_in(project).iter().chain(point.hooks_in(global));
+    for (index, spec) in hooks.enumerate() {
         if spec.command.is_empty() {
             continue;
         }
@@ -331,37 +405,32 @@ pub fn run(
             &stdin,
             Duration::from_secs(spec.timeout_secs),
         )?;
-        settle(point, spec, exit)?;
+        if exit.timed_out || exit.exit_code != Some(0) {
+            return Ok(Some(Blocked {
+                index,
+                command: spec.command.join(" "),
+                timeout_secs: spec.timeout_secs,
+                exit,
+            }));
+        }
     }
 
-    Ok(())
+    Ok(None)
 }
 
-/// Turns one hook's [`HookExit`] into the pass/fail decision [`run`] promises.
-fn settle(point: HookPoint, spec: &HookSpec, exit: HookExit) -> Result<()> {
-    let command = spec.command.join(" ");
-    let output = exit.stdout.trim();
-    let suffix = if output.is_empty() {
-        String::new()
-    } else {
-        format!(": {output}")
-    };
-
-    if exit.timed_out {
-        return Err(KetError::Conflict(format!(
-            "hook `{command}` for {point} timed out after {}s and was killed{suffix}",
-            spec.timeout_secs
-        )));
-    }
-
-    match exit.exit_code {
-        Some(0) => Ok(()),
-        Some(code) => Err(KetError::Conflict(format!(
-            "hook `{command}` for {point} exited {code}{suffix}"
-        ))),
-        None => Err(KetError::Conflict(format!(
-            "hook `{command}` for {point} was terminated by a signal{suffix}"
-        ))),
+/// Runs every hook configured for `point`, as [`check`] does, failing with
+/// [`KetError::Conflict`] when one refuses. See "Failure policy" on the
+/// module docs for exactly what each outcome maps to.
+pub fn run(
+    point: HookPoint,
+    project: &HookConfig,
+    global: &HookConfig,
+    context: &serde_json::Value,
+    spawner: &dyn HookSpawner,
+) -> Result<()> {
+    match check(point, project, global, context, spawner)? {
+        Some(blocked) => Err(KetError::Conflict(blocked.message(point))),
+        None => Ok(()),
     }
 }
 
@@ -563,6 +632,110 @@ mod tests {
         match result {
             Err(KetError::Conflict(message)) => {
                 assert!(message.contains("lint failed on src/main.rs"), "{message}");
+            }
+            other => panic!("expected a blocking conflict, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn check_names_the_hook_that_refused_and_what_it_printed() {
+        let recorder = Recorder::returning(vec![
+            allowed(),
+            HookExit {
+                exit_code: Some(3),
+                timed_out: false,
+                stdout: "no pushes\n".to_owned(),
+            },
+        ]);
+        let project = config_with(
+            HookPoint::AgentPermissionRequested,
+            vec![spec(&["project-gate"])],
+        );
+        let global = config_with(
+            HookPoint::AgentPermissionRequested,
+            vec![
+                HookSpec {
+                    command: Vec::new(),
+                    timeout_secs: 30,
+                },
+                spec(&["gate", "--strict"]),
+                spec(&["never-reached"]),
+            ],
+        );
+
+        let blocked = check(
+            HookPoint::AgentPermissionRequested,
+            &project,
+            &global,
+            &serde_json::json!({}),
+            &recorder,
+        )
+        .unwrap()
+        .expect("the second hook refused");
+
+        // Counted across both lists, the empty entry included.
+        assert_eq!(blocked.index, 2);
+        assert_eq!(blocked.command, "gate --strict");
+        assert_eq!(blocked.exit.exit_code, Some(3));
+        assert_eq!(blocked.exit.stdout, "no pushes\n");
+        assert_eq!(recorder.calls().len(), 2);
+    }
+
+    #[test]
+    fn check_finds_nothing_when_every_hook_allows() {
+        let recorder = Recorder::default();
+        let global = config_with(
+            HookPoint::AgentPermissionRequested,
+            vec![spec(&["one"]), spec(&["two"])],
+        );
+
+        let blocked = check(
+            HookPoint::AgentPermissionRequested,
+            &HookConfig::default(),
+            &global,
+            &serde_json::json!({}),
+            &recorder,
+        )
+        .unwrap();
+
+        assert_eq!(blocked, None);
+        assert_eq!(recorder.calls().len(), 2);
+    }
+
+    #[test]
+    fn run_fails_with_the_message_check_would_give() {
+        let refusal = || HookExit {
+            exit_code: Some(2),
+            timed_out: false,
+            stdout: "lint failed\n".to_owned(),
+        };
+        let global = config_with(HookPoint::WorktreeCreated, vec![spec(&["lint"])]);
+        let context = serde_json::json!({});
+
+        let blocked = check(
+            HookPoint::WorktreeCreated,
+            &HookConfig::default(),
+            &global,
+            &context,
+            &Recorder::returning(vec![refusal()]),
+        )
+        .unwrap()
+        .unwrap();
+        let result = run(
+            HookPoint::WorktreeCreated,
+            &HookConfig::default(),
+            &global,
+            &context,
+            &Recorder::returning(vec![refusal()]),
+        );
+
+        match result {
+            Err(KetError::Conflict(message)) => {
+                assert_eq!(message, blocked.message(HookPoint::WorktreeCreated));
+                assert_eq!(
+                    message,
+                    "hook `lint` for worktree.created exited 2: lint failed"
+                );
             }
             other => panic!("expected a blocking conflict, got {other:?}"),
         }

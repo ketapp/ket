@@ -62,13 +62,15 @@ figures, keys. Sentence case everywhere; no tracked uppercase labels.
 | Title      | Geist      | 15 / 600      | Dialog and popover titles       |
 | Control    | Geist      | 13 / 500      | Button and segment labels       |
 | Body       | Geist      | 13 / 400      | Dialog copy, field text         |
-| Identifier | Geist Mono | 13.5 / 400    | Worktree branch in a row        |
+| Identifier | Geist Mono | 12.5 / 400    | Worktree branch in a row        |
 | Label      | Geist      | 12.5 / 500    | Field labels, figure labels     |
-| Secondary  | Geist      | 12 / 400      | A row's detail line, help text  |
+| Secondary  | Geist      | 11–12 / 400   | A row's detail line (11), help text (12) |
 | Caption    | Geist Mono | 11 / 400      | Key hints, resets, counts       |
-| Code       | Monaspace Neon | 13 / 400  | Terminal and editor only        |
+| Code       | Monaspace Neon | 11 / 400  | Terminal and editor only        |
 
-`fonts.rs` owns the families; reach prose through `.prose()`.
+`fonts.rs` owns the families; reach prose through `.prose()`. The chrome's
+line height is 1.3, set once on the window's root; text read at length
+(markdown, release notes) states its own.
 
 ### Shape and size
 
@@ -76,20 +78,20 @@ figures, keys. Sentence case everywhere; no tracked uppercase labels.
 | ------ | -- | ------------- | --------------------------------- |
 | Chip   | 5  | `RADIUS_SM`   | Segments, tabs, badges, kbd       |
 | Control| 7  | `RADIUS_MD`   | Buttons, fields, tracks           |
-| Row    | 8  | —             | List rows                         |
+| Row    | 6  | `ROW_RADIUS`  | List rows                         |
 | Float  | 10 | `RADIUS_LG`   | Menus, popovers, dialogs          |
-| Card   | 12 | `CARD_RADIUS` | Cards                             |
+| Card   | 10 | `CARD_RADIUS` | Cards                             |
 
 | Height | px | Constant     |
 | ------ | -- | ------------ |
 | Control (button, icon well) | 32 | `CONTROL_H`, `WELL` |
 | Field                       | 36 | `FIELD_H`           |
 | Menu row / tall row         | 28 / 38 | `menu.rs`      |
-| Tab strip, panel strip      | 46 | `TOP_STRIP`         |
-| Worktree row                | 52 | —                   |
-| Header                      | 56 | `header::HEADER_H`  |
+| Tab strip, panel strip      | 32 | `TOP_STRIP`         |
+| Worktree row                | 42 | —                   |
+| Header / compact strip      | 56 / 28 | `HEADER_H`, `COMPACT_H` |
 
-Gutter between cards: 10 (`header::GUTTER`). Inside a card: 8 to 12.
+Gutter between cards: 6 (`header::GUTTER`). Inside a card: 4 to 8.
 
 ### Icons
 
@@ -177,8 +179,8 @@ the unsaved dot share one 16px cell and swap on hover so labels never shift.
 
 Four surfaces, chosen by what a thing is, not how loud it should be.
 
-- **Desk** — `backdrop`, 10px gutters. The footer sits on it.
-- **Card** — `panel`, `rule` edge, 12 corner (`header::card`). Every region
+- **Desk** — `backdrop`, 6px gutters. The footer sits on it.
+- **Card** — `panel`, `rule` edge, 10 corner (`header::card`). Every region
   of the window.
 - **Well** — `sunken`, 7 corner, set into a card.
 - **Float** — `elevated`, `border` edge, 10 corner, two-layer shadow.
@@ -192,12 +194,12 @@ Four surfaces, chosen by what a thing is, not how loud it should be.
 
 ## Rows and read-outs
 
-- **Worktree row** — 52 tall, 8 corner, no hairline. Agent mark, branch in
-  Geist Mono 13.5, detail in Geist 12 dim, state right-aligned in mono 11.5
+- **Worktree row** — 42 tall, 6 corner, no hairline. Agent mark, branch in
+  Geist Mono 12.5, detail in Geist 11 dim, state right-aligned in mono 11.5
   with its dot (`running`, `waiting`, `merging`, `failed`, or dim `idle`).
   Selected: `hover` fill plus a 3px `marker` rail inset 10 top and bottom.
-- **Project heading** — 20px badge (initial in Geist Mono semibold), name in
-  Geist 13.5, count in mono, chevron at the end.
+- **Project heading** — 24 tall: 16px badge (initial in Geist Mono semibold),
+  name in Geist 12.5, count in mono, chevron at the end.
 - **File tree row** — 28 tall, Geist Mono 12.5. The git letter sits at the far
   end in its signal colour (`A U` added, `M R` modified, `D !` removed); a
   folder with changes under it gets a dot.
@@ -210,9 +212,9 @@ Four surfaces, chosen by what a thing is, not how loud it should be.
 - **Chips** — `kbd` (mono 11, border, 5 corner), `badge`, `tag` (well fill),
   `tinted_tag` (signal at 10%). `key_hint` is a `kbd` and its word — `↵ save`
   — for the strip of keys under a surface.
-- **Read-out** (`chip::readout`) — a figure in a small recessed well, 22
-  tall, 5 corner, Geist Mono 12, usually led by a glyph. A line of them is the
-  compact header: provider mark + figure + 32 × 4 bar + reset; branch glyph +
+- **Read-out** (`chip::readout`) — a figure in a small recessed well, 20
+  tall, 5 corner, Geist Mono 11, usually led by a glyph. A line of them is the
+  compact header: provider mark + figure + 28 × 4 bar + reset; branch glyph +
   branch; `+128 −14`; status dot + "1 running".
 
 ## Where the code is not there yet

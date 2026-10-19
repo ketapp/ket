@@ -216,7 +216,7 @@ pub(crate) struct TabRename {
 }
 
 /// The sunken track the tabs sit in, matching a segmented switch's.
-const TAB_TRACK_H: Pixels = px(34.0);
+const TAB_TRACK_H: Pixels = px(26.0);
 
 /// How wide a tab's rename field is.
 ///
@@ -1221,6 +1221,7 @@ impl Shell {
         }
         tab.title = typed.into();
         tab.renamed = true;
+        tab.preview = false;
         self.persist_layout();
     }
 
@@ -1682,6 +1683,8 @@ pub struct Tab {
     /// menu pass them over. Closing one by name still closes it: a pin keeps a
     /// tab out of the way of a sweep, not out of reach of the reader.
     pub(crate) pinned: bool,
+    /// A Git-list preview, replaced by the next preview in this pane.
+    pub(crate) preview: bool,
 }
 
 /// How many tabs at the head of a strip are pinned.
@@ -2024,6 +2027,7 @@ impl Pane {
             kind: TabKind::Editor("/tmp/file.rs".into()),
             renamed: false,
             pinned: false,
+            preview: false,
         }
     }
 
@@ -2738,7 +2742,8 @@ impl Space {
     pub(crate) fn open_tab(&mut self, tab: Tab) {
         if let Some((id, index)) = self.root.find_tab(&tab.kind) {
             self.focused = id;
-            if let Some((_, active)) = self.root.leaf_mut(id) {
+            if let Some((tabs, active)) = self.root.leaf_mut(id) {
+                tabs[index].preview = false;
                 *active = index;
             }
             return;
@@ -2750,12 +2755,66 @@ impl Space {
         }
     }
 
+    /// Opens one Git preview in the focused pane, reusing its current preview.
+    pub(crate) fn open_preview_tab(&mut self, tab: Tab) {
+        if let Some((id, index)) = self.root.find_tab(&tab.kind) {
+            self.focused = id;
+            if let Some((_, active)) = self.root.leaf_mut(id) {
+                *active = index;
+            }
+            return;
+        }
+        if let Some((tabs, active)) = self.root.leaf_mut(self.focused) {
+            if let Some(index) = tabs.iter().position(|open| open.preview) {
+                tabs[index] = tab;
+                *active = index;
+            } else {
+                tabs.push(tab);
+                *active = tabs.len() - 1;
+            }
+        }
+    }
+
+    /// Replaces an active preview diff with the file's lasting editor tab.
+    pub(crate) fn open_tab_replacing_preview(&mut self, tab: Tab) {
+        let preview = self.root.leaf(self.focused).and_then(|(tabs, active)| {
+            tabs.get(active)
+                .and_then(|open| open.preview.then_some(active))
+        });
+        let Some(index) = preview else {
+            self.open_tab(tab);
+            return;
+        };
+        if self.root.find_tab(&tab.kind).is_some() {
+            self.close_tab(self.focused, index);
+            self.open_tab(tab);
+        } else if let Some((tabs, _)) = self.root.leaf_mut(self.focused) {
+            tabs[index] = tab;
+        }
+    }
+
+    /// Keeps a preview when the person explicitly pins or edits it.
+    pub(crate) fn promote_preview(&mut self, kind: &TabKind) -> bool {
+        let Some((pane, index)) = self.root.find_tab(kind) else {
+            return false;
+        };
+        let Some((tabs, _)) = self.root.leaf_mut(pane) else {
+            return false;
+        };
+        let was_preview = tabs[index].preview;
+        tabs[index].preview = false;
+        was_preview
+    }
+
     pub(crate) fn open_tab_in(&mut self, pane: PaneId, tab: Tab) -> bool {
         let Some((tabs, active)) = self.root.leaf_mut(pane) else {
             return false;
         };
         match tabs.iter().position(|open| open.kind == tab.kind) {
-            Some(index) => *active = index,
+            Some(index) => {
+                tabs[index].preview = false;
+                *active = index;
+            }
             // The end of whichever run it belongs to. Only a terminal a saved
             // layout brought back arrives here already pinned.
             None => {
@@ -2786,6 +2845,9 @@ impl Space {
         }
         let mut tab = tabs.remove(index);
         tab.pinned = pinned;
+        if pinned {
+            tab.preview = false;
+        }
         // Measured with the tab out, which is what makes one number serve
         // both ways: the end of the run it joins, or the slot it just left.
         let to = pinned_run(tabs);
@@ -2963,9 +3025,10 @@ impl Space {
             _ => {}
         }
 
-        let Some(tab) = self.root.take_tab(from, index) else {
+        let Some(mut tab) = self.root.take_tab(from, index) else {
             return false;
         };
+        tab.preview = false;
 
         let landed = match drop {
             TabDrop::Strip { pane, before } => {
@@ -3462,6 +3525,10 @@ impl Shell {
             .render(t)
             .flex_none()
             .w(RENAME_W)
+            // The tab's own height, which is under a compact field's: the
+            // field stands in for the label, so it must not push the tab
+            // taller than its neighbours.
+            .h(TAB_TRACK_H - px(6.0))
             .into_any_element()
         });
 
@@ -3577,9 +3644,9 @@ impl Shell {
             .flex()
             .flex_none()
             .items_center()
-            .gap(px(6.0))
+            .gap(px(4.0))
             .h(crate::tree::TOP_STRIP)
-            .px(px(8.0))
+            .px(px(4.0))
             // Deliberately no `window_control_area`, unlike every other strip
             // along the top edge. This one's tabs are picked up and carried,
             // and a region that both drags a tab and moves the window can only
@@ -3770,9 +3837,9 @@ impl Shell {
                             .flex()
                             .flex_none()
                             .items_center()
-                            .gap(px(8.0))
+                            .gap(px(6.0))
                             .h_full()
-                            .px(px(10.0))
+                            .px(px(8.0))
                             .rounded(crate::ui::RADIUS_SM)
                             // A tab's name is a word, not an identifier — "Claude",
                             // "Terminal", a file's name read as a title — so it takes
@@ -3787,6 +3854,7 @@ impl Shell {
                                 (false, false) => paint(t.text.dim),
                             })
                             .when(active, |el| el.font_weight(FontWeight::MEDIUM))
+                            .when(tab.preview, |el| el.italic())
                             .when(active && !tinted, |el| el.bg(paint(t.selection)))
                             // Raised in the tint rather than the neutral fill,
                             // with an edge. An overlay rather than a border on
@@ -4428,7 +4496,99 @@ mod tests {
             kind: TabKind::Image(path.to_owned().into()),
             renamed: false,
             pinned: false,
+            preview: false,
         }
+    }
+
+    fn preview_editor(path: &str) -> Tab {
+        Tab {
+            title: path.rsplit('/').next().unwrap_or(path).to_owned().into(),
+            kind: TabKind::Editor(path.to_owned().into()),
+            renamed: false,
+            pinned: false,
+            preview: true,
+        }
+    }
+
+    #[test]
+    fn git_previews_replace_only_the_preview_in_the_focused_pane() {
+        let mut space = Space::default();
+        space.open_tab(Pane::test_tab());
+        space.open_preview_tab(preview_editor("/repo/a.rs"));
+        space.open_preview_tab(preview_editor("/repo/b.rs"));
+
+        let (tabs, active) = space.root.leaf(PaneId(0)).unwrap();
+        assert_eq!(tabs.len(), 2);
+        assert!(tabs[0].kind == TabKind::Editor("/tmp/file.rs".into()));
+        assert!(tabs[active].kind == TabKind::Editor("/repo/b.rs".into()));
+        assert!(tabs[active].preview);
+    }
+
+    #[test]
+    fn explicitly_opening_a_preview_promotes_it() {
+        let mut space = Space::default();
+        space.open_preview_tab(preview_editor("/repo/a.rs"));
+        let mut lasting = preview_editor("/repo/a.rs");
+        lasting.preview = false;
+        space.open_tab(lasting);
+        space.open_preview_tab(preview_editor("/repo/b.rs"));
+
+        let (tabs, active) = space.root.leaf(PaneId(0)).unwrap();
+        assert_eq!(tabs.len(), 2);
+        assert!(!tabs[0].preview);
+        assert!(tabs[active].kind == TabKind::Editor("/repo/b.rs".into()));
+    }
+
+    #[test]
+    fn open_file_replaces_a_preview_in_its_slot() {
+        let mut space = Space::default();
+        space.open_tab(Pane::test_tab());
+        space.open_preview_tab(Tab {
+            title: "file.rs (diff)".into(),
+            kind: TabKind::Diff(crate::diff_view::DiffKey {
+                root: "/repo".into(),
+                rel: "file.rs".into(),
+                base: None,
+            }),
+            renamed: false,
+            pinned: false,
+            preview: true,
+        });
+        let mut file = preview_editor("/repo/file.rs");
+        file.preview = false;
+        space.open_tab_replacing_preview(file);
+
+        let (tabs, active) = space.root.leaf(PaneId(0)).unwrap();
+        assert_eq!(tabs.len(), 2);
+        assert_eq!(active, 1);
+        assert!(tabs[active].kind == TabKind::Editor("/repo/file.rs".into()));
+        assert!(!tabs[active].preview);
+    }
+
+    #[test]
+    fn an_edited_preview_stays_open_when_another_preview_arrives() {
+        let mut space = Space::default();
+        space.open_preview_tab(preview_editor("/repo/conflict.rs"));
+        assert!(space.promote_preview(&TabKind::Editor("/repo/conflict.rs".into())));
+        space.open_preview_tab(preview_editor("/repo/next.rs"));
+
+        let (tabs, _) = space.root.leaf(PaneId(0)).unwrap();
+        assert_eq!(tabs.len(), 2);
+        assert!(!tabs[0].preview);
+        assert!(tabs[1].preview);
+    }
+
+    #[test]
+    fn previews_in_separate_panes_do_not_replace_each_other() {
+        let mut space = Space::default();
+        space.open_preview_tab(preview_editor("/repo/left.rs"));
+        space.split(Axis::Horizontal);
+        space.open_preview_tab(preview_editor("/repo/right.rs"));
+
+        assert_eq!(space.root.leaf(PaneId(0)).unwrap().0.len(), 1);
+        assert_eq!(space.root.leaf(PaneId(1)).unwrap().0.len(), 1);
+        assert!(space.root.leaf(PaneId(0)).unwrap().0[0].preview);
+        assert!(space.root.leaf(PaneId(1)).unwrap().0[0].preview);
     }
 
     #[test]

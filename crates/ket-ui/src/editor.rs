@@ -147,6 +147,9 @@ const PLAIN_MARGIN: Pixels = px(12.0);
 
 pub(crate) const QUICK_PROMPT_EDITOR: &str = "quick-prompt:draft";
 
+/// The comment being written on lines picked in a diff — see `crate::review`.
+pub(crate) const REVIEW_EDITOR: &str = "review:draft";
+
 /// The size a composer's draft is set at: a prompt is the one thing in its
 /// dialog, and it is written in sentences, so it gets a reading size rather
 /// than the code face's.

@@ -106,12 +106,13 @@ fn a_mutating_busy_command_is_merging_others_are_running() {
         .signal(),
         Signal::Running
     );
+    // An agent's process with no report is open, not busy.
     assert_eq!(
         Activity::Observed {
             agent: "claude".to_owned()
         }
         .signal(),
-        Signal::Running
+        Signal::Quiet
     );
 }
 

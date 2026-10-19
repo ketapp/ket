@@ -54,6 +54,11 @@ const FADE_IN: Duration = Duration::from_millis(120);
 ///
 /// `id` must be unique per call site — it both makes the wrapper hoverable
 /// and, combined with `side`, seeds the fade's clock.
+///
+/// The label is painted in `gpui`'s deferred pass, so it escapes any scroll
+/// container's clip. That pass cannot nest: a trigger that already sits on a
+/// deferred surface — a `ui::popup` panel, a menu the shell defers — takes
+/// [`tooltip_in_place`] instead, or `gpui` aborts the frame.
 pub(crate) fn tooltip(
     id: impl Into<ElementId>,
     trigger: AnyElement,
@@ -62,8 +67,35 @@ pub(crate) fn tooltip(
     shown: bool,
     t: &Theme,
 ) -> Stateful<Div> {
-    let id = id.into();
+    build(id.into(), trigger, label.into(), side, shown, true, t)
+}
 
+/// [`tooltip`] for a trigger already on a deferred surface: the label is
+/// laid out in place, where its parent's pass puts it above everything else
+/// anyway. Inside a scroll container it would be clipped, which is what
+/// [`tooltip`] exists to avoid — so this is only for the deferred case.
+pub(crate) fn tooltip_in_place(
+    id: impl Into<ElementId>,
+    trigger: AnyElement,
+    label: impl Into<SharedString>,
+    side: Side,
+    shown: bool,
+    t: &Theme,
+) -> Stateful<Div> {
+    build(id.into(), trigger, label.into(), side, shown, false, t)
+}
+
+/// The shared body of [`tooltip`] and [`tooltip_in_place`]: `defer` says
+/// which pass paints the label.
+fn build(
+    id: ElementId,
+    trigger: AnyElement,
+    label: SharedString,
+    side: Side,
+    shown: bool,
+    defer: bool,
+    t: &Theme,
+) -> Stateful<Div> {
     let bubble = shown.then(|| {
         let surface: Div = div()
             .flex_none()
@@ -87,7 +119,7 @@ pub(crate) fn tooltip(
             .text_size(CAPTION)
             .text_color(paint(t.text.primary))
             .shadow_lg()
-            .child(label.into());
+            .child(label);
 
         // The gap sits as padding on whichever edge of this wrapper touches
         // the pin below, so the wrapper's own edge — not the surface's — is
@@ -184,6 +216,14 @@ pub(crate) fn tooltip(
         // near the panel's edge has the overhanging half cut off — which is
         // what centring it did, and why it spent a while anchored to the
         // trigger's edge instead. Painted in the deferred pass it is outside
-        // that clip, so it can be centred like a tooltip should be.
-        .children(bubble.map(|pin| deferred(pin).with_priority(1)))
+        // that clip, so it can be centred like a tooltip should be. Unless
+        // the trigger is already in that pass: `gpui` refuses to defer from
+        // inside a deferred draw, so there the pin is laid out in place.
+        .children(bubble.map(|pin| {
+            if defer {
+                deferred(pin).with_priority(1).into_any_element()
+            } else {
+                pin.into_any_element()
+            }
+        }))
 }

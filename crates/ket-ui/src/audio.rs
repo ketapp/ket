@@ -238,6 +238,7 @@ impl Shell {
             kind: TabKind::Audio(key),
             renamed: false,
             pinned: false,
+            preview: false,
         });
         self.persist_layout();
     }

@@ -15,6 +15,44 @@ words; no internal names, no commit hashes. ket reads this file
 
 ### New
 
+- Open a pull request from your phone: Pull request… beside Merge on a
+  worktree's screen offers the title and description your Mac's dialog
+  would, to edit or dictate, then commits what is uncommitted, pushes the
+  branch and opens the pull request — or pushes to the one already open.
+  It works with ket's window closed.
+- From your phone, choose a base branch, model and effort when starting work, or open a new agent session or shell in an existing worktree.
+- When Codex stops on its “Approaching rate limits” notice over a permission
+  prompt, the phone shows the notice as a question with Codex's own options and
+  answers it for you, instead of an Allow that pressed a key the notice ignored.
+- Settings → Agents shows MCP servers configured for Claude Code and Codex in the selected worktree, plus MCP calls ket has recorded there. Check servers runs on demand, with setup commands and troubleshooting links nearby.
+- Pick lines in a diff and comment on them. Comments collect in the Git
+  panel's Review section until you send them to the worktree's agent as one
+  message.
+- Comment on a diff from your phone too: tap a line, or a second one in the
+  same hunk to take in the lines between, and write what should change. Send
+  to agent, under the diff or on the worktree's screen, gives the agent every
+  comment as one message, the way the Review section on your Mac does.
+- A worktree's pull request shows how its checks are doing: the GitHub mark
+  on its row turns red when one fails and green once they all pass, and its
+  tooltip says how many. Fix checks with agent, in the worktree's menu or on
+  your phone, gives the agent there what the failed checks printed, to fix
+  and push. The phone's worktree screen lists the pull request's checks and
+  review, and its row wears the number in the checks' colour.
+- A hook can refuse an agent's permission prompt: add a command under
+  `[hooks] agent_permission_requested` in `config.toml`, or in a trusted
+  repository's `.ket.toml`. Exit 0 lets the prompt reach you; any other exit
+  refuses the call, with the hook's first line of output as the reason.
+- Claude Code and Codex sessions opened in ket are told at the start that
+  the `ket` command is there, so you can ask yours to read the backlog or
+  start work without explaining ket first.
+- `ket start "<prompt>"` and `ket backlog start <note>` start work from a
+  shell the way your phone does: the open ket window makes the worktree and
+  opens its agent in a tab, and a started note is marked done.
+- The status bar shows how much memory and CPU ket itself uses, and beside
+  it what your agents and terminals use. Click either for the last ten
+  minutes charted, each agent and terminal by name and worktree, and the
+  models a local Ollama is holding. Figures turn yellow, orange and red as
+  they climb, like your agents' usage limits do.
 - The macOS menu bar now offers File, Edit, View, Project, Worktree, Window and Help commands, with shortcuts, availability and checkmarks that follow the current selection.
 - The phone app runs full-screen on an iPad. On a wide screen your worktrees
   stay in a sidebar and what you open shows beside them, conversations keep
@@ -52,17 +90,80 @@ words; no internal names, no commit hashes. ket reads this file
 - Settings → Appearance picks the interface font and the code font from
   what is installed, with the code list kept to fixed-width faces.
 - The Theme picker shows each theme's accent colour beside its name.
+- On your phone, a message to an agent can carry photos and files. Tap +
+  beside the field for Photos, Camera, Files or a copied image; they wait in
+  the field until you send, and the agent gets each photo as an image of its
+  own, as if you had dropped it on its terminal at the Mac. Other files reach
+  it by path. Needs the Mac's ket updated too.
+- The phone's message field has a mic: tap it and what you say is written
+  into the message as you speak, with the keyboard down if you like, then
+  tap again or just Send. It transcribes on the iPhone, and for a local agent
+  never anywhere else.
 
 ### Improved
 
+- In Send Snippet (⌘/), the up and down arrows go round the list: down
+  from the last snippet goes to the first, and up from the first goes to the
+  last.
+- On your phone, a terminal's tabs sit at the top in place of its title and
+  scroll sideways, so every tab keeps a readable name however many are open,
+  and the terminal gets more room. A dot on the agent's mark shows whether it
+  is running or waiting, and titles no longer start with the agent's spinner
+  or ✳. The "you have control" badge is gone; leaving the terminal still
+  hands control back to your Mac.
+- A backlog note opened on your phone is easier to work with: its priority is
+  a row of four you tap once, what it says grows with the text instead of
+  scrolling in a small box, and Start sits at the far end with Mark done
+  beside it. Delete is a bin at the other end, away from Start, and still
+  asks first. While you have unsaved changes, Save takes Start's place.
+- The window is more compact: narrower gaps between the sidebar, the tabs and
+  the header, tighter rows and smaller type in the sidebar, a shorter tab bar
+  and status bar, and an 11-point terminal, so more of your projects and more
+  of each terminal fit on screen. A font size you set yourself is kept.
+- When the window is too narrow for the full header, it switches to the
+  compact strip on its own and comes back when there is room again; until
+  then its expand button is greyed out and says there is not enough room. The
+  sidebar, panel and header buttons at its right end are never cut off.
+- The Memory and CPU popover reads better and does more: larger figures over
+  smoother charts that you can run the pointer along to read any moment, a bar
+  beside each line's CPU, Claude listed by name instead of its version number,
+  and no footnote. Click a line to go to its tab, use its Stop button to stop
+  what runs there, or unload a model Ollama is holding.
+- Files clicked in the Git list now share a preview tab. Double-click to keep a diff open, or use Open file to keep the editable file.
 - A new terminal opened beside one already in the pane starts at the pane's
   size, so its prompt appears sooner and does not redraw once the shell is
   up.
 - The note composer now offers a description as you type, and open notes show
   their full title beside a separate panel for tags and worktree options.
+- On the phone, a run of tool calls in a conversation folds into one line
+  that counts them and names the tools; tap it to see each one. The agent's
+  words read straight through, and the terminal still has all of it.
 
 ### Fixed
 
+- An agent sitting at its own prompt no longer shows as busy when ket has not
+  heard from it yet, such as a session resumed after ket restarts.
+- Starting an OpenCode session no longer fails with “OpenCode listed no
+  agents” the first time a worktree is opened after OpenCode's background
+  service started: the service answers before it has finished opening the
+  worktree, so ket asks it once more rather than take that first answer.
+- When several agents run in one worktree, the phone shows each one's prompt in
+  its own chat and lists each under Needs you, instead of only the newest.
+- Opening a worktree's conversation on the phone no longer holds the tap while
+  a long conversation is drawn: the screen slides in first, then fills.
+- A worktree no longer stays marked as waiting after you dismiss an agent's
+  question without answering it.
+- OpenCode now keeps ket's “Never” rules when you switch agents or search files.
+- The phone's worktree list marks each row with its agent's logo, even before
+  the agent has reported anything, instead of a branch icon.
+- Codex started by ket reports to ket again when Codex's own background server
+  is running, as it is while the Codex app is open: its questions show the
+  worktree as waiting and reach your phone, and the phone can read its
+  conversation.
+- On your phone, typing in a chat no longer makes the conversation jump or
+  drops the field behind the keyboard, and Send sends with one press after
+  you have used the terminal at the Mac, instead of asking you to press it
+  again.
 - A browser tab given an address that does not exist, typed or opened from a
   terminal link, shows a "This site can’t be reached" page with a Reload
   button, instead of a blank white page.

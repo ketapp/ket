@@ -136,10 +136,14 @@ pub(crate) struct ProjectForm {
     /// Draft preferred agent. `None` means whichever ket defaults to.
     pub(super) agent: Option<String>,
     /// The agent dropdown, while it is open. Row 0 is "Settings default";
-    /// row `n` is `agents[n - 1]`.
+    /// row `n` is `agents[n - 1]`, then `local_agents` after them.
     pub(super) agent_menu: Option<OpenMenu<usize>>,
     /// The agents the config knows, for the picker.
     pub(super) agents: Vec<String>,
+    /// The local agents this Mac can run now — see `crate::local_models`.
+    /// Picked like any other, but with no command of the project's own:
+    /// ket builds a local agent's launch itself.
+    pub(super) local_agents: Vec<String>,
     /// Each agent's command line in Settings, in the order of `agents`: what
     /// a blank command runs, and what a set one replaces.
     pub(super) configured: Vec<SharedString>,
@@ -171,6 +175,12 @@ impl ProjectForm {
     /// A form holding `seed`, with the popover open when `focus` is in it.
     pub(super) fn new(workspace: &Workspace, seed: Seed<'_>, focus: Field, cx: &mut App) -> Self {
         let (agents, configured, commands) = agent_drafts(workspace, seed.settings, cx);
+        let local_agents =
+            ket_core::agents::Catalogue::detect(workspace.config(), &ket_core::agents::ShellProber)
+                .runnable()
+                .filter(|entry| ket_core::local_models::model_tag(&entry.name).is_some())
+                .map(|entry| entry.name.clone())
+                .collect();
         // The default colour is the placeholder rather than the text, so a
         // project nobody coloured keeps no colour until someone picks one.
         let hex = seed
@@ -201,6 +211,7 @@ impl ProjectForm {
             agent: seed.agent,
             agent_menu: None,
             agents,
+            local_agents,
             configured,
             commands,
             hide_discovered: seed.settings.hide_discovered_worktrees,
@@ -590,9 +601,13 @@ impl Shell {
     /// Takes a pick from the agent dropdown: row 0 is the default.
     fn pick_form_agent(&mut self, row: usize) {
         if let Some(form) = self.project_form_mut() {
-            form.agent = row
-                .checked_sub(1)
-                .and_then(|row| form.agents.get(row).cloned());
+            form.agent = row.checked_sub(1).and_then(|row| {
+                form.agents
+                    .iter()
+                    .chain(&form.local_agents)
+                    .nth(row)
+                    .cloned()
+            });
             form.agent_menu = None;
             form.error = None;
         }
@@ -879,10 +894,11 @@ impl Shell {
     /// list can grow.
     fn form_agent(&self, form: &ProjectForm, cx: &mut Context<Self>) -> AnyElement {
         let t = &self.theme;
-        let shown = form
-            .command_row()
-            .and_then(|row| form.agents.get(row))
-            .map(String::as_str);
+        let shown = form.agent.as_deref().or_else(|| {
+            form.command_row()
+                .and_then(|row| form.agents.get(row))
+                .map(String::as_str)
+        });
         let mut trigger = select(
             "project-agent",
             shown.map_or_else(|| "No agents configured".to_owned(), agent_label),
@@ -1172,13 +1188,18 @@ fn agent_menu(form: &ProjectForm, t: &Theme, cx: &App) -> OpenMenu<usize> {
     let current = form
         .agent
         .as_ref()
-        .and_then(|name| form.agents.iter().position(|agent| agent == name))
+        .and_then(|name| {
+            form.agents
+                .iter()
+                .chain(&form.local_agents)
+                .position(|agent| agent == name)
+        })
         .map_or(0, |row| row + 1);
     let checked = |item: MenuItem<usize>, row: usize| {
         MenuEntry::Item(if current == row { item.checked() } else { item })
     };
 
-    let mut entries = Vec::with_capacity(form.agents.len() + 2);
+    let mut entries = Vec::with_capacity(form.agents.len() + form.local_agents.len() + 3);
     if let Some(first) = form.agents.first() {
         let (which, colour) = provider(first, t);
         let item = MenuItem::new(0, "Settings default")
@@ -1194,6 +1215,18 @@ fn agent_menu(form: &ProjectForm, t: &Theme, cx: &App) -> OpenMenu<usize> {
             .tinted_icon(which, colour)
             .detail(command, ink);
         entries.push(checked(item, row + 1));
+    }
+    // Local agents last, set apart: what they run is the model, on this Mac.
+    if !form.local_agents.is_empty() {
+        entries.push(MenuEntry::Separator);
+    }
+    for (offset, name) in form.local_agents.iter().enumerate() {
+        let row = form.agents.len() + offset + 1;
+        let (which, colour) = provider(name, t);
+        let item = MenuItem::new(row, agent_label(name))
+            .tinted_icon(which, colour)
+            .detail("on this Mac", None);
+        entries.push(checked(item, row));
     }
     OpenMenu::new(
         "project-agent".into(),

@@ -1,6 +1,7 @@
 //! New work a phone asked for: a worktree made the way the Create Worktree
 //! dialog makes one, landed in, and its agent started on the phone's prompt.
-//! A backlog note started from its dialog goes the same way — see
+//! `ket start` and `ket backlog start` in a terminal ask the same way. A
+//! backlog note started from its dialog goes the same way too — see
 //! [`crate::backlog`].
 //!
 //! The host hands each request to one window — see
@@ -12,11 +13,13 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use gpui::{Context, WeakEntity};
-use ket_core::host::PhoneWork;
+use ket_core::attachments::{ATTACH_POLL, ATTACH_SETTLE, ATTACH_WAIT, with_files};
+use ket_core::host::{PhoneWork, WorkSource};
 use ket_core::id::ProjectId;
 use ket_core::workspace::Workspace;
 
 use crate::Shell;
+use crate::terminal::SessionLaunch;
 use crate::ui::toast::Tone;
 
 /// How long a new agent is given to start before its prompt is typed. Its
@@ -31,21 +34,15 @@ const TERMINAL_OPEN: Duration = Duration::from_secs(15);
 /// How often landing looks again while they open.
 const LANDING_POLL: Duration = Duration::from_millis(100);
 
-/// The longest attached images are waited for before the prompt follows
-/// them anyway — see [`Shell::images_shown`].
-const ATTACH_WAIT: Duration = Duration::from_secs(4);
-
-/// A beat after the last image shows, before the prompt is typed.
-const ATTACH_SETTLE: Duration = Duration::from_millis(150);
-
-/// How often the screen is looked at while images are read.
-const ATTACH_POLL: Duration = Duration::from_millis(50);
-
 impl Shell {
     /// Starts whatever work phones have asked for since the last look.
     pub(crate) fn take_phone_work(&mut self, cx: &mut Context<Self>) {
         for work in ket_core::host::take_phone_work() {
             self.start_phone_work(work, cx);
+        }
+        while let Some((req, worktree, prompt)) = ket_core::host::take_phone_fix_checks() {
+            let id = ket_core::id::WorktreeId::from(worktree.as_str());
+            self.fix_checks_from_phone(req, id, prompt, cx);
         }
         // Operator authority is the approval to merge. Keep later requests
         // queued while one merge is running rather than acknowledging work
@@ -79,27 +76,50 @@ impl Shell {
     }
 
     fn start_phone_work(&mut self, work: PhoneWork, cx: &mut Context<Self>) {
+        if let Some(worktree) = work.worktree.as_deref() {
+            self.open_phone_session(
+                ket_core::id::WorktreeId::from(worktree),
+                work.agent,
+                work.prompt,
+                work.model,
+                work.effort,
+                work.shell,
+                cx,
+            );
+            return;
+        }
         let project = ProjectId::from(work.project.as_str());
         let Some(name) = self.project_name(&project) else {
             self.toast(
                 Tone::Error,
-                "A phone asked for work in a project that isn't here",
+                format!(
+                    "{} asked for work in a project that isn't here",
+                    asker(work.from)
+                ),
                 cx,
             );
             return;
         };
+        let from = match work.from {
+            WorkSource::Phone => "your phone",
+            WorkSource::Cli => "the ket command",
+        };
         self.toast(
             Tone::Info,
-            format!("Starting work in {name} from your phone…"),
+            format!("Starting work in {name} from {from}…"),
             cx,
         );
         // A backlog note: started as the backlog's own Start starts it, files
         // and all, and marked done once its worktree exists.
         if let Some(note) = work.note.as_deref() {
-            self.start_phone_note(&project, note, cx);
+            self.start_phone_note(&project, note, work.agent, work.from, cx);
             return;
         }
-        let branch = branch_for(&work.prompt, "phone-task");
+        let (fallback, origin) = match work.from {
+            WorkSource::Phone => ("phone-task", WorkOrigin::Phone),
+            WorkSource::Cli => ("cli-task", WorkOrigin::Cli),
+        };
+        let branch = branch_for(&work.prompt, fallback);
         self.start_work(
             NewWork {
                 project,
@@ -107,9 +127,11 @@ impl Shell {
                 prompt: work.prompt,
                 attachments: Vec::new(),
                 agent: work.agent,
-                base: None,
+                base: work.base,
                 economy: None,
-                origin: WorkOrigin::Phone,
+                model: work.model,
+                effort: work.effort,
+                origin,
             },
             cx,
         );
@@ -212,12 +234,31 @@ impl Shell {
                     if let WorkOrigin::Backlog { note } = &work.origin {
                         shell.backlog_started(&work.project, note, &created, cx);
                     }
-                    shell.land_work(created.id, agent, work.prompt, work.attachments, cx);
+                    if matches!(work.origin, WorkOrigin::Phone)
+                        && (agent.is_some() || work.model.is_some() || work.effort.is_some())
+                    {
+                        shell.open_phone_session(
+                            created.id,
+                            agent,
+                            work.prompt,
+                            work.model,
+                            work.effort,
+                            false,
+                            cx,
+                        );
+                    } else {
+                        shell.land_work(created.id, agent, work.prompt, work.attachments, cx);
+                    }
                 }
                 Err(error) => match &work.origin {
                     WorkOrigin::Phone => shell.toast(
                         Tone::Error,
                         format!("Couldn't start the phone's work in {name}: {error}"),
+                        cx,
+                    ),
+                    WorkOrigin::Cli => shell.toast(
+                        Tone::Error,
+                        format!("Couldn't start the ket command's work in {name}: {error}"),
                         cx,
                     ),
                     WorkOrigin::QuickPrompt => shell.toast(
@@ -230,6 +271,48 @@ impl Shell {
             });
         })
         .detach();
+    }
+
+    /// Selects a worktree without resuming its default session, then opens a
+    /// fresh tab. The optional prompt belongs to the new tab alone.
+    #[allow(clippy::too_many_arguments)]
+    fn open_phone_session(
+        &mut self,
+        id: ket_core::id::WorktreeId,
+        agent: Option<String>,
+        prompt: String,
+        model: Option<String>,
+        effort: Option<String>,
+        shell: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.reload(cx);
+        let Some(selection) = self.position_of(&id) else {
+            self.toast(Tone::Error, "The phone's worktree is no longer here", cx);
+            return;
+        };
+        self.suppress_auto_session = true;
+        self.select(selection, cx);
+        self.suppress_auto_session = false;
+        let pane = self.spaces.entry(id).or_default().focused;
+        let before = self.next_terminal;
+        if shell {
+            self.open_terminal_tab_in(pane, cx);
+        } else if let Some(name) = agent {
+            self.open_agent_tab_with(pane, &name, SessionLaunch { model, effort }, cx);
+        }
+        if self.next_terminal == before {
+            self.toast(Tone::Error, "Could not open the phone's session", cx);
+            return;
+        }
+        if !shell && !prompt.is_empty() {
+            let terminal = crate::terminal::TerminalId(before);
+            cx.spawn(async move |shell: WeakEntity<Shell>, cx| {
+                cx.background_executor().timer(AGENT_START).await;
+                let _ = shell.update(cx, |shell, cx| shell.submit_or_queue(terminal, &prompt, cx));
+            })
+            .detach();
+        }
     }
 
     /// Shows the new worktree, makes sure its agent is running, and types the
@@ -410,12 +493,17 @@ pub(crate) struct NewWork {
     /// The Economy level picked for it. `None` leaves the choice to Jev,
     /// when its beta is on, and to the default level otherwise.
     pub(crate) economy: Option<u8>,
+    /// Explicit choices for the first agent session only.
+    pub(crate) model: Option<String>,
+    pub(crate) effort: Option<String>,
     pub(crate) origin: WorkOrigin,
 }
 
 /// Who asked for the work, which is who hears how it went.
 pub(crate) enum WorkOrigin {
     Phone,
+    /// `ket start`, run in a terminal.
+    Cli,
     /// The quick prompt, sent to a new worktree.
     QuickPrompt,
     /// A backlog note, marked done once its worktree exists.
@@ -424,17 +512,12 @@ pub(crate) enum WorkOrigin {
     },
 }
 
-/// `prompt`, with the files the agent could not be handed as attachments
-/// listed after it by path.
-fn with_files(prompt: String, files: &[PathBuf]) -> String {
-    if files.is_empty() {
-        return prompt;
+/// Who a message about work that `from` asked for says asked for it.
+pub(crate) fn asker(from: WorkSource) -> &'static str {
+    match from {
+        WorkSource::Phone => "A phone",
+        WorkSource::Cli => "The ket command",
     }
-    let list: Vec<String> = files
-        .iter()
-        .map(|path| format!("- {}", path.display()))
-        .collect();
-    format!("{prompt}\n\nAttached files:\n{}", list.join("\n"))
 }
 
 /// A branch name from a prompt: its first few words, and a few characters
@@ -513,17 +596,5 @@ mod tests {
     fn a_prompt_with_no_words_falls_back() {
         assert_eq!(branch_seeded("!!! ???", "phone", 0), "phone-0000");
         assert_eq!(branch_seeded("", "phone", 0), "phone-0000");
-    }
-
-    #[test]
-    fn files_the_agent_could_not_be_handed_are_listed_after_the_prompt() {
-        assert_eq!(with_files("Look".to_owned(), &[]), "Look");
-        assert_eq!(
-            with_files(
-                "Look".to_owned(),
-                &[PathBuf::from("/tmp/a.png"), PathBuf::from("/tmp/b.pdf")]
-            ),
-            "Look\n\nAttached files:\n- /tmp/a.png\n- /tmp/b.pdf"
-        );
     }
 }

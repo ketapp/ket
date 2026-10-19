@@ -300,15 +300,6 @@ impl Shell {
             }),
         )
         .track_scroll(scroll)
-        .font_family(font_family)
-        // The same code face as the terminal, and the same size as it until
-        // somebody says otherwise in Settings › Editor: a file and a shell
-        // looking like one machine is the default, not a rule.
-        .text_size(font_size)
-        // Set on the list rather than on the rows so that the gutter, the
-        // shaped text and `uniform_list`'s own row measurement all read the
-        // same number out of the window's text style.
-        .line_height(relative(line_height))
         .flex_grow()
         .size_full();
 
@@ -354,6 +345,18 @@ impl Shell {
             .flex_grow()
             .overflow_hidden()
             .cursor_text()
+            .font_family(font_family)
+            // The same code face as the terminal, and the same size as it until
+            // somebody says otherwise in Settings › Editor: a file and a shell
+            // looking like one machine is the default, not a rule.
+            .text_size(font_size)
+            // Set around the list rather than on it or the rows, so that the
+            // gutter, the shaped text and `uniform_list`'s own row measurement
+            // all read the same number out of the window's text style. The
+            // list measures its rows before it applies its own style, so a
+            // line height set on the list spaced the rows by the window's
+            // 1.3 instead and drew each line taller than the gap it was given.
+            .line_height(relative(line_height))
             .child(list)
             .child(probe)
             .on_mouse_down(

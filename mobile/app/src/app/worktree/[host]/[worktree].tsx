@@ -1,20 +1,25 @@
 'use no memo'; // Reads a live HostConnection — see lib/hosts.ts.
 
-// One worktree: its figures, and what its agent is waiting on when it is
-// waiting.
+// One worktree: its figures, what its agent is waiting on when it is
+// waiting, the pull request its branch is open as, the comments on its diff
+// waiting to go to the agent, and what a merge would bring — merged from
+// here, or pushed and opened as a pull request.
 
-import { Activity, Answer_Choice, type Changes, FileChange_Status } from '@ket/remote';
+import { Activity, Answer_Choice, type Changes, CheckSummary_State, FileChange_Status, type PullRequestSummary } from '@ket/remote';
 import { router, useIsFocused, useLocalSearchParams } from 'expo-router';
 import { useEffect, useState } from 'react';
-import { Alert, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Alert, Linking, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import { ConnectionHelp } from '../../../components/ConnectionHelp';
 import { RiskBadge } from '../../../components/Risk';
-import { AgentMark, TerminalGlyph } from '../../../components/icons';
-import { Banner, Bar, Button, Card, Dot, Figure, Heading, Prose, Row, Screen, Value } from '../../../components/ui';
+import { AgentMark, Close, TerminalGlyph } from '../../../components/icons';
+import { Banner, Bar, Button, Card, Dot, Figure, Heading, IconButton, Prose, Row, Screen, Value } from '../../../components/ui';
 import { agentTerminal, detail, everyWorktree, stateOf } from '../../../lib/activity';
+import { checkWord, checksInOrder, checksSummary, failedChecks, reviewWords } from '../../../lib/checks';
+import type { HostConnection } from '../../../lib/connection';
 import { useHost } from '../../../lib/hosts';
 import { confirmIdentity } from '../../../lib/lock';
+import { commentsSaid, review, sendReview, useReview } from '../../../lib/review';
 import { agentLabel, font, size, t } from '../../../lib/theme';
 
 export default function Worktree() {
@@ -75,7 +80,8 @@ export default function Worktree() {
   const state = stateOf(worktree.activity);
   const blocked = worktree.activity === Activity.BLOCKED;
   const failed = worktree.activity === Activity.FAILED;
-  const question = blocked ? worktree.question : undefined;
+  // The newest prompt; the list since 1.13, the single field from older desktops.
+  const question = blocked ? (worktree.questions[0] ?? worktree.question) : undefined;
 
   const answer = async (choice: Answer_Choice) => {
     // The prompt's own terminal and id, from the host — never a terminal
@@ -210,6 +216,23 @@ export default function Worktree() {
           <Button title="Terminal" icon={<TerminalGlyph size={16} color={t.text} />} onPress={() => open(agentTerm.id)} />
         ) : null}
 
+        {conn && conn.hostMinor >= 15 ? (
+          <Button title="New session or shell" onPress={() =>
+            router.push(`/new/${hostId}?worktree=${encodeURIComponent(id)}`)
+          } />
+        ) : null}
+
+        {worktree.pullRequest && conn ? (
+          <PullRequest
+            pr={worktree.pullRequest}
+            conn={conn}
+            worktreeId={id}
+            agentTerminal={agentTerm?.id ?? null}
+          />
+        ) : null}
+
+        {conn && conn.hostMinor >= 14 ? <Review conn={conn} hostId={hostId} worktreeId={id} /> : null}
+
         {changes && (changes.files.length > 0 || changes.error) ? (
           <Card style={styles.list}>
             <Heading count={changes.files.length}>{changes.base ? `Changes since ${changes.base}` : 'Changes'}</Heading>
@@ -272,12 +295,196 @@ export default function Worktree() {
                     )
                   }
                 />
+                {/* Pushed for review instead: the other way out, as the
+                    desktop's merge dialog offers it. Once the branch is open
+                    as one, its card above is where it is. */}
+                {conn && conn.hostMinor >= 16 && !worktree.pullRequest ? (
+                  <Button
+                    title="Pull request…"
+                    disabled={merging}
+                    onPress={() => router.push(`/pull-request/${hostId}/${encodeURIComponent(id)}`)}
+                  />
+                ) : null}
               </View>
             ) : null}
           </Card>
         ) : null}
       </ScrollView>
     </Screen>
+  );
+}
+
+/** The pull request a worktree's branch is open as: where it stands, its
+ * checks — what failed first, what passed folded away — and, when one
+ * failed, the button that hands them to the agent. */
+function PullRequest({
+  pr,
+  conn,
+  worktreeId,
+  agentTerminal: terminal,
+}: {
+  pr: PullRequestSummary;
+  conn: HostConnection;
+  worktreeId: string;
+  agentTerminal: bigint | null;
+}) {
+  const [fixing, setFixing] = useState(false);
+  const [said, setSaid] = useState<{ text: string; failed: boolean } | null>(null);
+  const [everyCheck, setEveryCheck] = useState(false);
+
+  const failed = failedChecks(pr);
+  // A desktop from 1.11 takes the fix; an older one sends no pull request.
+  const canFix = failed > 0 && conn.hostMinor >= 11;
+  const line = [pr.draft ? 'Draft' : '', reviewWords(pr), checksSummary(pr)].filter(Boolean).join(' · ');
+  const ordered = checksInOrder(pr);
+  const settled = (state: CheckSummary_State) => state !== CheckSummary_State.FAILED && state !== CheckSummary_State.PENDING;
+  const folded = everyCheck ? [] : ordered.filter((check) => settled(check.state));
+  const shown = everyCheck ? ordered : ordered.filter((check) => !settled(check.state));
+
+  // Straight to the agent, as asked: one tap sends it, and the conversation
+  // it lands in opens once the desktop has read the logs and started the
+  // agent. Startup failures show here.
+  const fix = async () => {
+    setFixing(true);
+    setSaid(null);
+    const fixed = await conn
+      .fixChecks(worktreeId)
+      .catch((e: unknown) => ({ why: e instanceof Error ? e.message : String(e) }));
+    setFixing(false);
+    if ('why' in fixed) {
+      setSaid({ text: fixed.why, failed: true });
+      return;
+    }
+    // Not a failure: tapping again would give it the checks twice.
+    if (fixed.starting) {
+      setSaid({
+        text: `ket on ${conn.host.name || 'your Mac'} is still starting the agent. It gets the failed checks once it's up.`,
+        failed: false,
+      });
+      return;
+    }
+    if (terminal !== null) {
+      router.push(`/session/${conn.host.id}/${terminal.toString()}`);
+      return;
+    }
+    setSaid({ text: `The agent on ${conn.host.name || 'your Mac'} has the failed checks.`, failed: false });
+  };
+
+  return (
+    <Card style={styles.list}>
+      <Heading count={`#${pr.number.toString()}`}>Pull request</Heading>
+      {line ? <Prose style={styles.changesNote}>{line}</Prose> : null}
+      {shown.map((check, at) => (
+        <Row
+          key={`${at}:${check.name}`}
+          small
+          title={check.name}
+          state={checkWord(check.state)}
+          onPress={check.url ? () => void Linking.openURL(check.url) : undefined}
+        />
+      ))}
+      {folded.length > 0 ? (
+        <Pressable
+          accessibilityRole="button"
+          onPress={() => setEveryCheck(true)}
+          style={({ pressed }) => [styles.more, pressed && { backgroundColor: t.selection }]}
+        >
+          <Text style={styles.moreText}>
+            {folded.length === 1 ? 'Show 1 more check' : `Show ${folded.length} more checks`}
+          </Text>
+        </Pressable>
+      ) : null}
+      {said ? (
+        <Prose color={said.failed ? t.failed : undefined} style={styles.changesNote}>
+          {said.text}
+        </Prose>
+      ) : null}
+      <View style={styles.actions}>
+        {canFix ? (
+          <Button
+            kind="primary"
+            title={fixing ? 'Reading the checks…' : 'Fix checks with agent'}
+            disabled={fixing}
+            style={styles.grow}
+            onPress={() => void fix()}
+          />
+        ) : null}
+        <Button
+          kind={canFix ? 'ghost' : undefined}
+          title="Open on GitHub"
+          style={styles.grow}
+          onPress={() => void Linking.openURL(pr.url)}
+        />
+      </View>
+    </Card>
+  );
+}
+
+/** The comments written on the worktree's diff, waiting to go to its agent
+ * as one review (desktop 1.14): each opens its file's diff, and Send to agent
+ * sends them all — see lib/review.ts. Nothing while there are none. */
+function Review({ conn, hostId, worktreeId }: { conn: HostConnection; hostId: string; worktreeId: string }) {
+  const comments = useReview(hostId, worktreeId);
+  const [sending, setSending] = useState(false);
+  // How the last send went, said only until the review changes again.
+  const [sent, setSent] = useState<{ text: string; failed: boolean; after: typeof comments } | null>(null);
+  const said = sent && sent.after === comments ? sent : null;
+  if (comments.length === 0 && !said) return null;
+
+  const send = async () => {
+    setSending(true);
+    setSent(null);
+    const result = await sendReview(conn, hostId, worktreeId);
+    setSent({ ...result, after: review.list(hostId, worktreeId) });
+    setSending(false);
+  };
+  const clear = () =>
+    Alert.alert(`Clear ${commentsSaid(comments.length)}?`, 'They are not sent to the agent.', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Clear',
+        style: 'destructive',
+        onPress: () => review.remove(hostId, worktreeId),
+      },
+    ]);
+
+  return (
+    <Card style={styles.list}>
+      <Heading count={comments.length > 0 ? comments.length : undefined}>Review</Heading>
+      {comments.map((comment) => (
+        <Row
+          key={comment.id}
+          small
+          title={comment.path.split('/').pop() ?? comment.path}
+          detail={[comment.lines, comment.comment.split('\n')[0]].filter(Boolean).join(' · ')}
+          meta={
+            <IconButton label="Remove from the review" onPress={() => review.remove(hostId, worktreeId, [comment.id])}>
+              <Close size={16} color={t.faint} />
+            </IconButton>
+          }
+          onPress={() =>
+            router.push(`/diff/${hostId}/${encodeURIComponent(worktreeId)}?path=${encodeURIComponent(comment.path)}`)
+          }
+        />
+      ))}
+      {said ? (
+        <Prose color={said.failed ? t.failed : undefined} style={styles.changesNote}>
+          {said.text}
+        </Prose>
+      ) : null}
+      {comments.length > 0 ? (
+        <View style={styles.actions}>
+          <Button
+            kind="primary"
+            title={sending ? 'Sending…' : 'Send to agent'}
+            disabled={sending}
+            style={styles.grow}
+            onPress={() => void send()}
+          />
+          <Button kind="ghost" title="Clear" disabled={sending} onPress={clear} />
+        </View>
+      ) : null}
+    </Card>
   );
 }
 
@@ -329,5 +536,8 @@ const styles = StyleSheet.create({
   actions: { flexDirection: 'row', gap: 8, padding: 4, paddingTop: 8 },
   choices: { flexDirection: 'row', gap: 8 },
   changesNote: { padding: 8 },
+  // In from the edge a row's name starts at.
+  more: { minHeight: size.rowSm, justifyContent: 'center', paddingHorizontal: 14, borderRadius: size.radiusRow },
+  moreText: { fontFamily: font.prose, fontSize: size.detail, color: t.dim },
   fileLines: { fontFamily: font.chrome, fontSize: 12, marginLeft: 8 },
 });

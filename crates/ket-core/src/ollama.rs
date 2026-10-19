@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::agents::Prober;
 use crate::{KetError, Result};
@@ -168,9 +168,18 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
-    /// The models a person picked, without ket's agent profiles of them.
+    /// The models a person picked, without ket's agent profiles of them —
+    /// nor any other copy named like one. A `<model>-ket` that is not ket's
+    /// is shown as what blocks `<model>` (see
+    /// [`crate::local_models::Standing::Taken`]), never as a model to make a
+    /// `-ket-ket` profile of.
     pub fn listed(&self) -> impl Iterator<Item = &ModelInfo> {
-        self.models.iter().filter(|model| !is_profile(model))
+        self.models.iter().filter(|model| {
+            !self
+                .models
+                .iter()
+                .any(|base| model.tag == crate::local_models::profile_tag(&base.tag))
+        })
     }
 
     /// The agent profile ket made of `tag`, when there is one.
@@ -182,13 +191,75 @@ impl Snapshot {
     }
 }
 
-/// Whether `model` is an agent profile ket made: named after its parent, and
-/// made from it.
-fn is_profile(model: &ModelInfo) -> bool {
-    model
-        .parent
-        .as_deref()
-        .is_some_and(|parent| model.tag == crate::local_models::profile_tag(parent))
+/// What ket made: each agent profile it created, the model it made it from,
+/// and the profile's digest then. A copy of a GGUF model records its parent
+/// itself; a copy of a safetensors model — Qwen3.8, say — records none, and
+/// size is no proof of whose a model is. A profile whose digest is still the
+/// one ket wrote down is ket's; anything else by that name is the person's.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Ledger {
+    /// By profile name.
+    pub profiles: std::collections::BTreeMap<String, Made>,
+}
+
+/// One profile ket made.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Made {
+    /// The model it was made from.
+    pub from: String,
+    /// Its digest when ket made it.
+    pub digest: String,
+}
+
+impl Ledger {
+    fn path() -> Option<std::path::PathBuf> {
+        crate::paths::data_dir()
+            .ok()
+            .map(|dir| dir.join("ollama-profiles.json"))
+    }
+
+    /// What is on disk, or nothing.
+    pub fn load() -> Self {
+        Self::path()
+            .and_then(|path| std::fs::read(path).ok())
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default()
+    }
+
+    fn save(&self) -> Result<()> {
+        let path =
+            Self::path().ok_or_else(|| KetError::Config("no data directory for ket".to_owned()))?;
+        let text = serde_json::to_string_pretty(self)
+            .map_err(|e| KetError::Config(format!("ollama profiles: {e}")))?;
+        crate::config::write_atomically(&path, &text, false)
+    }
+
+    /// Whether `profile`, now at `digest`, is the one ket made of `tag`.
+    pub fn made(&self, profile: &str, tag: &str, digest: &str) -> bool {
+        self.profiles
+            .get(profile)
+            .is_some_and(|made| made.from == tag && !digest.is_empty() && made.digest == digest)
+    }
+}
+
+/// Gives each parentless model ket made the parent its ledger says, so every
+/// reader can go by the parent — see [`Ledger`].
+fn adopt_profiles(
+    models: &mut [ModelInfo],
+    digests: &std::collections::HashMap<String, String>,
+    ledger: &Ledger,
+) {
+    for model in models.iter_mut().filter(|model| model.parent.is_none()) {
+        let Some(made) = ledger.profiles.get(&model.tag) else {
+            continue;
+        };
+        if digests
+            .get(&model.tag)
+            .is_some_and(|digest| ledger.made(&model.tag, &made.from, digest))
+        {
+            model.parent = Some(made.from.clone());
+        }
+    }
 }
 
 /// What asking a local Ollama found.
@@ -290,6 +361,8 @@ struct TagsModel {
     #[serde(default)]
     size: u64,
     #[serde(default)]
+    digest: String,
+    #[serde(default)]
     remote_host: Option<String>,
     #[serde(default)]
     remote_model: Option<String>,
@@ -374,7 +447,12 @@ fn fetch(endpoint: Endpoint) -> Probe {
         .and_then(|response| response.into_body().read_json::<VersionResponse>().ok())
         .map(|version| version.version);
 
+    let digests: std::collections::HashMap<String, String> = listed
+        .iter()
+        .map(|model| (model.name.clone(), model.digest.clone()))
+        .collect();
     let mut models: Vec<ModelInfo> = listed.into_iter().map(model_info).collect();
+    adopt_profiles(&mut models, &digests, &Ledger::load());
     // The shape, and any pinned context, only for what could become an
     // agent: a local model that calls tools.
     for model in models
@@ -394,8 +472,20 @@ fn fetch(endpoint: Endpoint) -> Probe {
         }
     }
 
-    let loaded = http
-        .get(endpoint.url("/api/ps"))
+    let loaded = loaded(&http, &endpoint);
+
+    Probe::Running(Snapshot {
+        endpoint,
+        version,
+        models,
+        loaded,
+    })
+}
+
+/// The models the daemon has in memory, from `/api/ps`; empty when it does
+/// not answer.
+fn loaded(http: &ureq::Agent, endpoint: &Endpoint) -> Vec<LoadedModel> {
+    http.get(endpoint.url("/api/ps"))
         .call()
         .ok()
         .and_then(|response| response.into_body().read_json::<PsResponse>().ok())
@@ -410,14 +500,21 @@ fn fetch(endpoint: Endpoint) -> Probe {
                 })
                 .collect()
         })
-        .unwrap_or_default();
+        .unwrap_or_default()
+}
 
-    Probe::Running(Snapshot {
-        endpoint,
-        version,
-        models,
-        loaded,
-    })
+/// The models a local Ollama holds in memory right now, asked afresh.
+///
+/// For a reading of what this Mac is carrying rather than for the catalogue,
+/// so [`probe`]'s cache is neither read nor filled. Empty when nothing
+/// answers, and for a daemon on another machine, whose memory is not this
+/// Mac's.
+pub fn loaded_now() -> Vec<LoadedModel> {
+    let endpoint = Endpoint::from_env();
+    if !endpoint.is_loopback() {
+        return Vec::new();
+    }
+    loaded(&agent(Some(REQUEST_TIMEOUT)), &endpoint)
 }
 
 fn model_info(model: TagsModel) -> ModelInfo {
@@ -496,9 +593,7 @@ pub fn prepare(tag: &str, num_ctx: u32) -> Result<String> {
     // Creating over a name replaces whatever had it. Only a profile ket made
     // from `tag` is ket's to replace; any other model by that name is the
     // person's own.
-    if let Some(parent) = made_from(&endpoint, &profile)?
-        && parent != tag
-    {
+    if profile_is_ours(&endpoint, &profile, tag)? == Some(false) {
         return Err(KetError::Config(format!(
             "{profile} is already a model of yours, so ket will not make {tag}'s agent profile under that name"
         )));
@@ -517,6 +612,20 @@ pub fn prepare(tag: &str, num_ctx: u32) -> Result<String> {
         return Err(KetError::Config(format!(
             "Ollama would not prepare {tag}: {why}"
         )));
+    }
+    // Written down so a copy that records no parent is still known as ket's.
+    // Without its digest it is not: then it reads as someone else's, which
+    // is the safe way to be wrong.
+    if let Ok(Some(digest)) = digest_of(&endpoint, &profile) {
+        let mut ledger = Ledger::load();
+        ledger.profiles.insert(
+            profile.clone(),
+            Made {
+                from: tag.to_owned(),
+                digest,
+            },
+        );
+        ledger.save()?;
     }
     clear_cache();
     Ok(profile)
@@ -546,10 +655,58 @@ pub fn unload(tag: &str) -> Result<()> {
 pub fn delete_profile(tag: &str) -> Result<()> {
     let profile = crate::local_models::profile_tag(tag);
     let endpoint = Endpoint::from_env();
-    match made_from(&endpoint, &profile)? {
-        Some(parent) if parent == tag => delete(&profile),
+    match profile_is_ours(&endpoint, &profile, tag)? {
+        Some(true) => {
+            delete(&profile)?;
+            let mut ledger = Ledger::load();
+            if ledger.profiles.remove(&profile).is_some() {
+                ledger.save()?;
+            }
+            Ok(())
+        }
         _ => Ok(()),
     }
+}
+
+/// Whether the model named `profile` is ket's agent profile of `tag`: `None`
+/// when no model has that name. Asked of the daemon now, and an error rather
+/// than a guess when it cannot say — see [`made_from`].
+fn profile_is_ours(endpoint: &Endpoint, profile: &str, tag: &str) -> Result<Option<bool>> {
+    let Some(parent) = made_from(endpoint, profile)? else {
+        return Ok(None);
+    };
+    if !parent.is_empty() {
+        return Ok(Some(parent == tag));
+    }
+    // A copy that records no parent: ket's only if ket wrote it down, and
+    // it has not changed since — see `Ledger`.
+    let digest = digest_of(endpoint, profile)?.unwrap_or_default();
+    Ok(Some(Ledger::load().made(profile, tag, &digest)))
+}
+
+/// The digest Ollama lists for `name`, `None` when it lists no such model.
+/// An error, never a guess, when Ollama cannot say.
+fn digest_of(endpoint: &Endpoint, name: &str) -> Result<Option<String>> {
+    let response = agent(Some(REQUEST_TIMEOUT))
+        .get(endpoint.url("/api/tags"))
+        .call()
+        .map_err(|e| KetError::Config(format!("Ollama: {e}")))?;
+    if !response.status().is_success() {
+        return Err(KetError::Config(format!(
+            "Ollama could not list its models to check {name}"
+        )));
+    }
+    let tags: TagsResponse = response
+        .into_body()
+        .with_config()
+        .limit(4 * 1024 * 1024)
+        .read_json()
+        .map_err(|e| KetError::Config(format!("Ollama: {e}")))?;
+    Ok(tags
+        .models
+        .into_iter()
+        .find(|model| model.name == name)
+        .map(|model| model.digest))
 }
 
 /// What `name` was made from: `None` when no model has that name, an empty
@@ -793,6 +950,45 @@ fn error_text(body: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_parentless_copy_is_ket_s_only_while_its_digest_is_the_one_ket_wrote_down() {
+        let copy = |tag: &str| ModelInfo {
+            tag: tag.to_owned(),
+            size_bytes: 1,
+            family: None,
+            parameters: None,
+            quantization: None,
+            cloud: false,
+            tools: true,
+            context_max: None,
+            parent: None,
+            num_ctx: None,
+            kv_per_token: None,
+        };
+        let mut ledger = Ledger::default();
+        ledger.profiles.insert(
+            "qwen3.8:27b-ket".to_owned(),
+            Made {
+                from: "qwen3.8:27b".to_owned(),
+                digest: "sha256:aa".to_owned(),
+            },
+        );
+        let digests = |digest: &str| {
+            std::collections::HashMap::from([("qwen3.8:27b-ket".to_owned(), digest.to_owned())])
+        };
+
+        let mut same = vec![copy("qwen3.8:27b-ket")];
+        adopt_profiles(&mut same, &digests("sha256:aa"), &ledger);
+        assert_eq!(same[0].parent.as_deref(), Some("qwen3.8:27b"));
+
+        // Replaced since, by the person: theirs now.
+        let mut changed = vec![copy("qwen3.8:27b-ket")];
+        adopt_profiles(&mut changed, &digests("sha256:bb"), &ledger);
+        assert_eq!(changed[0].parent, None);
+
+        assert!(!ledger.made("qwen3.8:27b-ket", "qwen3.8:27b", ""));
+    }
 
     #[test]
     fn ollama_host_is_read_the_way_ollamas_cli_reads_it() {

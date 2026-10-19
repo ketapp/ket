@@ -8,6 +8,7 @@ import {
 import { describe, expect, jest, test } from '@jest/globals';
 
 import {
+  agentOf,
   agentTerminal,
   detail,
   detailColor,
@@ -16,6 +17,7 @@ import {
   projectColor,
   railColor,
   stateOf,
+  terminalName,
 } from './activity';
 import { PROJECT_COLORS, t } from './theme';
 
@@ -113,5 +115,28 @@ describe('snapshot helpers', () => {
       fallback,
     );
     expect(agentTerminal(worktree(Activity.QUIET, { terminals: [terminal(''), terminal('codex', true)] }))).toBeUndefined();
+  });
+
+  test('marks a row with the reporting agent, else the one in its terminals', () => {
+    expect(agentOf(worktree(Activity.WORKING, { agent: 'claude', terminals: [terminal('codex')] }))).toBe('claude');
+    expect(agentOf(worktree(Activity.QUIET, { terminals: [terminal(''), terminal('codex')] }))).toBe('codex');
+    expect(agentOf(worktree(Activity.QUIET, { terminals: [terminal('')] }))).toBe('');
+  });
+
+  test('names a terminal without the glyph its agent leads the title with', () => {
+    const named = (agent: string, title: string) => terminalName({ agent, title } as TerminalSummary);
+    expect(named('claude', '✳ design canvas')).toBe('design canvas');
+    expect(named('claude', '✳\ufe0f design canvas')).toBe('design canvas');
+    expect(named('codex', '⠹ Review changes | ket')).toBe('Review changes | ket');
+    expect(named('codex', '🤖 Review')).toBe('Review');
+    // Nothing but the glyph: the agent's own name.
+    expect(named('claude', '✳ ')).toBe('Claude');
+    expect(named('opencode', '')).toBe('OpenCode');
+    // A glyph with no space after it is part of the title, and a shell's
+    // title is its own, whatever it starts with.
+    expect(named('claude', '→next')).toBe('→next');
+    expect(named('', '⠹ make')).toBe('⠹ make');
+    expect(named('', '~/dev/ket')).toBe('~/dev/ket');
+    expect(named('', '')).toBe('Terminal');
   });
 });

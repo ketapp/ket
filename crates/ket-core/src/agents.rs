@@ -147,7 +147,9 @@ const CANDIDATES: &[Candidate] = &[
     Candidate {
         name: "codex",
         probe: "codex",
-        gated_flags: &[],
+        // Its private session; why the pane wants it is with the shipped
+        // spec in `crate::config`.
+        gated_flags: &["--no-daemon"],
     },
     Candidate {
         name: "grok",
@@ -810,6 +812,31 @@ mod tests {
             "opencode"
         );
         assert!(!opencode.is_overridden());
+    }
+
+    #[test]
+    fn codex_runs_its_own_session_rather_than_the_shared_daemons() {
+        // In the daemon, its hooks lose the pane's environment.
+        let catalogue = Catalogue::detect(&config(), &Fake(vec!["codex"]));
+        let codex = catalogue.get("codex").unwrap();
+
+        assert_eq!(codex.spec.launch_line(&[]), "codex --no-daemon");
+        assert_eq!(
+            codex
+                .spec
+                .launch_line(&["resume".to_owned(), "s-1".to_owned()]),
+            "codex --no-daemon resume s-1"
+        );
+        assert!(!codex.is_overridden());
+    }
+
+    #[test]
+    fn a_codex_without_a_daemon_flag_starts_on_the_bare_line() {
+        let catalogue = Catalogue::detect(&config(), &Outdated(vec!["codex"]));
+        let codex = catalogue.get("codex").unwrap();
+
+        assert_eq!(codex.spec.launch_line(&[]), "codex");
+        assert!(!codex.is_overridden());
     }
 
     #[test]

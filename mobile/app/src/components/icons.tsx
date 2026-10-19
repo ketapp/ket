@@ -319,6 +319,16 @@ export const Close = (p: IconProps) => (
   </Stroke>
 );
 
+/** Throw away: a bin. */
+export const Trash = (p: IconProps) => (
+  <Stroke {...p}>
+    <Path d="M4 7h16" />
+    <Path d="M9.5 7V4.8a.8.8 0 0 1 .8-.8h3.4a.8.8 0 0 1 .8.8V7" />
+    <Path d="m6.5 7 .8 11.6A2 2 0 0 0 9.3 20.5h5.4a2 2 0 0 0 2-1.9L17.5 7" />
+    <Path d="M10.2 11v5.5M13.8 11v5.5" />
+  </Stroke>
+);
+
 /** Picked: a tick. */
 export const Check = (p: IconProps) => (
   <Stroke {...p}>
@@ -331,4 +341,39 @@ export const Stop = ({ size = 18, color = t.dim }: IconProps) => (
   <Svg width={size} height={size} viewBox="0 0 24 24">
     <Rect x={6} y={6} width={12} height={12} rx={2.5} fill={color} />
   </Svg>
+);
+
+/** Dictate: a microphone. */
+export const Mic = (p: IconProps) => (
+  <Stroke {...p}>
+    <Rect x={9} y={3} width={6} height={11} rx={3} />
+    <Path d="M5.5 10.5a6.5 6.5 0 0 0 13 0" />
+    <Path d="M12 17v4" />
+  </Stroke>
+);
+
+/** A photo or a screenshot. */
+export const Picture = (p: IconProps) => (
+  <Stroke {...p}>
+    <Rect x={3} y={3} width={18} height={18} rx={3} />
+    <Circle cx={9} cy={9} r={1.8} />
+    <Path d="m21 15-4.5-4.5L6 21" />
+  </Stroke>
+);
+
+/** A file that is not a photo. */
+export const FileGlyph = (p: IconProps) => (
+  <Stroke {...p}>
+    <Path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" />
+    <Path d="M14 3v5h5" />
+  </Stroke>
+);
+
+/** Something to know: a circled i. */
+export const Info = (p: IconProps) => (
+  <Stroke {...p}>
+    <Circle cx={12} cy={12} r={9} />
+    <Path d="M12 8v4.5" />
+    <Path d="M12 16h.01" />
+  </Stroke>
 );

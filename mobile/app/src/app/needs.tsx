@@ -8,9 +8,9 @@ import { Activity } from '@ket/remote';
 import { router } from 'expo-router';
 import { ScrollView, StyleSheet, View } from 'react-native';
 
-import { AgentMark, Branch } from '../components/icons';
+import { AgentMark } from '../components/icons';
 import { Card, Heading, Prose, Row, Screen, TAB_BAR_ROOM, TabBar } from '../components/ui';
-import { detail, detailColor, everyWorktree, stateOf } from '../lib/activity';
+import { agentOf, detail, detailColor, everyWorktree, stateOf } from '../lib/activity';
 import { useHosts } from '../lib/hosts';
 import { size, t } from '../lib/theme';
 
@@ -32,25 +32,30 @@ export default function Needs() {
         <Heading color={color} count={rows.length}>
           {title}
         </Heading>
-        {rows.map(({ conn, project, worktree }) => (
-          <Row
-            key={`${conn.host.id}/${worktree.id}`}
-            mark={worktree.agent ? <AgentMark agent={worktree.agent} size={16} /> : <Branch size={15} color={t.faint} />}
-            title={worktree.name}
-            detail={[many ? conn.host.name : null, project.name, worktree.question?.subject || detail(worktree)]
-              .filter(Boolean)
-              .join(' · ')}
-            detailColor={detailColor(worktree.activity)}
-            state={stateOf(worktree.activity)}
-            onPress={() =>
-              router.push(
-                worktree.question?.terminalId
-                  ? `/session/${conn.host.id}/${worktree.question.terminalId.toString()}`
-                  : `/worktree/${conn.host.id}/${encodeURIComponent(worktree.id)}`,
-              )
-            }
-          />
-        ))}
+        {rows.flatMap(({ conn, project, worktree }) => {
+          // One row per prompt: several agents in a worktree can each be
+          // waiting. A desktop from before 1.13 sends only the newest.
+          const prompts = worktree.questions.length > 0 ? worktree.questions : [worktree.question];
+          return prompts.map((question, at) => (
+            <Row
+              key={`${conn.host.id}/${worktree.id}/${question?.id.toString() ?? at}`}
+              mark={agentOf(worktree) ? <AgentMark agent={agentOf(worktree)} size={16} /> : null}
+              title={worktree.name}
+              detail={[many ? conn.host.name : null, project.name, question?.subject || detail(worktree)]
+                .filter(Boolean)
+                .join(' · ')}
+              detailColor={detailColor(worktree.activity)}
+              state={stateOf(worktree.activity)}
+              onPress={() =>
+                router.push(
+                  question?.terminalId
+                    ? `/session/${conn.host.id}/${question.terminalId.toString()}`
+                    : `/worktree/${conn.host.id}/${encodeURIComponent(worktree.id)}`,
+                )
+              }
+            />
+          ));
+        })}
       </Card>
     );
 

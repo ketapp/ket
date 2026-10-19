@@ -13,10 +13,11 @@ use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
-use super::wire::{self, Exit, Frame, Reply, Request, Running};
+use super::wire::{self, Exit, Frame, Reply, Request, Running, WorkSource};
 use super::{EXITED_KEPT, IDLE_EXIT, host_error};
 use crate::Result;
 use crate::agent_hooks::{self, HookReport, Listener, StatusLine};
@@ -28,6 +29,48 @@ const TICK: Duration = Duration::from_secs(1);
 
 /// How often hook reports are passed on to windows.
 const HOOK_TICK: Duration = Duration::from_millis(200);
+
+/// How long a phone's Fix checks with agent waits, after its logs are read,
+/// for the window to say the agent has the message — long enough to set up a
+/// worktree and start its agent, most times. Past it the phone is told the
+/// agent is still starting, not that it failed: the window carries on, and
+/// asking again would give the agent the message twice.
+const FIX_CHECKS_WAIT: Duration = if cfg!(test) {
+    Duration::from_secs(2)
+} else {
+    Duration::from_secs(60)
+};
+
+/// How often a phone's fix, waiting on a window, looks to see the window is
+/// still there.
+const FIX_CHECKS_LOOK: Duration = Duration::from_millis(250);
+
+/// How long a phone's review waits for a window to say the agent has it. A
+/// window takes one within a quarter of a second, so this is for one that is
+/// busy, or too old to know the request.
+const REVIEW_WAIT: Duration = if cfg!(test) {
+    Duration::from_secs(2)
+} else {
+    Duration::from_secs(10)
+};
+
+/// How much sooner than [`REVIEW_WAIT`] a window has to take a review: one
+/// that takes it later drops it, so a phone told it did not go can send it
+/// again without the agent getting it twice. The rest is for the answer's
+/// way back.
+const REVIEW_GRACE: Duration = Duration::from_millis(1500);
+
+/// How a window took a phone's failed checks — see [`Host::fix_checks`].
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Handed {
+    /// The worktree's agent has the message.
+    Given,
+    /// No agent was running, and the one the window is starting has not
+    /// taken the message yet. It will once it is up.
+    Starting,
+    /// It could not be given, and why.
+    Failed(String),
+}
 
 /// Hook reports kept while no window is connected, oldest dropped first.
 const BACKLOG_REPORTS: usize = 2000;
@@ -48,6 +91,10 @@ struct Out {
     /// window goes to one before that: its first frame has to be the
     /// welcome, or it cannot tell which host it reached.
     greeted: AtomicBool,
+    /// Whether the other end is a ket window rather than another program,
+    /// such as the CLI — see `same_program`. Only a window can be handed
+    /// work to start or merge.
+    window: bool,
 }
 
 impl Out {
@@ -186,6 +233,16 @@ pub(super) struct Host {
     /// The theme a window last said it is drawn in, for phones. `None` until
     /// one has.
     theme: Mutex<Option<crate::theme::Theme>>,
+    /// The pull requests worktrees' branches are open as, with their checks,
+    /// as a window last read them from GitHub — by worktree id, for phones.
+    /// Like `usage`, the host asks GitHub nothing itself.
+    pull_requests: Mutex<Vec<(String, crate::github::PullRequestStatus)>>,
+    /// Phone requests waiting for a window to report that the agent started.
+    fix_checks_waiting: Mutex<BTreeMap<u64, mpsc::Sender<std::result::Result<(), String>>>>,
+    next_fix_checks: AtomicU64,
+    /// Phone reviews waiting for a window to say the agent has them.
+    review_waiting: Mutex<BTreeMap<u64, mpsc::Sender<std::result::Result<(), String>>>>,
+    next_review: AtomicU64,
 }
 
 impl Host {
@@ -354,6 +411,30 @@ impl Host {
         lock(&self.agents).clone()
     }
 
+    /// The pull request `worktree`'s branch is open as, as a window last
+    /// read it.
+    pub(super) fn pull_request(&self, worktree: &str) -> Option<crate::github::PullRequestStatus> {
+        lock(&self.pull_requests)
+            .iter()
+            .find(|(id, _)| id == worktree)
+            .map(|(_, status)| status.clone())
+    }
+
+    /// Takes a pull request a phone just opened for `worktree`, so phones
+    /// see it now rather than once a window reads GitHub again — unless a
+    /// window has read one there already. The next read a window sends
+    /// replaces the lot, with its checks.
+    pub(super) fn remember_pull_request(
+        &self,
+        worktree: &str,
+        status: crate::github::PullRequestStatus,
+    ) {
+        let mut open = lock(&self.pull_requests);
+        if !open.iter().any(|(id, _)| id == worktree) {
+            open.push((worktree.to_owned(), status));
+        }
+    }
+
     /// Forgets the panes of terminals that have gone, and tells the windows.
     fn clear_panes(&self, keys: &[String]) {
         self.hook_bindings.unbind(keys);
@@ -437,6 +518,30 @@ impl Host {
         if current.prompt.is_none() {
             return Err(AnswerRefused::Unknown);
         }
+        // A dialog read off the screen has no hook to answer through: its
+        // option's number and Enter go to the terminal — while the screen
+        // still shows it, read again now rather than trusted from a tick ago.
+        if let Some(agent_hooks::Prompt::Dialog { options, .. }) = &current.prompt {
+            let Some(agent_hooks::Decision::Pick(at)) = decide(current) else {
+                return Err(AnswerRefused::Unfit);
+            };
+            if at >= options.len() {
+                return Err(AnswerRefused::Unfit);
+            }
+            let rows = entry
+                .terminal
+                .with_term(|term| crate::screen::bottom_rows(term, crate::screen::DIALOG_ROWS));
+            // The same dialog, option for option: a number means nothing
+            // against a list that has changed since the phone saw it.
+            match crate::screen::codex_rate_limit(&rows) {
+                Some(dialog) if dialog.options == *options => {}
+                _ => return Err(AnswerRefused::Changed),
+            }
+            return entry
+                .terminal
+                .send_input(format!("{}\r", at + 1).into_bytes())
+                .map_err(|_| AnswerRefused::Gone);
+        }
         let decision = decide(current).ok_or(AnswerRefused::Unfit)?;
         self.prompts
             .resolve(&key, current, &decision)
@@ -444,6 +549,44 @@ impl Host {
                 agent_hooks::Unresolved::NotHeld => AnswerRefused::Unknown,
                 agent_hooks::Unresolved::Unfit => AnswerRefused::Unfit,
             })
+    }
+
+    /// Reads the screen of every Codex pane waiting on a prompt for a dialog
+    /// drawn over it, and puts what it finds on the pane's status — see
+    /// [`crate::screen`]. Returns whether any status changed.
+    ///
+    /// Codex only, and only while waiting: the status is scanned once, and
+    /// no terminal is touched unless one of its panes is a Codex pane on a
+    /// prompt. A read is [`crate::screen::DIALOG_ROWS`] rows under the
+    /// parser's lock, which is held for the length of a row copy.
+    fn read_codex_dialogs(&self) -> bool {
+        let waiting: Vec<String> = lock(&self.status)
+            .entries()
+            .filter(|pane| {
+                pane.state == crate::event::AgentState::AwaitingPermission
+                    && crate::agents::harness(&pane.agent).eq_ignore_ascii_case("codex")
+            })
+            .map(|pane| pane.pane.clone())
+            .collect();
+        if waiting.is_empty() {
+            return false;
+        }
+        let screens: Vec<(String, Arc<LocalTerminal>)> = lock(&self.terminals)
+            .values()
+            .filter_map(|entry| {
+                let key = entry.key.as_ref().filter(|key| waiting.contains(key))?;
+                Some((key.clone(), entry.terminal.clone()))
+            })
+            .collect();
+        let now = crate::now_ms();
+        let mut changed = false;
+        for (key, terminal) in screens {
+            let rows = terminal
+                .with_term(|term| crate::screen::bottom_rows(term, crate::screen::DIALOG_ROWS));
+            let dialog = crate::screen::codex_rate_limit(&rows);
+            changed |= lock(&self.status).screen_dialog(&key, dialog, now);
+        }
+        changed
     }
 
     /// Whether the question or plan in `pane` can be answered from a phone:
@@ -458,21 +601,35 @@ impl Host {
 
     /// Lets go of held hooks whose prompt the pane is no longer showing —
     /// answered at the desktop, or replaced — so each one's script ends and
-    /// prints nothing, rather than an answer arriving late.
-    fn release_prompts(&self) {
+    /// prints nothing, rather than an answer arriving late. A hook whose
+    /// script died while the status still showed its prompt is the prompt
+    /// being dismissed unanswered, which Claude never reports; the status is
+    /// told so the row stops saying "waiting". Returns whether it changed.
+    fn release_prompts(&self) -> bool {
         if self.prompts.is_empty() {
-            return;
+            return false;
         }
         let status = lock(&self.status).snapshot();
-        self.prompts.release_unless(|key, asked| {
+        let dismissed = self.prompts.release_unless(|key, asked| {
             status.panes.iter().any(|pane| {
                 pane.pane == key
                     && pane.state == crate::event::AgentState::AwaitingPermission
-                    && pane.question.as_ref().is_some_and(|question| {
-                        question.tool == asked.tool && question.subject == asked.subject
-                    })
+                    && [pane.question.as_ref(), pane.covered.as_ref()]
+                        .into_iter()
+                        .flatten()
+                        .any(|question| {
+                            question.tool == asked.tool && question.subject == asked.subject
+                        })
             })
         });
+        if dismissed.is_empty() {
+            return false;
+        }
+        let now = crate::now_ms();
+        let mut status = lock(&self.status);
+        dismissed.iter().fold(false, |changed, (pane, asked)| {
+            status.prompt_gone(pane, asked, now) || changed
+        })
     }
 
     /// Hands new work from a phone to one window, which creates the worktree
@@ -483,8 +640,63 @@ impl Host {
         prompt: String,
         agent: Option<String>,
         note: Option<String>,
+        from: WorkSource,
     ) -> bool {
-        let Some(out) = greeted(&self.outs).into_iter().next() else {
+        self.hand_work(
+            project, prompt, agent, note, from, None, None, None, None, None, false,
+        )
+    }
+
+    /// Hands a phone's new work or fresh session to one desktop window.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn start_phone_session(
+        &self,
+        project: String,
+        prompt: String,
+        agent: Option<String>,
+        base: Option<String>,
+        model: Option<String>,
+        effort: Option<String>,
+        worktree: Option<String>,
+        shell: bool,
+    ) -> bool {
+        self.hand_work(
+            project,
+            prompt,
+            agent,
+            None,
+            WorkSource::Phone,
+            None,
+            base,
+            model,
+            effort,
+            worktree,
+            shell,
+        )
+    }
+
+    /// [`Host::start_work`], never handed back to `asker`: a terminal's
+    /// request comes over a connection that said hello as a window does, and
+    /// one run from the host's own executable passes for a window too.
+    #[allow(clippy::too_many_arguments)]
+    fn hand_work(
+        &self,
+        project: String,
+        prompt: String,
+        agent: Option<String>,
+        note: Option<String>,
+        from: WorkSource,
+        asker: Option<&Arc<Out>>,
+        base: Option<String>,
+        model: Option<String>,
+        effort: Option<String>,
+        worktree: Option<String>,
+        shell: bool,
+    ) -> bool {
+        let Some(out) = windows(&self.outs)
+            .into_iter()
+            .find(|out| asker.is_none_or(|asker| !Arc::ptr_eq(out, asker)))
+        else {
             return false;
         };
         let Ok(frame) = wire::json(&Reply::StartWork {
@@ -492,6 +704,12 @@ impl Host {
             prompt,
             agent,
             note,
+            from,
+            base,
+            model,
+            effort,
+            worktree,
+            shell,
         }) else {
             return false;
         };
@@ -502,7 +720,7 @@ impl Host {
     /// Hands a phone's merge to one window, which runs ket's own merge.
     /// `false` when no window is open to do it.
     pub(super) fn merge_work(&self, worktree: String) -> bool {
-        let Some(out) = greeted(&self.outs).into_iter().next() else {
+        let Some(out) = windows(&self.outs).into_iter().next() else {
             return false;
         };
         let Ok(frame) = wire::json(&Reply::MergeWork { worktree }) else {
@@ -510,6 +728,139 @@ impl Host {
         };
         out.send(&frame);
         true
+    }
+
+    /// Whether a window is open to hand a phone's work to.
+    pub(super) fn has_window(&self) -> bool {
+        !windows(&self.outs).is_empty()
+    }
+
+    /// The window to hand work for `worktree`'s agent to: one showing an
+    /// agent's terminal there, since only the window with its tab can type
+    /// into it — another would say none is running, or start a second — and
+    /// the first window when none is.
+    fn window_for(&self, worktree: &str) -> Option<Arc<Out>> {
+        let open = windows(&self.outs);
+        let agent_here = |key: &str| {
+            let mut parts = key.splitn(3, '|');
+            parts.next() == Some(worktree)
+                && parts
+                    .next()
+                    .is_some_and(|agent| !agent.is_empty() && agent != "shell")
+        };
+        let showing = lock(&self.terminals)
+            .values()
+            .filter(|entry| !entry.killed && !entry.terminal.is_closed())
+            .filter(|entry| entry.key.as_deref().is_some_and(agent_here))
+            .flat_map(|entry| entry.watchers.iter())
+            .filter(|watcher| watcher.watching())
+            .find_map(|watcher| {
+                open.iter()
+                    .find(|out| Arc::ptr_eq(out, &watcher.out))
+                    .cloned()
+            });
+        showing.or_else(|| open.into_iter().next())
+    }
+
+    /// Hands a phone's failed checks to one window and waits for the agent
+    /// to take the message, for starting it to fail, or for the window to
+    /// go — up to [`FIX_CHECKS_WAIT`], after which the agent is still
+    /// starting.
+    pub(super) fn fix_checks(&self, worktree: String, prompt: String) -> Handed {
+        let Some(out) = self.window_for(&worktree) else {
+            return Handed::Failed("open ket on your Mac to fix checks from here".into());
+        };
+        let req = self.next_fix_checks.fetch_add(1, Ordering::Relaxed);
+        let (sender, receiver) = mpsc::channel();
+        lock(&self.fix_checks_waiting).insert(req, sender);
+        if !out.reply(&Reply::FixChecks {
+            req,
+            worktree,
+            prompt,
+        }) {
+            lock(&self.fix_checks_waiting).remove(&req);
+            return Handed::Failed("the ket window closed before it could take the checks".into());
+        }
+        let deadline = Instant::now() + FIX_CHECKS_WAIT;
+        let handed = loop {
+            match receiver.recv_timeout(FIX_CHECKS_LOOK) {
+                Ok(Ok(())) => break Handed::Given,
+                Ok(Err(why)) => break Handed::Failed(why),
+                // Gone, its agent most likely with it.
+                Err(_) if !out.alive.load(Ordering::Acquire) => {
+                    break Handed::Failed(
+                        "the ket window closed before the agent took the checks".into(),
+                    );
+                }
+                Err(_) if Instant::now() >= deadline => break Handed::Starting,
+                Err(_) => {}
+            }
+        };
+        lock(&self.fix_checks_waiting).remove(&req);
+        handed
+    }
+
+    /// Delivers the window's answer to the phone's waiting request.
+    pub(super) fn finish_fix_checks(&self, req: u64, error: Option<String>) {
+        if let Some(waiting) = lock(&self.fix_checks_waiting).remove(&req) {
+            let _ = waiting.send(error.map_or(Ok(()), Err));
+        }
+    }
+
+    /// Hands a phone's review to the window showing the worktree's agent —
+    /// see [`Host::window_for`] — which writes it into one message for the
+    /// agent, and waits up to [`REVIEW_WAIT`] for the window to say the agent
+    /// has it. `Err` says why not, as the phone is told it.
+    pub(super) fn send_review(
+        &self,
+        worktree: String,
+        base: Option<String>,
+        comments: Vec<wire::PhoneReviewComment>,
+    ) -> std::result::Result<(), String> {
+        let Some(out) = self.window_for(&worktree) else {
+            return Err("open ket on your Mac to send a review from here".into());
+        };
+        let req = self.next_review.fetch_add(1, Ordering::Relaxed);
+        let (sender, receiver) = mpsc::channel();
+        lock(&self.review_waiting).insert(req, sender);
+        let taken_by = REVIEW_WAIT.saturating_sub(REVIEW_GRACE);
+        let until_ms =
+            crate::now_ms().saturating_add(u64::try_from(taken_by.as_millis()).unwrap_or(u64::MAX));
+        if !out.reply(&Reply::SendReview {
+            req,
+            worktree,
+            base,
+            comments,
+            until_ms,
+        }) {
+            lock(&self.review_waiting).remove(&req);
+            return Err("the ket window closed before it could take the review".into());
+        }
+        let deadline = Instant::now() + REVIEW_WAIT;
+        let sent = loop {
+            match receiver.recv_timeout(FIX_CHECKS_LOOK) {
+                Ok(answer) => break answer,
+                Err(_) if !out.alive.load(Ordering::Acquire) => {
+                    break Err("the ket window closed before it took the review".into());
+                }
+                // Too late for the window to send it now: see `until_ms`.
+                Err(_) if Instant::now() >= deadline => {
+                    break Err(
+                        "ket on your Mac didn't answer in time, so the review wasn't sent".into(),
+                    );
+                }
+                Err(_) => {}
+            }
+        };
+        lock(&self.review_waiting).remove(&req);
+        sent
+    }
+
+    /// Delivers the window's answer to the phone's waiting review.
+    pub(super) fn finish_send_review(&self, req: u64, error: Option<String>) {
+        if let Some(waiting) = lock(&self.review_waiting).remove(&req) {
+            let _ = waiting.send(error.map_or(Ok(()), Err));
+        }
     }
 
     /// An ambiguous Escape sent to a terminal by a phone.
@@ -619,6 +970,11 @@ impl Host {
             usage: Mutex::new(Vec::new()),
             agents: Mutex::new(Vec::new()),
             theme: Mutex::new(None),
+            pull_requests: Mutex::new(Vec::new()),
+            fix_checks_waiting: Mutex::new(BTreeMap::new()),
+            next_fix_checks: AtomicU64::new(1),
+            review_waiting: Mutex::new(BTreeMap::new()),
+            next_review: AtomicU64::new(1),
         })
     }
 
@@ -647,6 +1003,28 @@ impl Host {
             },
         );
         id
+    }
+
+    /// Takes pull requests as a window's `Request::PullRequests` does.
+    pub(super) fn pull_requests_for_tests(
+        &self,
+        pull_requests: Vec<(String, crate::github::PullRequestStatus)>,
+    ) {
+        *lock(&self.pull_requests) = pull_requests;
+    }
+
+    /// A window, greeted: what the host sends it can be read from the
+    /// stream.
+    pub(super) fn window_for_tests(&self) -> UnixStream {
+        let (a, b) = UnixStream::pair().expect("a socket pair");
+        let out = Arc::new(Out {
+            stream: Mutex::new(a),
+            alive: AtomicBool::new(true),
+            greeted: AtomicBool::new(true),
+            window: true,
+        });
+        lock(&self.outs).push((u64::MAX, out));
+        b
     }
 }
 
@@ -725,6 +1103,11 @@ pub(super) fn run() -> Result<()> {
         usage: Mutex::new(Vec::new()),
         agents: Mutex::new(Vec::new()),
         theme: Mutex::new(None),
+        pull_requests: Mutex::new(Vec::new()),
+        fix_checks_waiting: Mutex::new(BTreeMap::new()),
+        next_fix_checks: AtomicU64::new(1),
+        review_waiting: Mutex::new(BTreeMap::new()),
+        next_review: AtomicU64::new(1),
     });
 
     watch_signals(host.clone());
@@ -817,6 +1200,10 @@ fn housekeeping(host: &Arc<Host>, socket: &std::path::Path) {
         if !exited.is_empty() {
             host.clear_panes(&exited);
         }
+        // A Codex pane on a prompt may have a dialog drawn over it.
+        if host.read_codex_dialogs() {
+            host.broadcast_status();
+        }
 
         let phones = host.phones().map_or(0, |phones| phones.connected());
         if host.live() > 0 || host.clients.load(Ordering::Acquire) > 0 || phones > 0 {
@@ -853,9 +1240,11 @@ fn forward_hooks(host: &Host, listener: &Listener) {
             }
         }
         // Every tick, reports or not: a held hook whose script has gone —
-        // its session ended — is let go of as well as one answered at the
-        // desktop.
-        host.release_prompts();
+        // its session ended, or its prompt was dismissed — is let go of as
+        // well as one answered at the desktop. A dismissal moves a row.
+        if host.release_prompts() {
+            host.broadcast_status();
+        }
         if reports.is_empty() && lines.is_empty() {
             continue;
         }
@@ -885,6 +1274,12 @@ fn greeted(outs: &Mutex<Vec<(u64, Arc<Out>)>>) -> Vec<Arc<Out>> {
         .collect()
 }
 
+/// Of [`greeted`], the ones that are ket windows: what work is handed to.
+/// The CLI says hello too, and a request it makes must not come back to it.
+fn windows(outs: &Mutex<Vec<(u64, Arc<Out>)>>) -> Vec<Arc<Out>> {
+    greeted(outs).into_iter().filter(|out| out.window).collect()
+}
+
 fn send_hooks(out: &Out, reports: &[HookReport], lines: &[StatusLine]) {
     for report in reports {
         out.reply(&Reply::Hook {
@@ -903,18 +1298,19 @@ fn serve_connection(host: &Arc<Host>, stream: UnixStream) {
     let Ok(write_half) = stream.try_clone() else {
         return;
     };
-    let out = Arc::new(Out {
-        stream: Mutex::new(write_half),
-        alive: AtomicBool::new(true),
-        greeted: AtomicBool::new(false),
-    });
-    let conn = host.next_conn.fetch_add(1, Ordering::Relaxed);
-    host.clients.fetch_add(1, Ordering::AcqRel);
-    lock(&host.outs).push((conn, out.clone()));
     // Whether the other end is a ket window — this host's own executable —
     // rather than anything else the same user runs. Checked once, as it
     // connects; see `window_only`.
     let window = same_program(&stream);
+    let out = Arc::new(Out {
+        stream: Mutex::new(write_half),
+        alive: AtomicBool::new(true),
+        greeted: AtomicBool::new(false),
+        window,
+    });
+    let conn = host.next_conn.fetch_add(1, Ordering::Relaxed);
+    host.clients.fetch_add(1, Ordering::AcqRel);
+    lock(&host.outs).push((conn, out.clone()));
     let mut reader = io::BufReader::new(stream);
     // Nothing is served before a `Hello` on the host's own protocol: a
     // connection that has not said which protocol it speaks is not one of
@@ -1192,6 +1588,40 @@ fn handle(host: &Arc<Host>, conn: u64, out: &Arc<Out>, request: Request) -> bool
         }
         Request::Agents { names } => {
             *lock(&host.agents) = names;
+            true
+        }
+        Request::PullRequests { pull_requests } => {
+            *lock(&host.pull_requests) = pull_requests;
+            true
+        }
+        Request::FixChecksResult { req, error } => {
+            host.finish_fix_checks(req, error);
+            true
+        }
+        Request::SendReviewResult { req, error } => {
+            host.finish_send_review(req, error);
+            true
+        }
+        Request::StartWork {
+            project,
+            prompt,
+            agent,
+            note,
+        } => {
+            let taken = host.hand_work(
+                project,
+                prompt,
+                agent,
+                note,
+                WorkSource::Cli,
+                Some(out),
+                None,
+                None,
+                None,
+                None,
+                false,
+            );
+            out.reply(&Reply::WorkTaken { taken });
             true
         }
         Request::Theme { theme } => {
@@ -1531,6 +1961,7 @@ mod tests {
             stream: Mutex::new(a),
             alive: AtomicBool::new(true),
             greeted: AtomicBool::new(false),
+            window: true,
         });
         (out, b)
     }
@@ -2267,17 +2698,30 @@ mod tests {
     }
 
     #[test]
-    fn work_and_merges_from_a_phone_go_to_a_window_and_only_when_one_is_open() {
+    fn work_merges_and_fixes_from_a_phone_go_to_a_window_and_only_when_one_is_open() {
         let host = Host::for_tests();
-        assert!(!host.start_work("p".to_owned(), "Fix it".to_owned(), None, None));
+        assert!(!host.start_work(
+            "p".to_owned(),
+            "Fix it".to_owned(),
+            None,
+            None,
+            WorkSource::Phone
+        ));
         assert!(!host.merge_work("wt".to_owned()));
+        assert!(!host.has_window());
+        assert!(matches!(
+            host.fix_checks("wt".to_owned(), "Fix it".to_owned()),
+            Handed::Failed(_)
+        ));
 
-        let (_out, mut reader) = window(&host);
+        let (out, mut reader) = window(&host);
+        assert!(host.has_window());
         assert!(host.start_work(
             "proj".to_owned(),
             "Fix the login".to_owned(),
             Some("codex".to_owned()),
             Some("note-1".to_owned()),
+            WorkSource::Phone,
         ));
         match next_reply(&mut reader) {
             Reply::StartWork {
@@ -2285,6 +2729,7 @@ mod tests {
                 prompt,
                 agent,
                 note,
+                ..
             } => {
                 assert_eq!(project, "proj");
                 assert_eq!(prompt, "Fix the login");
@@ -2298,6 +2743,61 @@ mod tests {
             Reply::MergeWork { worktree } => assert_eq!(worktree, "wt-7"),
             other => panic!("{other:?}"),
         }
+        let fixing = std::thread::spawn({
+            let host = host.clone();
+            move || host.fix_checks("wt-7".to_owned(), "The checks failed".to_owned())
+        });
+        match next_reply(&mut reader) {
+            Reply::FixChecks {
+                req,
+                worktree,
+                prompt,
+            } => {
+                assert_eq!(worktree, "wt-7");
+                assert_eq!(prompt, "The checks failed");
+                assert!(!fixing.is_finished(), "the phone still waits for the agent");
+                host.finish_fix_checks(req, None);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(fixing.join().unwrap(), Handed::Given);
+
+        let failing = std::thread::spawn({
+            let host = host.clone();
+            move || host.fix_checks("wt-7".to_owned(), "Try again".to_owned())
+        });
+        match next_reply(&mut reader) {
+            Reply::FixChecks { req, .. } => {
+                host.finish_fix_checks(req, Some("agent is not configured".to_owned()));
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(
+            failing.join().unwrap(),
+            Handed::Failed("agent is not configured".to_owned())
+        );
+
+        // A window slow to start the agent: still starting, not failed.
+        let slow = std::thread::spawn({
+            let host = host.clone();
+            move || host.fix_checks("wt-7".to_owned(), "Slowly".to_owned())
+        });
+        assert!(matches!(next_reply(&mut reader), Reply::FixChecks { .. }));
+        assert_eq!(slow.join().unwrap(), Handed::Starting);
+
+        // A window that goes while starting it: failed, at once.
+        let started = Instant::now();
+        let gone = std::thread::spawn({
+            let host = host.clone();
+            move || host.fix_checks("wt-7".to_owned(), "Then close".to_owned())
+        });
+        assert!(matches!(next_reply(&mut reader), Reply::FixChecks { .. }));
+        out.alive.store(false, Ordering::Release);
+        assert!(matches!(gone.join().unwrap(), Handed::Failed(why) if why.contains("closed")));
+        assert!(
+            started.elapsed() < FIX_CHECKS_WAIT,
+            "it did not wait the window out"
+        );
     }
 
     /// Reports that pane `key` has started a turn, as its prompt hook would.

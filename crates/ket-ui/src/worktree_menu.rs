@@ -87,6 +87,8 @@ pub(crate) enum WorktreeAction {
     ClearBuildOutput,
     /// Commit its work, push its branch and open a pull request for it.
     PullRequest,
+    /// Give its pull request's failed checks to its agent.
+    FixChecks,
     /// Hand a local agent's task to a cloud agent, in a new tab here: the
     /// one explicit step that lets a local task leave the Mac.
     Escalate,
@@ -110,6 +112,7 @@ impl WorktreeAction {
             Self::Snippets => "Send snippet",
             Self::ClearBuildOutput => "Clear build output",
             Self::PullRequest => "Push and open pull request",
+            Self::FixChecks => "Fix checks with agent",
             Self::Escalate => "Hand to a cloud agent",
             Self::Delete => "Delete",
         }
@@ -204,6 +207,10 @@ const HANDOFF: &str = "A local model has been working on a task in this worktree
 /// `primary` disables **Delete**: the repository's own checkout is not a
 /// worktree ket created, and removing it would take the project with it. It
 /// stays visible so the menu has one shape rather than two.
+///
+/// `failed_checks` is how many of its pull request's checks failed, which
+/// **Fix checks with agent** says and is disabled without.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn worktree_menu(
     at: Point<Pixels>,
     primary: bool,
@@ -211,6 +218,7 @@ pub(crate) fn worktree_menu(
     token_reduction: u8,
     build_bytes: Option<u64>,
     escalate_to: Option<SharedString>,
+    failed_checks: usize,
     t: &Theme,
 ) -> OpenMenu<WorktreeAction> {
     let clear_build = match build_bytes.filter(|bytes| *bytes > 0) {
@@ -266,6 +274,17 @@ pub(crate) fn worktree_menu(
                     pull_request.disabled()
                 } else {
                     pull_request
+                }
+            }),
+            // Beside it, since it is about the pull request that opens, and
+            // disabled until one of its checks has failed.
+            MenuEntry::Item({
+                let fix = MenuItem::new(WorktreeAction::FixChecks, "Fix checks with agent")
+                    .icon(Icon::CircleX);
+                if failed_checks == 0 {
+                    fix.disabled()
+                } else {
+                    fix.subtitle(format!("{failed_checks} failed"))
                 }
             }),
             // Named with its current level rather than just "Economy":
@@ -517,6 +536,10 @@ impl Shell {
         let escalate_to = self
             .escalation_target(node.agent.as_ref().map(|agent| agent.as_ref()))
             .map(|agent| crate::ui::agent::agent_label(&agent).into());
+        let failed_checks = self
+            .pull_requests
+            .of(&node.id)
+            .map_or(0, |open| open.failed().count());
         self.worktree_menu = Some(worktree_menu(
             at,
             node.primary,
@@ -524,6 +547,7 @@ impl Shell {
             node.token_reduction,
             build_bytes,
             escalate_to,
+            failed_checks,
             &self.theme,
         ));
     }
@@ -557,6 +581,10 @@ impl Shell {
             WorktreeAction::PullRequest => {
                 self.popup = None;
                 self.request_pull_request(target, cx);
+            }
+            WorktreeAction::FixChecks => {
+                self.popup = None;
+                self.fix_checks(target.id, cx);
             }
             WorktreeAction::Escalate => {
                 self.popup = None;
@@ -1383,6 +1411,10 @@ mod tests {
 
     /// The menu under test, at the default token-reduction level.
     fn default_menu(primary: bool) -> OpenMenu<WorktreeAction> {
+        menu_with_failed_checks(primary, 0)
+    }
+
+    fn menu_with_failed_checks(primary: bool, failed: usize) -> OpenMenu<WorktreeAction> {
         worktree_menu(
             Point::default(),
             primary,
@@ -1390,8 +1422,29 @@ mod tests {
             ket_core::worktree::default_token_reduction(),
             None,
             None,
+            failed,
             &Theme::dark(),
         )
+    }
+
+    #[test]
+    fn fixing_checks_waits_for_one_to_fail_and_says_how_many() {
+        // Whether it can be picked, and what it says beside its name.
+        let fix = |failed: usize| {
+            let menu = menu_with_failed_checks(false, failed);
+            let item = menu
+                .sections()
+                .into_iter()
+                .flatten()
+                .find(|item| item.title == "Fix checks with agent")
+                .expect("Fix checks with agent is in the menu");
+            (
+                item.enabled,
+                item.subtitle.as_ref().map(ToString::to_string),
+            )
+        };
+        assert_eq!(fix(0), (false, None));
+        assert_eq!(fix(2), (true, Some("2 failed".to_owned())));
     }
 
     #[test]

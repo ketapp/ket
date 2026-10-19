@@ -21,6 +21,12 @@
 //! one "ask before `git push`" cannot be undone for a project by accident.
 //! Nothing matching anywhere is no ruling: the agent's own settings decide.
 //!
+//! A prompt the rules leave to a person — no ruling, or an ask — goes past
+//! the `agent.permission_requested` hooks first (see [`crate::hook`]). One
+//! that exits non-zero refuses the call, with what it printed as the reason,
+//! and the ruling names it as [`Scope::Hook`]; one that exits `0` lets the
+//! prompt through. A hook never allows a call. Claude Code only.
+//!
 //! Enforced from the agent's hook, which runs this binary with
 //! [`HOOK_ARG`] for every call — see [`serve_if_asked`]. Claude Code takes a
 //! deny or an ask before the tool runs (`PreToolUse`) and an allow only when
@@ -63,6 +69,9 @@ pub const WORKTREE_ROOT_ENV: &str = "KET_WORKTREE_ROOT";
 /// this is far above the filter's bound; past it the call goes unruled.
 const MAX_STDIN: usize = 16 * 1024 * 1024;
 
+/// The most of a refusing hook's output the agent is told, in characters.
+const HOOK_REASON_MAX: usize = 200;
+
 /// What a rule says about a call.
 ///
 /// Ordered by strictness, which is what [`RuleSet::evaluate`] takes the
@@ -101,6 +110,8 @@ pub enum Scope {
     Project,
     /// The person's rules for every project.
     Global,
+    /// A lifecycle hook — see [`crate::hook`].
+    Hook,
 }
 
 impl Scope {
@@ -111,6 +122,7 @@ impl Scope {
             Scope::Repo => "repository",
             Scope::Project => "project",
             Scope::Global => "global",
+            Scope::Hook => "hook",
         }
     }
 }
@@ -476,7 +488,10 @@ pub struct Ruling {
 impl Ruling {
     /// What the agent and the person are told: the reason, and which rule.
     pub fn explanation(&self) -> String {
-        let which = format!("{} rule {}", self.scope.label(), self.index + 1);
+        let which = match self.scope {
+            Scope::Hook => format!("hook {}", self.index + 1),
+            scope => format!("{} rule {}", scope.label(), self.index + 1),
+        };
         match self.reason.as_deref() {
             Some(reason) => format!("ket: {reason} ({which})"),
             None => format!("ket: {which}"),
@@ -556,6 +571,367 @@ impl RuleSet {
         }
         best
     }
+
+    /// These rules in OpenCode's own spelling, for its `permissions` config:
+    /// ket has no hook into OpenCode, so OpenCode is told the rules and
+    /// enforces them itself.
+    ///
+    /// Only ask and deny: an allow would override a deny in the person's own
+    /// OpenCode config, and ket only ever tightens what an agent may do.
+    /// OpenCode lets the last matching rule win, so asks come first and
+    /// denies after them, and each scope's list is reversed — the first rule
+    /// in it is the one that ends up last. Where a list puts an allow ahead
+    /// of a deny that also matches, OpenCode denies.
+    ///
+    /// One place it cannot match ket: OpenCode rules `grep` and `glob` by the
+    /// search, not the files searched, so a path rule cannot reach them. A
+    /// path ask therefore asks before every affected search; a path deny
+    /// denies every affected search, since asking would let it be overridden.
+    pub fn opencode_permissions(
+        &self,
+        worktree: Option<&Path>,
+        home: Option<&Path>,
+    ) -> Vec<serde_json::Value> {
+        let mut asks = Vec::new();
+        let mut denies = Vec::new();
+        let mut search_guards = BTreeMap::<String, Verdict>::new();
+        for (_, rules) in &self.scopes {
+            for rule in rules.iter().rev() {
+                let bucket = match rule.decision {
+                    Verdict::Allow => continue,
+                    Verdict::Ask => &mut asks,
+                    Verdict::Deny => &mut denies,
+                };
+                if !rule.path.is_empty() {
+                    for action in rule.tool.0.iter().flat_map(|tool| opencode_actions(tool)) {
+                        if matches!(action.as_str(), "grep" | "glob") {
+                            search_guards
+                                .entry(action)
+                                .and_modify(|verdict| *verdict = (*verdict).max(rule.decision))
+                                .or_insert(rule.decision);
+                        }
+                    }
+                }
+                for (action, resource) in opencode_pairs(rule, worktree, home) {
+                    bucket.push(serde_json::json!({
+                        "action": action,
+                        "resource": resource,
+                        "effect": rule.decision.as_str(),
+                    }));
+                }
+            }
+        }
+        for (action, verdict) in search_guards {
+            let bucket = if verdict == Verdict::Deny {
+                &mut denies
+            } else {
+                &mut asks
+            };
+            bucket.push(serde_json::json!({
+                "action": action,
+                "resource": "*",
+                "effect": verdict.as_str(),
+            }));
+        }
+        asks.extend(denies);
+        asks
+    }
+}
+
+/// `config`, an OpenCode inline config (`OPENCODE_CONFIG_CONTENT`) or none,
+/// with `rules` added after any permissions it already has — last, so they
+/// win — and after each of `agents`' own. OpenCode appends an agent's rules
+/// after the config's, so a rule only at the top would lose to an agent's
+/// allow. Denies also become `tool.use` policies: OpenCode applies those
+/// after agent permissions and saved approvals, so they cannot be lifted.
+pub fn with_opencode_permissions(
+    config: Option<&str>,
+    rules: Vec<serde_json::Value>,
+    agents: &[String],
+) -> String {
+    fn append(table: &mut serde_json::Value, rules: &[serde_json::Value]) {
+        let Some(table) = table.as_object_mut() else {
+            return;
+        };
+        let permissions = table
+            .entry("permissions")
+            .or_insert_with(|| serde_json::json!([]));
+        match permissions.as_array_mut() {
+            Some(list) => list.extend(rules.iter().cloned()),
+            None => *permissions = serde_json::Value::Array(rules.to_vec()),
+        }
+    }
+    let mut config = config
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok())
+        .filter(serde_json::Value::is_object)
+        .unwrap_or_else(|| serde_json::json!({}));
+    let hard_denies: Vec<_> = rules
+        .iter()
+        .filter(|rule| rule["effect"] == "deny")
+        .filter_map(|rule| {
+            Some(serde_json::json!({
+                "action": "tool.use",
+                "resource": format!("{}:{}", rule["action"].as_str()?, rule["resource"].as_str()?),
+                "effect": "deny",
+            }))
+        })
+        .collect();
+    append(&mut config, &rules);
+    if !hard_denies.is_empty() {
+        let policies = config
+            .as_object_mut()
+            .expect("an object")
+            .entry("policies")
+            .or_insert_with(|| serde_json::json!([]));
+        match policies.as_array_mut() {
+            Some(list) => list.extend(hard_denies),
+            None => *policies = serde_json::Value::Array(hard_denies),
+        }
+    }
+    if !agents.is_empty() {
+        let table = config
+            .as_object_mut()
+            .expect("an object")
+            .entry("agents")
+            .or_insert_with(|| serde_json::json!({}));
+        if let Some(table) = table.as_object_mut() {
+            for agent in agents {
+                let entry = table
+                    .entry(agent.clone())
+                    .or_insert_with(|| serde_json::json!({}));
+                append(entry, &rules);
+            }
+        }
+    }
+    config.to_string()
+}
+
+/// The agents OpenCode at `opencode` has in `directory`, a project's own
+/// included. Uses the same inline config as the launch. An incomplete list
+/// must be an error: a custom agent's own allow can override a global rule.
+/// An answer that lists no agent at all is asked for once more — an OpenCode
+/// service answers for a directory it is opening for the first time before
+/// it has listed any agent — and an id set still empty after that, the
+/// inline config's own agents included, is an error.
+pub fn opencode_agents(
+    opencode: &Path,
+    launch_command: &str,
+    directory: &Path,
+    inline: Option<&str>,
+) -> Result<Vec<String>> {
+    // An override may be an alias or a wrapper command. In that case ask the
+    // same interactive shell that launches it, rather than trying to exec the
+    // text `command -v` printed for an alias or dropping wrapper arguments.
+    let direct = opencode.is_file() && launch_command.split_whitespace().count() == 1;
+    let marker = "__KET_OPENCODE_AGENTS_JSON__";
+    // One `debug agents` run, the ids it listed.
+    let ask = || -> Result<std::collections::BTreeSet<String>> {
+        let mut command = if direct {
+            let mut command = std::process::Command::new(opencode);
+            command.args(["debug", "agents"]);
+            command
+        } else {
+            let mut command = std::process::Command::new(crate::shell::login_shell());
+            command.args([
+                "-i",
+                "-c",
+                &format!("printf '{marker}\\n'; {launch_command} debug agents"),
+            ]);
+            command
+        };
+        command
+            .current_dir(directory)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null());
+        if let Some(inline) = inline {
+            command.env("OPENCODE_CONFIG_CONTENT", inline);
+        }
+        let mut child = command
+            .spawn()
+            .map_err(|e| KetError::Config(format!("could not inspect OpenCode agents: {e}")))?;
+        // Drain concurrently: `debug agents` writes whole agent definitions, and
+        // a full pipe would otherwise keep the child from exiting until timeout.
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| KetError::Config("OpenCode did not provide agent output".to_owned()))?;
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut out = Vec::new();
+            let mut limited = std::io::Read::take(stdout, 2 * 1024 * 1024);
+            let result = std::io::Read::read_to_end(&mut limited, &mut out).map(|_| out);
+            let _ = sender.send(result);
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break status,
+                Ok(None) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                _ => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(KetError::Config(
+                        "OpenCode did not list its agents in time".to_owned(),
+                    ));
+                }
+            }
+        };
+        if !status.success() {
+            return Err(KetError::Config(format!(
+                "OpenCode could not list its agents ({status})"
+            )));
+        }
+        let out = receiver
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .map_err(|_| KetError::Config("OpenCode agent output did not finish".to_owned()))?
+            .map_err(|e| KetError::Config(format!("could not read OpenCode agents: {e}")))?;
+        let out = if direct {
+            out.as_slice()
+        } else {
+            let Some(at) = out
+                .windows(marker.len())
+                .position(|window| window == marker.as_bytes())
+            else {
+                return Err(KetError::Config(
+                    "OpenCode's shell did not start agent discovery".to_owned(),
+                ));
+            };
+            &out[at + marker.len()..]
+        };
+        let listed: Vec<serde_json::Value> = serde_json::from_slice(out)
+            .map_err(|e| KetError::Config(format!("could not parse OpenCode agents: {e}")))?;
+        let ids: std::collections::BTreeSet<String> = listed
+            .iter()
+            .filter_map(|agent| agent.get("id")?.as_str().map(str::to_owned))
+            .collect();
+        Ok(ids)
+    };
+    let mut ids = ask()?;
+    if ids.is_empty() {
+        // A background OpenCode service answers `debug agents` for a
+        // directory it is opening for the first time before that opening has
+        // finished, with no agent listed yet. The ask itself is what finishes
+        // opening it, so ask again rather than take the empty list as the
+        // answer: a working OpenCode always lists its built-in agents, so one
+        // that comes back empty twice is a real error, not a late boot.
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        ids = ask()?;
+    }
+    // A running OpenCode service can answer `debug agents` using an older
+    // config. Inline agent definitions still need ket's rules on this launch.
+    if let Some(inline) = inline
+        && let Ok(config) = serde_json::from_str::<serde_json::Value>(inline)
+        && let Some(agents) = config.get("agents").and_then(serde_json::Value::as_object)
+    {
+        ids.extend(agents.keys().cloned());
+    }
+    if ids.is_empty() {
+        return Err(KetError::Config("OpenCode listed no agents".to_owned()));
+    }
+    Ok(ids.into_iter().collect())
+}
+
+/// The OpenCode actions a tool pattern covers. A Claude Code tool with no
+/// OpenCode counterpart covers none.
+fn opencode_actions(pattern: &str) -> Vec<String> {
+    let names: &[&str] = match pattern {
+        "*" => &[
+            "shell",
+            "read",
+            "glob",
+            "grep",
+            "edit",
+            "webfetch",
+            "websearch",
+        ],
+        "shell" | "Bash" => &["shell"],
+        "read" => &["read", "glob", "grep"],
+        "Read" | "LS" | "NotebookRead" => &["read"],
+        "Glob" => &["glob"],
+        "Grep" => &["grep"],
+        "edit" | "Edit" | "Write" | "MultiEdit" | "NotebookEdit" => &["edit"],
+        "web" => &["webfetch", "websearch"],
+        "WebFetch" => &["webfetch"],
+        "WebSearch" => &["websearch"],
+        other => {
+            // An MCP tool: Claude's `mcp__<server>__<tool>` is OpenCode's
+            // `<server>_<tool>`.
+            return other
+                .strip_prefix("mcp__")
+                .map(|rest| vec![rest.replacen("__", "_", 1)])
+                .unwrap_or_default();
+        }
+    };
+    names.iter().map(|name| (*name).to_owned()).collect()
+}
+
+/// A path pattern as OpenCode reads it: anchored the way ket anchors it, and
+/// with `**` written `*`, since OpenCode's `*` already crosses `/`. That
+/// makes a single `*` cross it too — wider, which an ask or a deny can
+/// afford.
+fn opencode_path(pattern: &str, worktree: Option<&Path>, home: Option<&Path>) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(anchored) = anchor(pattern, worktree, home) {
+        out.push(anchored.replace("**", "*"));
+    }
+    // OpenCode may name a file relative to where it runs.
+    if !pattern.starts_with('/') && !pattern.starts_with("~/") {
+        out.push(pattern.replace("**", "*"));
+    }
+    out
+}
+
+/// Every (action, resource) pair one rule becomes.
+fn opencode_pairs(
+    rule: &Rule,
+    worktree: Option<&Path>,
+    home: Option<&Path>,
+) -> Vec<(String, String)> {
+    let actions: Vec<String> = rule
+        .tool
+        .0
+        .iter()
+        .flat_map(|t| opencode_actions(t))
+        .collect();
+    let mut pairs = Vec::new();
+    if rule.outside_worktree {
+        if !actions.is_empty() {
+            pairs.push(("external_directory".to_owned(), "*".to_owned()));
+        }
+        return pairs;
+    }
+    for action in &actions {
+        let shell = action == "shell";
+        // `grep` and `glob` are ruled by the search, not the files — see
+        // `RuleSet::opencode_permissions`.
+        let files = matches!(action.as_str(), "read" | "edit");
+        if !rule.command.is_empty() {
+            if shell {
+                pairs.extend(rule.command.0.iter().map(|c| (action.clone(), c.clone())));
+            }
+        } else if !rule.path.is_empty() {
+            if files {
+                for pattern in &rule.path.0 {
+                    for resource in opencode_path(pattern, worktree, home) {
+                        pairs.push((action.clone(), resource));
+                    }
+                }
+            }
+        } else if !rule.domain.is_empty() {
+            if action == "webfetch" {
+                for domain in &rule.domain.0 {
+                    pairs.push((action.clone(), format!("*://{domain}")));
+                    pairs.push((action.clone(), format!("*://{domain}/*")));
+                }
+            }
+        } else {
+            pairs.push((action.clone(), "*".to_owned()));
+        }
+    }
+    pairs
 }
 
 /// What one call offers a rule to match on.
@@ -1198,13 +1574,99 @@ pub fn hook_answer(payload: &serde_json::Value, agent: &str) -> Option<String> {
     });
     let rules = RuleSet::load(project.as_deref(), root.as_deref(), home.as_deref()).ok()?;
     let empty = serde_json::Value::Null;
-    let ruling = rules.evaluate(&Request {
+    let mut ruling = rules.evaluate(&Request {
         tool,
         input: payload.get("tool_input").unwrap_or(&empty),
         worktree: worktree.as_deref(),
         home: home.as_deref(),
-    })?;
-    claude_output(event, &ruling)
+    });
+    if event == "PermissionRequest"
+        && ruling.as_ref().is_none_or(|r| r.verdict == Verdict::Ask)
+        && let Some(denied) = hook_ruling(payload, tool, project.as_deref(), root.as_deref())
+    {
+        ruling = Some(denied);
+    }
+    claude_output(event, &ruling?)
+}
+
+/// What the `agent.permission_requested` hooks make of a prompt the rules
+/// left to a person: a deny when one refused, `None` when every one let it
+/// through, none is configured, or one could not be run.
+///
+/// The repository's hooks run only when its automation is trusted, as every
+/// other hook point's do; the store is read only when there is a `.ket.toml`
+/// to trust.
+fn hook_ruling(
+    payload: &serde_json::Value,
+    tool: &str,
+    project: Option<&str>,
+    root: Option<&Path>,
+) -> Option<Ruling> {
+    use crate::config::{Config, HookConfig};
+    use crate::hook::{self, HookPoint, ProcessHookSpawner};
+
+    let config = Config::load().ok()?;
+    let repo = match (project, root) {
+        (Some(project), Some(root)) if root.join(".ket.toml").is_file() => {
+            let trusted = crate::store::Store::open_default()
+                .ok()?
+                .load()
+                .ok()?
+                .trusted_automation
+                .contains(&crate::id::ProjectId::new(project));
+            if trusted {
+                HookConfig::for_repo(root).unwrap_or_default()
+            } else {
+                HookConfig::default()
+            }
+        }
+        _ => HookConfig::default(),
+    };
+    if repo.agent_permission_requested.is_empty()
+        && config.hooks.agent_permission_requested.is_empty()
+    {
+        return None;
+    }
+
+    let null = serde_json::Value::Null;
+    let field = |name: &str| payload.get(name).unwrap_or(&null);
+    let context = serde_json::json!({
+        "sessionId": field("session_id"),
+        "worktreeId": std::env::var(crate::agent_hooks::WORKTREE_ENV).ok().filter(|id| !id.is_empty()),
+        "projectId": project,
+        "agent": "claude",
+        "tool": tool,
+        "input": field("tool_input"),
+        "cwd": field("cwd"),
+    });
+    let blocked = hook::check(
+        HookPoint::AgentPermissionRequested,
+        &repo,
+        &config.hooks,
+        &context,
+        &ProcessHookSpawner,
+    )
+    .ok()??;
+    Some(hook_refusal(&blocked))
+}
+
+/// The deny a refusing hook gives: the first line it printed as the reason,
+/// cut to [`HOOK_REASON_MAX`] characters, or its command when it printed
+/// nothing.
+fn hook_refusal(blocked: &crate::hook::Blocked) -> Ruling {
+    let said = blocked
+        .exit
+        .stdout
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(|line| line.chars().take(HOOK_REASON_MAX).collect());
+    Ruling {
+        verdict: Verdict::Deny,
+        scope: Scope::Hook,
+        index: blocked.index,
+        reason: Some(said.unwrap_or_else(|| format!("blocked by hook {}", blocked.command))),
+    }
 }
 
 /// Runs as the permission hook and exits, if this process was started as one.
@@ -1293,6 +1755,281 @@ mod tests {
                 home: Some(Path::new("/home/me")),
             })
             .map(|ruling| ruling.verdict)
+    }
+
+    /// What OpenCode is told, as (action, resource, effect) triples.
+    fn opencode(rules: &RuleSet) -> Vec<(String, String, String)> {
+        rules
+            .opencode_permissions(Some(Path::new("/work/tree")), Some(Path::new("/home/me")))
+            .iter()
+            .map(|rule| {
+                let field = |key: &str| rule[key].as_str().unwrap().to_owned();
+                (field("action"), field("resource"), field("effect"))
+            })
+            .collect()
+    }
+
+    fn told(action: &str, resource: &str, effect: &str) -> (String, String, String) {
+        (action.to_owned(), resource.to_owned(), effect.to_owned())
+    }
+
+    #[test]
+    fn opencode_is_told_asks_then_denies_with_each_list_reversed_and_no_allows() {
+        let rules = set(
+            vec![
+                command("git push *", Verdict::Ask),
+                command("cargo test *", Verdict::Allow),
+                command("rm -rf *", Verdict::Deny),
+                command("curl *", Verdict::Ask),
+            ],
+            vec![command("npm publish *", Verdict::Deny)],
+            vec![],
+        );
+        // The last match wins in OpenCode: a list's first rule comes last
+        // within its effect, and any deny comes after every ask.
+        assert_eq!(
+            opencode(&rules),
+            vec![
+                told("shell", "curl *", "ask"),
+                told("shell", "git push *", "ask"),
+                told("shell", "npm publish *", "deny"),
+                told("shell", "rm -rf *", "deny"),
+            ]
+        );
+    }
+
+    #[test]
+    fn each_kind_of_rule_reaches_opencode_in_its_spelling() {
+        let rules = set(
+            vec![
+                path("edit", "secrets/**", Verdict::Deny),
+                Rule {
+                    domain: Patterns::one("example.com"),
+                    ..rule("WebFetch", Verdict::Ask)
+                },
+                Rule {
+                    outside_worktree: true,
+                    ..rule("edit", Verdict::Ask)
+                },
+                rule("mcp__github__create_issue", Verdict::Deny),
+                rule("TodoWrite", Verdict::Deny),
+            ],
+            vec![],
+            vec![],
+        );
+        let told_opencode = opencode(&rules);
+        for expected in [
+            told("edit", "/work/tree/secrets/*", "deny"),
+            told("edit", "secrets/*", "deny"),
+            told("webfetch", "*://example.com", "ask"),
+            told("webfetch", "*://example.com/*", "ask"),
+            told("external_directory", "*", "ask"),
+            told("github_create_issue", "*", "deny"),
+        ] {
+            assert!(
+                told_opencode.contains(&expected),
+                "{expected:?} in {told_opencode:?}"
+            );
+        }
+        // A tool OpenCode has no counterpart for says nothing to it.
+        assert_eq!(told_opencode.len(), 6);
+    }
+
+    #[test]
+    fn a_path_deny_on_reading_denies_every_search_it_could_reach() {
+        let rules = set(
+            vec![path("read", "secrets/**", Verdict::Deny)],
+            vec![],
+            vec![],
+        );
+        let told_opencode = opencode(&rules);
+        assert!(told_opencode.contains(&told("read", "/work/tree/secrets/*", "deny")));
+        // Searches are ruled by what is searched for, not where.
+        assert!(!told_opencode.iter().any(|(action, resource, _)| {
+            matches!(action.as_str(), "grep" | "glob") && resource != "*"
+        }));
+        assert!(told_opencode.contains(&told("grep", "*", "deny")));
+        assert!(told_opencode.contains(&told("glob", "*", "deny")));
+    }
+
+    #[test]
+    fn a_path_ask_affects_only_its_search_tool_and_a_deny_wins() {
+        let rules = set(
+            vec![
+                path("Grep", "reports/**", Verdict::Ask),
+                path("Grep", "secrets/**", Verdict::Deny),
+            ],
+            vec![],
+            vec![],
+        );
+        let told_opencode = opencode(&rules);
+        assert!(told_opencode.contains(&told("grep", "*", "deny")));
+        assert!(!told_opencode.iter().any(|(action, _, _)| action == "glob"));
+    }
+
+    #[test]
+    fn opencode_permissions_go_after_a_configs_own() {
+        let rule = json!({ "action": "shell", "resource": "rm *", "effect": "deny" });
+        let merged = with_opencode_permissions(
+            Some(
+                r#"{"model":"ollama/m","permissions":[{"action":"read","resource":"*","effect":"allow"}],"policies":[{"action":"provider.use","resource":"*","effect":"deny"}]}"#,
+            ),
+            vec![rule.clone()],
+            &["build".to_owned()],
+        );
+        let merged: serde_json::Value = serde_json::from_str(&merged).unwrap();
+        assert_eq!(merged["model"], "ollama/m");
+        assert_eq!(merged["permissions"].as_array().unwrap().len(), 2);
+        assert_eq!(merged["permissions"][1], rule);
+        // An agent's own rules come after the config's, so ket's go there too.
+        assert_eq!(merged["agents"]["build"]["permissions"], json!([rule]));
+        assert_eq!(
+            merged["policies"],
+            json!([
+                { "action": "provider.use", "resource": "*", "effect": "deny" },
+                { "action": "tool.use", "resource": "shell:rm *", "effect": "deny" },
+            ])
+        );
+        let fresh: serde_json::Value =
+            serde_json::from_str(&with_opencode_permissions(None, vec![rule.clone()], &[]))
+                .unwrap();
+        assert_eq!(
+            fresh,
+            json!({
+                "permissions": [rule],
+                "policies": [{ "action": "tool.use", "resource": "shell:rm *", "effect": "deny" }],
+            })
+        );
+    }
+
+    /// A throwaway directory and an executable `opencode` script in it that
+    /// runs `body`, for `opencode_agents` against a scripted OpenCode.
+    fn scripted(name: &str, body: &str) -> (PathBuf, PathBuf) {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "ket-opencode-{name}-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("opencode");
+        std::fs::write(&script, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+        (dir, script)
+    }
+
+    #[test]
+    fn agent_discovery_uses_inline_config_and_drains_large_output() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "ket-opencode-agents-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("opencode");
+        let inline = r#"{"agents":{"custom":{"permissions":[]}}}"#;
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\n[ \"$OPENCODE_CONFIG_CONTENT\" = '{}' ] || exit 1\ncat agents.json\n",
+                inline
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let many: Vec<_> = (0..5_000)
+            .map(|n| json!({ "id": format!("agent-{n}") }))
+            .collect();
+        std::fs::write(dir.join("agents.json"), serde_json::to_vec(&many).unwrap()).unwrap();
+
+        let found = opencode_agents(&script, script.to_str().unwrap(), &dir, Some(inline)).unwrap();
+        assert_eq!(found.len(), many.len() + 1);
+        assert!(found.contains(&"custom".to_owned()));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn agent_discovery_asks_again_when_the_first_answer_lists_none() {
+        // A first answer of none, as an OpenCode service still opening the
+        // directory gives; the second has the agents.
+        let (dir, script) = scripted(
+            "asks-again",
+            r#"if [ -e asked ]; then printf '[{"id":"build"}]'; else touch asked; printf '[]'; fi"#,
+        );
+
+        let found = opencode_agents(&script, script.to_str().unwrap(), &dir, None).unwrap();
+        assert_eq!(found, vec!["build".to_owned()]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn agent_discovery_errors_when_no_agent_is_ever_listed() {
+        // An OpenCode that never lists an agent is a real error — but only
+        // after asking once more, the way a late answer is asked for.
+        let (dir, script) = scripted(
+            "never-listed",
+            r#"echo x >> runs
+printf '[]'"#,
+        );
+
+        let error = opencode_agents(&script, script.to_str().unwrap(), &dir, None).unwrap_err();
+        assert_eq!(error.to_string(), "config: OpenCode listed no agents");
+        let asked = std::fs::read_to_string(dir.join("runs"))
+            .unwrap()
+            .lines()
+            .count();
+        assert_eq!(asked, 2);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn agent_discovery_keeps_the_inline_agents_when_no_agent_is_listed() {
+        // The inline config's own agents keep the launch going when none are
+        // listed — and the empty answer is still asked about once more
+        // rather than settled for.
+        let (dir, script) = scripted(
+            "inline-agents",
+            r#"echo x >> runs
+printf '[]'"#,
+        );
+        let inline = r#"{"agents":{"custom":{"permissions":[]}}}"#;
+
+        let found = opencode_agents(&script, script.to_str().unwrap(), &dir, Some(inline)).unwrap();
+        assert_eq!(found, vec!["custom".to_owned()]);
+        let asked = std::fs::read_to_string(dir.join("runs"))
+            .unwrap()
+            .lines()
+            .count();
+        assert_eq!(asked, 2);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn agent_discovery_asks_once_when_the_first_answer_lists_agents() {
+        // A complete first answer is not asked about again.
+        let (dir, script) = scripted(
+            "asks-once",
+            r#"echo x >> runs
+printf '[{"id":"build"}]'"#,
+        );
+
+        let found = opencode_agents(&script, script.to_str().unwrap(), &dir, None).unwrap();
+        assert_eq!(found, vec!["build".to_owned()]);
+        let asked = std::fs::read_to_string(dir.join("runs"))
+            .unwrap()
+            .lines()
+            .count();
+        assert_eq!(asked, 1);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -1632,6 +2369,67 @@ mod tests {
         );
         assert!(claude_output("PermissionRequest", &ruling(Verdict::Ask)).is_none());
         assert!(claude_output("PostToolUse", &ruling(Verdict::Deny)).is_none());
+    }
+
+    fn refused(stdout: &str) -> crate::hook::Blocked {
+        crate::hook::Blocked {
+            index: 1,
+            command: "sh gate.sh".to_owned(),
+            timeout_secs: 30,
+            exit: crate::hook::HookExit {
+                exit_code: Some(1),
+                timed_out: false,
+                stdout: stdout.to_owned(),
+            },
+        }
+    }
+
+    #[test]
+    fn a_refusing_hook_denies_with_its_first_line() {
+        let ruling = hook_refusal(&refused("\n  no pushes from agents  \nsecond line\n"));
+        assert_eq!(ruling.verdict, Verdict::Deny);
+        assert_eq!(ruling.scope, Scope::Hook);
+        assert_eq!(ruling.index, 1);
+        assert_eq!(ruling.reason.as_deref(), Some("no pushes from agents"));
+        assert_eq!(ruling.explanation(), "ket: no pushes from agents (hook 2)");
+
+        let long = hook_refusal(&refused(&"é".repeat(HOOK_REASON_MAX + 50)));
+        assert_eq!(
+            long.reason.unwrap().chars().count(),
+            HOOK_REASON_MAX,
+            "cut on a character, not a byte"
+        );
+
+        let silent = hook_refusal(&refused("  \n"));
+        assert_eq!(silent.reason.as_deref(), Some("blocked by hook sh gate.sh"));
+    }
+
+    #[test]
+    fn claude_is_told_why_a_hook_refused_its_prompt() {
+        let ruling = hook_refusal(&refused("refused by my hook\n"));
+        let printed = claude_output("PermissionRequest", &ruling).unwrap();
+        let (line, answer) = printed.split_once('\n').unwrap();
+        let line: serde_json::Value = serde_json::from_str(line).unwrap();
+        assert_eq!(line["scope"], "hook");
+        assert_eq!(line["verdict"], "deny");
+        let answer: serde_json::Value = serde_json::from_str(answer).unwrap();
+        assert_eq!(answer["hookSpecificOutput"]["decision"]["behavior"], "deny");
+        assert_eq!(
+            answer["hookSpecificOutput"]["decision"]["message"],
+            "ket: refused by my hook (hook 2)"
+        );
+    }
+
+    #[test]
+    fn a_hook_is_named_by_its_place_not_as_a_rule() {
+        let ruling = Ruling {
+            verdict: Verdict::Deny,
+            scope: Scope::Hook,
+            index: 0,
+            reason: None,
+        };
+        assert_eq!(ruling.explanation(), "ket: hook 1");
+        assert_eq!(Scope::Hook.label(), "hook");
     }
 
     #[test]

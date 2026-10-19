@@ -6,8 +6,9 @@
 
 use ket_core::id::WorktreeId;
 use ket_core::usage::{
-    Billing, History, Reading, Work, billing_from_statusline, builtin_pack_id, cache_from_codex,
-    from_statusline, reading_from_codex, reading_from_statusline,
+    Billing, History, Reading, Record, TokenTotals, Work, WorktreeSavings, billing_from_statusline,
+    builtin_pack_id, cache_from_codex, from_statusline, reading_from_codex,
+    reading_from_statusline,
 };
 
 mod common;
@@ -29,6 +30,7 @@ fn reading(cost_micros: Option<i64>) -> Reading {
         last_output_tokens: 0,
         last_input_tokens: 0,
         last_cache_read_tokens: 0,
+        totals: None,
         work: Work::default(),
         cache: None,
         billing: None,
@@ -594,7 +596,7 @@ fn the_rollup_counts_command_output_for_every_level_before_judging_the_level() {
     let savings = history.savings_by_worktree(0);
     let figures = savings.get(&wt).expect("the worktree");
     assert_eq!(figures.unreduced, 1);
-    assert_eq!(figures.unmeasured, 1);
+    assert_eq!(figures.unpriced, 1);
     assert_eq!(figures.command_output_tokens, 3_000);
     assert_eq!(figures.filter_saved_tokens, 1_500);
     assert_eq!(figures.command_output_share(), None);
@@ -602,4 +604,574 @@ fn the_rollup_counts_command_output_for_every_level_before_judging_the_level() {
     total.add(figures);
     total.add(figures);
     assert_eq!(total.command_output_tokens, 6_000);
+}
+
+// ---- Economy's savings, priced ----------------------------------------------------
+
+/// A model the list price table covers, so every figure below has a rate
+/// without a configured one. The expected figures are built from that rate
+/// rather than written out, so a price change moves both sides at once.
+const PRICED: &str = "Opus 5.5";
+
+fn rate() -> &'static ket_core::rates::ModelRate {
+    ket_core::rates::estimate_for(PRICED).expect("a listed model")
+}
+
+/// A saved session, as `usage.json` holds it: a reduced session on [`PRICED`]
+/// in `w1`, with whatever `fields` set on top.
+fn record(fields: serde_json::Value) -> Record {
+    let mut base = serde_json::json!({
+        "session": "s1",
+        "worktree": "w1",
+        "level": 1,
+        "model": PRICED,
+        "firstSeenMs": 1_000,
+        "lastSeenMs": 1_000,
+    });
+    base.as_object_mut()
+        .unwrap()
+        .extend(fields.as_object().expect("an object").clone());
+    serde_json::from_value(base).expect("a record")
+}
+
+/// A history holding exactly these sessions, loaded the way ket loads one.
+fn history_of(sandbox: &Sandbox, records: &[Record]) -> History {
+    let path = sandbox.path("usage.json");
+    std::fs::write(&path, serde_json::to_string(records).unwrap()).unwrap();
+    History::load_from(path)
+}
+
+#[test]
+fn the_filter_saving_is_what_it_trimmed_at_the_input_rate_once() {
+    // 32,000 bytes kept from the model: 8,000 tokens, priced once as fresh
+    // input and never again as the cache reads that would have followed.
+    let session = record(serde_json::json!({
+        "commandCalls": 3,
+        "commandOutputBytes": 40_000,
+        "commandShownBytes": 8_000,
+        "cacheReadTokens": 5_000_000,
+    }));
+    assert_eq!(session.filter_saved_tokens(), 8_000);
+    assert_eq!(
+        session.filter_saved_micros(),
+        Some(rate().input_micros(8_000))
+    );
+
+    // Nothing trimmed is a saving of nothing, not of nothing yet.
+    let unfiltered = record(serde_json::json!({
+        "commandCalls": 1,
+        "commandOutputBytes": 4_000,
+        "commandShownBytes": 4_000,
+    }));
+    assert_eq!(unfiltered.filter_saved_micros(), Some(0));
+}
+
+#[test]
+fn nothing_is_priced_without_a_rate() {
+    let fields = serde_json::json!({
+        "inputTokens": 1_000,
+        "outputTokens": 1_000,
+        "cacheReadTokens": 1_000,
+        "commandOutputBytes": 4_000,
+        "commandShownBytes": 0,
+    });
+    let mut unknown = record(fields.clone());
+    unknown.model = Some("a-local-model-nobody-prices".to_owned());
+    let mut unnamed = record(fields);
+    unnamed.model = None;
+
+    for session in [unknown, unnamed] {
+        assert_eq!(session.estimated_cost_micros(), None);
+        assert_eq!(session.filter_saved_micros(), None);
+        assert_eq!(session.economy_estimate(), None);
+    }
+}
+
+#[test]
+fn spend_prices_every_token_class_at_the_sessions_rate() {
+    let session = record(serde_json::json!({
+        "inputTokens": 120_000,
+        "outputTokens": 30_000,
+        "cacheReadTokens": 2_000_000,
+        "cacheWriteTokens": 150_000,
+        "cacheTtl": "1h",
+    }));
+    let rate = rate();
+    assert_eq!(
+        session.estimated_cost_micros(),
+        Some(
+            rate.input_micros(120_000)
+                + rate.output_micros(30_000)
+                + rate.cache_read_micros(2_000_000)
+                + rate.cache_write_micros(150_000, Some("1h"))
+        )
+    );
+}
+
+#[test]
+fn a_tainted_session_is_still_spend_but_never_an_estimate() {
+    let session = record(serde_json::json!({
+        "inputTokens": 1_000,
+        "outputTokens": 1_000,
+        "tainted": true,
+    }));
+    assert!(
+        session
+            .estimated_cost_micros()
+            .is_some_and(|spent| spent > 0)
+    );
+    assert_eq!(session.economy_estimate(), None);
+}
+
+#[test]
+fn the_rollup_spends_every_priced_session_and_credits_the_estimate_to_reduced_ones() {
+    let sandbox = Sandbox::new("usage-savings-rollup");
+    let default = ket_core::worktree::default_token_reduction();
+    let off = record(serde_json::json!({
+        "session": "off",
+        "level": default,
+        "inputTokens": 100_000,
+        "outputTokens": 10_000,
+        "cacheReadTokens": 1_000_000,
+        "cacheWriteTokens": 50_000,
+        "commandCalls": 2,
+        "commandOutputBytes": 8_000,
+        "commandShownBytes": 4_000,
+    }));
+    let on = record(serde_json::json!({
+        "session": "on",
+        "inputTokens": 50_000,
+        "outputTokens": 20_000,
+        "cacheReadTokens": 2_000_000,
+        "cacheWriteTokens": 100_000,
+        "cacheTtl": "5m",
+        "turns": 4,
+        "commandCalls": 5,
+        "commandOutputBytes": 40_000,
+        "commandShownBytes": 8_000,
+    }));
+    // Reduced, but the level moved under it: spent, filtered, not estimated.
+    let tainted = record(serde_json::json!({
+        "session": "tainted",
+        "outputTokens": 5_000,
+        "cacheReadTokens": 300_000,
+        "tainted": true,
+        "commandCalls": 1,
+        "commandOutputBytes": 4_000,
+        "commandShownBytes": 0,
+    }));
+    // Reduced, on a model with no rate: counted, never priced.
+    let mut unrated = record(serde_json::json!({
+        "session": "unrated",
+        "outputTokens": 9_000,
+    }));
+    unrated.model = None;
+    // Before the period: left out entirely.
+    let old = record(serde_json::json!({
+        "session": "old",
+        "outputTokens": 99_000,
+        "firstSeenMs": 10,
+        "lastSeenMs": 10,
+    }));
+
+    let history = history_of(
+        &sandbox,
+        &[off.clone(), on.clone(), tainted.clone(), unrated, old],
+    );
+    let savings = history.savings_by_worktree(500);
+    let figures = savings.get(&WorktreeId::new("w1")).expect("the worktree");
+
+    assert_eq!(figures.priced, 1);
+    assert_eq!(figures.unpriced, 2, "tainted and unrated");
+    assert_eq!(figures.unreduced, 1);
+    assert_eq!(figures.turns, 4);
+    assert_eq!(figures.command_calls, 8);
+
+    let sum = |figure: fn(&Record) -> Option<i64>, sessions: &[&Record]| -> i64 {
+        sessions
+            .iter()
+            .map(|session| figure(session).unwrap())
+            .sum()
+    };
+    assert_eq!(
+        figures.spent_micros,
+        sum(Record::estimated_cost_micros, &[&off, &on, &tainted]),
+        "every priced session, at any level"
+    );
+    assert_eq!(
+        figures.filter_saved_micros,
+        sum(Record::filter_saved_micros, &[&off, &on, &tainted]),
+        "every priced session, at any level"
+    );
+    assert_eq!(
+        figures.estimated_micros,
+        on.economy_estimate().unwrap().saved_micros
+    );
+    assert_eq!(figures.cache_read_tokens, 2_000_000);
+    assert_eq!(figures.cache_write_tokens, 100_000);
+    assert_eq!(
+        figures.saved_micros(),
+        figures.filter_saved_micros + figures.estimated_micros
+    );
+}
+
+#[test]
+fn the_share_is_the_saving_over_spend_and_saving_together() {
+    let figures = |priced: usize, spent: i64| WorktreeSavings {
+        priced,
+        spent_micros: spent,
+        filter_saved_micros: 250_000,
+        estimated_micros: 750_000,
+        ..WorktreeSavings::default()
+    };
+    // Spent $3, saved $1 between the two: $4 without Economy, a quarter less.
+    assert_eq!(figures(1, 3_000_000).fraction(), Some(0.25));
+    // No Economy session priced: no share at all.
+    assert_eq!(figures(0, 3_000_000).fraction(), None);
+    // Nothing spent and nothing saved: nothing to divide by.
+    let empty = WorktreeSavings {
+        priced: 1,
+        ..WorktreeSavings::default()
+    };
+    assert_eq!(empty.fraction(), None);
+}
+
+#[test]
+fn adding_rollups_sums_every_figure() {
+    let one = WorktreeSavings {
+        priced: 1,
+        unpriced: 2,
+        unreduced: 3,
+        turns: 4,
+        spent_micros: 5,
+        filter_saved_micros: 6,
+        estimated_micros: 8,
+        cache_read_tokens: 9,
+        cache_write_tokens: 10,
+        input_tokens: 11,
+        command_calls: 12,
+        command_output_tokens: 13,
+        filter_saved_tokens: 14,
+    };
+    let mut total = WorktreeSavings::default();
+    total.add(&one);
+    total.add(&one);
+    assert_eq!(
+        total,
+        WorktreeSavings {
+            priced: 2,
+            unpriced: 4,
+            unreduced: 6,
+            turns: 8,
+            spent_micros: 10,
+            filter_saved_micros: 12,
+            estimated_micros: 16,
+            cache_read_tokens: 18,
+            cache_write_tokens: 20,
+            input_tokens: 22,
+            command_calls: 24,
+            command_output_tokens: 26,
+            filter_saved_tokens: 28,
+        }
+    );
+}
+
+#[test]
+fn the_estimate_is_the_output_a_level_is_assumed_to_have_left_unwritten() {
+    let at = |level: u8, output: u64| {
+        record(serde_json::json!({ "level": level, "outputTokens": output }))
+            .economy_estimate()
+            .expect("priced")
+            .saved_micros
+    };
+    // Half trimmed: what was written is the other half, so as much again.
+    assert_eq!(at(0, 10_000), rate().output_micros(10_000));
+    // A third and a bit trimmed: 13,000 written is 65% of 20,000.
+    assert_eq!(at(1, 13_000), rate().output_micros(7_000));
+    // The default level, and a level the table does not cover, trim nothing.
+    let default = ket_core::worktree::default_token_reduction();
+    assert_eq!(at(default, 10_000), 0);
+    assert_eq!(at(9, 10_000), 0);
+    // A session that wrote nothing is assumed to have saved nothing.
+    assert_eq!(at(0, 0), 0);
+}
+
+#[test]
+fn the_estimates_cost_is_the_sessions_spend() {
+    let session = record(serde_json::json!({
+        "inputTokens": 40_000,
+        "outputTokens": 9_000,
+        "cacheReadTokens": 700_000,
+        "cacheWriteTokens": 30_000,
+    }));
+    assert_eq!(
+        Some(session.economy_estimate().unwrap().cost_micros),
+        session.estimated_cost_micros()
+    );
+}
+
+#[test]
+fn a_filter_that_showed_more_than_it_ran_saves_nothing() {
+    // Two counts from two sources; one past the other is a disagreement, not
+    // a negative saving.
+    let session = record(serde_json::json!({
+        "commandCalls": 1,
+        "commandOutputBytes": 1_000,
+        "commandShownBytes": 5_000,
+    }));
+    assert_eq!(session.filter_saved_tokens(), 0);
+    assert_eq!(session.filter_saved_micros(), Some(0));
+}
+
+#[test]
+fn a_cache_write_with_no_lifetime_is_spent_at_the_five_minute_rate() {
+    let spent = |ttl: Option<&str>| {
+        let mut fields = serde_json::json!({ "cacheWriteTokens": 100_000 });
+        if let Some(ttl) = ttl {
+            fields["cacheTtl"] = ttl.into();
+        }
+        record(fields).estimated_cost_micros().expect("priced")
+    };
+    assert_eq!(spent(None), spent(Some("5m")));
+    assert_eq!(
+        spent(Some("1h")),
+        rate().cache_write_micros(100_000, Some("1h"))
+    );
+    assert!(spent(Some("1h")) > spent(Some("5m")));
+}
+
+#[test]
+fn the_rollup_keeps_worktrees_apart_and_goes_by_when_a_session_was_last_seen() {
+    let sandbox = Sandbox::new("usage-savings-period");
+    let session = |id: &str, worktree: &str, first: u64, last: u64| {
+        record(serde_json::json!({
+            "session": id,
+            "worktree": worktree,
+            "outputTokens": 1_000,
+            "firstSeenMs": first,
+            "lastSeenMs": last,
+        }))
+    };
+    let history = history_of(
+        &sandbox,
+        &[
+            // Began before the period and ran into it: counted, all of it.
+            session("long", "w1", 100, 2_000),
+            // Last seen on the period's first millisecond: counted.
+            session("edge", "w1", 1_000, 1_000),
+            // Last seen just before: not.
+            session("early", "w1", 900, 999),
+            session("other", "w2", 1_500, 1_500),
+            // A worktree whose only session ended before the period.
+            session("gone", "w3", 10, 20),
+        ],
+    );
+    let savings = history.savings_by_worktree(1_000);
+
+    assert_eq!(savings.get(&WorktreeId::new("w1")).unwrap().priced, 2);
+    assert_eq!(savings.get(&WorktreeId::new("w2")).unwrap().priced, 1);
+    assert!(
+        !savings.contains_key(&WorktreeId::new("w3")),
+        "nothing in the period, so not in the rollup"
+    );
+    let one = history
+        .record("other")
+        .unwrap()
+        .estimated_cost_micros()
+        .unwrap();
+    assert_eq!(
+        savings.get(&WorktreeId::new("w1")).unwrap().spent_micros,
+        2 * one
+    );
+}
+
+// ---- Codex totals ------------------------------------------------------------------
+
+/// A Codex `token_count` payload: the session's running totals, and the last
+/// response's own counts.
+fn codex_tokens(total: (u64, u64, u64), last: (u64, u64, u64)) -> serde_json::Value {
+    let usage = |(input, cached, output): (u64, u64, u64)| {
+        serde_json::json!({
+            "input_tokens": input,
+            "cached_input_tokens": cached,
+            "output_tokens": output,
+        })
+    };
+    serde_json::json!({
+        "info": {
+            "total_token_usage": usage(total),
+            "last_token_usage": usage(last),
+        }
+    })
+}
+
+#[test]
+fn reading_from_codex_reads_the_running_totals_with_cached_input_split_out() {
+    let reading = reading_from_codex(
+        &codex_tokens((10_000, 6_000, 900), (2_000, 1_500, 300)),
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        reading.totals,
+        Some(TokenTotals {
+            input: 4_000,
+            output: 900,
+            cache_read: 6_000,
+        })
+    );
+
+    // A record with only a last response's counts carries no totals.
+    let last_only = serde_json::json!({
+        "info": { "last_token_usage": { "input_tokens": 10, "output_tokens": 5 } }
+    });
+    let reading = reading_from_codex(&last_only, None, None, None, None).unwrap();
+    assert_eq!(reading.totals, None);
+}
+
+#[test]
+fn codex_responses_landing_between_two_polls_are_all_counted() {
+    let sandbox = Sandbox::new("usage-codex-totals");
+    let wt = WorktreeId::new("w1");
+    let mut history = history_at(&sandbox);
+    let poll = |tokens: &serde_json::Value| {
+        reading_from_codex(tokens, Some("sess-1"), None, Some("gpt-5.6-sol"), None).unwrap()
+    };
+
+    // The first poll sees one response.
+    history.observe(
+        "sess-1",
+        &wt,
+        4,
+        &poll(&codex_tokens((1_000, 500, 100), (1_000, 500, 100))),
+        1_000,
+    );
+    // Two more land before the next poll, which sees only the newest one's
+    // own counts — but the totals carry both.
+    history.observe(
+        "sess-1",
+        &wt,
+        4,
+        &poll(&codex_tokens((3_600, 2_000, 400), (1_400, 900, 150))),
+        2_000,
+    );
+
+    let record = history.record("sess-1").unwrap();
+    assert_eq!(record.input_tokens, 1_600, "3,600 less 2,000 cached");
+    assert_eq!(record.cache_read_tokens, 2_000);
+    assert_eq!(record.output_tokens, 400, "not 100 + 150");
+}
+
+#[test]
+fn codex_totals_correct_an_undercount_upwards_and_never_go_backwards() {
+    let sandbox = Sandbox::new("usage-codex-monotonic");
+    let wt = WorktreeId::new("w1");
+    let mut history = history_at(&sandbox);
+
+    // A record built from per-response counts before totals were read.
+    let mut early = reading(None);
+    early.last_output_tokens = 100;
+    history.observe("sess-1", &wt, 4, &early, 1_000);
+    assert_eq!(history.record("sess-1").unwrap().output_tokens, 100);
+
+    let totals = |output: u64| {
+        reading_from_codex(
+            &codex_tokens((0, 0, output), (0, 0, 50)),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap()
+    };
+    history.observe("sess-1", &wt, 4, &totals(500), 2_000);
+    assert_eq!(history.record("sess-1").unwrap().output_tokens, 500);
+
+    // A lower total — a recycled id, a rollout read from its start — leaves
+    // what was already counted.
+    history.observe("sess-1", &wt, 4, &totals(300), 3_000);
+    assert_eq!(history.record("sess-1").unwrap().output_tokens, 500);
+}
+
+// ---- the prompt cache --------------------------------------------------------------
+
+#[test]
+fn the_prompt_cache_is_reported_but_never_counted_as_a_saving() {
+    let sandbox = Sandbox::new("usage-cache-not-saved");
+    let claude = record(serde_json::json!({
+        "session": "claude",
+        "outputTokens": 2_000,
+        "cacheReadTokens": 1_000_000,
+        "cacheWriteTokens": 20_000,
+        "cacheTtl": "1h",
+    }));
+    let codex = record(serde_json::json!({
+        "session": "codex",
+        "model": "gpt-5.6-sol",
+        "outputTokens": 1_000,
+        "cacheReadTokens": 4_000_000,
+    }));
+    let history = history_of(&sandbox, &[claude.clone(), codex.clone()]);
+    let savings = history.savings_by_worktree(0);
+    let figures = savings.get(&WorktreeId::new("w1")).unwrap();
+
+    // What the cache cost is spend like any other token.
+    assert_eq!(
+        figures.spent_micros,
+        claude.estimated_cost_micros().unwrap() + codex.estimated_cost_micros().unwrap()
+    );
+    // What it read back is said, for the line that says it was left out.
+    assert_eq!(figures.cache_read_tokens, 5_000_000);
+    assert_eq!(figures.cache_write_tokens, 20_000);
+    // And the saving is the estimate and the filter, nothing more.
+    assert_eq!(
+        figures.saved_micros(),
+        claude.economy_estimate().unwrap().saved_micros
+            + codex.economy_estimate().unwrap().saved_micros
+    );
+}
+
+#[test]
+fn reading_from_codex_has_no_totals_when_codex_wrote_none() {
+    let null = serde_json::json!({
+        "info": {
+            "total_token_usage": null,
+            "last_token_usage": { "input_tokens": 10, "output_tokens": 5 },
+        }
+    });
+    let reading = reading_from_codex(&null, None, None, None, None).unwrap();
+    assert_eq!(reading.totals, None);
+    assert_eq!(reading.last_output_tokens, 5);
+}
+
+#[test]
+fn a_reading_without_totals_after_one_with_them_adds_only_what_is_new() {
+    let sandbox = Sandbox::new("usage-codex-mixed");
+    let wt = WorktreeId::new("w1");
+    let mut history = history_at(&sandbox);
+
+    let totals = reading_from_codex(
+        &codex_tokens((0, 0, 500), (0, 0, 50)),
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    history.observe("s1", &wt, 4, &totals, 1_000);
+
+    // The same last response again, from a source with no totals: a redraw,
+    // so nothing is added.
+    let mut again = reading(None);
+    again.last_output_tokens = 50;
+    history.observe("s1", &wt, 4, &again, 2_000);
+    assert_eq!(history.record("s1").unwrap().output_tokens, 500);
+
+    // A new response is.
+    again.last_output_tokens = 70;
+    history.observe("s1", &wt, 4, &again, 3_000);
+    assert_eq!(history.record("s1").unwrap().output_tokens, 570);
 }

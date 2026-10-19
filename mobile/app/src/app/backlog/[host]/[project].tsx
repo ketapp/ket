@@ -12,11 +12,11 @@
 import { type Backlog, type BacklogNote, BacklogPriority } from '@ket/remote';
 import { useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { useCallback, useRef, useState } from 'react';
-import { Alert, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { ActivityIndicator, Alert, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import { KeyboardAwareScrollView } from 'react-native-keyboard-controller';
 
-import { Check, Chevron, ChevronDown, Plus, PriorityMark } from '../../../components/icons';
-import { Bar, Button, Card, Heading, Prose, Screen, Tag, field } from '../../../components/ui';
+import { Check, Chevron, ChevronDown, Plus, PriorityMark, Trash } from '../../../components/icons';
+import { Bar, Button, Card, Heading, IconButton, Prose, Screen, Segmented, Tag, field } from '../../../components/ui';
 import type { BacklogChange } from '../../../lib/connection';
 import { useHost } from '../../../lib/hosts';
 import { font, size, t } from '../../../lib/theme';
@@ -39,6 +39,14 @@ const PRIORITY_NAMES: Record<BacklogPriority, string> = {
   [BacklogPriority.HIGH]: 'High',
   [BacklogPriority.URGENT]: 'Urgent',
 };
+
+/** The priorities as an open note's track: least pressing first, so the
+ * marks climb from left to right. */
+const PRIORITY_SEGMENTS = [...PRIORITIES].reverse().map((priority) => ({
+  key: String(priority),
+  label: PRIORITY_NAMES[priority],
+  icon: <PriorityMark priority={priority} size={14} />,
+}));
 
 /** A note's priority; one from a desktop that keeps none is Medium. */
 function priorityOf(note: BacklogNote): BacklogPriority {
@@ -281,15 +289,15 @@ export default function BacklogScreen() {
                           open === note.id ? (
                             <View key={note.id} style={styles.opened}>
                               <NoteText note={note} />
-                              <View style={styles.actions}>
+                              <View style={styles.footer}>
+                                <DeleteButton onPress={() => remove(note)} />
+                                <View style={styles.grow} />
                                 <Button
                                   title="Reopen"
                                   onPress={() => {
                                     void edit(note.id, { action: 'reopen' }).then((ok) => ok && setOpen(null));
                                   }}
-                                  style={styles.grow}
                                 />
-                                <Button kind="danger" title="Delete" onPress={() => remove(note)} style={styles.grow} />
                               </View>
                             </View>
                           ) : (
@@ -372,8 +380,20 @@ function PriorityList({ value, onPick }: { value: BacklogPriority; onPick: (prio
   );
 }
 
+/** Delete, as a bin at the near end of a note's actions: kept apart from the
+ * rest, so it is never what a thumb lands on reaching for Start. */
+function DeleteButton({ onPress }: { onPress: () => void }) {
+  return (
+    <IconButton label="Delete the note" onPress={onPress} style={styles.delete}>
+      <Trash size={18} color={t.failed} />
+    </IconButton>
+  );
+}
+
 /** An open note, opened: its words and priority to change, then Save — or,
- * unchanged, Start, Done and Delete, the desktop's row of actions. */
+ * unchanged, Start and Mark done, the desktop's actions, with Delete apart at
+ * the other end. The actions hold their place whichever are showing: Save is
+ * where Start was. */
 function OpenNote({
   note,
   starting,
@@ -400,7 +420,6 @@ function OpenNote({
   const [title, setTitle] = useState(note.title);
   const [body, setBody] = useState(note.body);
   const [priority, setPriority] = useState(priorityOf(note));
-  const [choosing, setChoosing] = useState(false);
   const [saving, setSaving] = useState(false);
   const changed =
     title.trim() !== note.title.trim() || body.trim() !== note.body.trim() || (ranked && priority !== priorityOf(note));
@@ -421,48 +440,32 @@ function OpenNote({
           placeholder="What the work is"
           placeholderTextColor={t.faint}
           editable={!starting}
-          style={[field, styles.grow]}
+          style={[field, styles.openTitle, styles.grow]}
         />
-        <Pressable accessibilityRole="button" accessibilityLabel="Close the note" onPress={onClose} hitSlop={6} style={styles.close}>
-          <View style={styles.turned}>
-            <Chevron size={14} color={t.faint} />
+        <IconButton label="Close the note" onPress={onClose} style={styles.close}>
+          <View style={styles.flipped}>
+            <ChevronDown size={16} color={t.dim} weight={2} />
           </View>
-        </Pressable>
+        </IconButton>
       </View>
       {ranked ? (
-        <>
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel={`Priority: ${PRIORITY_NAMES[priority]}`}
-            accessibilityState={{ expanded: choosing, disabled: starting }}
-            disabled={starting}
-            onPress={() => setChoosing(!choosing)}
-            style={({ pressed }) => [styles.pick, (choosing || pressed) && styles.pickOpen]}
-          >
-            <PriorityMark priority={priority} size={16} />
-            <Text style={[styles.pickText, styles.grow]}>{PRIORITY_NAMES[priority]}</Text>
-            <Text style={styles.pickLabel}>Priority</Text>
-            <View style={choosing && styles.flipped}>
-              <ChevronDown size={15} color={t.dim} weight={2.2} />
-            </View>
-          </Pressable>
-          {choosing ? (
-            <PriorityList
-              value={priority}
-              onPick={(picked) => {
-                setPriority(picked);
-                setChoosing(false);
-              }}
-            />
-          ) : null}
-        </>
+        <Segmented
+          tall
+          segments={PRIORITY_SEGMENTS}
+          value={String(priority)}
+          onChange={(key) => setPriority(Number(key) as BacklogPriority)}
+          disabled={starting}
+        />
       ) : null}
+      {/* As tall as what it says, never scrolled inside: the page scrolls,
+          and keeps the caret above the keyboard as it does. */}
       <TextInput
         value={body}
         onChangeText={setBody}
         placeholder="What the agent should know"
         placeholderTextColor={t.faint}
         multiline
+        scrollEnabled={false}
         editable={!starting}
         style={[field, styles.body]}
       />
@@ -474,30 +477,36 @@ function OpenNote({
           <Prose style={styles.filesNote}>Kept on {hostName}. They go to the agent when the note is started.</Prose>
         </View>
       ) : null}
-      {starting ? (
-        <Prose style={styles.starting}>Starting on {hostName}…</Prose>
-      ) : changed ? (
-        <View style={styles.actions}>
-          <Button kind="primary" title="Save" disabled={saving || empty} onPress={() => void save()} style={styles.grow} />
-          <Button
-            kind="ghost"
-            title="Cancel"
-            disabled={saving}
-            onPress={() => {
-              setTitle(note.title);
-              setBody(note.body);
-              setPriority(priorityOf(note));
-              setChoosing(false);
-            }}
-          />
-        </View>
-      ) : (
-        <View style={styles.actions}>
-          <Button kind="primary" title="Start" disabled={empty} onPress={onStart} style={styles.grow} />
-          <Button title="Done" onPress={onDone} />
-          <Button kind="danger" title="Delete" onPress={onDelete} />
-        </View>
-      )}
+      <View style={styles.footer}>
+        {starting ? (
+          <>
+            <ActivityIndicator size="small" color={t.dim} style={styles.spinner} />
+            <Prose>Starting on {hostName}…</Prose>
+          </>
+        ) : changed ? (
+          <>
+            <Button
+              kind="ghost"
+              title="Cancel"
+              disabled={saving}
+              onPress={() => {
+                setTitle(note.title);
+                setBody(note.body);
+                setPriority(priorityOf(note));
+              }}
+            />
+            <View style={styles.grow} />
+            <Button kind="primary" title="Save" disabled={saving || empty} onPress={() => void save()} style={styles.main} />
+          </>
+        ) : (
+          <>
+            <DeleteButton onPress={onDelete} />
+            <View style={styles.grow} />
+            <Button title="Mark done" onPress={onDone} />
+            <Button kind="primary" title="Start" disabled={empty} onPress={onStart} style={styles.main} />
+          </>
+        )}
+      </View>
     </View>
   );
 }
@@ -562,20 +571,6 @@ const styles = StyleSheet.create({
   priorities: { padding: 4, gap: 2, borderRadius: size.radiusLg, backgroundColor: t.sunken },
   priority: { height: 44, flexDirection: 'row', alignItems: 'center', gap: 11, paddingHorizontal: 12, borderRadius: size.radius },
   priorityName: { fontFamily: font.proseMedium, fontSize: size.body, color: t.text },
-  pick: {
-    height: size.control,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-    paddingHorizontal: 12,
-    borderRadius: size.radius,
-    backgroundColor: t.sunken,
-    borderWidth: 1,
-    borderColor: 'transparent',
-  },
-  pickOpen: { backgroundColor: t.selection, borderColor: t.dim },
-  pickText: { fontFamily: font.prose, fontSize: size.body, color: t.text },
-  pickLabel: { fontFamily: font.prose, fontSize: size.detail, color: t.dim },
   flipped: { transform: [{ rotate: '180deg' }] },
   note: { paddingHorizontal: 6 },
   list: { padding: 6, gap: 2 },
@@ -592,13 +587,26 @@ const styles = StyleSheet.create({
   title: { fontFamily: font.proseMedium, fontSize: size.body, color: t.text },
   detail: { fontFamily: font.prose, fontSize: size.detail, color: t.dim, marginTop: 3 },
   opened: { gap: 8, padding: 8, borderRadius: size.radiusRow, backgroundColor: t.hover },
-  openHead: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  close: { width: 32, height: 32, alignItems: 'center', justifyContent: 'center' },
-  body: { height: undefined, minHeight: 96, maxHeight: 220, paddingTop: 11, paddingBottom: 11, lineHeight: 20, textAlignVertical: 'top' },
+  openHead: { flexDirection: 'row', alignItems: 'center', gap: 4 },
+  openTitle: { fontFamily: font.proseMedium },
+  close: { width: 40, height: size.control },
+  body: { height: undefined, minHeight: 120, paddingTop: 11, paddingBottom: 11, lineHeight: 20, textAlignVertical: 'top' },
   files: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
   filesNote: { width: '100%', fontSize: size.detail, lineHeight: 17 },
-  starting: { paddingHorizontal: 4, paddingVertical: 10 },
-  actions: { flexDirection: 'row', gap: 8 },
+  // A hairline between what the note says and what to do with it, and the
+  // height of a button whichever of them are showing.
+  footer: {
+    minHeight: size.control + 8,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingTop: 8,
+    borderTopWidth: 1,
+    borderTopColor: t.border,
+  },
+  delete: { width: size.control, height: size.control },
+  main: { minWidth: 96 },
+  spinner: { marginLeft: 4 },
   text: { gap: 6, paddingHorizontal: 4, paddingTop: 2 },
   doneHead: { flexDirection: 'row', alignItems: 'center', paddingRight: 8 },
   turned: { transform: [{ rotate: '90deg' }] },

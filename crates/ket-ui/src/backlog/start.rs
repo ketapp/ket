@@ -279,6 +279,8 @@ fn note_work(
         agent: options.and_then(|options| options.agent().map(str::to_owned)),
         base: options.and_then(StartOptions::base),
         economy: options.and_then(|options| options.economy),
+        model: None,
+        effort: None,
         origin: WorkOrigin::Backlog {
             note: note.id.clone(),
         },
@@ -394,12 +396,15 @@ impl Shell {
         self.start_work(work, cx);
     }
 
-    /// Starts the note `id` in `project` because a phone asked: the work the
-    /// dialog's Start would make, with no dialog to report to.
+    /// Starts the note `id` in `project` because a phone or the ket command
+    /// asked: the work the dialog's Start would make, on `agent` when one is
+    /// named, with no dialog to report to.
     pub(crate) fn start_phone_note(
         &mut self,
         project: &ProjectId,
         id: &str,
+        agent: Option<String>,
+        from: ket_core::host::WorkSource,
         cx: &mut Context<Self>,
     ) {
         let note = ket_core::backlog::Backlog::load(project)
@@ -409,10 +414,18 @@ impl Shell {
             .filter(|note| note.done.is_none())
             .and_then(|note| note_work(project, &note, ket_core::now_ms(), None));
         match work {
-            Some(work) => self.start_work(work, cx),
+            Some(mut work) => {
+                if agent.is_some() {
+                    work.agent = agent;
+                }
+                self.start_work(work, cx);
+            }
             None => self.toast(
                 crate::ui::toast::Tone::Error,
-                "A phone asked to start a note that is gone or already done",
+                format!(
+                    "{} asked to start a note that is gone or already done",
+                    crate::phone_work::asker(from)
+                ),
                 cx,
             ),
         }

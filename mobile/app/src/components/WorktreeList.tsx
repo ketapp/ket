@@ -8,14 +8,14 @@
 // On a phone it is the Worktrees tab. On a wide screen it is the sidebar,
 // always drawn, and what a row opens goes beside it (see lib/layout.ts).
 
-import { Activity, type SubagentSummary, SubagentSummary_State } from '@ket/remote';
+import { Activity, type SubagentSummary, SubagentSummary_State, type WorktreeSummary } from '@ket/remote';
 import { router, useFocusEffect, usePathname } from 'expo-router';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import { Connecting } from './Connecting';
 import { Unpaired } from './Unpaired';
-import { AgentMark, BrandMark, Branch, Chevron, Desktop, Hand, Plus } from './icons';
+import { AgentMark, BrandMark, Chevron, Desktop, Hand, Plus } from './icons';
 import {
   Card,
   Dot,
@@ -29,7 +29,8 @@ import {
   TabBar,
   Tag,
 } from './ui';
-import { type Filter, agentTerminal, detail, detailColor, everyWorktree, filterOf, projectColor, stateOf } from '../lib/activity';
+import { type Filter, agentOf, agentTerminal, detail, detailColor, everyWorktree, filterOf, projectColor, stateOf } from '../lib/activity';
+import { checksColor, checksState } from '../lib/checks';
 import type { HostConnection } from '../lib/connection';
 import { statusLine, useHosts } from '../lib/hosts';
 import { showBeside, tabAt, worktreeAt } from '../lib/layout';
@@ -128,8 +129,8 @@ export function WorktreeList({ sidebar = false, refresh }: { sidebar?: boolean; 
   const answer = () =>
     waiting.length === 1 && conn
       ? open(
-          waiting[0].worktree.question?.terminalId
-            ? `/session/${conn.host.id}/${waiting[0].worktree.question.terminalId.toString()}`
+          (waiting[0].worktree.questions[0] ?? waiting[0].worktree.question)?.terminalId
+            ? `/session/${conn.host.id}/${(waiting[0].worktree.questions[0] ?? waiting[0].worktree.question)!.terminalId.toString()}`
             : `/worktree/${conn.host.id}/${encodeURIComponent(waiting[0].worktree.id)}`,
         )
       : sidebar
@@ -210,7 +211,8 @@ export function WorktreeList({ sidebar = false, refresh }: { sidebar?: boolean; 
                       <View style={styles.headerText}>
                         <Text style={styles.bannerTitle}>{waiting.length === 1 ? '1 waiting on you' : `${waiting.length} waiting on you`}</Text>
                         <Text style={styles.bannerDetail} numberOfLines={1}>
-                          {waiting[0].worktree.name} · {waiting[0].worktree.question?.subject || detail(waiting[0].worktree)}
+                          {waiting[0].worktree.name} ·{' '}
+                          {(waiting[0].worktree.questions[0] ?? waiting[0].worktree.question)?.subject || detail(waiting[0].worktree)}
                         </Text>
                       </View>
                       <View style={styles.answerLink}>
@@ -258,7 +260,7 @@ export function WorktreeList({ sidebar = false, refresh }: { sidebar?: boolean; 
                       {starting.map((work) => (
                         <Row
                           key={`starting-${work.at}`}
-                          mark={<Branch size={15} color={t.faint} />}
+                          mark={work.agent ? <AgentMark agent={work.agent} size={16} /> : null}
                           title={firstLine(work.prompt)}
                           detail={`Starting on ${conn?.host.name || 'your desktop'}\u2026`}
                           state={{ word: 'starting', color: t.faint }}
@@ -271,19 +273,12 @@ export function WorktreeList({ sidebar = false, refresh }: { sidebar?: boolean; 
                         <Row
                           key={worktree.id}
                           marker={worktree.id === opened}
-                          mark={worktree.agent ? <AgentMark agent={worktree.agent} size={16} /> : <Branch size={15} color={t.faint} />}
+                          mark={agentOf(worktree) ? <AgentMark agent={agentOf(worktree)} size={16} /> : null}
                           title={worktree.name || 'Other terminals'}
                           detail={detail(worktree)}
                           detailColor={detailColor(worktree.activity)}
                           state={stateOf(worktree.activity)}
-                          meta={
-                            worktree.linesAdded + worktree.linesRemoved > 0 ? (
-                              <Text style={styles.lines}>
-                                <Text style={{ color: t.added }}>+{worktree.linesAdded}</Text>{' '}
-                                <Text style={{ color: t.removed }}>−{worktree.linesRemoved}</Text>
-                              </Text>
-                            ) : undefined
-                          }
+                          meta={<RowMeta worktree={worktree} />}
                           onPress={() => {
                             // Straight into the work: the agent's conversation, or
                             // with no agent, the first terminal still open.
@@ -316,6 +311,27 @@ export function WorktreeList({ sidebar = false, refresh }: { sidebar?: boolean; 
       </ScrollView>
       <TabBar active={sidebar ? tabAt(path) : 'worktrees'} needs={waitingEverywhere} sidebar={sidebar} />
     </Screen>
+  );
+}
+
+/** What ends a row before its state: the pull request its branch is open
+ * as, in its checks' colour as ket's sidebar tints its mark, and the lines
+ * its uncommitted work adds and removes. Nothing when it has neither. */
+function RowMeta({ worktree }: { worktree: WorktreeSummary }) {
+  const pr = worktree.pullRequest;
+  const lines = worktree.linesAdded + worktree.linesRemoved > 0;
+  if (!pr && !lines) return null;
+  return (
+    <Text style={styles.lines}>
+      {pr ? <Text style={{ color: checksColor(checksState(pr)) }}>#{pr.number.toString()}</Text> : null}
+      {pr && lines ? '  ' : null}
+      {lines ? (
+        <>
+          <Text style={{ color: t.added }}>+{worktree.linesAdded}</Text>{' '}
+          <Text style={{ color: t.removed }}>−{worktree.linesRemoved}</Text>
+        </>
+      ) : null}
+    </Text>
   );
 }
 

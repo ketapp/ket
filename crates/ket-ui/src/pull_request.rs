@@ -225,6 +225,9 @@ impl Shell {
         self.opening_pull_request = None;
         match result {
             Ok(report) => {
+                // The push starts its checks: read them on the next tick,
+                // not up to a minute from now.
+                self.read_checks_soon(&report.worktree);
                 // The row's mark is the lasting receipt; the toast is for
                 // whoever looked away while it pushed.
                 self.toast_detail(

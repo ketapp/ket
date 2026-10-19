@@ -186,6 +186,9 @@ pub(crate) enum Icon {
     Play,
     /// Suspend playback.
     Pause,
+    /// Stop what is running: an agent's turn, a command's job. Filled, like
+    /// [`Icon::Pause`].
+    Stop,
     /// Step the audio player's position back a fixed increment.
     RotateCcw,
     /// Step the audio player's position forward a fixed increment.
@@ -370,6 +373,7 @@ impl Icon {
             Icon::UnfoldHorizontal => "icons/unfold-horizontal.svg",
             Icon::Play => "icons/play.svg",
             Icon::Pause => "icons/pause.svg",
+            Icon::Stop => "icons/stop.svg",
             Icon::RotateCcw => "icons/rotate-ccw.svg",
             Icon::RotateCw => "icons/rotate-cw.svg",
             Icon::Info => "icons/info.svg",
@@ -452,7 +456,7 @@ pub(crate) fn sized_icon(which: Icon, size: Pixels, colour: Rgba) -> Svg {
 pub(crate) struct Assets;
 
 /// The bytes for every path [`Icon::asset`] can return.
-const FILES: [(&str, &[u8]); 106] = [
+const FILES: [(&str, &[u8]); 107] = [
     (
         "icons/chevron-down.svg",
         include_bytes!("../../assets/icons/chevron-down.svg"),
@@ -656,6 +660,10 @@ const FILES: [(&str, &[u8]); 106] = [
     (
         "icons/pause.svg",
         include_bytes!("../../assets/icons/pause.svg"),
+    ),
+    (
+        "icons/stop.svg",
+        include_bytes!("../../assets/icons/stop.svg"),
     ),
     (
         "icons/rotate-ccw.svg",
@@ -993,6 +1001,7 @@ mod tests {
             Icon::UnfoldHorizontal,
             Icon::Play,
             Icon::Pause,
+            Icon::Stop,
             Icon::RotateCcw,
             Icon::RotateCw,
             Icon::PiggyBank,

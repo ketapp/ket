@@ -46,6 +46,9 @@ pub(crate) struct Connection {
     opening: Mutex<HashMap<u64, (TerminalSpec, Opening)>>,
     /// Terminals this process is showing, by the host's id.
     terminals: Mutex<HashMap<u64, Weak<Shared>>>,
+    /// The host's process, from the kernel when the socket connected — see
+    /// [`super::host_pid`].
+    pid: Option<i32>,
 }
 
 static CONNECTION: Mutex<Option<Arc<Connection>>> = Mutex::new(None);
@@ -68,6 +71,12 @@ pub(crate) static AGENT_STATUS: Mutex<(u64, Option<AgentStatusSnapshot>)> = Mute
 pub(crate) static PHONE_WORK: Mutex<Vec<super::PhoneWork>> = Mutex::new(Vec::new());
 /// Worktrees phones asked this window to merge — see [`super::take_phone_merge`].
 pub(crate) static PHONE_MERGES: Mutex<Vec<String>> = Mutex::new(Vec::new());
+/// Worktrees whose failed checks phones asked this window to hand to their
+/// agents — see [`super::take_phone_fix_checks`].
+pub(crate) static PHONE_FIX_CHECKS: Mutex<Vec<(u64, String, String)>> = Mutex::new(Vec::new());
+/// Reviews phones asked this window to send to their worktrees' agents — see
+/// [`super::take_phone_review`].
+pub(crate) static PHONE_REVIEWS: Mutex<Vec<super::PhoneReview>> = Mutex::new(Vec::new());
 /// The serial the next [`Connection`] gets. See [`AGENT_STATUS`].
 static NEXT_SERIAL: AtomicU64 = AtomicU64::new(1);
 /// This window's worktrees, as last published — sent again on every new
@@ -81,6 +90,10 @@ pub(crate) static USAGE: Mutex<Vec<crate::rate_limits::ProviderSnapshot>> = Mute
 pub(crate) static AGENTS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 /// The theme this window is drawn in, as last published — like [`USAGE`].
 pub(crate) static THEME: Mutex<Option<crate::theme::Theme>> = Mutex::new(None);
+/// The worktrees' pull requests, as last published — like [`USAGE`], but
+/// `None` until the first, so that finding none is still sent.
+pub(crate) static PULL_REQUESTS: Mutex<Option<Vec<(String, crate::github::PullRequestStatus)>>> =
+    Mutex::new(None);
 
 /// The connection to the host, if there is one now. Never starts a host:
 /// for telling it something that only matters if it is running.
@@ -89,6 +102,23 @@ pub(crate) fn current() -> Option<Arc<Connection>> {
         .as_ref()
         .filter(|conn| conn.alive())
         .cloned()
+}
+
+/// The connected host's pid, without waiting.
+///
+/// `try_lock` rather than [`current`]'s lock: [`connection`] holds the slot
+/// for the whole of [`establish`], which can be seconds while a host starts,
+/// and this is asked from the window's thread. While the slot is held there is
+/// no live connection to name anyway.
+pub(crate) fn current_pid() -> Option<i32> {
+    let slot = match CONNECTION.try_lock() {
+        Ok(slot) => slot,
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => return None,
+    };
+    slot.as_ref()
+        .filter(|conn| conn.alive())
+        .and_then(|conn| conn.pid)
 }
 
 /// The connection to the host, made — and the host started — if need be.
@@ -157,6 +187,11 @@ fn establish() -> Result<Arc<Connection>> {
             let _ = conn.request(&Request::Theme {
                 theme: Box::new(theme),
             });
+        }
+        // Even none: a host that outlived an earlier window may still hold
+        // pull requests since closed.
+        if let Some(pull_requests) = lock(&PULL_REQUESTS).clone() {
+            let _ = conn.request(&Request::PullRequests { pull_requests });
         }
         return Ok(conn);
     }
@@ -413,7 +448,9 @@ fn wait_gone(socket: &std::path::Path, timeout: Duration) {
 impl Connection {
     fn start(stream: UnixStream) -> Result<Arc<Self>> {
         let reader = stream.try_clone().map_err(host_error)?;
+        let pid = peer_pid(&stream);
         let conn = Arc::new(Self {
+            pid,
             writer: Mutex::new(stream),
             serial: NEXT_SERIAL.fetch_add(1, Ordering::Relaxed),
             alive: AtomicBool::new(true),
@@ -572,20 +609,51 @@ fn route(conn: &Arc<Connection>, reply: Reply) {
             prompt,
             agent,
             note,
+            from,
+            base,
+            model,
+            effort,
+            worktree,
+            shell,
         } => lock(&PHONE_WORK).push(super::PhoneWork {
             project,
             prompt,
             agent,
             note,
+            from,
+            base,
+            model,
+            effort,
+            worktree,
+            shell,
         }),
         Reply::MergeWork { worktree } => lock(&PHONE_MERGES).push(worktree),
+        Reply::FixChecks {
+            req,
+            worktree,
+            prompt,
+        } => lock(&PHONE_FIX_CHECKS).push((req, worktree, prompt)),
+        Reply::SendReview {
+            req,
+            worktree,
+            base,
+            comments,
+            until_ms,
+        } => lock(&PHONE_REVIEWS).push(super::PhoneReview {
+            req,
+            worktree,
+            base,
+            comments,
+            until_ms,
+        }),
         Reply::Welcome { .. }
         | Reply::PairingCode { .. }
         | Reply::Devices { .. }
         | Reply::Revoked { .. }
         | Reply::Phones { .. }
         | Reply::Pairings { .. }
-        | Reply::PairingDecided { .. } => {}
+        | Reply::PairingDecided { .. }
+        | Reply::WorkTaken { .. } => {}
     }
 }
 

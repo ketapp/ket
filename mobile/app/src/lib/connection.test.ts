@@ -13,6 +13,7 @@ jest.mock('./version', () => ({ versionLabel: 'test' }));
 jest.mock('@ket/remote', () => ({
   AnswerSchema: 'answer',
   ErrorCode: { UNSUPPORTED_VERSION: 1, NOT_CONTROLLER: 2 },
+  FixChecksSchema: 'fixChecks',
   GetChangesSchema: 'getChanges',
   GetConversationSchema: 'getConversation',
   GetDiffSchema: 'getDiff',
@@ -27,12 +28,14 @@ jest.mock('@ket/remote', () => ({
   Signal_Kind: { INTERRUPT: 1 },
   SignalSchema: 'signal',
   StartWorkSchema: 'startWork',
+  GetStartOptionsSchema: 'getStartOptions',
+  StartSessionSchema: 'startSession',
   SubscribeSchema: 'subscribe',
   UnsubscribeSchema: 'unsubscribe',
   create: (_schema: string, value: object) => value,
   envelope: (requestId: bigint, payload: Envelope['payload']) => ({ requestId, payload, idempotencyKey: '' }),
   resume: jest.fn(),
-  toBase64Url: () => 'nonce',
+  toBase64Url: (bytes: Uint8Array) => `key-${bytes[0]}`,
   utf8: (bytes: Uint8Array) => String.fromCharCode(...bytes),
 }));
 
@@ -54,6 +57,7 @@ const reply = (payload: { case: string; value?: unknown }): Envelope =>
   ({ requestId: 10n, seq: 0n, payload }) as unknown as Envelope;
 
 let nextReply: Envelope;
+let keys = 0;
 let conn: HostConnection;
 let inside: Internals;
 let remote: RemoteStub;
@@ -63,7 +67,8 @@ beforeEach(() => {
   jest.useFakeTimers();
   Object.defineProperty(globalThis, 'crypto', {
     configurable: true,
-    value: { getRandomValues: (bytes: Uint8Array) => (bytes.fill(7), bytes) },
+    // A new key each time one is made, so a test can tell them apart.
+    value: { getRandomValues: (bytes: Uint8Array) => (bytes.fill(++keys % 256), bytes) },
   });
   sent = [];
   nextReply = reply({ case: 'ack', value: {} });
@@ -115,7 +120,7 @@ describe('HostConnection requests', () => {
 
   test('takes, renews, and releases terminal control', async () => {
     await expect(conn.takeControl(4n)).resolves.toBe(true);
-    expect(sent[0].idempotencyKey).toBe('nonce');
+    expect(sent[0].idempotencyKey).toMatch(/^key-/);
     expect(inside.leases.has(4n)).toBe(true);
 
     nextReply = reply({ case: 'error', value: { code: 0, message: 'busy' } });
@@ -146,7 +151,7 @@ describe('HostConnection requests', () => {
     await expect(conn.devices()).rejects.toThrow('did not list');
   });
 
-  test('starts and merges work, returning host errors', async () => {
+  test('starts and merges work and fixes checks, returning host errors', async () => {
     await expect(conn.startWork('project', 'fix it', 'codex')).resolves.toBeNull();
     expect(sent[0].payload).toEqual({
       case: 'startWork',
@@ -154,7 +159,7 @@ describe('HostConnection requests', () => {
     });
     // The desktop took it: a row stands in for the work until it arrives.
     expect(conn.starting).toEqual([
-      { project: 'project', prompt: 'fix it', at: expect.any(Number), before: [] },
+      { project: 'project', prompt: 'fix it', agent: 'codex', at: expect.any(Number), before: [] },
     ]);
     nextReply = reply({ case: 'error', value: { code: 0, message: 'ket is closed' } });
     await expect(conn.startWork('project', 'fix it')).resolves.toBe('ket is closed');
@@ -163,8 +168,52 @@ describe('HostConnection requests', () => {
     jest.advanceTimersByTime(120_100);
     expect(conn.starting).toEqual([]);
     await expect(conn.merge('tree')).resolves.toBe('ket is closed');
+    await expect(conn.fixChecks('tree')).resolves.toEqual({ why: 'ket is closed' });
+    expect(sent.at(-1)?.payload).toEqual({ case: 'fixChecks', value: { worktreeId: 'tree' } });
+    nextReply = reply({ case: 'checksHandedOver', value: { starting: true } });
+    await expect(conn.fixChecks('tree')).resolves.toEqual({ starting: true });
     nextReply = reply({ case: 'ack', value: {} });
     await expect(conn.merge('tree')).resolves.toBeNull();
+  });
+
+  test('sends explicit start choices and opens fresh sessions', async () => {
+    await expect(conn.startWork('project', 'fix it', 'codex', { base: 'release', model: 'gpt-6.1-sol', effort: 'high' })).resolves.toBeNull();
+    expect(sent[0].payload).toEqual({ case: 'startWork', value: {
+      projectId: 'project', prompt: 'fix it', agent: 'codex', base: 'release', model: 'gpt-6.1-sol', effort: 'high',
+    } });
+    nextReply = reply({ case: 'startOptions', value: { projectId: 'project', defaultBase: 'main', localBranches: ['main'] } });
+    await expect(conn.startOptions('project')).resolves.toMatchObject({ defaultBase: 'main' });
+    nextReply = reply({ case: 'ack', value: {} });
+    await expect(conn.startSession('tree', 'codex', 'review it', 'gpt-6.1-sol', 'high')).resolves.toBeNull();
+    expect(sent.at(-1)?.payload).toEqual({ case: 'startSession', value: {
+      worktreeId: 'tree', agent: 'codex', prompt: 'review it', model: 'gpt-6.1-sol', effort: 'high',
+    } });
+  });
+
+  test('fixing checks asks again under the same key after the connection drops', async () => {
+    // The first try's session ends before the desktop answers.
+    remote.send.mockImplementationOnce((message: Envelope) => {
+      sent.push(message);
+      void Promise.resolve().then(() => inside.pending.get(message.requestId)?.reject(new Error('the connection to the desktop dropped')));
+    });
+    Object.assign(conn, { status: 'offline' });
+    nextReply = reply({ case: 'checksHandedOver', value: { starting: false } });
+    const fixed = conn.fixChecks('tree');
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(sent).toHaveLength(1);
+    // Something else asked meanwhile gets a key of its own.
+    void conn.merge('other').catch(() => {});
+    // Welcomed again: the same ask, under the same key.
+    Object.assign(conn, { status: 'connected' });
+    inside.notify();
+    await expect(fixed).resolves.toEqual({ starting: false });
+    const tries = sent.filter((message) => message.payload.case === 'fixChecks');
+    expect(tries).toHaveLength(2);
+    expect(tries[1].idempotencyKey).toBe(tries[0].idempotencyKey);
+    expect(tries[1].requestId).not.toBe(tries[0].requestId);
+    const merge = sent.find((message) => message.payload.case === 'mergeWorktree');
+    expect(merge?.idempotencyKey).not.toBe(tries[0].idempotencyKey);
   });
 
   test('reads changes and diffs, preserving host errors', async () => {

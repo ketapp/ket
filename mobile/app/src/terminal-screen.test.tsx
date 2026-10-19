@@ -126,8 +126,30 @@ describe('TerminalScreen', () => {
     await act(async () => { await jest.advanceTimersByTimeAsync(90); });
     await waitFor(() => expect(mockConn.type).toHaveBeenCalledWith(7n, '\r'));
 
-    await fireEvent.press(view.getByLabelText('Let go of control'));
+    // No badge to let go with: leaving the screen does.
+    expect(view.queryByText('you have control')).toBeNull();
+    expect(mockConn.releaseControl).not.toHaveBeenCalled();
+    await view.unmount();
     expect(mockConn.releaseControl).toHaveBeenCalledWith(7n);
+  });
+
+  test('puts the tabs in the bar, with the state on the agent’s mark', async () => {
+    mockConn.snapshot.projects[0].worktrees[0].terminals[0].title = '⠋ Review changes';
+    const view = await render(<TerminalScreen />);
+    // The tabs are the title; the agent's spinner frame is left off its name.
+    expect(view.getByLabelText('Terminals in Tree')).toBeTruthy();
+    expect(view.getByLabelText('Review changes, busy').props.accessibilityState).toEqual({ selected: true });
+    expect(view.getByLabelText('Shell').props.accessibilityState).toEqual({ selected: false });
+    expect(view.queryByText('busy')).toBeNull();
+    await view.unmount();
+  });
+
+  test('titles a lone terminal in the bar, its state on the mark', async () => {
+    mockConn.snapshot.projects[0].worktrees[0].terminals = [{ id: 7n, agent: 'codex', title: '', closed: false }];
+    const view = await render(<TerminalScreen />);
+    expect(view.queryByLabelText('Terminals in Tree')).toBeNull();
+    expect(view.getByLabelText('Codex, busy')).toBeTruthy();
+    expect(view.getByText('Codex')).toBeTruthy();
     await view.unmount();
   });
 

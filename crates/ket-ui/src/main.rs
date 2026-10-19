@@ -38,6 +38,7 @@ mod browser;
 mod browser_snapshot;
 #[cfg(target_os = "macos")]
 mod browser_view;
+mod checks;
 mod clear_build;
 mod commands;
 mod device_capture;
@@ -65,6 +66,7 @@ mod merge_worktree;
 mod motion;
 mod notify;
 mod orbit;
+mod overhead;
 mod paint;
 mod palette;
 mod panel;
@@ -78,6 +80,7 @@ mod pull_request;
 mod quick_prompt;
 mod region;
 mod release;
+mod review;
 mod savings;
 mod search;
 mod shortcuts;
@@ -108,7 +111,7 @@ use std::sync::Arc;
 use gpui::{
     App, Application, Bounds, Context, FocusHandle, Focusable, KeyBinding, KeyDownEvent,
     MouseButton, Pixels, SharedString, TitlebarOptions, Window, WindowAppearance, WindowBounds,
-    WindowOptions, actions, deferred, div, point, prelude::*, px, size,
+    WindowOptions, actions, deferred, div, point, prelude::*, px, relative, size,
 };
 
 use ket_core::activity::Tracker;
@@ -356,6 +359,9 @@ pub(crate) enum PopupKind {
     Savings,
     /// The worktrees ready to merge, from the header's Merge figure.
     Merge,
+    /// What ket and its agents cost, from the status bar's read-outs — see
+    /// `crate::overhead`.
+    Overhead,
 }
 
 /// Outcome of the managed Economy pack check performed at launch.
@@ -510,6 +516,13 @@ struct Shell {
     /// Open diff tabs' state, by the comparison each shows. See
     /// `crate::diff_view`.
     pub(crate) diffs: crate::diff_view::Diffs,
+    /// Review comments waiting to be sent to each worktree's agent. See
+    /// `crate::review`.
+    pub(crate) reviews: HashMap<WorktreeId, Vec<crate::review::ReviewComment>>,
+    /// The panel a review comment is written in, while it is up.
+    pub(crate) review_draft: Option<crate::review::ReviewDraft>,
+    /// The id the last review comment was given.
+    pub(crate) next_review_id: usize,
     /// The file tree, for the selected worktree.
     pub(crate) explorer: Explorer,
     /// The `Cmd-P` file finder.
@@ -571,6 +584,9 @@ struct Shell {
     /// Where each project's GitHub issues were last read, and what ket is
     /// changing on GitHub now.
     pub(crate) issue_sync: crate::backlog::IssueSync,
+    /// The worktrees' pull requests and their checks, as last read from
+    /// GitHub.
+    pub(crate) pull_requests: crate::checks::PullRequests,
     /// The Mac's GitHub accounts, and any sign-in under way.
     pub(crate) github: crate::github::GitHubState,
     /// The ⇧⌘A panel that takes a note for a backlog, while it is up.
@@ -595,6 +611,9 @@ struct Shell {
     /// The feedback popover over the status bar's right end, and the draft
     /// it keeps between openings. See `crate::feedback`.
     pub(crate) feedback: crate::feedback::Feedback,
+    /// What ket and its agents cost, read on the tick while the status bar
+    /// is open. See `crate::overhead`.
+    pub(crate) overhead: crate::overhead::OverheadItems,
     /// The span the Savings item and popup total over.
     pub(crate) savings_period: crate::savings::SavingsPeriod,
     /// The savings rollup, rebuilt on the poll tick rather than per frame —
@@ -613,13 +632,9 @@ struct Shell {
     ///
     /// Codex publishes no status line, so nothing pushes its numbers at ket the
     /// way Claude's do — they have to be read out of the transcript it is
-    /// already writing. See [`ket_core::sessions::CodexRollout`].
-    ///
-    /// Created on demand rather than per worktree up front: finding the right
-    /// rollout means walking Codex's dated store, which is too much to do for a
-    /// worktree that has never run one. A hook report naming the agent is the
-    /// signal that there is something to follow.
-    pub(crate) codex_rollouts: HashMap<WorktreeId, ket_core::sessions::CodexRollout>,
+    /// already writing. See [`ket_core::sessions::CodexRollouts`] for which
+    /// rollout a worktree follows, and when it looks for another.
+    pub(crate) codex: ket_core::sessions::CodexRollouts,
     /// What each worktree's own instruction files cost every session in it.
     ///
     /// Filled once per worktree, the first tick a session there reports, and
@@ -704,6 +719,10 @@ struct Shell {
     /// The worktree whose merge mark is under the pointer, if any. Its own
     /// field for the same reason `hovered_primary` is.
     pub(crate) hovered_merge: Option<WorktreeId>,
+    /// Which glyph-only control of the diff or its review is under the
+    /// pointer, for its tooltip: its kind, and which row or comment —
+    /// see `Shell::tipped`.
+    pub(crate) hovered_diff_control: Option<(&'static str, usize)>,
     /// The worktree whose pull request mark is under the pointer, if any.
     pub(crate) hovered_pull_request: Option<WorktreeId>,
     /// The worktree whose size on disk is under the pointer, for its
@@ -768,6 +787,10 @@ struct Shell {
     /// Which height the traffic lights were last placed for, so they are
     /// moved when the header changes rather than on every frame.
     pub(crate) lights_placed: std::cell::Cell<Option<bool>>,
+    /// The full header's natural width, measured off screen each frame —
+    /// see `Shell::header_probe`. Wider than the window, the header shows
+    /// the compact strip whatever [`Shell::header_compact`] asks for.
+    pub(crate) header_need: std::cell::Cell<Option<Pixels>>,
     /// Which worktrees the sidebar lists. Not kept across runs: a filter
     /// left on "Waiting" is a sidebar that looks empty the next morning.
     pub(crate) sidebar_filter: crate::tree::SidebarFilter,
@@ -803,6 +826,8 @@ struct Shell {
     /// the layout, and what the tab asks for to get its terminal back after a
     /// restart. Also what its agent's hooks report as their pane.
     pub(crate) terminal_keys: HashMap<TerminalId, String>,
+    /// Prevent automatic resume while a phone opens a fresh session.
+    pub(crate) suppress_auto_session: bool,
     /// The worktrees last handed to the status owners — see
     /// `Shell::sync_status_worktrees`.
     pub(crate) status_worktrees: Vec<(String, std::path::PathBuf)>,
@@ -1007,6 +1032,7 @@ impl Shell {
             || self.quick_prompt.is_some()
             || self.backlog.is_some()
             || self.quick_capture.is_some()
+            || self.review_draft_focused()
             || self.feedback.typing()
             || self.browser_typing(window, cx)
             || self.searches.explorer.read(cx).is_focused(window)
@@ -1066,6 +1092,11 @@ impl Shell {
             self.persist_view();
         }
         self.refresh_savings();
+        // Only for a bar someone can see. See `crate::overhead`.
+        if self.status_bar_open {
+            let _t = crate::frametrace::tick("refresh_overhead");
+            self.refresh_overhead();
+        }
         self.refresh_menu_tools(cx);
         self.refresh_native_menus(cx);
         // The theme the window is drawn in, for phones to draw in too. Sent
@@ -1172,12 +1203,16 @@ impl Shell {
         })
         .detach();
 
-        // Agent status, as it arrives — see `STATUS_WAKE`.
+        // Agent status, as it arrives — see `STATUS_WAKE` — and a phone's
+        // review, which the phone waits on.
         cx.spawn(async move |shell, cx| {
             loop {
                 cx.background_executor().timer(STATUS_WAKE).await;
                 if shell
                     .update(cx, |shell, cx| {
+                        if shell.take_phone_reviews(cx) {
+                            cx.notify();
+                        }
                         if shell.drain_hook_reports(false) {
                             shell.announce_waiting();
                             shell.refresh_rule_offers();
@@ -1289,9 +1324,12 @@ impl Shell {
                     panel_view: Default::default(),
                     git_panel: Default::default(),
                     diffs: Default::default(),
+                    reviews: HashMap::new(),
+                    review_draft: None,
+                    next_review_id: 0,
                     explorer: Explorer::default(),
                     finder: Finder::default(),
-                    sidebar_width: px(300.0),
+                    sidebar_width: px(270.0),
                     projects: Vec::new(),
                     selection: None,
                     project_focus: HashMap::new(),
@@ -1312,6 +1350,7 @@ impl Shell {
                     device_strip_hovered: None,
                     backlog: None,
                     issue_sync: crate::backlog::IssueSync::default(),
+                    pull_requests: crate::checks::PullRequests::default(),
                     github: crate::github::GitHubState::default(),
                     quick_capture: None,
                     worktree_menu: None,
@@ -1320,10 +1359,11 @@ impl Shell {
                     worktree_snippet_menu: None,
                     popup: None,
                     feedback: Default::default(),
+                    overhead: Default::default(),
                     savings_period: Default::default(),
                     savings: Default::default(),
                     session_usage: crate::usage_card::restored_sessions(&usage_history),
-                    codex_rollouts: HashMap::new(),
+                    codex: Default::default(),
                     context_weights: HashMap::new(),
                     active_pack: None,
                     pack_refresh_status: PackRefreshStatus::NotConfigured,
@@ -1336,6 +1376,7 @@ impl Shell {
                     override_hover: Default::default(),
                     hovered_primary: None,
                     hovered_merge: None,
+                    hovered_diff_control: None,
                     hovered_pull_request: None,
                     hovered_footprint: None,
                     hovered_worktree: None,
@@ -1358,6 +1399,7 @@ impl Shell {
                     sidebar_menu: None,
                     rail_hover: Default::default(),
                     lights_placed: std::cell::Cell::new(None),
+                    header_need: std::cell::Cell::new(None),
                     reading_git_status: false,
                     git_watch: Default::default(),
                     reading_records: false,
@@ -1371,6 +1413,7 @@ impl Shell {
                     owed_terminals: HashMap::new(),
                     owed_restores: HashMap::new(),
                     terminal_keys: HashMap::new(),
+                    suppress_auto_session: false,
                     status_worktrees: Vec::new(),
                     tab_drop: None,
                     tab_dragging: false,
@@ -1452,9 +1495,12 @@ impl Shell {
             panel_view: Default::default(),
             git_panel: Default::default(),
             diffs: Default::default(),
+            reviews: HashMap::new(),
+            review_draft: None,
+            next_review_id: 0,
             explorer: Explorer::default(),
             finder: Finder::default(),
-            sidebar_width: px(300.0),
+            sidebar_width: px(270.0),
             projects,
             selection: None,
             project_focus: HashMap::new(),
@@ -1475,6 +1521,7 @@ impl Shell {
             device_strip_hovered: None,
             backlog: None,
             issue_sync: crate::backlog::IssueSync::default(),
+            pull_requests: crate::checks::PullRequests::default(),
             github: crate::github::GitHubState::default(),
             quick_capture: None,
             worktree_menu: None,
@@ -1483,10 +1530,11 @@ impl Shell {
             worktree_snippet_menu: None,
             popup: None,
             feedback: Default::default(),
+            overhead: Default::default(),
             savings_period: Default::default(),
             savings: Default::default(),
             session_usage: crate::usage_card::restored_sessions(&usage_history),
-            codex_rollouts: HashMap::new(),
+            codex: Default::default(),
             context_weights: HashMap::new(),
             active_pack: None,
             pack_refresh_status: PackRefreshStatus::NotConfigured,
@@ -1499,6 +1547,7 @@ impl Shell {
             override_hover: Default::default(),
             hovered_primary: None,
             hovered_merge: None,
+            hovered_diff_control: None,
             hovered_pull_request: None,
             hovered_footprint: None,
             hovered_worktree: None,
@@ -1521,6 +1570,7 @@ impl Shell {
             sidebar_menu: None,
             rail_hover: Default::default(),
             lights_placed: std::cell::Cell::new(None),
+            header_need: std::cell::Cell::new(None),
             reading_git_status: false,
             git_watch: Default::default(),
             reading_records: false,
@@ -1534,6 +1584,7 @@ impl Shell {
             owed_terminals: HashMap::new(),
             owed_restores: HashMap::new(),
             terminal_keys: HashMap::new(),
+            suppress_auto_session: false,
             status_worktrees: Vec::new(),
             tab_drop: None,
             tab_dragging: false,
@@ -1604,9 +1655,13 @@ impl Shell {
         // window being something else.
         let was_selected = shell.restore_view();
         shell.refresh_savings();
-        // The refresh was started with the shell; a bar restored hidden stops
-        // it before its first fetch has had a chance to matter.
-        if !shell.status_bar_open {
+        // A bar restored open has its memory figures from the first frame and
+        // its CPU from the first tick — see `crate::overhead`. One restored
+        // hidden goes the way a person hiding it does, so the View menu's item
+        // says the right thing.
+        if shell.status_bar_open {
+            shell.refresh_overhead();
+        } else {
             shell.set_status_bar(false, cx);
         }
 
@@ -1883,8 +1938,9 @@ impl Render for Shell {
         };
         let status = self.status_bar_open.then(|| {
             let _span = crate::frametrace::span("build:status");
+            let overhead = self.overhead_trigger(window, cx);
             let feedback = self.feedback_trigger(window, cx);
-            self.window_status_bar(feedback)
+            self.window_status_bar(overhead, feedback)
         });
         let feedback_overlay = self.feedback_overlay(window, cx);
         let toasts = self.toasts_view(window, cx);
@@ -1906,6 +1962,12 @@ impl Render for Shell {
             // that show code or a grid ask for `self.font_family`, and only
             // the lines that are words ask for `fonts::prose`.
             .font_family(self.chrome_family.clone())
+            // Stated once, for everything under it. gpui's default is the
+            // golden ratio, which set every two-line row in the sidebar a
+            // third taller than its text and is most of what made the
+            // window read as loose. Text that is read at length — a note's
+            // markdown, a release's notes — states its own.
+            .line_height(relative(1.3))
             .track_focus(&self.focus)
             .on_action(cx.listener(|this, _: &OpenSettings, _, cx| {
                 this.menu_dirty = true;
@@ -2591,7 +2653,8 @@ impl Render for Shell {
                         | this.tab_context_menu.take().is_some()
                         | this.link_menu.take().is_some()
                         | this.popup.take().is_some()
-                        | this.dismiss_feedback();
+                        | this.dismiss_feedback()
+                        | this.blur_review_draft();
                     // Not folded into the run of `take`s above: closing this
                     // one clears a text field, which needs the context the
                     // boolean chain has no room for.
@@ -2739,6 +2802,12 @@ impl Render for Shell {
                         return;
                     }
                     if this.quick_capture_key(event, window, cx) {
+                        this.caret_wake(cx);
+                        cx.notify();
+                        stop_unless_text(event, cx);
+                        return;
+                    }
+                    if this.review_draft_key(event, cx) {
                         this.caret_wake(cx);
                         cx.notify();
                         stop_unless_text(event, cx);

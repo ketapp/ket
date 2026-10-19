@@ -5,11 +5,18 @@
 //! This does: a figure in the header, and behind it the same figure by project
 //! and by worktree.
 //!
-//! **Every figure is an estimate, in dollars, and none can go below zero.**
-//! Each session is priced from its own tokens, and its saving is the output
-//! its level is assumed to have trimmed — see
-//! [`ket_core::usage::ASSUMED_OUTPUT_REDUCTION`] for why it is never measured
-//! against other sessions.
+//! **Spent, and what was saved, with the measured kept apart from the
+//! assumed.** Each session is priced from its own tokens at its model's rates.
+//! What the output filter kept from the model is measured the same way and
+//! drawn plainly. Shorter answers are the output a level is assumed to have
+//! trimmed — see [`ket_core::usage::ASSUMED_OUTPUT_REDUCTION`] for why that is
+//! never measured against other sessions — and carry `≈` and a tag that says
+//! so.
+//!
+//! **The prompt cache is shown and not counted.** It saves more than both put
+//! together, and nearly all of it would have been saved with Economy off —
+//! see [`ket_core::usage::History::savings_by_worktree`]. So its tokens get a
+//! line that says it is left out, and no dollar figure.
 //!
 //! **A worktree is listed if it is reduced now or ran Economy sessions in the
 //! period.** One put back to the default keeps what it saved while it was on.
@@ -27,17 +34,18 @@ use gpui::{
     AnyElement, Context, FontWeight, Pixels, SharedString, Window, div, prelude::*, px, relative,
 };
 use ket_core::id::ProjectId;
+use ket_core::rates::money;
 use ket_core::theme::{Color, Theme};
 use ket_core::usage::WorktreeSavings;
 
 use crate::fonts::Prose;
 use crate::paint::{alpha, paint};
 use crate::ui::button::button;
-use crate::ui::chip::{badge, caption, token_reduction_ring};
+use crate::ui::chip::{badge, caption, tag, token_reduction_ring};
 use crate::ui::icon::{Icon, WELL_GLYPH, icon_well, sized_icon};
 use crate::ui::popup::{self, Placement};
 use crate::ui::{CAPTION, LABEL, RADIUS_LG, RADIUS_MD};
-use crate::usage_card::level_name;
+use crate::usage_card::{level_name, tokens};
 use crate::{PopupKind, Shell};
 
 /// The popup's width: a worktree line carries a name, its level, a figure
@@ -59,7 +67,7 @@ const TOTAL: Pixels = px(18.0);
 /// How far a worktree line sits in from its project's badge.
 const INDENT: Pixels = px(28.0);
 
-/// The Tokens and Saved columns' width, and the gap before each.
+/// The Spent and Saved columns' width, and the gap before each.
 const COLUMN_W: Pixels = px(76.0);
 const COLUMN_GAP: Pixels = px(12.0);
 
@@ -89,8 +97,9 @@ const DAY_MS: u64 = 24 * 60 * 60 * 1000;
 /// The settings pane's saved figure: the point of its card.
 const FIGURE: Pixels = px(34.0);
 
-/// The spent-and-saved bar's height.
-const BAR_H: Pixels = px(6.0);
+/// How much of the saving's green an estimate gets: the same hue, so it adds
+/// up with the measured lines, but quieter, so it never reads as one of them.
+const ESTIMATE_INK: f32 = 0.62;
 
 /// A level's name, in the Economy pane's levels card.
 const LEVEL_NAME_W: Pixels = px(68.0);
@@ -171,7 +180,7 @@ impl Savings {
     /// Whether there is nothing to show: no worktree reduced now, and none
     /// removed with reduced sessions in the period.
     fn is_off(&self) -> bool {
-        self.projects.is_empty() && self.removed.measured + self.removed.unmeasured == 0
+        self.projects.is_empty() && self.removed.priced + self.removed.unpriced == 0
     }
 }
 
@@ -238,16 +247,33 @@ fn card_head(
 
 /// An estimated dollar figure, marked as one.
 fn estimated(micros: i64) -> String {
-    format!("≈{}", ket_core::rates::money(micros))
+    format!("≈{}", money(micros))
 }
 
-/// A saving's ink: green when there is one, dim when it rounds to nothing.
-/// Never red — the estimate cannot go below zero.
-fn tint(savings: &WorktreeSavings, t: &Theme) -> gpui::Rgba {
-    paint(match savings.saved_micros > 0 {
+/// A saving as a figure and its ink: green when there is one, dim when there
+/// is none. Never red: neither saving can go below zero.
+pub(crate) fn saving(micros: i64, t: &Theme) -> (String, gpui::Rgba) {
+    let ink = match micros > 0 {
         true => t.diff.added,
         false => t.text.dim,
-    })
+    };
+    (money(micros), paint(ink))
+}
+
+/// A figure that has the shorter-answers estimate in it, marked as an
+/// estimate: a total is only as measured as its least measured part.
+fn approx(savings: &WorktreeSavings, figure: String) -> String {
+    match savings.estimated_micros > 0 {
+        true => format!("≈{figure}"),
+        false => figure,
+    }
+}
+
+/// Everything a line saved as a figure and its ink — see [`saving`] — with
+/// `≈` when the estimate is part of it.
+fn whole_saving(savings: &WorktreeSavings, t: &Theme) -> (String, gpui::Rgba) {
+    let (figure, ink) = saving(savings.saved_micros(), t);
+    (approx(savings, figure), ink)
 }
 
 /// The saving as a share of what the same sessions would have cost with
@@ -269,8 +295,8 @@ fn sessions(count: usize) -> String {
 /// Why a figure has no saving to show: its sessions could not be priced, they
 /// ran at the default level, or there are none.
 fn unmeasured(savings: &WorktreeSavings) -> String {
-    if savings.unmeasured > 0 {
-        format!("{} not priced", sessions(savings.unmeasured))
+    if savings.unpriced > 0 {
+        format!("{} not priced", sessions(savings.unpriced))
     } else if savings.unreduced > 0 {
         format!("{} at {}", sessions(savings.unreduced), default_level())
     } else {
@@ -317,16 +343,160 @@ fn column(text: impl Into<SharedString>, ink: gpui::Rgba) -> gpui::Div {
         .child(text.into())
 }
 
-/// A line's estimated cost and saving, or a dash each when nothing was priced.
+/// What a line spent, once anything in it could be priced.
+fn spent_figure(savings: &WorktreeSavings) -> Option<String> {
+    (savings.priced > 0 || savings.spent_micros > 0).then(|| money(savings.spent_micros))
+}
+
+/// What a line saved, both savings together, once one of its Economy
+/// sessions could be priced.
+fn saved_figure(savings: &WorktreeSavings, t: &Theme) -> Option<(String, gpui::Rgba)> {
+    (savings.priced > 0).then(|| whole_saving(savings, t))
+}
+
+/// A line's spend and saving, or a dash for either it has none of.
 fn figures(savings: &WorktreeSavings, t: &Theme) -> [gpui::Div; 2] {
-    if savings.measured == 0 {
-        let dash = alpha(paint(t.text.dim), 0.6);
-        return [column("\u{2014}", dash), column("\u{2014}", dash)];
-    }
+    let dash = || column("\u{2014}", alpha(paint(t.text.dim), 0.6));
     [
-        column(estimated(savings.cost_micros), paint(t.text.dim)),
-        column(estimated(savings.saved_micros), tint(savings, t)),
+        spent_figure(savings).map_or_else(dash, |spent| column(spent, paint(t.text.dim))),
+        saved_figure(savings, t).map_or_else(dash, |(saved, ink)| {
+            column(saved, ink).font_weight(FontWeight::MEDIUM)
+        }),
     ]
+}
+
+/// "1 command" or "1,284 commands".
+fn commands(count: u32) -> String {
+    let digits = count.to_string();
+    let mut grouped = String::new();
+    for (i, digit) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            grouped.push(',');
+        }
+        grouped.push(digit);
+    }
+    match count {
+        1 => "1 command".to_owned(),
+        _ => format!("{grouped} commands"),
+    }
+}
+
+/// What the output filter's saving is made of, measured: the tokens it kept
+/// from the model, and the commands it saw.
+fn filter_detail(total: &WorktreeSavings) -> String {
+    format!(
+        "{} tokens trimmed \u{b7} {}",
+        tokens(total.filter_saved_tokens),
+        commands(total.command_calls)
+    )
+}
+
+/// One line under the totals: what it is, with a tag when it needs one, what
+/// it was made of under that, and — for a saving — what it came to at the
+/// end.
+fn ledger_row(
+    name: &'static str,
+    label: Option<gpui::Div>,
+    detail: String,
+    figure: Option<(String, gpui::Rgba)>,
+    t: &Theme,
+) -> gpui::Div {
+    div()
+        .flex()
+        .items_center()
+        .gap(COLUMN_GAP)
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_w_0()
+                .gap(px(2.0))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .child(
+                            div()
+                                .prose()
+                                .text_size(NAME)
+                                .text_color(paint(t.text.primary))
+                                .child(name),
+                        )
+                        .children(label),
+                )
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(META)
+                        .text_color(paint(t.text.dim))
+                        .child(detail),
+                ),
+        )
+        .children(figure.map(|(figure, ink)| {
+            column(figure, ink)
+                .text_size(NAME)
+                .font_weight(FontWeight::MEDIUM)
+        }))
+}
+
+/// The two savings, the measured one first, and under them the prompt cache,
+/// which is said and not counted.
+///
+/// The filter says it has nothing yet rather than `$0.00` until a command has
+/// been measured: a session that never ran one is not a filter that saved
+/// nothing. The cache gets no figure at all, so that nothing on the line can
+/// be read as part of the total — see the module docs.
+fn ledger(total: &WorktreeSavings, t: &Theme) -> Vec<gpui::Div> {
+    let dim = paint(t.text.dim);
+    let filter = match total.command_calls {
+        0 => ledger_row(
+            "Output filter",
+            None,
+            "no commands measured yet".to_owned(),
+            Some(("\u{2014}".to_owned(), alpha(dim, 0.6))),
+            t,
+        ),
+        _ => ledger_row(
+            "Output filter",
+            None,
+            filter_detail(total),
+            Some(saving(total.filter_saved_micros, t)),
+            t,
+        ),
+    };
+    let shorter = ledger_row(
+        "Shorter answers",
+        Some(tag("estimated", t)),
+        "assumed output trim, by level".to_owned(),
+        Some((
+            estimated(total.estimated_micros),
+            match total.estimated_micros > 0 {
+                true => alpha(paint(t.diff.added), ESTIMATE_INK),
+                false => dim,
+            },
+        )),
+        t,
+    );
+    let cache = (total.cache_read_tokens + total.cache_write_tokens > 0).then(|| {
+        ledger_row(
+            "Prompt cache",
+            Some(tag("not counted", t)),
+            format!(
+                "{} read \u{b7} {} written \u{b7} cached at every level",
+                tokens(total.cache_read_tokens),
+                tokens(total.cache_write_tokens)
+            ),
+            None,
+            t,
+        )
+    });
+    [Some(filter), Some(shorter), cache]
+        .into_iter()
+        .flatten()
+        .collect()
 }
 
 /// One line of the list: what it is on the left, its two figures on the
@@ -378,8 +548,9 @@ impl Shell {
     /// came or went) and when the period changes.
     ///
     /// Whatever the history holds for a worktree the sidebar no longer has
-    /// goes on the removed line — reduced sessions only, since a removed
-    /// worktree's sessions at the default level explain nothing.
+    /// goes on the removed line — only one that ran reduced sessions, since
+    /// one that never did explains nothing. Its spend counts at every level,
+    /// as a listed worktree's does, so the line's Spent and Saved agree.
     pub(crate) fn refresh_savings(&mut self) {
         let since = self.savings_period.since_ms(ket_core::now_ms());
         let mut by_worktree = self.usage_history.savings_by_worktree(since);
@@ -392,7 +563,7 @@ impl Shell {
                 .iter()
                 .filter_map(|node| {
                     let savings = by_worktree.remove(&node.id).unwrap_or_default();
-                    let ran = savings.measured + savings.unmeasured > 0;
+                    let ran = savings.priced + savings.unpriced > 0;
                     (node.token_reduction != default || ran).then(|| WorktreeLine {
                         label: node.name.clone().unwrap_or_else(|| node.branch.clone()),
                         level: node.token_reduction,
@@ -432,7 +603,7 @@ impl Shell {
 
         // Every sidebar worktree was taken above; what is left was removed.
         for savings in by_worktree.into_values() {
-            if savings.measured + savings.unmeasured > 0 {
+            if savings.priced + savings.unpriced > 0 {
                 rollup.removed.add(&WorktreeSavings {
                     unreduced: 0,
                     ..savings
@@ -460,7 +631,7 @@ impl Shell {
             .find(|project| &project.id == id)?;
         let total = &project.total;
         let period = self.savings_period.short();
-        if total.measured == 0 {
+        if total.priced == 0 {
             return Some((
                 "—".into(),
                 paint(self.theme.text.dim),
@@ -469,25 +640,23 @@ impl Shell {
         }
         let note = match percent(total) {
             Some(percent) => format!("{percent} · {period}"),
-            None => format!("{} · {period}", sessions(total.measured)),
+            None => format!("{} · {period}", sessions(total.priced)),
         };
-        Some((
-            estimated(total.saved_micros).into(),
-            tint(total, &self.theme),
-            note.into(),
-        ))
+        let (figure, tint) = whole_saving(total, &self.theme);
+        Some((figure.into(), tint, note.into()))
     }
 
     /// The Economy pane's first card: what Economy saved over the header's
-    /// period, in green, with the switch that sets the period; a bar of what
-    /// was spent against what was saved; and the two figures under it.
+    /// period, in green, with the switch that sets the period; the two
+    /// savings it is made of and the cache it leaves out, as the popup's
+    /// ledger has them; and what was spent against what it would have been.
     ///
     /// From the same rollup as the header, so the two can never disagree.
     pub(crate) fn economy_figures(&self, cx: &mut Context<Self>) -> AnyElement {
         let t = &self.theme;
         let savings = &self.savings;
         let total = &savings.total;
-        let measured = total.measured > 0;
+        let measured = total.priced > 0;
         let dim = paint(t.text.dim);
 
         let period = crate::status_bar::segmented(
@@ -503,6 +672,10 @@ impl Shell {
             cx,
         );
 
+        let (figure, ink) = match measured {
+            true => whole_saving(total, t),
+            false => ("\u{2014}".to_owned(), dim),
+        };
         let figure = div()
             .flex()
             .items_end()
@@ -513,54 +686,41 @@ impl Shell {
                     .font_family(crate::fonts::chrome())
                     .text_size(FIGURE)
                     .font_weight(FontWeight::MEDIUM)
-                    .text_color(match measured {
-                        true => tint(total, t),
-                        false => dim,
-                    })
+                    .text_color(ink)
                     .whitespace_nowrap()
-                    .child(match measured {
-                        true => estimated(total.saved_micros),
-                        false => "\u{2014}".to_owned(),
-                    }),
+                    .child(figure),
             )
             .children(percent(total).filter(|_| measured).map(|share| {
                 div()
+                    .prose()
                     .pb(px(5.0))
                     .text_size(NAME)
-                    .text_color(paint(t.diff.added))
+                    .text_color(ink)
                     .child(share)
             }));
 
-        // What was spent, then what was saved, end to end: the whole bar is
-        // what the same sessions would have cost with Economy off.
-        let cost = total.cost_micros.max(0) as f32;
-        let saved = total.saved_micros.max(0) as f32;
-        let bar = div().flex().gap(px(2.0)).h(BAR_H);
-        let bar = if measured && cost + saved > 0.0 {
-            bar.child(
-                div()
-                    .h_full()
-                    .w(relative(cost / (cost + saved)))
-                    .rounded(BAR_H)
-                    .bg(alpha(dim, 0.35)),
-            )
-            .child(
-                div()
-                    .h_full()
-                    .flex_1()
-                    .rounded(BAR_H)
-                    .bg(paint(t.diff.added)),
-            )
-        } else {
-            bar.child(div().h_full().flex_1().rounded(BAR_H).bg(alpha(dim, 0.14)))
-        };
+        // The popup's ledger, with a rule between its lines: on the sheet
+        // they are not in a well that already sets them apart.
+        let ledger = measured.then(|| {
+            let rows = ledger(total, t);
+            let last = rows.len().saturating_sub(1);
+            div()
+                .flex()
+                .flex_col()
+                .children(rows.into_iter().enumerate().map(|(i, row)| {
+                    row.when(i > 0, |row| {
+                        row.pt(px(8.0)).border_t_1().border_color(paint(t.rule))
+                    })
+                    .when(i < last, |row| row.pb(px(8.0)))
+                }))
+        });
 
-        let pair = |label: &'static str, micros: i64| {
+        let pair = |label: &'static str, figure: String| {
             div().flex().gap(px(5.0)).child(label).child(
                 div()
                     .font_family(crate::fonts::chrome())
                     .text_color(paint(t.text.primary))
-                    .child(estimated(micros)),
+                    .child(figure),
             )
         };
         let foot = if savings.is_off() {
@@ -571,12 +731,16 @@ impl Shell {
             div()
                 .flex()
                 .justify_between()
+                .pt(px(2.0))
                 .text_size(CAPTION)
                 .text_color(dim)
-                .child(pair("Spent", total.cost_micros))
+                .child(pair("Spent", money(total.spent_micros)))
                 .child(pair(
                     "Without Economy",
-                    total.cost_micros + total.saved_micros,
+                    approx(
+                        total,
+                        money(total.spent_micros.saturating_add(total.saved_micros())),
+                    ),
                 ))
         };
 
@@ -589,9 +753,8 @@ impl Shell {
                 t,
             ))
             .child(figure)
-            .child(bar)
+            .children(ledger)
             .child(foot)
-            .children(command_output_line(total).map(|line| caption(line, t)))
             .into_any_element()
     }
 
@@ -693,7 +856,7 @@ impl Shell {
     /// and worktree.
     ///
     /// Three states, each worded rather than left blank: no worktree is
-    /// reduced, one is but nothing could be priced yet, and the estimate.
+    /// reduced, one is but nothing could be priced yet, and the whole saving.
     pub(crate) fn economy_status(
         &self,
         compact: bool,
@@ -705,12 +868,12 @@ impl Shell {
         let t = &self.theme;
         let savings = &self.savings;
         let total = &savings.total;
-        let measured = total.measured > 0;
+        let measured = total.priced > 0;
         let dim = paint(t.text.dim);
         let (figure, ink, note): (String, gpui::Rgba, Option<String>) = if savings.is_off() {
             ("off".to_owned(), dim, None)
         } else if !measured {
-            let note = match total.unmeasured {
+            let note = match total.unpriced {
                 0 => "no sessions",
                 _ => "not priced",
             };
@@ -718,11 +881,8 @@ impl Shell {
         } else {
             // Plain ink up here: green is the popover's, where the figure
             // has its columns and labels to say what it means.
-            (
-                estimated(total.saved_micros),
-                paint(t.text.primary),
-                percent(total),
-            )
+            let (figure, _) = whole_saving(total, t);
+            (figure, paint(t.text.primary), percent(total))
         };
 
         let face = match compact {
@@ -829,14 +989,20 @@ impl Shell {
         }
 
         // The whole period in a well, headed by the two columns the lines
-        // below repeat: estimated cost, and what Economy saved.
+        // below repeat — what was spent, and what Economy saved — with the
+        // saving's two parts, and the cache it leaves out, under a rule.
         let totals = {
-            let measured = total.measured > 0;
+            let measured = total.priced > 0;
             let share = match percent(total) {
                 Some(percent) if measured => format!("{percent} than {}", default_level()),
                 _ => capitalise(&unmeasured(total)),
             };
             let [spent, saved] = figures(total, t);
+            // The period's spend is read first, so it is not dimmed the way
+            // a line's is.
+            let spent = spent.when(spent_figure(total).is_some(), |spent| {
+                spent.text_color(paint(t.text.primary))
+            });
             let heading =
                 |text: &'static str| column(text, paint(t.text.dim)).prose().text_size(CAPTION);
             div()
@@ -847,7 +1013,9 @@ impl Shell {
                 .mt(PAD)
                 .mb(px(4.0))
                 .px(px(12.0))
-                .py(px(10.0))
+                .pt(px(10.0))
+                // The ledger's lines carry their own room below.
+                .pb(px(if measured { 4.0 } else { 10.0 }))
                 .rounded(RADIUS_MD)
                 .bg(paint(t.sunken))
                 .border_1()
@@ -859,7 +1027,7 @@ impl Shell {
                         .child(
                             caption(
                                 match measured {
-                                    true => sessions(total.measured),
+                                    true => sessions(total.priced),
                                     false => String::new(),
                                 },
                                 t,
@@ -868,8 +1036,8 @@ impl Shell {
                             .flex_1()
                             .min_w_0(),
                         )
-                        .child(heading("Est. cost"))
-                        .child(heading("Est. saved")),
+                        .child(heading("Spent"))
+                        .child(heading("Saved")),
                 )
                 .child(
                     div()
@@ -887,12 +1055,18 @@ impl Shell {
                         .child(spent.text_size(TOTAL).font_weight(FontWeight::SEMIBOLD))
                         .child(saved.text_size(TOTAL).font_weight(FontWeight::SEMIBOLD)),
                 )
-                .children(command_output_line(total).map(|line| {
-                    caption(line, t)
-                        .prose()
-                        .pt(px(4.0))
-                        .text_color(alpha(paint(t.text.dim), 0.8))
-                }))
+                .when(measured, |well| {
+                    well.child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .mt(px(8.0))
+                            .pt(px(2.0))
+                            .border_t_1()
+                            .border_color(paint(t.border))
+                            .children(ledger(total, t).into_iter().map(|row| row.py(px(6.0)))),
+                    )
+                })
         };
 
         let list = div()
@@ -935,7 +1109,7 @@ impl Shell {
                 }))
             }))
             .when(
-                savings.removed.measured + savings.removed.unmeasured > 0,
+                savings.removed.priced + savings.removed.unpriced > 0,
                 |list| {
                     // Says what "removed" means in so many words: worktrees
                     // deleted since, whose reduced sessions still count. One
@@ -968,7 +1142,7 @@ impl Shell {
             );
 
         // How the figures are made lives on the website; all the popup
-        // keeps is what they leave out.
+        // keeps is which of them is an estimate, and what they leave out.
         let footer = div()
             .flex()
             .items_center()
@@ -986,10 +1160,15 @@ impl Shell {
                     .on_click(|_, _, cx| cx.open_url(DOCS_URL)),
             )
             .child(div().flex_grow())
-            .child(caption("≈ estimated from model rates", t).prose())
-            .children(
-                (total.unmeasured > 0)
-                    .then(|| caption(format!("{} not priced", total.unmeasured), t).prose()),
+            .child(
+                caption(
+                    match total.unpriced {
+                        0 => "≈ estimated".to_owned(),
+                        unpriced => format!("≈ estimated \u{b7} {unpriced} not priced"),
+                    },
+                    t,
+                )
+                .prose(),
             );
 
         panel
@@ -1067,29 +1246,6 @@ impl Shell {
     }
 }
 
-/// What the period's shell commands cost, measured — the one figure in this
-/// file that is a count rather than an estimate. `None` until a command has
-/// been measured in the period.
-fn command_output_line(total: &WorktreeSavings) -> Option<String> {
-    if total.command_output_tokens == 0 {
-        return None;
-    }
-    let mut line = format!(
-        "Command output \u{2248}{} tokens",
-        crate::usage_card::tokens(total.command_output_tokens)
-    );
-    if let Some(share) = total.command_output_share() {
-        line.push_str(&format!(" \u{b7} {:.0}% of fresh input", share * 100.0));
-    }
-    if total.filter_saved_tokens > 0 {
-        line.push_str(&format!(
-            " \u{b7} filter trimmed \u{2248}{}",
-            crate::usage_card::tokens(total.filter_saved_tokens)
-        ));
-    }
-    Some(line)
-}
-
 #[cfg(test)]
 mod tests {
     //! The arithmetic and wording behind the savings figures, apart from
@@ -1097,11 +1253,11 @@ mod tests {
 
     use super::*;
 
-    fn savings(measured: usize, cost: i64, saved: i64) -> WorktreeSavings {
+    fn savings(measured: usize, spent: i64, saved: i64) -> WorktreeSavings {
         WorktreeSavings {
-            measured,
-            cost_micros: cost,
-            saved_micros: saved,
+            priced: measured,
+            spent_micros: spent,
+            estimated_micros: saved,
             ..WorktreeSavings::default()
         }
     }
@@ -1144,6 +1300,149 @@ mod tests {
     }
 
     #[test]
+    fn the_share_counts_both_savings_and_never_the_cache() {
+        let both = WorktreeSavings {
+            priced: 1,
+            spent_micros: 2_000_000,
+            filter_saved_micros: 1_000_000,
+            estimated_micros: 1_000_000,
+            // A cache read back a million times over changes nothing here.
+            cache_read_tokens: 1_000_000_000,
+            ..WorktreeSavings::default()
+        };
+        assert_eq!(percent(&both).as_deref(), Some("50% less"));
+    }
+
+    #[test]
+    fn a_saving_is_green_and_none_is_dim() {
+        let t = Theme::dark();
+        assert_eq!(
+            saving(2_250_000, &t),
+            ("$2.25".to_owned(), paint(t.diff.added))
+        );
+        assert_eq!(saving(0, &t), ("$0.00".to_owned(), paint(t.text.dim)));
+        // Too small for a cent is still a saving, and still says so.
+        assert_eq!(saving(1, &t), ("<$0.01".to_owned(), paint(t.diff.added)));
+    }
+
+    #[test]
+    fn a_line_shows_spend_once_anything_was_priced_and_a_saving_once_economy_was() {
+        let t = Theme::dark();
+        let none = WorktreeSavings::default();
+        assert_eq!(spent_figure(&none), None);
+        assert_eq!(saved_figure(&none, &t), None);
+
+        // Sessions at the default level only: real spend, nothing to credit.
+        let unreduced = WorktreeSavings {
+            unreduced: 2,
+            spent_micros: 5_000_000,
+            ..WorktreeSavings::default()
+        };
+        assert_eq!(spent_figure(&unreduced).as_deref(), Some("$5.00"));
+        assert_eq!(saved_figure(&unreduced, &t), None);
+
+        let reduced = WorktreeSavings {
+            priced: 1,
+            filter_saved_micros: 2_000_000,
+            ..unreduced
+        };
+        assert_eq!(
+            saved_figure(&reduced, &t),
+            Some(("$2.00".to_owned(), paint(t.diff.added)))
+        );
+
+        // With the estimate in it, the whole figure is an estimate.
+        let estimated = WorktreeSavings {
+            estimated_micros: 1_000_000,
+            ..reduced
+        };
+        assert_eq!(
+            saved_figure(&estimated, &t),
+            Some(("≈$3.00".to_owned(), paint(t.diff.added)))
+        );
+    }
+
+    #[test]
+    fn commands_are_counted_in_words_with_thousands_grouped() {
+        assert_eq!(commands(0), "0 commands");
+        assert_eq!(commands(1), "1 command");
+        assert_eq!(commands(2), "2 commands");
+        assert_eq!(commands(999), "999 commands");
+        assert_eq!(commands(1_000), "1,000 commands");
+        assert_eq!(commands(1_284), "1,284 commands");
+        assert_eq!(commands(1_234_567), "1,234,567 commands");
+    }
+
+    #[test]
+    fn a_total_is_marked_an_estimate_only_when_the_estimate_is_in_it() {
+        let t = Theme::dark();
+        let filtered = WorktreeSavings {
+            priced: 1,
+            filter_saved_micros: 1_500_000,
+            ..WorktreeSavings::default()
+        };
+        assert_eq!(approx(&filtered, "$1.50".to_owned()), "$1.50");
+        assert_eq!(
+            whole_saving(&filtered, &t),
+            ("$1.50".to_owned(), paint(t.diff.added))
+        );
+
+        let both = WorktreeSavings {
+            estimated_micros: 500_000,
+            ..filtered
+        };
+        assert_eq!(approx(&both, "$2.00".to_owned()), "≈$2.00");
+        assert_eq!(
+            whole_saving(&both, &t),
+            ("≈$2.00".to_owned(), paint(t.diff.added))
+        );
+
+        // Nothing saved at all: plain, and dim.
+        assert_eq!(
+            whole_saving(&WorktreeSavings::default(), &t),
+            ("$0.00".to_owned(), paint(t.text.dim))
+        );
+    }
+
+    #[test]
+    fn the_share_rounds_to_a_whole_percent() {
+        // $38 saved on $322 spent: 10.6%, which reads as 11.
+        assert_eq!(
+            percent(&savings(1, 322_000_000, 38_000_000)).as_deref(),
+            Some("11% less")
+        );
+        // Too small to round up to one is still said, as nothing.
+        assert_eq!(
+            percent(&savings(1, 1_000_000_000, 1)).as_deref(),
+            Some("0% less")
+        );
+    }
+
+    #[test]
+    fn the_filter_says_so_when_it_has_trimmed_nothing_yet() {
+        let unfiltered = WorktreeSavings {
+            command_calls: 3,
+            ..WorktreeSavings::default()
+        };
+        assert_eq!(
+            filter_detail(&unfiltered),
+            "0 tokens trimmed \u{b7} 3 commands"
+        );
+    }
+
+    #[test]
+    fn a_removed_worktree_with_only_unpriced_sessions_still_turns_the_rollup_on() {
+        let removed = Savings {
+            removed: WorktreeSavings {
+                unpriced: 1,
+                ..WorktreeSavings::default()
+            },
+            ..Savings::default()
+        };
+        assert!(!removed.is_off());
+    }
+
+    #[test]
     fn an_estimate_says_it_is_one() {
         assert_eq!(estimated(1_250_000), "≈$1.25");
         assert_eq!(estimated(1), "≈<$0.01");
@@ -1162,7 +1461,7 @@ mod tests {
         assert_eq!(unmeasured(&none), "no sessions yet");
 
         let unpriced = WorktreeSavings {
-            unmeasured: 2,
+            unpriced: 2,
             unreduced: 5,
             ..WorktreeSavings::default()
         };
@@ -1185,29 +1484,22 @@ mod tests {
     }
 
     #[test]
-    fn command_output_is_only_reported_once_something_was_measured() {
-        assert_eq!(command_output_line(&WorktreeSavings::default()), None);
+    fn the_filter_says_what_it_trimmed_over_how_many_commands() {
+        let one = WorktreeSavings {
+            command_calls: 1,
+            filter_saved_tokens: 2_500,
+            ..WorktreeSavings::default()
+        };
+        assert_eq!(filter_detail(&one), "2K tokens trimmed \u{b7} 1 command");
 
-        let measured = WorktreeSavings {
-            input_tokens: 40_000,
-            command_output_tokens: 10_000,
+        let many = WorktreeSavings {
+            command_calls: 1_284,
+            filter_saved_tokens: 612_000,
             ..WorktreeSavings::default()
         };
         assert_eq!(
-            command_output_line(&measured).as_deref(),
-            Some("Command output \u{2248}10K tokens \u{b7} 25% of fresh input")
-        );
-
-        let filtered = WorktreeSavings {
-            filter_saved_tokens: 2_500,
-            ..measured
-        };
-        assert_eq!(
-            command_output_line(&filtered).as_deref(),
-            Some(
-                "Command output \u{2248}10K tokens \u{b7} 25% of fresh input \
-                 \u{b7} filter trimmed \u{2248}2K"
-            )
+            filter_detail(&many),
+            "612K tokens trimmed \u{b7} 1,284 commands"
         );
     }
 
@@ -1216,7 +1508,7 @@ mod tests {
         assert!(Savings::default().is_off());
         let removed = Savings {
             removed: WorktreeSavings {
-                measured: 1,
+                priced: 1,
                 ..WorktreeSavings::default()
             },
             ..Savings::default()

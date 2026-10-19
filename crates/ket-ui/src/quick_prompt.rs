@@ -696,6 +696,8 @@ impl Shell {
                     agent: None,
                     base: None,
                     economy: None,
+                    model: None,
+                    effort: None,
                     origin: crate::phone_work::WorkOrigin::QuickPrompt,
                 },
                 cx,

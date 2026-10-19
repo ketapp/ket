@@ -215,6 +215,7 @@ impl Shell {
                     title: "Browser".into(),
                     renamed: false,
                     pinned: false,
+                    preview: false,
                     kind: TabKind::Browser(id),
                 },
             )

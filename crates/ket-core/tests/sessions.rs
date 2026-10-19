@@ -4,9 +4,11 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use ket_core::id::WorktreeId;
 use ket_core::sessions::{
-    ClaudeSessions, CodexRollout, CodexSessions, DiscoveredSession, GeminiSessions, GrokSessions,
-    LiveKind, LiveSession, MAX_SESSIONS_PER_SOURCE, OpencodeSessions, SessionSource, Sessions,
+    CODEX_WANTED_FOR_MS, ClaudeSessions, CodexRollout, CodexRollouts, CodexSessions,
+    DiscoveredSession, GeminiSessions, GrokSessions, LiveKind, LiveSession,
+    MAX_SESSIONS_PER_SOURCE, OpencodeSessions, SessionSource, Sessions,
 };
 
 mod common;
@@ -815,6 +817,97 @@ fn codex_rollout_finds_the_session_named_for_its_directory() {
     );
 }
 
+/// Writes `session`'s rollout for `dir` into the store at `root`, last written
+/// `age_secs` ago.
+fn codex_rollout(root: &Path, dir: &Path, session: &str, age_secs: u64) -> PathBuf {
+    let path = root
+        .join("2026")
+        .join("01")
+        .join("15")
+        .join(format!("rollout-{session}.jsonl"));
+    write(
+        &path,
+        &format!(
+            "{}\n",
+            rollout_line(
+                "session_meta",
+                serde_json::json!({"id": session, "cwd": dir.to_string_lossy()})
+            )
+        ),
+    );
+    std::fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - Duration::from_secs(age_secs))
+        .unwrap();
+    path
+}
+
+/// A sandbox with a worktree directory in it and an empty Codex store.
+fn codex_store(tag: &str) -> (Sandbox, PathBuf, PathBuf) {
+    let sandbox = Sandbox::new(tag);
+    let dir = sandbox.path("worktree");
+    std::fs::create_dir_all(&dir).unwrap();
+    let root = sandbox.path("sessions");
+    std::fs::create_dir_all(&root).unwrap();
+    (sandbox, root, dir)
+}
+
+#[test]
+fn codex_rollout_for_a_session_is_its_own_file_not_the_newest() {
+    let (_sandbox, root, dir) = codex_store("rollout-by-session");
+    // The first session is still writing; the second has only just started.
+    let first = codex_rollout(&root, &dir, "sess-a", 0);
+    let second = codex_rollout(&root, &dir, "sess-b", 60);
+
+    assert_eq!(
+        CodexRollout::under(&root, &dir).unwrap().path(),
+        first,
+        "the newest, when no session is named"
+    );
+    let named = CodexRollout::under_session(&root, &dir, "sess-b").expect("its own file");
+    assert_eq!(named.path(), second);
+    assert_eq!(named.session(), Some("sess-b"));
+    // Not on disk yet: nothing, rather than another session's file.
+    assert!(CodexRollout::under_session(&root, &dir, "sess-c").is_none());
+}
+
+#[test]
+fn codex_rollout_for_a_session_reads_either_id_and_stays_in_its_directory() {
+    let sandbox = Sandbox::new("rollout-by-session-ids");
+    let dir = sandbox.path("worktree");
+    let elsewhere = sandbox.path("elsewhere");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let root = sandbox.path("sessions");
+    let day = root.join("2026").join("01").join("15");
+    let meta = |name: &str, payload: serde_json::Value| {
+        write(
+            &day.join(name),
+            &format!("{}\n", rollout_line("session_meta", payload)),
+        );
+    };
+    // An empty `id` is no id: the older `session_id` names the session.
+    meta(
+        "rollout-a.jsonl",
+        serde_json::json!({"id": "", "session_id": "sess-a", "cwd": dir.to_string_lossy()}),
+    );
+    // The right session, in another directory.
+    meta(
+        "rollout-b.jsonl",
+        serde_json::json!({"id": "sess-b", "cwd": elsewhere.to_string_lossy()}),
+    );
+
+    let found = CodexRollout::under_session(&root, &dir, "sess-a").expect("by session_id");
+    assert_eq!(found.path(), day.join("rollout-a.jsonl"));
+    assert!(
+        CodexRollout::under_session(&root, &dir, "sess-b").is_none(),
+        "a session is only followed in the directory it ran in"
+    );
+    assert!(CodexRollout::under_session(&root, &elsewhere, "sess-b").is_some());
+}
+
 #[test]
 fn codex_rollout_poll_reports_the_newest_token_count_and_turn_settings() {
     let sandbox = Sandbox::new("rollout-poll");
@@ -860,7 +953,7 @@ fn codex_rollout_poll_reports_the_newest_token_count_and_turn_settings() {
         "{}",
         rollout_line(
             "token_count",
-            serde_json::json!({"type": "token_count", "total": 100})
+            serde_json::json!({"type": "token_count", "info": {}, "total": 100})
         )
     )
     .unwrap();
@@ -869,7 +962,7 @@ fn codex_rollout_poll_reports_the_newest_token_count_and_turn_settings() {
         "{}",
         rollout_line(
             "token_count",
-            serde_json::json!({"type": "token_count", "total": 200})
+            serde_json::json!({"type": "token_count", "info": {}, "total": 200})
         )
     )
     .unwrap();
@@ -937,6 +1030,243 @@ fn codex_rollout_poll_keeps_the_last_settings_when_a_later_turn_omits_them() {
         "unset fields are not cleared"
     );
     assert_eq!(rollout.effort(), Some("low"));
+}
+
+#[test]
+fn codex_rollout_poll_passes_over_a_token_count_with_no_counts_in_it() {
+    let sandbox = Sandbox::new("rollout-poll-quota-only");
+    let dir = sandbox.path("worktree");
+    std::fs::create_dir_all(&dir).unwrap();
+    let root = sandbox.path("sessions");
+    let path = root
+        .join("2026")
+        .join("01")
+        .join("15")
+        .join("rollout-a.jsonl");
+
+    write(
+        &path,
+        &format!(
+            "{}\n",
+            rollout_line(
+                "session_meta",
+                serde_json::json!({"id": "sess-1", "cwd": dir.to_string_lossy()})
+            )
+        ),
+    );
+    let mut rollout = CodexRollout::under(&root, &dir).expect("found");
+
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    use std::io::Write;
+    writeln!(
+        file,
+        "{}",
+        rollout_line(
+            "token_count",
+            serde_json::json!({"type": "token_count", "info": {"total": 300}})
+        )
+    )
+    .unwrap();
+    // Newer, but only a quota reading: taking it would lose the totals.
+    writeln!(
+        file,
+        "{}",
+        rollout_line(
+            "token_count",
+            serde_json::json!({"type": "token_count", "info": null, "rate_limits": {}})
+        )
+    )
+    .unwrap();
+
+    let tokens = rollout.poll().expect("the record with counts");
+    assert_eq!(tokens["info"]["total"], 300);
+
+    // A batch of nothing but quota readings has nothing to report.
+    writeln!(
+        file,
+        "{}",
+        rollout_line(
+            "token_count",
+            serde_json::json!({"type": "token_count", "rate_limits": {}})
+        )
+    )
+    .unwrap();
+    assert!(rollout.poll().is_none());
+}
+
+// ---- codex rollouts, by worktree ----------------------------------------------------
+
+/// The session the rollout `worktree` follows is for.
+fn following<'a>(rollouts: &'a CodexRollouts, worktree: &WorktreeId) -> Option<&'a str> {
+    rollouts.followed(worktree).and_then(CodexRollout::session)
+}
+
+#[test]
+fn with_no_session_named_the_newest_rollout_is_followed_and_kept() {
+    let (_sandbox, root, dir) = codex_store("rollouts-newest");
+    let wt = WorktreeId::new("w1");
+    let mut rollouts = CodexRollouts::under(root.clone());
+    codex_rollout(&root, &dir, "sess-a", 60);
+
+    rollouts.follow(&wt, None, 0, || Some(dir.clone()));
+    assert_eq!(following(&rollouts, &wt), Some("sess-a"));
+
+    // A newer file, and another hook that names no session: the walk is not
+    // repeated, and what is followed stays.
+    codex_rollout(&root, &dir, "sess-b", 0);
+    rollouts.follow(&wt, None, 1, || panic!("no walk needed"));
+    assert_eq!(following(&rollouts, &wt), Some("sess-a"));
+}
+
+#[test]
+fn a_named_session_is_followed_even_when_another_rollout_is_newer() {
+    let (_sandbox, root, dir) = codex_store("rollouts-named");
+    let wt = WorktreeId::new("w1");
+    let mut rollouts = CodexRollouts::under(root.clone());
+    codex_rollout(&root, &dir, "sess-a", 0);
+    codex_rollout(&root, &dir, "sess-b", 60);
+
+    rollouts.follow(&wt, Some("sess-b"), 0, || Some(dir.clone()));
+    assert_eq!(following(&rollouts, &wt), Some("sess-b"));
+    assert_eq!(rollouts.wanted(&wt), None);
+
+    // Named again: already followed, so nothing to walk for.
+    rollouts.follow(&wt, Some("sess-b"), 1, || panic!("no walk needed"));
+    // The other session, named: followed in turn.
+    rollouts.follow(&wt, Some("sess-a"), 2, || Some(dir.clone()));
+    assert_eq!(following(&rollouts, &wt), Some("sess-a"));
+}
+
+#[test]
+fn a_session_with_no_rollout_yet_is_found_on_the_tick_without_another_hook() {
+    let (_sandbox, root, dir) = codex_store("rollouts-wanted");
+    let wt = WorktreeId::new("w1");
+    let mut rollouts = CodexRollouts::under(root.clone());
+    codex_rollout(&root, &dir, "sess-a", 0);
+    rollouts.follow(&wt, Some("sess-a"), 0, || Some(dir.clone()));
+
+    // The new session's first hook lands before its rollout does.
+    rollouts.follow(&wt, Some("sess-b"), 1_000, || Some(dir.clone()));
+    assert_eq!(rollouts.wanted(&wt), Some("sess-b"));
+    assert_eq!(
+        following(&rollouts, &wt),
+        Some("sess-a"),
+        "the old one is kept until the new one is found"
+    );
+
+    // Its later hooks leave the walk to the tick.
+    rollouts.follow(&wt, Some("sess-b"), 2_000, || panic!("left to the tick"));
+
+    codex_rollout(&root, &dir, "sess-b", 0);
+    rollouts.look_again(10_000, |_| Some(dir.clone()));
+    assert_eq!(following(&rollouts, &wt), Some("sess-b"));
+    assert_eq!(rollouts.wanted(&wt), None);
+}
+
+#[test]
+fn a_hook_from_the_session_still_writing_does_not_cancel_the_one_wanted() {
+    let (_sandbox, root, dir) = codex_store("rollouts-wanted-kept");
+    let wt = WorktreeId::new("w1");
+    let mut rollouts = CodexRollouts::under(root.clone());
+    codex_rollout(&root, &dir, "sess-a", 0);
+    rollouts.follow(&wt, Some("sess-a"), 0, || Some(dir.clone()));
+    rollouts.follow(&wt, Some("sess-b"), 1_000, || Some(dir.clone()));
+
+    // The first session carries on, and fires a hook of its own.
+    rollouts.follow(&wt, Some("sess-a"), 2_000, || panic!("already followed"));
+    assert_eq!(rollouts.wanted(&wt), Some("sess-b"));
+
+    codex_rollout(&root, &dir, "sess-b", 0);
+    rollouts.look_again(10_000, |_| Some(dir.clone()));
+    assert_eq!(following(&rollouts, &wt), Some("sess-b"));
+}
+
+#[test]
+fn a_wanted_session_is_given_up_on_after_the_deadline() {
+    let (_sandbox, root, dir) = codex_store("rollouts-deadline");
+    let wt = WorktreeId::new("w1");
+    let mut rollouts = CodexRollouts::under(root.clone());
+
+    rollouts.follow(&wt, Some("sess-b"), 0, || Some(dir.clone()));
+    assert_eq!(following(&rollouts, &wt), None);
+    rollouts.look_again(CODEX_WANTED_FOR_MS - 1, |_| Some(dir.clone()));
+    assert_eq!(
+        rollouts.wanted(&wt),
+        Some("sess-b"),
+        "still inside the window"
+    );
+
+    // Too late: dropped before the walk, so a rollout that turns up now is
+    // not followed on the tick.
+    codex_rollout(&root, &dir, "sess-b", 0);
+    rollouts.look_again(CODEX_WANTED_FOR_MS, |_| Some(dir.clone()));
+    assert_eq!(rollouts.wanted(&wt), None);
+    assert_eq!(following(&rollouts, &wt), None);
+
+    // Its next hook still finds it.
+    rollouts.follow(&wt, Some("sess-b"), CODEX_WANTED_FOR_MS + 1, || {
+        Some(dir.clone())
+    });
+    assert_eq!(following(&rollouts, &wt), Some("sess-b"));
+}
+
+#[test]
+fn a_newer_session_named_while_one_is_wanted_takes_its_place_with_a_fresh_clock() {
+    let (_sandbox, root, dir) = codex_store("rollouts-replaced");
+    let wt = WorktreeId::new("w1");
+    let mut rollouts = CodexRollouts::under(root.clone());
+
+    rollouts.follow(&wt, Some("sess-b"), 0, || Some(dir.clone()));
+    let later = CODEX_WANTED_FOR_MS / 2;
+    rollouts.follow(&wt, Some("sess-c"), later, || Some(dir.clone()));
+    assert_eq!(rollouts.wanted(&wt), Some("sess-c"));
+
+    // Past where the first would have expired, inside the second's window.
+    rollouts.look_again(CODEX_WANTED_FOR_MS + 1, |_| Some(dir.clone()));
+    assert_eq!(rollouts.wanted(&wt), Some("sess-c"));
+}
+
+#[test]
+fn a_worktree_that_has_gone_is_no_longer_looked_for() {
+    let (_sandbox, root, dir) = codex_store("rollouts-gone");
+    let wt = WorktreeId::new("w1");
+    let mut rollouts = CodexRollouts::under(root.clone());
+
+    rollouts.follow(&wt, Some("sess-b"), 0, || Some(dir.clone()));
+    assert_eq!(rollouts.wanted(&wt), Some("sess-b"));
+    rollouts.look_again(1_000, |_| None);
+    assert_eq!(rollouts.wanted(&wt), None);
+
+    // Nor followed when a hook arrives from where it used to be.
+    rollouts.follow(&wt, None, 2_000, || None);
+    assert_eq!(following(&rollouts, &wt), None);
+}
+
+#[test]
+fn every_followed_rollout_is_handed_out_to_poll() {
+    let (_sandbox, root, dir) = codex_store("rollouts-poll");
+    let other = root.parent().unwrap().join("other");
+    std::fs::create_dir_all(&other).unwrap();
+    let mut rollouts = CodexRollouts::under(root.clone());
+    codex_rollout(&root, &dir, "sess-a", 0);
+    codex_rollout(&root, &other, "sess-b", 0);
+
+    rollouts.follow(&WorktreeId::new("w1"), Some("sess-a"), 0, || {
+        Some(dir.clone())
+    });
+    rollouts.follow(&WorktreeId::new("w2"), Some("sess-b"), 0, || {
+        Some(other.clone())
+    });
+    let mut polled: Vec<String> = rollouts
+        .iter_mut()
+        .map(|(worktree, rollout)| format!("{worktree:?}={}", rollout.session().unwrap()))
+        .collect();
+    polled.sort();
+    assert_eq!(polled.len(), 2);
+    assert!(polled[0].ends_with("=sess-a") && polled[1].ends_with("=sess-b"));
 }
 
 // ---- grok directory encoding ---------------------------------------------------

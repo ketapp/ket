@@ -301,6 +301,14 @@ fn alive(_pid: u32) -> bool {
     true
 }
 
+/// Whether process `pid` is an emulator: one `stat` of the discovery file it
+/// writes under its own pid. For telling an emulator ket started apart from
+/// the agents it starts the same way, without reading every file
+/// [`running`] does.
+pub fn is_emulator(pid: u32) -> bool {
+    discovery_dir().is_some_and(|dir| dir.join(format!("pid_{pid}.ini")).exists())
+}
+
 /// The emulators that say they are running, newest first — only those whose
 /// process is still there. A process id can be reused;
 /// [`Device::connect`] is what proves an emulator is really there.

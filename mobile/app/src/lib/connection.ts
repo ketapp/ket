@@ -24,14 +24,26 @@ import {
   type Device as PairedDevice,
   type Envelope,
   ErrorCode,
+  FixChecksSchema,
+  GetPullRequestDraftSchema,
+  OpenPullRequestSchema,
+  type PullRequestDraft,
+  type PullRequestOpened,
   GetChangesSchema,
   GetConversationSchema,
   GetDiffSchema,
   GetSnippetsSchema,
+  AttachmentSchema,
+  SendFilesSchema,
   ListDevicesSchema,
   MergeWorktreeSchema,
   RevokeDeviceSchema,
+  ReviewCommentSchema,
+  SendReviewSchema,
   StartWorkSchema,
+  GetStartOptionsSchema,
+  type StartOptions,
+  StartSessionSchema,
   type HostSnapshot,
   InputSchema,
   Lease_Action,
@@ -69,8 +81,47 @@ type Listener = (message: Envelope) => void;
 /** How long a lease lasts on the host, and how often the phone renews it. */
 const RENEW_MS = 20_000;
 
+/** How long it has to answer a message with files: the upload, then a few
+ * seconds while the agent takes its images in. */
+const FILES_ANSWER_MS = 60_000;
+
 /** How long the desktop has to welcome a session once the handshake is done. */
 const WELCOME_TIMEOUT_MS = 15_000;
+
+/** How long a FixChecks waits for its answer, across reconnects: the
+ * desktop gives reading the failed logs up to a minute (two `gh` calls a job,
+ * side by side, 30 s each) and then the agent another minute to take the
+ * message before saying it is still starting. */
+const FIX_CHECKS_WAIT_MS = 150_000;
+
+/** How long a review waits for its answer, across reconnects: the desktop
+ * gives a ket window ten seconds to take it, and says it did not go after. */
+const REVIEW_WAIT_MS = 20_000;
+
+/** How long opening a pull request waits for its answer, across reconnects:
+ * a commit that runs the repository's hooks, a push, and two `gh` calls. */
+const PULL_REQUEST_WAIT_MS = 180_000;
+
+/** How opening a pull request went: opened, or pushed to one already open —
+ * or why not. */
+export type OpenedPullRequest = { opened: PullRequestOpened } | { why: string };
+
+/** One comment of a review, as `sendReview` sends it. */
+export type ReviewNote = { path: string; lines: string; text: string; comment: string };
+
+/** What a request still waiting is failed with when its session ends. */
+const DROPPED = 'the connection to the desktop dropped';
+
+/** How a Fix checks with agent went: given to the agent — to one still
+ * starting, when `starting` — or why it was not. */
+export type FixedChecks = { starting: boolean } | { why: string };
+
+/** A fresh idempotency key, naming one change however often it is sent. */
+function newKey(): string {
+  const nonce = new Uint8Array(12);
+  crypto.getRandomValues(nonce);
+  return toBase64Url(nonce);
+}
 
 /** Away longer than this — locked, or in another app — and the phone dials
  * the desktop again as it comes back rather than trusting the old socket.
@@ -86,6 +137,8 @@ export interface Starting {
   project: string;
   /** What the agent was asked to do, which the row is named after. */
   prompt: string;
+  /** The agent asked for, or empty for the project's own. */
+  agent: string;
   at: number;
   /** The project's worktrees when it was asked for: the first that is not
    * among them is the new one. */
@@ -183,7 +236,7 @@ export class HostConnection {
       this.redialing = false;
       this.remote = null;
       this.clearLeases();
-      for (const { reject } of this.pending.values()) reject(new Error('the connection to the desktop dropped'));
+      for (const { reject } of this.pending.values()) reject(new Error(DROPPED));
       this.pending.clear();
       if (this.closed) return;
       this.status = 'offline';
@@ -274,15 +327,17 @@ export class HostConnection {
   }
 
   private send(payload: Envelope['payload'], idempotent = false): Promise<Envelope> {
+    return this.request(payload, idempotent ? newKey() : '', 10_000);
+  }
+
+  /** Sends `payload` under idempotency key `key` — none, if empty — and
+   * waits up to `waitMs` for its answer. */
+  private request(payload: Envelope['payload'], key: string, waitMs: number): Promise<Envelope> {
     const remote = this.remote;
     if (!remote) return Promise.reject(new Error('not connected'));
     const id = this.nextRequest++;
     const message = envelope(id, payload);
-    if (idempotent) {
-      const nonce = new Uint8Array(12);
-      crypto.getRandomValues(nonce);
-      message.idempotencyKey = toBase64Url(nonce);
-    }
+    if (key) message.idempotencyKey = key;
     return new Promise((resolve, reject) => {
       this.pending.set(id, { resolve, reject });
       try {
@@ -293,7 +348,7 @@ export class HostConnection {
       }
       setTimeout(() => {
         if (this.pending.delete(id)) reject(new Error('no answer from the host'));
-      }, 10_000);
+      }, waitMs);
     });
   }
 
@@ -383,6 +438,36 @@ export class HostConnection {
     return true;
   }
 
+  /**
+   * A message with photos and files for the agent in a terminal (desktop
+   * 1.12): the desktop keeps the files, pastes the images into the agent's
+   * input, and types the words and Enter after them, as `type` would. Needs
+   * control, as `type` does: resolves `false` if the phone no longer has it,
+   * and throws the desktop's reason when it refuses.
+   */
+  async sendFiles(terminalId: bigint, text: string, files: { name: string; bytes: Uint8Array }[]): Promise<boolean> {
+    const reply = await this.request(
+      {
+        case: 'sendFiles',
+        value: create(SendFilesSchema, {
+          terminalId,
+          text,
+          attachments: files.map((file) => create(AttachmentSchema, { name: file.name, data: file.bytes })),
+        }),
+      },
+      newKey(),
+      FILES_ANSWER_MS,
+    );
+    if (reply.payload.case !== 'error') return true;
+    if (reply.payload.value.code === ErrorCode.NOT_CONTROLLER) {
+      const renew = this.leases.get(terminalId);
+      if (renew) clearInterval(renew);
+      this.leases.delete(terminalId);
+      return false;
+    }
+    throw new Error(reply.payload.value.message);
+  }
+
   /** The phones paired with this desktop, this one marked. */
   async devices(): Promise<PairedDevice[]> {
     const reply = await this.send({ case: 'listDevices', value: create(ListDevicesSchema, {}) });
@@ -393,21 +478,36 @@ export class HostConnection {
   /** New work in a project: ket on the desktop makes a worktree for it and
    * starts the project's agent on `prompt`. Resolves `null` once ket has it,
    * or the desktop's reason it could not — most often that ket isn't open. */
-  async startWork(projectId: string, prompt: string, agent = ''): Promise<string | null> {
+  async startWork(projectId: string, prompt: string, agent = '', choices: { base?: string; model?: string; effort?: string } = {}): Promise<string | null> {
     const before =
       this.snapshot?.projects.find((p) => p.id === projectId)?.worktrees.map((w) => w.id) ?? [];
     const reply = await this.send(
-      { case: 'startWork', value: create(StartWorkSchema, { projectId, prompt, agent }) },
+      { case: 'startWork', value: create(StartWorkSchema, { projectId, prompt, agent, ...choices }) },
       true,
     );
     if (reply.payload.case === 'error') return reply.payload.value.message;
-    this.starting = [...this.starting, { project: projectId, prompt, at: Date.now(), before }];
+    this.starting = [...this.starting, { project: projectId, prompt, agent, at: Date.now(), before }];
     setTimeout(() => {
       this.settleStarting();
       this.notify();
     }, STARTING_FOR_MS + 50);
     this.notify();
     return null;
+  }
+
+  /** Current desktop choices for a project's new work and sessions. */
+  async startOptions(projectId: string): Promise<StartOptions> {
+    const reply = await this.send({ case: 'getStartOptions', value: create(GetStartOptionsSchema, { projectId }) });
+    if (reply.payload.case === 'startOptions') return reply.payload.value;
+    throw new Error(reply.payload.case === 'error' ? reply.payload.value.message : 'the desktop did not send start options');
+  }
+
+  /** Opens a fresh agent session or blank shell in an existing worktree. */
+  async startSession(worktreeId: string, agent = '', prompt = '', model = '', effort = ''): Promise<string | null> {
+    const reply = await this.send(
+      { case: 'startSession', value: create(StartSessionSchema, { worktreeId, agent, prompt, model, effort }) }, true,
+    );
+    return reply.payload.case === 'error' ? reply.payload.value.message : null;
   }
 
   /** Lets go of the rows standing in for work that has arrived, or that
@@ -477,6 +577,133 @@ export class HostConnection {
       true,
     );
     return reply.payload.case === 'error' ? reply.payload.value.message : null;
+  }
+
+  /** Hands a worktree's failed checks to its agent, as the desktop's Fix
+   * checks with agent does (desktop 1.11), and says how it went.
+   *
+   * It takes a while, and the desktop carries on with it if the connection
+   * drops meanwhile. So it is asked again from the next session under the
+   * same key, and the desktop answers with how that went — waiting for it,
+   * if need be — rather than giving the agent the message twice. */
+  async fixChecks(worktreeId: string): Promise<FixedChecks> {
+    const payload: Envelope['payload'] = { case: 'fixChecks', value: create(FixChecksSchema, { worktreeId }) };
+    const key = newKey();
+    const until = Date.now() + FIX_CHECKS_WAIT_MS;
+    for (;;) {
+      let reply: Envelope;
+      try {
+        reply = await this.request(payload, key, Math.max(until - Date.now(), 1));
+      } catch (error) {
+        const dropped = error instanceof Error && error.message === DROPPED;
+        if (dropped && (await this.reconnected(until))) continue;
+        throw error;
+      }
+      switch (reply.payload.case) {
+        case 'error':
+          return { why: reply.payload.value.message };
+        case 'checksHandedOver':
+          return { starting: reply.payload.value.starting };
+        default:
+          return { starting: false };
+      }
+    }
+  }
+
+  /** Sends comments on a worktree's diff to its agent as one review, as the
+   * desktop's Send to agent does (desktop 1.14): ket there writes the
+   * message. `null` once the agent has it, or the desktop's reason it did
+   * not go — a local model busy with other work among them.
+   *
+   * Asked again from the next session under the same key if the connection
+   * drops meanwhile, so the desktop answers with how the first went rather
+   * than giving the agent the review twice. */
+  async sendReview(worktreeId: string, comments: ReviewNote[]): Promise<string | null> {
+    const payload: Envelope['payload'] = {
+      case: 'sendReview',
+      value: create(SendReviewSchema, {
+        worktreeId,
+        comments: comments.map((comment) => create(ReviewCommentSchema, comment)),
+      }),
+    };
+    const key = newKey();
+    const until = Date.now() + REVIEW_WAIT_MS;
+    for (;;) {
+      let reply: Envelope;
+      try {
+        reply = await this.request(payload, key, Math.max(until - Date.now(), 1));
+      } catch (error) {
+        const dropped = error instanceof Error && error.message === DROPPED;
+        if (dropped && (await this.reconnected(until))) continue;
+        throw error;
+      }
+      return reply.payload.case === 'error' ? reply.payload.value.message : null;
+    }
+  }
+
+  /** What a pull request for a worktree would be (desktop 1.16): the title
+   * and description to offer, and where it would go. */
+  async pullRequestDraft(worktreeId: string): Promise<PullRequestDraft> {
+    const reply = await this.send({ case: 'getPullRequestDraft', value: create(GetPullRequestDraftSchema, { worktreeId }) });
+    if (reply.payload.case === 'pullRequestDraft') return reply.payload.value;
+    throw new Error(reply.payload.case === 'error' ? reply.payload.value.message : 'the desktop did not send the draft');
+  }
+
+  /** Commits a worktree's work, pushes its branch and opens a pull request
+   * for it, as the desktop's Pull request… does (desktop 1.16) — or pushes
+   * to the one already open.
+   *
+   * A push takes a while, and the desktop carries on with it if the
+   * connection drops meanwhile. So it is asked again from the next session
+   * under the same key, and the desktop answers with how that went rather
+   * than pushing twice. */
+  async openPullRequest(
+    worktreeId: string,
+    words: { title: string; body: string; draft: boolean },
+  ): Promise<OpenedPullRequest> {
+    const payload: Envelope['payload'] = {
+      case: 'openPullRequest',
+      value: create(OpenPullRequestSchema, { worktreeId, ...words }),
+    };
+    const key = newKey();
+    const until = Date.now() + PULL_REQUEST_WAIT_MS;
+    for (;;) {
+      let reply: Envelope;
+      try {
+        reply = await this.request(payload, key, Math.max(until - Date.now(), 1));
+      } catch (error) {
+        const dropped = error instanceof Error && error.message === DROPPED;
+        if (dropped && (await this.reconnected(until))) continue;
+        throw error;
+      }
+      switch (reply.payload.case) {
+        case 'pullRequestOpened':
+          return { opened: reply.payload.value };
+        case 'error':
+          return { why: reply.payload.value.message };
+        default:
+          return { why: 'the desktop did not say how it went' };
+      }
+    }
+  }
+
+  /** `true` once the desktop has welcomed a new session; `false` if `until`
+   * passes, or the connection is closed, first. */
+  private reconnected(until: number): Promise<boolean> {
+    return new Promise((resolve) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const done = (back: boolean) => {
+        clearTimeout(timer);
+        stop();
+        resolve(back);
+      };
+      const stop = this.onChange(() => {
+        if (this.status === 'connected') done(true);
+        else if (this.closed) done(false);
+      });
+      timer = setTimeout(() => done(false), Math.max(until - Date.now(), 0));
+      if (this.status === 'connected') done(true);
+    });
   }
 
   /** The snippets saved in ket on the desktop. */

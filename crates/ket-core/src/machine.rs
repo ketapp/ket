@@ -1,8 +1,17 @@
-//! Facts about this machine that a local model has to fit inside: how much
-//! memory it has, and how much disk is free where Ollama keeps models.
+//! Facts about this machine that a local model has to fit inside, and that
+//! what ket costs is measured against: how much memory it has, how many cores,
+//! and how much disk is free where Ollama keeps models.
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+
+/// How many cores the system runs work on — every one, efficiency cores
+/// included, which is what CPU figures counted per core add up to. At least
+/// one, however little ket can tell.
+pub fn cores() -> usize {
+    static CORES: OnceLock<usize> = OnceLock::new();
+    *CORES.get_or_init(|| std::thread::available_parallelism().map_or(1, usize::from))
+}
 
 /// Total physical memory in bytes, read once — it does not change while ket
 /// runs. `None` where ket cannot tell.

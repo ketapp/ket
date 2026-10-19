@@ -1,4 +1,4 @@
-//! `ket_core::github`'s issue calls, through a `gh` of the test's own.
+//! `ket_core::github`'s issue and check calls, through a `gh` of the test's own.
 //!
 //! The unit tests in `github.rs` read captured `gh` output; these run the
 //! calls themselves against a shell script handed in as
@@ -12,10 +12,12 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use ket_core::checks;
 use ket_core::github::{
-    self, Checkout, CloseReason, IssueLink, PullRequestLink, close_issue, create_issue,
-    open_issues, reopen_issue, repository,
+    self, Check, CheckState, Checkout, CloseReason, IssueLink, PullRequestLink, PullRequestStatus,
+    Review, close_issue, create_issue, open_issues, reopen_issue, repository,
 };
+use ket_core::id::WorktreeId;
 
 mod common;
 use common::Sandbox;
@@ -291,4 +293,121 @@ fn the_credential_helper_names_this_gh_and_the_picked_accounts_token() {
         .unwrap()
         .unwrap();
     assert!(active.token.is_none());
+}
+
+#[test]
+fn open_pull_requests_are_listed_with_their_checks_in_one_call() {
+    let sandbox = Sandbox::new("gh-pr-checks");
+    let gh = FakeGh::new(
+        &sandbox,
+        "\"pr list\") echo '[{\"number\": 5, \"url\": \"https://github.com/o/r/pull/5\", \
+         \"headRefName\": \"fix\", \"isDraft\": false, \"isCrossRepository\": false, \
+         \"reviewDecision\": \"APPROVED\", \"statusCheckRollup\": [{\"__typename\": \"CheckRun\", \
+         \"name\": \"rust\", \"status\": \"COMPLETED\", \"conclusion\": \"SUCCESS\", \
+         \"detailsUrl\": \"\"}]}]' ;;",
+    );
+    let open = github::open_pull_requests(&gh.checkout(sandbox.root(), None)).unwrap();
+    assert_eq!(open.len(), 1);
+    assert_eq!(open[0].branch, "fix");
+    assert_eq!(open[0].review, Review::Approved);
+    assert_eq!(open[0].checks_state(), Some(CheckState::Passed));
+    assert_eq!(
+        gh.calls(),
+        ["none|pr list --state open --limit 100 --json \
+          number,url,headRefName,isDraft,isCrossRepository,reviewDecision,statusCheckRollup"]
+    );
+}
+
+#[test]
+fn failed_checks_are_handed_over_with_what_they_printed_saved_beside() {
+    let sandbox = Sandbox::new("gh-checks-hand-over");
+    let gh = FakeGh::new(
+        &sandbox,
+        "\"run view\") printf 'lint\\tRun clippy\\t2026-10-15T20:31:19.0000000Z error: unused\\n' ;;",
+    );
+    let failed = |name: &str, url: &str| Check {
+        name: name.to_owned(),
+        state: CheckState::Failed,
+        url: url.to_owned(),
+    };
+    let status = PullRequestStatus {
+        number: 17,
+        url: "https://github.com/o/r/pull/17".to_owned(),
+        branch: "fix".to_owned(),
+        draft: false,
+        review: Review::None,
+        checks: vec![
+            failed("lint", "https://github.com/o/r/actions/runs/1/job/2"),
+            Check {
+                state: CheckState::Passed,
+                ..failed("rust", "https://github.com/o/r/actions/runs/1/job/3")
+            },
+            failed("ci/circleci", "https://circleci.com/gh/o/r/1"),
+        ],
+    };
+    let logs = sandbox.path("checks");
+
+    let prompt = checks::hand_over(
+        &gh.checkout(sandbox.root(), Some("work")),
+        &WorktreeId::new("wt-1"),
+        &status,
+        &logs,
+    )
+    .unwrap();
+
+    // Only the failed Actions job's log is asked for, as the project's account.
+    let calls = gh.calls();
+    assert_eq!(
+        calls.last().unwrap(),
+        "tok-work|run view --job 2 --log-failed"
+    );
+    assert!(
+        !calls.iter().any(|call| call.contains("--job 3")),
+        "{calls:?}"
+    );
+
+    let saved: Vec<PathBuf> = fs::read_dir(&logs)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(saved.len(), 1);
+    let log = fs::read_to_string(&saved[0]).unwrap();
+    assert_eq!(
+        log,
+        "# lint\nhttps://github.com/o/r/actions/runs/1/job/2\n\n== Run clippy ==\nerror: unused\n"
+    );
+    assert!(
+        prompt.starts_with("The checks on pull request #17 failed: lint, ci/circleci. "),
+        "{prompt}"
+    );
+    assert!(prompt.contains(&saved[0].display().to_string()), "{prompt}");
+    assert!(
+        prompt.contains("ci/circleci's log is at https://circleci.com/gh/o/r/1."),
+        "{prompt}"
+    );
+    assert!(prompt.ends_with("run `ket pr wt-1` to push the branch so the checks run again."));
+}
+
+#[test]
+fn a_pull_request_with_nothing_failed_has_nothing_to_hand_over() {
+    let sandbox = Sandbox::new("gh-checks-none-failed");
+    let gh = FakeGh::new(&sandbox, "");
+    let status = PullRequestStatus {
+        number: 3,
+        url: String::new(),
+        branch: "b".to_owned(),
+        draft: false,
+        review: Review::None,
+        checks: Vec::new(),
+    };
+    let err = checks::hand_over(
+        &gh.checkout(sandbox.root(), None),
+        &WorktreeId::new("wt"),
+        &status,
+        &sandbox.path("checks"),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("#3 has no failed checks"), "{err}");
+    assert!(gh.calls().is_empty());
 }

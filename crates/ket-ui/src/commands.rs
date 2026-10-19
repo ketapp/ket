@@ -63,6 +63,9 @@ pub(crate) enum Intent {
     /// The handler never removes directly: `project.remove` is one fuzzy
     /// match away in the palette, and a project's worktrees go with it.
     ConfirmRemoveProject(ProjectId),
+    /// Send the selected worktree's review comments to its agent. See
+    /// `crate::review`.
+    SendReview,
 }
 
 /// Where handlers post intents for the shell to pick up.
@@ -160,6 +163,7 @@ pub(crate) fn registry() -> (Registry, Outbox) {
             "Focus pane below",
             Category::Application,
         ),
+        Command::new("review.send", "Send review to agent", Category::Review),
     ];
     for command in shell_commands {
         // A duplicate id here is a mistake in this file, not a runtime state.
@@ -215,6 +219,7 @@ fn bind(registry: &mut Registry, outbox: &Outbox) {
         "shell.focus_pane_down",
         Box::new(|_| Ok(Intent::FocusPane(Toward::Down))),
     );
+    wire("review.send", Box::new(|_| Ok(Intent::SendReview)));
 
     wire(
         "worktree.open",

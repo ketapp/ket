@@ -164,13 +164,17 @@ impl Shell {
             "/" if event.keystroke.modifiers.platform || event.keystroke.modifiers.control => {
                 self.close_snippet_picker(cx)
             }
+            // Round the list: down from the last row is the first, and up
+            // from the first is the last.
             "down" | "up" => {
-                if let Some(open) = self.snippet_picker.as_mut() {
-                    let last = open.candidates.len().saturating_sub(1);
+                if let Some(open) = self.snippet_picker.as_mut()
+                    && !open.candidates.is_empty()
+                {
+                    let count = open.candidates.len();
                     open.selected = if event.keystroke.key == "down" {
-                        (open.selected + 1).min(last)
+                        (open.selected + 1) % count
                     } else {
-                        open.selected.saturating_sub(1)
+                        (open.selected + count - 1) % count
                     };
                     open.scroll.scroll_to_item(open.selected);
                 }

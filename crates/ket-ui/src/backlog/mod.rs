@@ -33,7 +33,7 @@ mod list;
 mod organise;
 mod start;
 
-pub(crate) use capture::QuickCapture;
+pub(crate) use capture::{QuickCapture, fence_for};
 pub(crate) use github::IssueSync;
 
 use gpui::{

@@ -574,8 +574,30 @@ mod tests {
         };
         let taken = snapshot(vec![base.clone(), theirs], None);
         assert_eq!(standing(&taken, &base, GB64), Standing::Taken);
-        let unparented = snapshot(vec![base.clone(), model("qwen3:0.6b-ket")], None);
+        let other_weights = ModelInfo {
+            size_bytes: 3 * GB,
+            ..model("qwen3:0.6b-ket")
+        };
+        let unparented = snapshot(vec![base.clone(), other_weights], None);
         assert_eq!(standing(&unparented, &base, GB64), Standing::Taken);
+    }
+
+    #[test]
+    fn a_copy_that_records_no_parent_is_never_prepared_over_or_listed() {
+        // Ollama records no parent on a copy of a safetensors model, and a
+        // copy ket has no record of is the person's however alike it looks.
+        let base = model("qwen3.8:27b");
+        let copy = ModelInfo {
+            num_ctx: Some(40_960),
+            ..model("qwen3.8:27b-ket")
+        };
+        let snap = snapshot(vec![base.clone(), copy], None);
+        assert_eq!(standing(&snap, &base, GB64), Standing::Taken);
+        // Never offered as a model of its own, so never `-ket-ket`.
+        assert_eq!(
+            snap.listed().map(|m| m.tag.as_str()).collect::<Vec<_>>(),
+            vec!["qwen3.8:27b"]
+        );
     }
 
     #[test]

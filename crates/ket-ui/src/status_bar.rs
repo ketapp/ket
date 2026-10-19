@@ -1,9 +1,14 @@
-//! The strip along the bottom of the window.
+//! The strip along the bottom of the window, and the quota read-outs that
+//! started on it.
 //!
-//! Agent quota, which is what it was asked for: how much of each provider's
-//! plan is used and when it resets. It is a strip of *sections* rather than a
-//! fixed row, so what else lands here later — branch, background work — is a
-//! section rather than a rewrite.
+//! The strip holds the key hints on the left and, on the right, what ket and
+//! its agents cost the machine — see `crate::overhead` — beside the feedback
+//! bubble. It is the window's footnote: nothing on it asks to be acted on.
+//!
+//! Agent quota was what it was first asked for: how much of each provider's
+//! plan is used and when it resets. That has moved to the header, which is
+//! always on screen, but the sections and the usage popover that draw it are
+//! still here.
 //!
 //! Session usage lived here for a while and has gone to the sidebar — see
 //! `crate::usage_card`. It never belonged: a quota is an account-wide fact and
@@ -14,7 +19,9 @@
 //! fetch failed reports [`SnapshotStatus::Unavailable`], and rendering that as
 //! `0%` would say "plenty of headroom" about a provider ket cannot currently see.
 //! `ket-core` went to some trouble to keep those four states distinct; the whole
-//! benefit is lost if the bar collapses them back into a percentage.
+//! benefit is lost if the bar collapses them back into a percentage. The same
+//! goes for CPU: a rate takes two readings, and until there are two the strip
+//! gives memory alone.
 
 use gpui::{
     AnyElement, Context, Div, FontFeatures, FontWeight, Pixels, SharedString, Window, div,
@@ -25,7 +32,6 @@ use ket_core::theme::{Color, Theme};
 
 use crate::fonts::Prose;
 use crate::paint::{alpha, paint};
-use crate::ui::CAPTION;
 use crate::ui::agent;
 use crate::ui::button::icon_button;
 use crate::ui::icon::{Icon, sized_icon};
@@ -33,8 +39,9 @@ use crate::ui::popup::{self, Placement};
 use crate::ui::progress::progress;
 use crate::{PopupKind, Shell};
 
-/// The shell's periodic tick: how often the bar re-reads the quota cache, and
-/// the cadence of everything else `Shell::poll_tick` keeps current.
+/// The shell's periodic tick: how often the header re-reads the quota cache
+/// and the bar reads what ket costs, and the cadence of everything else
+/// `Shell::poll_tick` keeps current.
 ///
 /// The cache refreshes on its own thread; this only decides how soon the window
 /// notices. Ten seconds rather than five: each tick stamps every worktree's git
@@ -48,16 +55,28 @@ impl Shell {
     /// Shows or hides the status bar.
     ///
     /// The quota refresh keeps running either way: the figures it feeds are
-    /// in the header now, which is always on screen.
+    /// in the header now, which is always on screen. What ket costs is read
+    /// only while the bar is open.
     ///
     /// Rebuilds the menu bar too, since the View menu's item says which of
     /// the two it will do.
     pub(crate) fn set_status_bar(&mut self, open: bool, cx: &mut Context<Self>) {
         self.status_bar_open = open;
         // The feedback popover hangs off the bar; with the bar gone it would
-        // be a form nobody can see, still taking the keys.
+        // be a form nobody can see, still taking the keys. The overhead
+        // popover hangs off it too, and its readings stop with it.
         if !open {
             self.dismiss_feedback();
+            if self.popup == Some(PopupKind::Overhead) {
+                self.popup = None;
+            }
+        }
+        // A fresh start either way. The first CPU figure after opening should
+        // be what ket costs now, not an average over however long the bar was
+        // hidden; it arrives on the next tick, with memory showing at once.
+        self.forget_overhead();
+        if open {
+            self.refresh_overhead();
         }
         self.refresh_native_menus(cx);
         cx.notify();
@@ -270,10 +289,10 @@ const HEADER_BAR_W: Pixels = px(56.0);
 const HEADER_BAR_H: Pixels = px(4.0);
 
 /// The compact header's quota bar, in a read-out.
-const COMPACT_BAR_W: Pixels = px(32.0);
+const COMPACT_BAR_W: Pixels = px(28.0);
 
 /// Where a quota starts to be worth a glance.
-const WARM: f32 = 70.0;
+pub(crate) const WARM: f32 = 70.0;
 
 /// Where it starts to be worth planning around.
 const HOT: f32 = 80.0;
@@ -291,7 +310,7 @@ const CRITICAL: f32 = 90.0;
 /// green is deliberately not in the ramp: green already means *a session is
 /// working* everywhere else in the shell, and a green quota bar would be a
 /// second, unrelated meaning for one colour.
-fn pressure(used: f32, t: &Theme) -> Option<Color> {
+pub(crate) fn pressure(used: f32, t: &Theme) -> Option<Color> {
     if used >= CRITICAL {
         Some(t.quota.critical)
     } else if used >= HOT {
@@ -373,7 +392,7 @@ fn note(text: impl Into<SharedString>, t: &Theme) -> AnyElement {
 
 /// Digits set to one width, so a column of figures lines up by its digits
 /// and a reset ticking from `9m` to `10m` does not shift the text beside it.
-fn tabular(mut el: Div) -> Div {
+pub(crate) fn tabular(mut el: Div) -> Div {
     el.text_style()
         .get_or_insert_with(Default::default)
         .font_features = Some(FontFeatures(std::sync::Arc::new(vec![("tnum".into(), 1)])));
@@ -809,7 +828,7 @@ impl Shell {
                             )
                             .children(section.resets_in.clone().map(|resets| {
                                 div()
-                                    .text_size(px(11.0))
+                                    .text_size(px(10.5))
                                     .text_color(paint(t.text.dim))
                                     .child(resets)
                             }))
@@ -922,27 +941,35 @@ impl Shell {
         )
     }
 
-    /// The window's status bar: the key hints on the left, `feedback` — the
-    /// bubble that opens the feedback popover, see `crate::feedback` — on the
-    /// right. It sits on the desk rather than in a card of its own — it is
-    /// the window's footnote, not a region.
+    /// The window's status bar: the key hints on the left; on the right,
+    /// `overhead` — what ket and its agents cost, which opens a popover with
+    /// the detail, see `crate::overhead` — and
+    /// `feedback`, the bubble that opens the feedback popover, see
+    /// `crate::feedback`. It sits on the desk rather than in a card of its
+    /// own — it is the window's footnote, not a region.
     ///
     /// Quota refresh used to sit where the bubble is; it is in the usage
     /// popover's header, beside the reading it refreshes.
     ///
     /// Named apart from the editor pane's own status line, which is a
     /// different thing at a different scope.
-    pub(crate) fn window_status_bar(&self, feedback: AnyElement) -> AnyElement {
+    pub(crate) fn window_status_bar(
+        &self,
+        overhead: Option<AnyElement>,
+        feedback: AnyElement,
+    ) -> AnyElement {
         // Drawn straight on the desk, which is not always darker than the ink.
         let t = &self.theme.on_backdrop();
         div()
             .flex()
             .flex_none()
             .items_center()
-            .gap(px(18.0))
-            .h(px(24.0))
+            .gap(px(14.0))
+            .h(px(20.0))
             .px(px(6.0))
-            .text_size(CAPTION)
+            // Half a pixel under the chrome's caption: the bar is a line of
+            // reminders under everything else, and the quietest text in it.
+            .text_size(px(10.5))
             .text_color(paint(t.text.dim))
             .children(crate::shortcuts::FOOTER_HINTS.iter().map(|&(keys, words)| {
                 div()
@@ -954,6 +981,7 @@ impl Shell {
                     .child(div().prose().child(words))
             }))
             .child(div().flex_grow())
+            .children(overhead)
             .child(feedback)
             .into_any_element()
     }

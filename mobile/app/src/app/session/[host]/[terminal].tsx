@@ -1,32 +1,61 @@
 'use no memo'; // Reads a live HostConnection — see lib/hosts.ts.
 
 // An agent's session as a conversation: what you said, what it said back,
-// and each tool it used as one line — read from its transcript on the
-// desktop, not drawn from a terminal screen. A message line under it types
-// into the agent's terminal; when the agent is asking to be allowed
+// and each tool it used as one line, a run of them shut under their count —
+// read from its transcript on the desktop, not drawn from a terminal screen.
+// A message line under it types into the agent's terminal, with photos and
+// files from + and words from the mic; when the agent is asking to be allowed
 // something, the answer is right here. The terminal itself is one tap away.
 
 import { Activity, Answer_Choice, type Question, type Turn, Turn_Kind } from '@ket/remote';
 import * as Clipboard from 'expo-clipboard';
-import { router, useFocusEffect, useLocalSearchParams } from 'expo-router';
+import { router, useFocusEffect, useLocalSearchParams, useNavigation } from 'expo-router';
 import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react';
-import { AppState, Linking, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import {
+  AppState,
+  Linking,
+  Platform,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+  type ViewStyle,
+} from 'react-native';
 import { KeyboardChatScrollView, KeyboardStickyView } from 'react-native-keyboard-controller';
 import Animated, { useAnimatedStyle, useSharedValue, withTiming } from 'react-native-reanimated';
 import Svg, { Circle, Defs, LinearGradient, Path, Rect, Stop as GradientStop } from 'react-native-svg';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { AttachMenu, FileChip, ImagesChip, SentFiles, type Source, Tray } from '../../../components/Attachments';
 import { CommandMenu } from '../../../components/Commands';
 import { KeyCommands } from '../../../components/KeyCommands';
+import { MicButton } from '../../../components/Mic';
 import { RiskBadge } from '../../../components/Risk';
-import { AgentMark, Bookmark, Branch, Check, ChevronDown, Send, Stop, TerminalGlyph } from '../../../components/icons';
+import { AgentMark, Bookmark, Branch, Check, Chevron, ChevronDown, Close, Plus, Send, Stop, TerminalGlyph } from '../../../components/icons';
 import { Bar, Button, Choice, Dot, IconButton, Prose, Screen, field } from '../../../components/ui';
 import { detail, everyWorktree, stateOf } from '../../../lib/activity';
+import {
+  type Attachment,
+  MAX_BYTES,
+  MAX_FILES,
+  canPaste,
+  fileName,
+  fromCamera,
+  fromClipboard,
+  fromFiles,
+  fromPhotos,
+  splitFiles,
+} from '../../../lib/attach';
 import { type Command, commandsFor, matching } from '../../../lib/commands';
 import type { PromptAnswer } from '../../../lib/connection';
 import { useHost } from '../../../lib/hosts';
+import { useDictation } from '../../../lib/dictation';
 import { confirmIdentity } from '../../../lib/lock';
+import { Refused } from '../../../lib/refused';
 import { agentLabel, font, size, t, tint } from '../../../lib/theme';
+import { canDictate } from '../../../lib/voice';
 
 /** How often the conversation is asked for while it is on screen: more
  * often while the agent is working or a message is on its way. */
@@ -53,7 +82,19 @@ type Pending = {
    * after the step in progress. Sent while it was idle, it is what starts
    * the next step, and belongs before the step's indicator. */
   behind: boolean;
+  /** The photos and files sent with it. */
+  files: Attachment[];
 };
+
+/** A message of yours as the conversation reads it back: its words, without
+ * the paths the desktop listed under them, and how many images it carried. */
+type Said = { words: string; images: number };
+
+/** The photos and files messages from here carried, by host, terminal and
+ * message, while the app runs: the conversation read back has only their
+ * count, so a message shows its pictures for as long as the phone has them. */
+const carriedFiles = new Map<string, Attachment[]>();
+const carriedKey = (where: string, said: Said) => `${where}\n${said.images}\n${said.words}`;
 
 /** How tall the fade over the conversation's foot is, and how long it
  * takes to come and go. */
@@ -69,11 +110,37 @@ const REPLIES = ['Continue', 'Looks good', 'Run the tests', 'Commit it'];
  * was, rather than starting over at "Loading the conversation…". */
 const kept = new Map<string, { turns: Turn[]; cursor: bigint; session: string }>();
 
+/** How long the conversation waits for the push to finish before painting
+ * anyway: a screen that arrived without an animation, or a platform that
+ * never says one ended, is not left blank. Longer than the stack's slide. */
+const SETTLE_BOUND_MS = 600;
+
 export default function Session() {
   const { host: hostId, terminal } = useLocalSearchParams<{ host: string; terminal: string }>();
   const terminalId = BigInt(terminal);
   const conn = useHost(hostId);
   const insets = useSafeAreaInsets();
+  // The stack renders this screen before it slides it in, and painting a
+  // kept conversation — every turn, unvirtualised — on that first frame held
+  // the tap for as long as the paint took. So the turns wait for the
+  // transition to end; the header and composer come up at once.
+  const navigation = useNavigation<{ addListener(type: 'transitionEnd', listener: () => void): () => void }>();
+  const [settled, setSettled] = useState(false);
+  useEffect(() => {
+    if (settled) return;
+    let done = false;
+    const settle = () => {
+      if (done) return;
+      done = true;
+      setSettled(true);
+    };
+    const off = navigation.addListener('transitionEnd', settle);
+    const bound = setTimeout(settle, SETTLE_BOUND_MS);
+    return () => {
+      off();
+      clearTimeout(bound);
+    };
+  }, [navigation, settled]);
   const keptKey = `${hostId}:${terminal}`;
   const [turns, setTurns] = useState<Turn[]>(() => kept.get(keptKey)?.turns ?? []);
   // Sent from here and not in the conversation yet: shown at once, as
@@ -89,7 +156,25 @@ export default function Session() {
   const [loaded, setLoaded] = useState(() => kept.has(keptKey));
   const [failing, setFailing] = useState('');
   const [message, setMessage] = useState('');
+  // The draft as it is this moment, for what reads it after a wait: Send
+  // after the mic's last words, which arrive between renders.
+  const draft = useRef('');
+  const write = (text: string) => {
+    draft.current = text;
+    setMessage(text);
+  };
   const [note, setNote] = useState('');
+  // The note is about a permission that is off: Settings, under it.
+  const [toSettings, setToSettings] = useState(false);
+  // Photos and files for the next message, in the field above its words.
+  const [files, setFiles] = useState<Attachment[]>([]);
+  // The `/` chip's menu — see `menu` below.
+  const [listing, setListing] = useState(false);
+  // The + menu, open in place of the `/` one, and whether it offers a paste.
+  const [attaching, setAttaching] = useState(false);
+  const [pasteable, setPasteable] = useState(false);
+  // Where the cursor was in the draft, which is where dictation writes.
+  const selection = useRef({ start: 0, end: 0 });
   const [answering, setAnswering] = useState(false);
   // A Stop just pressed: the agent has the interrupt, and a second press
   // before it has stopped would reach whatever comes after.
@@ -106,7 +191,8 @@ export default function Session() {
   const held = useRef(false);
   const scroll = useRef<Animated.ScrollView>(null);
   const input = useRef<TextInput>(null);
-  const clearedAt = useRef(0);
+  // Just cleared by Send, for a moment — see `SETTLE_MS`.
+  const settling = useRef(false);
   // Whether the view is at the newest turn, so new ones scroll it along —
   // and one scrolled up to read is left where it is.
   const atEnd = useRef(true);
@@ -128,8 +214,13 @@ export default function Session() {
   useEffect(() => {
     busy.current = isBusy;
   }, [isBusy]);
+  // This terminal's own prompt. Several agents can run in one worktree, and
+  // `question` is only the newest of their prompts; since 1.13 the desktop
+  // sends every one, so the chat for this terminal shows its own.
   const question =
-    worktree?.activity === Activity.BLOCKED && worktree.question?.terminalId === terminalId ? worktree.question : undefined;
+    worktree?.activity === Activity.BLOCKED
+      ? ([...worktree.questions, worktree.question].find((q) => q?.terminalId === terminalId) ?? undefined)
+      : undefined;
   // A question or a plan rather than a permission: its own card, answerable
   // or not, in place of the permission's.
   const prompt = question ? promptKind(question.tool) : undefined;
@@ -177,16 +268,18 @@ export default function Session() {
           }
           setQueued(reply.queued);
           // A message that has reached the conversation is no longer pending.
-          // After a fresh read, only the newest few can be one just sent.
+          // After a fresh read, only the newest few can be one just sent. One
+          // with photos keeps them, now it is delivered.
           const arrived = (restart ? reply.turns.slice(-6) : reply.turns)
             .filter((turn) => turn.kind === Turn_Kind.USER)
-            .map((turn) => turn.text);
+            .map(saidIn);
           if (arrived.length > 0) {
             setPending((before) => {
               const left = [...arrived];
               return before.filter((p) => {
-                const at = left.findIndex((said) => carries(said, p.text));
+                const at = left.findIndex((said) => fits(said, p));
                 if (at < 0) return true;
+                if (p.files.length > 0) carriedFiles.set(carriedKey(keptKey, left[at]), p.files);
                 left.splice(at, 1);
                 return false;
               });
@@ -234,7 +327,7 @@ export default function Session() {
         offChange();
         appState.remove();
       };
-    }, [conn, terminalId, tooOld]),
+    }, [conn, terminalId, tooOld, keptKey]),
   );
 
   // The desktop's saved snippets, once, as more chips over the composer.
@@ -252,48 +345,139 @@ export default function Session() {
     };
   }, [conn, tooOld]);
 
+  // The mic: see lib/dictation.ts. A message to a local agent keeps its
+  // words on the phone too, or is refused.
+  const local = /^(opencode:ollama\/|ollama:)/i.test(located?.terminal?.agent ?? worktree?.agent ?? '');
+  const dictation = useDictation({
+    local,
+    draft,
+    selection,
+    write,
+    onNote: (text, settings) => {
+      setNote(text);
+      setToSettings(settings);
+    },
+  });
+  const hearing = dictation.hearing;
+
   // Typing needs the terminal's control, taken the first time and kept.
-  const type = async (text: string): Promise<boolean> => {
+  // Pressing Send is asking to type, so control the desktop took back since
+  // is taken again on the same press — asking for a second press made every
+  // first message after using the Mac look lost. Once: a second refusal is
+  // the desktop typing right now, and says so. `act` is `false` when the
+  // phone turns out not to have control.
+  const controlled = async (act: () => Promise<boolean>, failed: (why: string) => string): Promise<boolean> => {
     if (!conn) return false;
-    if (!held.current) {
-      held.current = await conn.takeControl(terminalId).catch(() => false);
+    for (let attempt = 0; attempt < 2; attempt += 1) {
       if (!held.current) {
-        setNote('Another device is typing in this terminal.');
+        held.current = await conn.takeControl(terminalId).catch(() => false);
+        if (!held.current) {
+          setNote('Another device is typing in this terminal.');
+          return false;
+        }
+      }
+      try {
+        if (await act()) return true;
+        held.current = false;
+      } catch (e) {
+        setNote(failed(e instanceof Error ? e.message : String(e)));
         return false;
       }
     }
-    try {
-      if (await conn.type(terminalId, text)) return true;
-      held.current = false;
-      setNote('Your desktop took control back. Send again to take it.');
-    } catch (e) {
-      setNote(`Not sent: ${e instanceof Error ? e.message : String(e)}`);
-    }
+    setNote('Your desktop took control back.');
     return false;
   };
+  const type = (text: string) => controlled(() => conn?.type(terminalId, text) ?? Promise.resolve(false), (why) => `Not sent: ${why}`);
+
 
   // The text, then Enter on its own, as the terminal screen sends it: sent
-  // together, an agent reads the Enter as a new line in a paste.
+  // together, an agent reads the Enter as a new line in a paste. With photos
+  // or files, the desktop types both once it has handed them over. Send while
+  // dictating closes the mic and waits for its last words first.
   const send = async (said?: string) => {
-    const text = (said ?? message).trim();
-    if (!text) return;
+    if (said === undefined) await dictation.finish();
+    const text = (said ?? draft.current).trim();
+    const attached = said === undefined ? files : [];
+    if (!text && attached.length === 0) return;
     if (said === undefined) {
-      setMessage('');
+      write('');
       input.current?.clear();
-      clearedAt.current = Date.now();
+      settling.current = true;
+      setTimeout(() => {
+        settling.current = false;
+      }, SETTLE_MS);
+      setFiles([]);
     }
     setNote('');
+    setToSettings(false);
+    setAttaching(false);
     const key = ++sentCount.current;
-    setPending((before) => [...before, { key, text, at: Date.now(), behind: working }]);
+    setPending((before) => [...before, { key, text, at: Date.now(), behind: working, files: attached }]);
     atEnd.current = true;
-    if (!(await type(text))) {
+    const sent =
+      attached.length > 0
+        ? await controlled(
+            () => conn?.sendFiles(terminalId, text, attached) ?? Promise.resolve(false),
+            (why) => `Not sent: ${why}. Everything is back in the field; send again when it’s connected.`,
+          )
+        : await type(text);
+    if (!sent) {
       setPending((before) => before.filter((p) => p.key !== key));
-      if (said === undefined) setMessage(text);
+      if (said === undefined) {
+        write(text);
+        setFiles(attached);
+      }
       return;
     }
-    await new Promise((resolve) => setTimeout(resolve, ENTER_AFTER_MS));
-    await type('\r');
+    if (attached.length === 0) {
+      await new Promise((resolve) => setTimeout(resolve, ENTER_AFTER_MS));
+      await type('\r');
+    }
     atEnd.current = true;
+  };
+
+
+  // The + menu's choices: photos, the camera, files, or what was copied, up
+  // to what one message carries.
+  const openAttach = () => {
+    if (attaching) {
+      setAttaching(false);
+      return;
+    }
+    setListing(false);
+    setAttaching(true);
+    void canPaste().then(setPasteable);
+  };
+  const attach = async (source: Source) => {
+    setAttaching(false);
+    setNote('');
+    setToSettings(false);
+    const room = MAX_FILES - files.length;
+    if (room <= 0) {
+      setNote(`A message carries ${MAX_FILES} photos and files at most. Send these, then the rest.`);
+      return;
+    }
+    try {
+      const picked =
+        source === 'photos'
+          ? await fromPhotos(room)
+          : source === 'camera'
+            ? await fromCamera()
+            : source === 'files'
+              ? await fromFiles(room)
+              : await fromClipboard();
+      if (picked.length === 0) return;
+      const all = [...files, ...picked].slice(0, MAX_FILES);
+      if (all.reduce((sum, file) => sum + file.bytes.length, 0) > MAX_BYTES) {
+        setNote('That’s more than one message carries, 15 MB. Send what’s attached first, then the rest.');
+        return;
+      }
+      setFiles(all);
+    } catch (e) {
+      const why = e instanceof Error ? e.message : String(e);
+      setNote(e instanceof Refused ? why : `Couldn’t attach it: ${why}`);
+      setToSettings(e instanceof Refused);
+    }
   };
 
   // Held on a message or a code block: its words, on the clipboard.
@@ -347,21 +531,25 @@ export default function Session() {
   const lift = rest - 6;
   const openTerminal = () => router.push(`/terminal/${hostId}/${terminal}`);
 
+  // Something to send: words, or photos and files on their own.
+  const ready = message.trim() !== '' || files.length > 0;
+  // A desktop from before 1.12 takes words and nothing else.
+  const canAttach = conn === null || conn.hostMinor >= 12;
+
   // The `/` menu, while the draft is a slash and the start of a name.
   const commands = commandsFor(agent);
   const suggested = matching(commands, message);
   // The `/` chip's menu: every command, with nothing typed and the keyboard
   // left as it was. A draft that is a slash shows its own matches instead.
-  const [listing, setListing] = useState(false);
   const menu = listing && !message ? commands : suggested;
   const pick = async (command: Command) => {
     setListing(false);
     if (command.args) {
-      setMessage(`${command.name} `);
+      write(`${command.name} `);
       input.current?.focus();
       return;
     }
-    setMessage('');
+    write('');
     await send(command.name);
     // Its picker is answered where it is drawn.
     if (command.picker) openTerminal();
@@ -379,12 +567,15 @@ export default function Session() {
   }
 
   // Sent from here and in neither the conversation nor the agent's queue yet.
-  const unsent = pending.filter((p) => !queued.some((q) => carries(q, p.text)));
+  const unsent = pending.filter((p) => !(p.text && queued.some((q) => carries(splitFiles(q).words, p.text))));
+  // Nothing kept paints at once; a kept conversation waits for the slide.
+  const painted = settled || turns.length === 0;
   const statusOf = (p: Pending) => (now - p.at > UNSEEN_MS && !working ? 'unseen' : 'sending');
   const outgoing = (p: Pending) => (
     <Outgoing
       key={p.key}
       text={p.text}
+      files={p.files}
       status={statusOf(p)}
       onCopy={copy}
       onDismiss={() => setPending((before) => before.filter((x) => x.key !== p.key))}
@@ -446,7 +637,7 @@ export default function Session() {
             if (atEnd.current) scroll.current?.scrollToEnd({ animated: false });
           }}
         >
-          {tooOld ? (
+          {!painted ? null : tooOld ? (
             <View style={styles.empty}>
               <Prose>
                 ket on {conn?.host.name ?? 'your Mac'} is older than this app. Update it — rebuild ket and start a new
@@ -474,15 +665,20 @@ export default function Session() {
               <Button title="Open the terminal" onPress={openTerminal} />
             </View>
           ) : null}
-          {turns.map((turn, index) => (
-            <TurnView
-              key={index}
-              turn={turn}
-              agent={agent}
-              onCopy={copy}
-              delivered={index === lastYours && unsent.length === 0 && queued.length === 0}
-            />
-          ))}
+          {grouped(painted ? turns : []).map(({ at, tools }) =>
+            tools ? (
+              <Tools key={at} turns={tools} onCopy={copy} />
+            ) : (
+              <TurnView
+                key={at}
+                turn={turns[at]}
+                agent={agent}
+                carried={turns[at].kind === Turn_Kind.USER ? carriedFiles.get(carriedKey(keptKey, saidIn(turns[at]))) : undefined}
+                onCopy={copy}
+                delivered={at === lastYours && unsent.length === 0 && queued.length === 0}
+              />
+            ),
+          )}
           {/* A message that starts the agent working goes before the
               indicator: the desktop says the agent is working a moment
               before its transcript has the message that set it off. */}
@@ -546,13 +742,40 @@ export default function Session() {
           </View>
         ) : null}
 
-        {note ? (
-          <Prose style={styles.note} color={t.dim}>
-            {note}
-          </Prose>
+        {hearing ? (
+          <View accessibilityLiveRegion="polite" style={styles.hearing}>
+            <View style={styles.hearingDot} />
+            <Text style={styles.hearingText}>
+              <Text style={{ color: t.text }}>Listening</Text>
+              {hearing.onDevice
+                ? ' · transcribed on this iPhone'
+                : Platform.OS === 'web'
+                  ? ' · transcribed by the browser'
+                  : ' · transcribed by Apple'}
+            </Text>
+          </View>
+        ) : note ? (
+          <View style={styles.noteBox}>
+            <Prose style={styles.noteText} color={t.dim}>
+              {note}
+            </Prose>
+            {toSettings ? (
+              <Button title="Open Settings" onPress={() => void Linking.openSettings()} style={styles.settings} />
+            ) : null}
+          </View>
         ) : null}
-        {menu.length > 0 ? <CommandMenu commands={menu} onPick={(command) => void pick(command)} /> : null}
-        {!tooOld && !asking && !message ? (
+        {attaching ? (
+          <AttachMenu
+            older={canAttach ? undefined : (conn?.host.name ?? 'your Mac')}
+            pasteable={pasteable}
+            onPick={(source) => void attach(source)}
+          />
+        ) : menu.length > 0 ? (
+          <CommandMenu commands={menu} onPick={(command) => void pick(command)} />
+        ) : null}
+        {/* Chips send at once, so not while photos wait to go with the next
+            message, while the mic is writing one, or under the + menu. */}
+        {!tooOld && !asking && !message && files.length === 0 && !hearing && !attaching ? (
           <ScrollView
             horizontal
             showsHorizontalScrollIndicator={false}
@@ -565,7 +788,10 @@ export default function Session() {
                 accessibilityRole="button"
                 accessibilityLabel="Commands"
                 accessibilityState={{ expanded: listing }}
-                onPress={() => setListing(!listing)}
+                onPress={() => {
+                  setAttaching(false);
+                  setListing(!listing);
+                }}
                 style={({ pressed }) => [styles.reply, styles.slash, (listing || pressed) && { backgroundColor: t.selection }]}
               >
                 <Text style={styles.slashText}>/</Text>
@@ -579,7 +805,7 @@ export default function Session() {
                 accessibilityHint="Hold to edit it first"
                 onPress={() => void send(snippet.body)}
                 onLongPress={() => {
-                  setMessage(snippet.body);
+                  write(snippet.body);
                   input.current?.focus();
                 }}
                 style={({ pressed }) => [styles.reply, styles.snippet, pressed && { backgroundColor: t.selection }]}
@@ -604,22 +830,53 @@ export default function Session() {
           </ScrollView>
         ) : null}
         <KeyCommands title="Send" onSend={() => void send()} style={[styles.composer, { paddingBottom: rest }]}>
-          <TextInput
-            ref={input}
-            value={message}
-            onChangeText={(text) => {
-              if (Date.now() - clearedAt.current < SETTLE_MS) {
-                input.current?.clear();
-                return;
-              }
-              setMessage(text);
-            }}
-            placeholder={`Message ${agent ? agentLabel(agent) : 'the agent'}`}
-            placeholderTextColor={t.faint}
-            multiline
-            style={styles.input}
-          />
-          {working && !message.trim() ? (
+          {!tooOld ? (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={attaching ? 'Close the attach menu' : 'Attach a photo or file'}
+              accessibilityState={{ expanded: attaching }}
+              onPress={openAttach}
+              style={({ pressed }) => [styles.plus, (attaching || pressed) && { backgroundColor: t.selection }]}
+            >
+              {attaching ? <Close size={20} color={t.text} weight={2.2} /> : <Plus size={20} color={t.text} weight={2.2} />}
+            </Pressable>
+          ) : null}
+          <View style={[styles.field, files.length > 0 && styles.fieldTray, hearing && styles.fieldHearing]}>
+            {files.length > 0 ? (
+              <Tray files={files} onRemove={(key) => setFiles((before) => before.filter((file) => file.key !== key))} />
+            ) : null}
+            <View style={styles.fieldRow}>
+              <TextInput
+                ref={input}
+                value={message}
+                onChangeText={(text) => {
+                  if (settling.current) {
+                    input.current?.clear();
+                    return;
+                  }
+                  dictation.letGo();
+                  write(text);
+                }}
+                onSelectionChange={(e) => {
+                  selection.current = e.nativeEvent.selection;
+                }}
+                placeholder={`Message ${agent ? agentLabel(agent) : 'the agent'}`}
+                placeholderTextColor={t.faint}
+                multiline
+                style={[styles.input, !canDictate && styles.inputAlone, files.length > 0 && styles.inputUnderTray]}
+              />
+              {canDictate ? <MicButton
+                  listening={hearing !== null}
+                  level={dictation.level}
+                  onPress={() => {
+                    setAttaching(false);
+                    setListing(false);
+                    void dictation.toggle();
+                  }}
+                /> : null}
+            </View>
+          </View>
+          {working && !ready ? (
             // Working, with nothing to send: the button stops the turn.
             <Pressable
               accessibilityRole="button"
@@ -634,11 +891,11 @@ export default function Session() {
             <Pressable
               accessibilityRole="button"
               accessibilityLabel="Send"
-              disabled={!message.trim()}
+              disabled={!ready}
               onPress={() => void send()}
-              style={[styles.send, message.trim() ? styles.sendReady : null]}
+              style={[styles.send, ready ? styles.sendReady : null]}
             >
-              <Send size={18} color={message.trim() ? t.onBrand : t.faint} weight={2.3} />
+              <Send size={18} color={ready ? t.onBrand : t.faint} weight={2.3} />
             </Pressable>
           )}
         </KeyCommands>
@@ -686,6 +943,8 @@ function join(before: Turn[], more: Turn[]): Turn[] {
 /** Which card a prompt takes, when it is not a permission. */
 function promptKind(tool: string): 'ask' | 'plan' | undefined {
   if (tool === 'AskUserQuestion') return 'ask';
+  // A dialog the desktop read off the agent's screen, with its options.
+  if (tool === 'Dialog') return 'ask';
   if (tool === 'ExitPlanMode') return 'plan';
   return undefined;
 }
@@ -809,14 +1068,18 @@ function Asking({
                 />
               ))}
             </View>
-            <TextInput
-              value={others[i]}
-              onChangeText={(text) => write(i, text)}
-              placeholder="Or write your own"
-              placeholderTextColor={t.faint}
-              editable={idle}
-              style={field}
-            />
+            {question.tool === 'Dialog' ? null : (
+              // A dialog read off the agent's screen takes one of its own
+              // options and nothing else.
+              <TextInput
+                value={others[i]}
+                onChangeText={(text) => write(i, text)}
+                placeholder="Or write your own"
+                placeholderTextColor={t.faint}
+                editable={idle}
+                style={field}
+              />
+            )}
           </View>
         ))}
       </ScrollView>
@@ -860,6 +1123,18 @@ function Working({ agent, what }: { agent: string; what: string }) {
   );
 }
 
+/** A message of yours as the conversation reads it back. */
+function saidIn(turn: Turn): Said {
+  return { words: splitFiles(turn.text).words, images: turn.images ?? 0 };
+}
+
+/** Whether `said`, read back, is pending message `sent`: the same words —
+ * see [`carries`] — or, for photos sent alone, images and no words. */
+function fits(said: Said, sent: Pending): boolean {
+  if (!sent.text) return said.words === '' && said.images > 0;
+  return carries(said.words, sent.text);
+}
+
 /** Whether a message the transcript or the agent's queue shows is one sent
  * from here: the same start, since the desktop clips long turns, or the same
  * end, since whatever the terminal's prompt already held when the phone
@@ -885,11 +1160,14 @@ function carries(said: string, sent: string): boolean {
  * it copies, as the delivered one does. */
 function Outgoing({
   text,
+  files = [],
   status,
   onCopy,
   onDismiss,
 }: {
   text: string;
+  /** Photos and files sent with it, drawn above its words. */
+  files?: Attachment[];
   status: 'sending' | 'queued' | 'unseen';
   onCopy: (text: string) => void;
   onDismiss?: () => void;
@@ -900,17 +1178,39 @@ function Outgoing({
       : status === 'unseen'
         ? 'Not in the conversation, check the terminal'
         : 'Sending';
+  const sending = status === 'sending';
+  const words = <Text style={[styles.youText, sending && styles.youSendingText]}>{text}</Text>;
+  const what = text || (files.length === 1 ? files[0].name : `${files.length} files`);
   return (
     <Pressable
       onPress={status === 'unseen' ? onDismiss : undefined}
       delayLongPress={350}
       onLongPress={() => onCopy(text)}
-      accessibilityLabel={`${text}. ${said}.`}
+      accessibilityLabel={`${what}. ${said}.`}
       accessibilityHint={status === 'unseen' ? 'Tap to clear, hold to copy' : 'Hold to copy'}
-      style={({ pressed }) => [styles.you, status === 'sending' && styles.youSending, pressed && styles.held]}
+      style={({ pressed }) => [
+        files.length > 0 ? styles.yours : [styles.you, sending && styles.youSending],
+        pressed && styles.held,
+      ]}
     >
-      <StatusMark status={status} />
-      <Text style={[styles.youText, status === 'sending' && styles.youSendingText]}>{text}</Text>
+      {files.length > 0 ? (
+        <>
+          <SentFiles files={files} sending={sending} />
+          {text ? (
+            <View style={[styles.bubble, sending && styles.youSending]}>
+              <StatusMark status={status} />
+              {words}
+            </View>
+          ) : (
+            <StatusMark status={status} />
+          )}
+        </>
+      ) : (
+        <>
+          <StatusMark status={status} />
+          {words}
+        </>
+      )}
     </Pressable>
   );
 }
@@ -964,34 +1264,114 @@ function sentence(text: string): string {
   return /[.!?]$/.test(s) ? s : `${s}.`;
 }
 
+/** The conversation as it is drawn: a run of two or more tool lines as one
+ * group, every other turn on its own. Each is keyed by the turn it starts
+ * at, so a group the agent is still adding to stays as open as it was. */
+function grouped(turns: Turn[]): { at: number; tools?: Turn[] }[] {
+  const items: { at: number; tools?: Turn[] }[] = [];
+  let at = 0;
+  while (at < turns.length) {
+    let end = at;
+    while (end < turns.length && turns[end].kind === Turn_Kind.TOOL) end += 1;
+    if (end - at >= 2) {
+      items.push({ at, tools: turns.slice(at, end) });
+      at = end;
+    } else {
+      items.push({ at });
+      at += 1;
+    }
+  }
+  return items;
+}
+
+/** A run of tool lines, shut under how many there are and which tools: the
+ * agent's words read straight through, and what it ran is a tap away — or
+ * the whole of it, as it ran, in the terminal. */
+function Tools({ turns, onCopy }: { turns: Turn[]; onCopy: (text: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const count = `${turns.length} tool calls`;
+  const names = [...new Set(turns.map((turn) => turn.tool).filter(Boolean))].join(', ');
+  return (
+    <View style={styles.tools}>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={names ? `${count}: ${names}` : count}
+        accessibilityState={{ expanded: open }}
+        onPress={() => setOpen(!open)}
+        style={({ pressed }) => [styles.toolsHead, pressed && styles.held]}
+      >
+        <View style={open && styles.toolsOpen}>
+          <Chevron size={13} color={t.faint} weight={2} />
+        </View>
+        <Text style={styles.toolText} numberOfLines={1}>
+          {count}
+          {names ? <Text style={styles.toolNames}>{` · ${names}`}</Text> : null}
+        </Text>
+      </Pressable>
+      {open ? turns.map((turn, index) => <TurnView key={index} turn={turn} agent="" onCopy={onCopy} />) : null}
+    </View>
+  );
+}
+
 function TurnView({
   turn,
   agent,
+  carried,
   onCopy,
   delivered,
 }: {
   turn: Turn;
   agent: string;
+  /** The photos and files a message of yours carried, while the phone has
+   * them. */
+  carried?: Attachment[];
   onCopy: (text: string) => void;
   delivered?: boolean;
 }) {
   // A tool line opened to its whole text.
   const [open, setOpen] = useState(false);
   switch (turn.kind) {
-    case Turn_Kind.USER:
+    case Turn_Kind.USER: {
+      // Files the desktop named under the words, as files; images by their
+      // count, unless the phone still has their pictures.
+      const { words, files } = splitFiles(turn.text);
+      const images = carried ? 0 : (turn.images ?? 0);
+      const plain = !carried && images === 0 && files.length === 0;
+      const said = words ? (
+        <Text style={styles.youText}>
+          <Linked text={words} />
+        </Text>
+      ) : null;
+      const mark = delivered ? <StatusMark status="delivered" /> : null;
       return (
         <Pressable
           accessibilityHint="Hold to copy"
           delayLongPress={350}
-          onLongPress={() => onCopy(turn.text)}
-          style={({ pressed }) => [styles.you, pressed && styles.held]}
+          onLongPress={() => onCopy(words)}
+          style={({ pressed }) => [plain ? styles.you : styles.yours, pressed && styles.held]}
         >
-          {delivered ? <StatusMark status="delivered" /> : null}
-          <Text style={styles.youText}>
-            <Linked text={turn.text} />
-          </Text>
+          {plain ? (
+            <>
+              {mark}
+              {said}
+            </>
+          ) : (
+            <>
+              {carried ? <SentFiles files={carried} /> : files.map((path) => <FileChip key={path} name={fileName(path)} />)}
+              {said || images > 0 ? (
+                <View style={styles.bubble}>
+                  {mark}
+                  {images > 0 ? <ImagesChip count={images} /> : null}
+                  {said}
+                </View>
+              ) : (
+                mark
+              )}
+            </>
+          )}
         </Pressable>
       );
+    }
     case Turn_Kind.TOOL:
       return (
         <Pressable
@@ -1354,6 +1734,18 @@ function Linked({ text }: { text: string }) {
   return <>{out}</>;
 }
 
+/** A message of yours: round all over but the corner nearest the composer,
+ * which is tighter — a hint of where the message came from. An images chip
+ * read back sits over its words. */
+const bubble: ViewStyle = {
+  backgroundColor: t.selection,
+  borderRadius: 18,
+  borderBottomRightRadius: 6,
+  paddingHorizontal: 12,
+  paddingVertical: 9,
+  gap: 6,
+};
+
 const styles = StyleSheet.create({
   fill: { flex: 1 },
   page: { paddingHorizontal: size.gutter + 4, paddingTop: 4, paddingBottom: 18, gap: 12 },
@@ -1361,17 +1753,10 @@ const styles = StyleSheet.create({
   stateText: { fontFamily: font.chrome, fontSize: size.caption },
   barActions: { flexDirection: 'row', gap: 4 },
   empty: { gap: 12, paddingVertical: 24, alignItems: 'flex-start' },
-  // Round all over but the corner nearest the composer, which is tighter: a
-  // hint of where the message came from.
-  you: {
-    alignSelf: 'flex-end',
-    maxWidth: '86%',
-    backgroundColor: t.selection,
-    borderRadius: 18,
-    borderBottomRightRadius: 6,
-    paddingHorizontal: 12,
-    paddingVertical: 9,
-  },
+  you: { ...bubble, alignSelf: 'flex-end', maxWidth: '86%' },
+  // A message of yours with photos or files: them, then its bubble.
+  yours: { alignSelf: 'flex-end', maxWidth: '86%', alignItems: 'flex-end', gap: 4 },
+  bubble,
   // Faded while sending — the fill and the words, not the mark beside them —
   // at the delivered bubble's size and corners.
   youSending: { backgroundColor: tint(t.selection, 0.7) },
@@ -1435,6 +1820,11 @@ const styles = StyleSheet.create({
   tool: { flexDirection: 'row', alignItems: 'flex-start', gap: 8, paddingLeft: 24 },
   toolMark: { width: 5, height: 5, borderRadius: 3, marginTop: 6, backgroundColor: t.faint },
   toolText: { flex: 1, minWidth: 0, fontFamily: font.chrome, fontSize: size.detail, color: t.dim },
+  tools: { gap: 10 },
+  // The chevron centred where a tool line's dot is, its words where theirs start.
+  toolsHead: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingLeft: 20 },
+  toolsOpen: { transform: [{ rotate: '90deg' }] },
+  toolNames: { color: t.faint },
   ask: {
     marginHorizontal: size.gutter,
     marginBottom: 8,
@@ -1455,7 +1845,13 @@ const styles = StyleSheet.create({
   askInput: { height: undefined, minHeight: size.control, maxHeight: 120, paddingTop: 11, paddingBottom: 11, lineHeight: 20 },
   askButtons: { flexDirection: 'row', gap: 8 },
   grow: { flex: 1 },
-  note: { paddingHorizontal: size.gutter + 4, paddingBottom: 6 },
+  noteBox: { paddingHorizontal: size.gutter + 4, paddingBottom: 8, gap: 8, alignItems: 'flex-start' },
+  noteText: { fontSize: size.label, lineHeight: 19 },
+  settings: { height: 36, paddingHorizontal: 14 },
+  // Dictating: a white dot and what is listening, where a note would be.
+  hearing: { flexDirection: 'row', alignItems: 'center', gap: 7, paddingHorizontal: size.gutter + 4, paddingBottom: 8 },
+  hearingDot: { width: 7, height: 7, borderRadius: 4, backgroundColor: t.accent },
+  hearingText: { fontFamily: font.prose, fontSize: size.label, lineHeight: 18, color: t.dim },
   replies: { flexGrow: 0 },
   repliesInner: { paddingHorizontal: size.gutter, paddingBottom: 8, gap: 6 },
   // A chip: a reply, a snippet, or `/`. Gone once there is a draft.
@@ -1475,20 +1871,34 @@ const styles = StyleSheet.create({
   slash: { width: 30, paddingHorizontal: 0, justifyContent: 'center' },
   slashText: { fontFamily: font.chromeMedium, fontSize: 14, color: t.dim },
   snippet: { paddingLeft: 9 },
-  // The field and Send beside it: nothing else, since everything else is a chip.
+  // +, the field with the mic in it, and Send: everything else is a chip.
   composer: {
     flexDirection: 'row',
     alignItems: 'flex-end',
     gap: 8,
     paddingHorizontal: size.gutter,
   },
-  input: {
-    flex: 1,
-    minHeight: size.control,
-    maxHeight: 140,
+  plus: {
+    width: size.control,
+    height: size.control,
     borderRadius: size.control / 2,
     backgroundColor: t.sunken,
-    paddingHorizontal: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  field: { flex: 1, minWidth: 0, minHeight: size.control, borderRadius: size.control / 2, backgroundColor: t.sunken },
+  // With photos in it: a well, the tray over the words.
+  fieldTray: { borderRadius: 20 },
+  // Listening: a faint ring, inside, so nothing moves.
+  fieldHearing: { boxShadow: `inset 0 0 0 1px ${tint(t.accent, 0.22)}` },
+  fieldRow: { flexDirection: 'row', alignItems: 'flex-end' },
+  input: {
+    flex: 1,
+    minWidth: 0,
+    minHeight: size.control,
+    maxHeight: 140,
+    paddingLeft: 16,
+    paddingRight: 0,
     paddingTop: 11,
     paddingBottom: 11,
     color: t.text,
@@ -1497,6 +1907,9 @@ const styles = StyleSheet.create({
     lineHeight: 21,
     textAlignVertical: 'top',
   },
+  // With no mic beside it, the words keep clear of the field's round end.
+  inputAlone: { paddingRight: 16 },
+  inputUnderTray: { paddingTop: 9 },
   send: {
     width: size.control,
     height: size.control,

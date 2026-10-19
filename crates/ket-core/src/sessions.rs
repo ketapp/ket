@@ -745,6 +745,19 @@ impl CodexRollout {
     /// [`CodexRollout::for_directory`] against an explicit store, so this is
     /// exercisable without a home directory.
     pub fn under(root: &Path, directory: &Path) -> Option<Self> {
+        Self::find(root, directory, None)
+    }
+
+    /// The rollout one session wrote in `directory`, in the store at `root`,
+    /// rather than the newest — see [`CodexRollouts`] for why. `None` until
+    /// that session's rollout is on disk.
+    pub fn under_session(root: &Path, directory: &Path, session: &str) -> Option<Self> {
+        Self::find(root, directory, Some(session))
+    }
+
+    /// The newest rollout in `root` for `directory`, and for `session` when
+    /// one is named.
+    fn find(root: &Path, directory: &Path, session: Option<&str>) -> Option<Self> {
         if !root.is_dir() {
             return None;
         }
@@ -765,15 +778,17 @@ impl CodexRollout {
         files
             .into_iter()
             .find(|(path, _)| {
-                first_record(path)
-                    .and_then(|record| {
-                        record
-                            .get("payload")?
-                            .get("cwd")?
-                            .as_str()
-                            .map(str::to_owned)
+                let Some(meta) =
+                    first_record(path).and_then(|record| record.get("payload").cloned())
+                else {
+                    return false;
+                };
+                let text = |key: &str| meta.get(key).and_then(serde_json::Value::as_str);
+                text("cwd").is_some_and(|cwd| wanted.iter().any(|want| want == cwd))
+                    && session.is_none_or(|session| {
+                        let named = |key| text(key).filter(|found| !found.is_empty());
+                        named("id").or_else(|| named("session_id")) == Some(session)
                     })
-                    .is_some_and(|cwd| wanted.contains(&cwd))
             })
             .map(|(path, _)| {
                 let meta = first_record(&path).and_then(|record| record.get("payload").cloned());
@@ -820,7 +835,8 @@ impl CodexRollout {
         &self.path
     }
 
-    /// The newest `token_count` payload appended since the last poll.
+    /// The newest `token_count` payload with counts in it appended since the
+    /// last poll.
     ///
     /// `None` when nothing has been written since — the common case, because
     /// this is polled on the same tick as everything else and a session spends
@@ -889,8 +905,13 @@ impl CodexRollout {
             if wants_turn && kind == Some("turn_context") {
                 turn = Some(payload.clone());
             }
+            // One with counts in it: a `token_count` can carry only a quota,
+            // and taking that as the newest would lose the totals behind it.
             if wants_tokens
                 && payload.get("type").and_then(serde_json::Value::as_str) == Some("token_count")
+                && payload
+                    .get("info")
+                    .is_some_and(serde_json::Value::is_object)
             {
                 tokens = Some(payload.clone());
             }
@@ -917,6 +938,163 @@ impl CodexRollout {
         }
 
         tokens
+    }
+}
+
+/// How long a Codex session a hook named is looked for before
+/// [`CodexRollouts`] stops walking the store for it.
+///
+/// Far longer than it should ever take: Codex writes a rollout's first line as
+/// the session starts. A session still missing after this has its rollout
+/// somewhere ket does not look, and a walk every tick would never find it.
+pub const CODEX_WANTED_FOR_MS: u64 = 10 * 60 * 1000;
+
+/// The Codex rollout each worktree follows, and the sessions hooks have named
+/// whose rollouts were not on disk yet.
+///
+/// Created on demand rather than per worktree up front: finding a rollout
+/// means walking Codex's dated store, which is too much to do for a worktree
+/// that has never run Codex. A hook report naming the agent is the signal that
+/// there is something to follow.
+///
+/// **By session, not by the newest file.** A second session started beside a
+/// first that is still writing leaves the first's rollout the most recently
+/// touched, and following that would leave the new session's counts unread.
+///
+/// **Looked for again on the tick, not only on the next hook.** A session can
+/// write all its counts after the last hook it fires, so one whose rollout was
+/// not there yet is kept as wanted and walked for by [`Self::look_again`] —
+/// and not on every hook in between, which can come many to a second.
+#[derive(Debug)]
+pub struct CodexRollouts {
+    /// Codex's session store.
+    root: PathBuf,
+    /// The rollout each worktree follows.
+    followed: std::collections::HashMap<crate::id::WorktreeId, CodexRollout>,
+    /// The session a hook last named in each worktree whose rollout was not
+    /// found, and when it was first named.
+    wanted: std::collections::HashMap<crate::id::WorktreeId, (String, u64)>,
+}
+
+impl Default for CodexRollouts {
+    /// Following rollouts in Codex's own store, under the home directory.
+    fn default() -> Self {
+        Self::under(home().join(".codex").join("sessions"))
+    }
+}
+
+impl CodexRollouts {
+    /// Following rollouts in the store at `root`, so this is exercisable
+    /// without a home directory.
+    pub fn under(root: PathBuf) -> Self {
+        Self {
+            root,
+            followed: Default::default(),
+            wanted: Default::default(),
+        }
+    }
+
+    /// A hook report from Codex in `worktree`, naming `session` when it did.
+    ///
+    /// Nothing changes when the rollout followed is already that session's,
+    /// or — with no session named — when any rollout is followed. That
+    /// includes a session still wanted: the session being followed may well
+    /// be the one that is still writing, and its hooks say nothing about
+    /// whether the new one has a rollout yet. Otherwise the store is walked
+    /// for the session's rollout, or the newest when none was named, unless
+    /// the session is already wanted: that is left to [`Self::look_again`].
+    /// `directory` says where the worktree is, and is only asked when there
+    /// is a walk to do; `None` means it has gone.
+    pub fn follow(
+        &mut self,
+        worktree: &crate::id::WorktreeId,
+        session: Option<&str>,
+        now_ms: u64,
+        directory: impl FnOnce() -> Option<PathBuf>,
+    ) {
+        let followed = self.followed.get(worktree);
+        if followed.is_some_and(|rollout| session.is_none_or(|s| rollout.session() == Some(s))) {
+            return;
+        }
+        if session.is_some_and(|session| self.wanted(worktree) == Some(session)) {
+            return;
+        }
+        self.find(worktree, session, now_ms, directory);
+    }
+
+    /// Walks the store again for every wanted session, following each one
+    /// found, and gives up on any wanted for [`CODEX_WANTED_FOR_MS`] or more.
+    pub fn look_again(
+        &mut self,
+        now_ms: u64,
+        directory: impl Fn(&crate::id::WorktreeId) -> Option<PathBuf>,
+    ) {
+        self.wanted
+            .retain(|_, (_, since)| now_ms.saturating_sub(*since) < CODEX_WANTED_FOR_MS);
+        let wanted: Vec<(crate::id::WorktreeId, String)> = self
+            .wanted
+            .iter()
+            .map(|(worktree, (session, _))| (worktree.clone(), session.clone()))
+            .collect();
+        for (worktree, session) in wanted {
+            self.find(&worktree, Some(&session), now_ms, || directory(&worktree));
+        }
+    }
+
+    /// The rollout `worktree` follows.
+    pub fn followed(&self, worktree: &crate::id::WorktreeId) -> Option<&CodexRollout> {
+        self.followed.get(worktree)
+    }
+
+    /// The session `worktree` is waiting on a rollout for.
+    pub fn wanted(&self, worktree: &crate::id::WorktreeId) -> Option<&str> {
+        self.wanted
+            .get(worktree)
+            .map(|(session, _)| session.as_str())
+    }
+
+    /// Every followed rollout, to poll.
+    pub fn iter_mut(
+        &mut self,
+    ) -> impl Iterator<Item = (&crate::id::WorktreeId, &mut CodexRollout)> {
+        self.followed.iter_mut()
+    }
+
+    /// Walks the store for `session`'s rollout, or the newest when none is
+    /// named, and follows it — or, when a named session's is not there yet,
+    /// keeps it wanted, from when it was first named so the search has an
+    /// end.
+    fn find(
+        &mut self,
+        worktree: &crate::id::WorktreeId,
+        session: Option<&str>,
+        now_ms: u64,
+        directory: impl FnOnce() -> Option<PathBuf>,
+    ) {
+        let Some(directory) = directory() else {
+            self.wanted.remove(worktree);
+            return;
+        };
+        let found = match session {
+            Some(session) => CodexRollout::under_session(&self.root, &directory, session),
+            None => CodexRollout::under(&self.root, &directory),
+        };
+        match (found, session) {
+            (Some(rollout), _) => {
+                self.followed.insert(worktree.clone(), rollout);
+                self.wanted.remove(worktree);
+            }
+            (None, Some(session)) => {
+                let wanted = self
+                    .wanted
+                    .entry(worktree.clone())
+                    .or_insert_with(|| (session.to_owned(), now_ms));
+                if wanted.0 != session {
+                    *wanted = (session.to_owned(), now_ms);
+                }
+            }
+            (None, None) => {}
+        }
     }
 }
 

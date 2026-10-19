@@ -214,6 +214,7 @@ impl Shell {
                     title: "Android".into(),
                     renamed: false,
                     pinned: false,
+                    preview: false,
                     kind: TabKind::Android,
                 },
             )

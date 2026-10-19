@@ -99,6 +99,13 @@ pub struct Reading {
     /// `context_window.current_usage.cache_read_input_tokens`. See
     /// [`Reading::last_input_tokens`].
     pub last_cache_read_tokens: u64,
+    /// The session's own running totals, when its source keeps them.
+    ///
+    /// Codex does, on every `token_count` record; Claude's status line does
+    /// not. Where they exist [`History::observe`] takes them as they are
+    /// rather than building totals out of the `last_*` counts above, which
+    /// lose every response that lands between two readings.
+    pub totals: Option<TokenTotals>,
     /// What the session has left behind besides spend.
     pub work: Work,
     /// How well its prompt cache is working, once a response has said.
@@ -108,6 +115,19 @@ pub struct Reading {
     pub billing: Option<Billing>,
     /// Context pressure and cost, as the status bar wants them.
     pub usage: SessionUsage,
+}
+
+/// A session's token counts so far, by class, as its source totals them.
+///
+/// See [`Reading::totals`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TokenTotals {
+    /// Fresh, uncached input tokens.
+    pub input: u64,
+    /// Output tokens.
+    pub output: u64,
+    /// Cache-read input tokens.
+    pub cache_read: u64,
 }
 
 /// How well a session's prompt cache is working.
@@ -346,6 +366,7 @@ pub fn reading_from_statusline(payload: &serde_json::Value) -> Option<Reading> {
             payload,
             &["context_window", "current_usage", "cache_read_input_tokens"],
         ),
+        totals: None,
         work: Work {
             lines_added: count(payload, &["cost", "total_lines_added"]),
             lines_removed: count(payload, &["cost", "total_lines_removed"]),
@@ -578,6 +599,12 @@ pub fn cache_from_codex(payload: &serde_json::Value) -> Option<CacheHealth> {
 /// [`SessionUsage::cost`] is `None` and every surface that draws money simply
 /// has nothing to draw — rather than a zero, which would read as "free". The
 /// context window it does publish, so pressure is real.
+///
+/// **The session's totals come from `total_token_usage`**, which Codex keeps
+/// itself, not from adding up `last_token_usage` one poll at a time: a poll
+/// sees only the newest record, so every response that lands between two
+/// polls was lost, and real sessions were undercounted by half. The `last_*`
+/// counts are still filled in, for the card that draws the latest response.
 #[allow(clippy::too_many_arguments)]
 pub fn reading_from_codex(
     tokens: &serde_json::Value,
@@ -616,6 +643,16 @@ pub fn reading_from_codex(
         last_input_tokens: count(info.get("last_token_usage"), "input_tokens")
             .saturating_sub(count(info.get("last_token_usage"), "cached_input_tokens")),
         last_cache_read_tokens: count(info.get("last_token_usage"), "cached_input_tokens"),
+        // Split the same way as the per-response counts above, for the same
+        // reason: Codex's input includes its cached input.
+        totals: total.filter(|total| total.is_object()).map(|_| {
+            let cached = count(total, "cached_input_tokens");
+            TokenTotals {
+                input: count(total, "input_tokens").saturating_sub(cached),
+                output: count(total, "output_tokens"),
+                cache_read: cached,
+            }
+        }),
         work: Work::default(),
         cache: cache_from_codex(tokens),
         // `rate_limits` rides on the same record, and its presence means the
@@ -719,10 +756,12 @@ pub struct Record {
     /// Output tokens summed over the readings ket saw, which is the half of
     /// the bill narration actually moves.
     ///
-    /// Summed rather than read off, because there is nothing to read off:
-    /// see [`Reading::last_output_tokens`]. A session that ran while ket was
-    /// closed is undercounted by whatever it produced then — status lines are
-    /// not spooled — which is a floor rather than a fiction.
+    /// Summed rather than read off, because Claude's status line has nothing
+    /// to read off: see [`Reading::last_output_tokens`]. A session that ran
+    /// while ket was closed is undercounted by whatever it produced then —
+    /// status lines are not spooled — which is a floor rather than a fiction.
+    /// Codex keeps its own totals, and those are read off instead — see
+    /// [`Reading::totals`]; so are this record's input and cache reads.
     #[serde(default)]
     pub output_tokens: u64,
     /// The last response's output tokens, so the next reading can be turned
@@ -978,6 +1017,7 @@ impl Record {
             last_output_tokens: self.last_output_tokens,
             last_input_tokens: self.last_input_tokens,
             last_cache_read_tokens: self.last_cache_read_tokens,
+            totals: None,
             work: Work::default(),
             cache: None,
             billing: self.billing,
@@ -996,6 +1036,46 @@ impl Record {
         }
     }
 
+    /// The rates Economy's figures price this session at — see
+    /// [`crate::rates::estimate_for`]. `None` until a model is known, and for
+    /// a model with no rate, configured or listed.
+    fn estimate_rate(&self) -> Option<&'static crate::rates::ModelRate> {
+        crate::rates::estimate_for(self.model.as_deref()?)
+    }
+
+    /// What this session spent, every token class at its model's rate, in
+    /// micros: the figure Economy's savings are set beside.
+    ///
+    /// Rebuilt from counts, as [`Record::contracted_micros`] is and with the
+    /// same floor, but at list price wherever no rate is configured — see
+    /// [`crate::rates::estimate_for`]. A [`Record::tainted`] session is priced
+    /// too: it ran at no one level, but what it spent was spent.
+    pub fn estimated_cost_micros(&self) -> Option<i64> {
+        let rate = self.estimate_rate()?;
+        Some(
+            rate.input_micros(self.input_tokens)
+                .saturating_add(rate.output_micros(self.output_tokens))
+                .saturating_add(rate.cache_read_micros(self.cache_read_tokens))
+                .saturating_add(
+                    rate.cache_write_micros(self.cache_write_tokens, self.cache_ttl.as_deref()),
+                ),
+        )
+    }
+
+    /// What the output filter saved this session, measured: the tokens it
+    /// kept from the model — see [`Record::filter_saved_tokens`] — at the
+    /// input rate.
+    ///
+    /// **A floor, on purpose.** Trimmed output would have been paid for once
+    /// as fresh input and then read back from the cache on every later turn;
+    /// only the first is counted. `None` without a rate.
+    pub fn filter_saved_micros(&self) -> Option<i64> {
+        Some(
+            self.estimate_rate()?
+                .input_micros(self.filter_saved_tokens()),
+        )
+    }
+
     /// What this session cost and what Economy saved it, both estimated from
     /// its own token counts — see [`EconomyEstimate`].
     ///
@@ -1007,14 +1087,8 @@ impl Record {
         if self.tainted {
             return None;
         }
-        let rate = crate::rates::estimate_for(self.model.as_deref()?)?;
-        let cost_micros = rate
-            .input_micros(self.input_tokens)
-            .saturating_add(rate.output_micros(self.output_tokens))
-            .saturating_add(rate.cache_read_micros(self.cache_read_tokens))
-            .saturating_add(
-                rate.cache_write_micros(self.cache_write_tokens, self.cache_ttl.as_deref()),
-            );
+        let rate = self.estimate_rate()?;
+        let cost_micros = self.estimated_cost_micros()?;
         let trim = assumed_output_reduction(self.level);
         let unwritten = (self.output_tokens as f64 * trim / (1.0 - trim)).round() as u64;
         let saved_micros = rate.output_micros(unwritten);
@@ -1125,32 +1199,46 @@ impl History {
             record.billing = Some(billing);
         }
 
-        // Each reading names the last response's output, so a total has to be
-        // built from what changes between them. Redraws repeat a figure and
-        // add nothing; a new response replaces it and its whole value is new.
-        // Two responses that happen to produce the same count read as one,
-        // which loses tokens rather than inventing them.
-        if reading.last_output_tokens != record.last_output_tokens {
-            record.output_tokens = record
-                .output_tokens
-                .saturating_add(reading.last_output_tokens);
+        // A source that keeps its own totals is taken at its word. Never
+        // backwards, for the reason `cost_micros` never goes backwards, and
+        // so a record built from deltas before totals were read is corrected
+        // upwards rather than reset.
+        if let Some(totals) = reading.totals {
+            record.output_tokens = record.output_tokens.max(totals.output);
+            record.input_tokens = record.input_tokens.max(totals.input);
+            record.cache_read_tokens = record.cache_read_tokens.max(totals.cache_read);
             record.last_output_tokens = reading.last_output_tokens;
-        }
-        // The other two classes, on the same terms and for the same reason.
-        // Split rather than summed, because they are priced an order of
-        // magnitude apart and a total that averaged them would answer no
-        // question anybody has.
-        if reading.last_input_tokens != record.last_input_tokens {
-            record.input_tokens = record
-                .input_tokens
-                .saturating_add(reading.last_input_tokens);
             record.last_input_tokens = reading.last_input_tokens;
-        }
-        if reading.last_cache_read_tokens != record.last_cache_read_tokens {
-            record.cache_read_tokens = record
-                .cache_read_tokens
-                .saturating_add(reading.last_cache_read_tokens);
             record.last_cache_read_tokens = reading.last_cache_read_tokens;
+        } else {
+            // Otherwise each reading names the last response's output, so a
+            // total has to be built from what changes between them. Redraws
+            // repeat a figure and add nothing; a new response replaces it and
+            // its whole value is new. Two responses that happen to produce the
+            // same count read as one, which loses tokens rather than inventing
+            // them.
+            if reading.last_output_tokens != record.last_output_tokens {
+                record.output_tokens = record
+                    .output_tokens
+                    .saturating_add(reading.last_output_tokens);
+                record.last_output_tokens = reading.last_output_tokens;
+            }
+            // The other two classes, on the same terms and for the same
+            // reason. Split rather than summed, because they are priced an
+            // order of magnitude apart and a total that averaged them would
+            // answer no question anybody has.
+            if reading.last_input_tokens != record.last_input_tokens {
+                record.input_tokens = record
+                    .input_tokens
+                    .saturating_add(reading.last_input_tokens);
+                record.last_input_tokens = reading.last_input_tokens;
+            }
+            if reading.last_cache_read_tokens != record.last_cache_read_tokens {
+                record.cache_read_tokens = record
+                    .cache_read_tokens
+                    .saturating_add(reading.last_cache_read_tokens);
+                record.last_cache_read_tokens = reading.last_cache_read_tokens;
+            }
         }
 
         if let Some(cache) = reading.cache.as_ref() {
@@ -1376,6 +1464,21 @@ impl History {
         self.records.get(session)
     }
 
+    /// MCP calls recorded in all retained sessions for one worktree.
+    pub fn mcp_calls_for_worktree(&self, worktree: &WorktreeId) -> BTreeMap<String, u64> {
+        let mut calls: BTreeMap<String, u64> = BTreeMap::new();
+        for record in self
+            .records
+            .values()
+            .filter(|record| &record.worktree == worktree)
+        {
+            for (server, count) in &record.mcp_calls {
+                *calls.entry(server.clone()).or_default() += u64::from(*count);
+            }
+        }
+        calls
+    }
+
     /// Whether resuming `session` would keep one Economy policy throughout it.
     ///
     /// An unseen session is safe to resume: there is no evidence it began
@@ -1413,15 +1516,30 @@ impl History {
 }
 
 impl History {
-    /// What every worktree's Economy sessions cost and saved since `since_ms`,
-    /// estimated one session at a time — see [`Record::economy_estimate`].
+    /// What every worktree's sessions spent since `since_ms`, and what Economy
+    /// saved them — measured where it can be, estimated where it cannot.
     ///
-    /// Every session run at a reduced level counts, whatever its worktree is
-    /// set to now. Sessions at the default level are only counted, in
-    /// [`WorktreeSavings::unreduced`], so a worktree set to reduce after its
-    /// session began can say why it has nothing to show. A reduced session
-    /// that cannot be priced is counted in [`WorktreeSavings::unmeasured`]
-    /// rather than dropped, so a total can say how much of the picture it is.
+    /// Three kinds of session, counted differently:
+    ///
+    /// - **every** session adds its command output, and, when its model has a
+    ///   rate, its spend and what its output filter saved — the filter is
+    ///   Economy's own wherever it ran, and a session at the default level
+    ///   never filters, so it adds nothing there;
+    /// - a session at the default level is otherwise only counted, in
+    ///   [`WorktreeSavings::unreduced`], so a worktree set to reduce after its
+    ///   session began can say why it has nothing to show;
+    /// - a reduced session adds its estimate — see
+    ///   [`Record::economy_estimate`] — and its cache traffic, or, when it
+    ///   cannot be priced, is counted in [`WorktreeSavings::unpriced`] rather
+    ///   than dropped, so a total can say how much of the picture it is.
+    ///
+    /// **The prompt cache is never a saving.** Its reads cost a tenth of fresh
+    /// input, but the main conversation's cache is the same at every level —
+    /// see [`crate::worktree::cache_ttl_for`], which goes by billing alone —
+    /// so almost all of what it saves would have been saved with Economy off.
+    /// Only the subagent cache lifetime moves with the level, and the counts
+    /// do not say which reads were a subagent's. The tokens are kept, for a
+    /// surface to say what was left out.
     pub fn savings_by_worktree(&self, since_ms: u64) -> BTreeMap<WorktreeId, WorktreeSavings> {
         let default = crate::worktree::default_token_reduction();
         let mut out: BTreeMap<WorktreeId, WorktreeSavings> = BTreeMap::new();
@@ -1434,54 +1552,86 @@ impl History {
             // Measured for every session before the level is looked at: what
             // commands cost is a fact about the session, not about Economy.
             entry.input_tokens = entry.input_tokens.saturating_add(record.input_tokens);
+            entry.command_calls = entry.command_calls.saturating_add(record.command_calls);
             entry.command_output_tokens = entry
                 .command_output_tokens
                 .saturating_add(record.command_output_tokens());
             entry.filter_saved_tokens = entry
                 .filter_saved_tokens
                 .saturating_add(record.filter_saved_tokens());
+            if let Some(spent) = record.estimated_cost_micros() {
+                entry.spent_micros = entry.spent_micros.saturating_add(spent);
+            }
+            if let Some(filtered) = record.filter_saved_micros() {
+                entry.filter_saved_micros = entry.filter_saved_micros.saturating_add(filtered);
+            }
             if record.level == default {
                 entry.unreduced += 1;
                 continue;
             }
             let Some(estimate) = record.economy_estimate() else {
-                entry.unmeasured += 1;
+                entry.unpriced += 1;
                 continue;
             };
-            entry.measured += 1;
+            entry.priced += 1;
             entry.turns += record.turns;
-            entry.cost_micros = entry.cost_micros.saturating_add(estimate.cost_micros);
-            entry.saved_micros = entry.saved_micros.saturating_add(estimate.saved_micros);
+            entry.estimated_micros = entry.estimated_micros.saturating_add(estimate.saved_micros);
+            entry.cache_read_tokens = entry
+                .cache_read_tokens
+                .saturating_add(record.cache_read_tokens);
+            entry.cache_write_tokens = entry
+                .cache_write_tokens
+                .saturating_add(record.cache_write_tokens);
         }
         out
     }
 }
 
-/// What one worktree's Economy sessions cost and saved — see
+/// What one worktree's sessions spent, and what Economy saved them — see
 /// [`History::savings_by_worktree`].
 ///
 /// Additive, so a project's figure is its worktrees' summed and the whole
 /// window's is its projects'.
+///
+/// **Two savings, kept apart because they are not the same kind of figure.**
+/// [`Self::filter_saved_micros`] is measured, a count of tokens priced;
+/// [`Self::estimated_micros`] is assumed. [`Self::saved_micros`] adds them up
+/// for a surface with room for one number. The prompt cache is neither — see
+/// [`History::savings_by_worktree`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WorktreeSavings {
-    /// Economy sessions priced into the figures.
-    pub measured: usize,
+    /// Economy sessions priced into the estimate.
+    pub priced: usize,
     /// Economy sessions that could not be — the level changed under them, or
     /// their model has no rate — counted so a total can say what it leaves out.
-    pub unmeasured: usize,
-    /// Sessions that ran at the default level, measured nowhere. A session
-    /// keeps the level it started with, so a worktree set to reduce mid-session
-    /// has only these until its next session.
+    pub unpriced: usize,
+    /// Sessions that ran at the default level. A session keeps the level it
+    /// started with, so a worktree set to reduce mid-session has only these
+    /// until its next session.
     pub unreduced: usize,
-    /// Prompts across the measured sessions.
+    /// Prompts across the priced sessions.
     pub turns: u32,
-    /// Estimated cost of the measured sessions, in micros.
-    pub cost_micros: i64,
-    /// Estimated saving of the measured sessions, in micros. Never negative.
-    pub saved_micros: i64,
+    /// What every session in the period with a rate spent, at any level, in
+    /// micros — see [`Record::estimated_cost_micros`]. What the saving is a
+    /// share of — see [`Self::fraction`].
+    pub spent_micros: i64,
+    /// What the output filter saved, measured, in micros — see
+    /// [`Record::filter_saved_micros`]. Every session with a rate, whatever
+    /// its level.
+    pub filter_saved_micros: i64,
+    /// What shorter answers are assumed to have saved the priced sessions, in
+    /// micros — see [`Record::economy_estimate`]. Never negative.
+    pub estimated_micros: i64,
+    /// Cache-read tokens across the priced sessions: what a surface says was
+    /// left out of the saving, and why — see [`History::savings_by_worktree`].
+    pub cache_read_tokens: u64,
+    /// Cache-write tokens across the priced sessions.
+    pub cache_write_tokens: u64,
     /// Fresh input tokens across every session in the period, reduced or
     /// not: the denominator [`Self::command_output_tokens`] is a share of.
     pub input_tokens: u64,
+    /// Shell commands run to completion across every session in the period.
+    pub command_calls: u32,
     /// Estimated tokens of shell-command output across every session in the
     /// period — see [`Record::command_output_tokens`]. Measured, so it counts
     /// sessions at every level, not only the reduced ones.
@@ -1494,13 +1644,23 @@ pub struct WorktreeSavings {
 impl WorktreeSavings {
     /// Folds another worktree's figures into this one.
     pub fn add(&mut self, other: &WorktreeSavings) {
-        self.measured += other.measured;
-        self.unmeasured += other.unmeasured;
+        self.priced += other.priced;
+        self.unpriced += other.unpriced;
         self.unreduced += other.unreduced;
         self.turns += other.turns;
-        self.cost_micros = self.cost_micros.saturating_add(other.cost_micros);
-        self.saved_micros = self.saved_micros.saturating_add(other.saved_micros);
+        self.spent_micros = self.spent_micros.saturating_add(other.spent_micros);
+        self.filter_saved_micros = self
+            .filter_saved_micros
+            .saturating_add(other.filter_saved_micros);
+        self.estimated_micros = self.estimated_micros.saturating_add(other.estimated_micros);
+        self.cache_read_tokens = self
+            .cache_read_tokens
+            .saturating_add(other.cache_read_tokens);
+        self.cache_write_tokens = self
+            .cache_write_tokens
+            .saturating_add(other.cache_write_tokens);
         self.input_tokens = self.input_tokens.saturating_add(other.input_tokens);
+        self.command_calls = self.command_calls.saturating_add(other.command_calls);
         self.command_output_tokens = self
             .command_output_tokens
             .saturating_add(other.command_output_tokens);
@@ -1515,10 +1675,21 @@ impl WorktreeSavings {
         share(self.command_output_tokens, self.input_tokens)
     }
 
-    /// The saving as a share of what the same sessions would have cost with
-    /// Economy off, when there is anything to divide by.
+    /// Everything Economy saved: the filter's, measured, and shorter
+    /// answers', estimated. Never negative.
+    pub fn saved_micros(&self) -> i64 {
+        self.filter_saved_micros
+            .saturating_add(self.estimated_micros)
+    }
+
+    /// The whole saving as a share of what the same sessions would have cost
+    /// with Economy off: [`Self::spent_micros`] and the saving together, so a
+    /// surface that shows Spent, Saved and the share shows three figures that
+    /// agree. `None` until a reduced session was priced, or with nothing to
+    /// divide by.
     pub fn fraction(&self) -> Option<f64> {
-        let whole = self.cost_micros.saturating_add(self.saved_micros);
-        (self.measured > 0 && whole > 0).then(|| self.saved_micros as f64 / whole as f64)
+        let saved = self.saved_micros();
+        let whole = self.spent_micros.saturating_add(saved);
+        (self.priced > 0 && whole > 0).then(|| saved as f64 / whole as f64)
     }
 }

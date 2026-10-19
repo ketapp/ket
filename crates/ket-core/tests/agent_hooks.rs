@@ -793,6 +793,28 @@ fn a_permission_prompt_carries_what_it_asks() {
     assert_eq!(report.question, None);
 }
 
+#[test]
+fn a_prompt_a_hook_refused_arrives_as_a_refusal() {
+    let hooks = Hooks::new();
+    let mut ruled = envelope(
+        "claude",
+        event(
+            "PermissionRequest",
+            json!({ "tool_name": "Bash", "tool_input": { "command": "curl https://example.com" } }),
+        ),
+    );
+    ruled["ruling"] = json!({
+        "verdict": "deny", "scope": "hook", "index": 0, "reason": "refused by my hook",
+    });
+
+    let report = hooks.post(&ruled).expect("reported");
+    assert_eq!(report.event, HookEvent::PermissionDenied);
+    assert_eq!(report.question, None, "nothing left to ask");
+    let ruling = report.ruling.expect("the ruling rides along");
+    assert_eq!(ruling.scope, ket_core::permissions::Scope::Hook);
+    assert_eq!(ruling.reason.as_deref(), Some("refused by my hook"));
+}
+
 // ---- questions and plans -----------------------------------------------------
 
 /// An `AskUserQuestion` with two questions, one of them multi-select.

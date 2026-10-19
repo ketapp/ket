@@ -73,15 +73,15 @@ use crate::paint::paint;
 ///
 /// The real value is [`crate::Shell`]'s `theme_config.code_font_size`, which is
 /// a setting; this exists so the element still draws if that is ever zero.
-const FALLBACK_FONT_SIZE: Pixels = px(12.);
+const FALLBACK_FONT_SIZE: Pixels = px(11.);
 /// Row height as a multiple of the font size. Every terminal sits between
 /// 1.2 and 1.35; the shell's default text style is 1.618, which is what made
 /// the prototype read as double-spaced.
 const LINE_HEIGHT: f32 = 1.3;
 /// Space between the pane's edge and the first column.
-const PAD_X: Pixels = px(8.);
+const PAD_X: Pixels = px(6.);
 /// Space between the pane's top edge and the first row.
-const PAD_TOP: Pixels = px(4.);
+const PAD_TOP: Pixels = px(2.);
 /// Width of the beam cursor and height of the underline cursor.
 const THIN_CURSOR: Pixels = px(2.);
 /// How much of the cell colours show through the selection.

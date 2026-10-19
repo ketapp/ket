@@ -31,6 +31,25 @@
 //
 // 1.10 adds a note's priority: `BacklogNote.priority`, and
 // `EditBacklog.priority` to change it with a SAVE.
+//
+// 1.11 adds the pull request a worktree's branch is open as on GitHub, with
+// its checks (`WorktreeSummary.pull_request`), and FixChecks, which hands the
+// failed ones to the worktree's agent and is answered with ChecksHandedOver.
+//
+// 1.12 adds photos and files sent with a message, SendFiles, and how many
+// images a message read back carried, `Turn.images`.
+//
+// 1.13 adds every prompt a worktree's panes are waiting on
+// (`WorktreeSummary.questions`), so a phone showing one of several agents in
+// a worktree sees that agent's prompt and not only the newest.
+//
+// 1.14 adds SendReview: comments on a worktree's diff, sent to its agent as
+// one message, as the desktop's Send to agent sends its review.
+//
+// 1.15 adds start options and fresh sessions in existing worktrees.
+//
+// 1.16 adds GetPullRequestDraft and OpenPullRequest: a worktree's branch
+// pushed and opened as a pull request, as the desktop's Pull request… does.
 
 syntax = "proto3";
 
@@ -104,6 +123,27 @@ message Envelope {
     Backlog backlog = 91;
     EditBacklog edit_backlog = 92;
     StartNote start_note = 93;
+
+    // Since 1.11.
+    FixChecks fix_checks = 100;
+    ChecksHandedOver checks_handed_over = 101;
+
+    // Since 1.12.
+    SendFiles send_files = 102;
+
+    // Since 1.14.
+    SendReview send_review = 103;
+
+    // Since 1.15.
+    GetStartOptions get_start_options = 104;
+    StartOptions start_options = 105;
+    StartSession start_session = 106;
+
+    // Since 1.16.
+    GetPullRequestDraft get_pull_request_draft = 107;
+    PullRequestDraft pull_request_draft = 108;
+    OpenPullRequest open_pull_request = 109;
+    PullRequestOpened pull_request_opened = 110;
   }
 }
 
@@ -304,6 +344,53 @@ message WorktreeSummary {
   // Since 1.7. The subagents its agents have running, oldest first — the
   // rows ket's sidebar draws under it.
   repeated SubagentSummary subagents = 14;
+  // Since 1.11. The pull request its branch is open as on GitHub, as ket on
+  // the desktop last read it — about once a minute, while a window is open.
+  // Unset when there is none, or no window has read one.
+  PullRequestSummary pull_request = 15;
+  // Since 1.13. Every prompt the worktree's panes are waiting on, newest
+  // first, each naming its terminal. Several agents can run in one worktree,
+  // and `question` holds only the newest of them: a phone reading this picks
+  // the one for the terminal it is showing. Empty while none waits.
+  repeated Question questions = 16;
+}
+
+// Since 1.11. A pull request open from a worktree's branch.
+message PullRequestSummary {
+  uint64 number = 1;
+  // Its page on GitHub.
+  string url = 2;
+  bool draft = 3;
+  enum Review {
+    // None is needed, or none has been given.
+    REVIEW_UNSPECIFIED = 0;
+    APPROVED = 1;
+    CHANGES_REQUESTED = 2;
+    // The repository's rules want a review it does not have yet.
+    REVIEW_REQUIRED = 3;
+  }
+  Review review = 4;
+  // In GitHub's order.
+  repeated CheckSummary checks = 5;
+}
+
+// Since 1.11. One check on a pull request: a GitHub Actions job, or a status
+// another service posted.
+message CheckSummary {
+  string name = 1;
+  enum State {
+    STATE_UNSPECIFIED = 0;
+    PASSED = 1;
+    // Failed, errored or timed out.
+    FAILED = 2;
+    // Queued or running.
+    PENDING = 3;
+    // Skipped, cancelled or superseded: it says nothing either way.
+    SKIPPED = 4;
+  }
+  State state = 2;
+  // Its page, or empty.
+  string url = 3;
 }
 
 // Since 1.7. A subagent a worktree's agent has running.
@@ -466,6 +553,32 @@ message Input {
   bytes bytes = 2;
 }
 
+// Since 1.12. A message for the agent in a terminal, with photos and files:
+// only from the phone holding the terminal's lease, as Input is. A mutation;
+// answered with Ack once the message is typed and Enter pressed after it.
+//
+// The host keeps each file in a directory of its own, outside every
+// worktree. An image goes into the agent's input first, as a bracketed paste
+// of its path — what dropping one on the desktop's terminal does — and the
+// words follow once the agent shows it attached, or after a few seconds if it
+// never does. Any other file is named by its path under the words. Nothing is
+// typed when a file cannot be kept, so a refusal leaves the agent's input as
+// it was.
+message SendFiles {
+  uint64 terminal_id = 1;
+  // What was written. Empty for photos alone.
+  string text = 2;
+  repeated Attachment attachments = 3;
+}
+
+// Since 1.12. One file of a SendFiles.
+message Attachment {
+  // Its name on the phone, "IMG_2041.jpg". The host keeps it under this
+  // name, made safe for a path; its extension says whether it is an image.
+  string name = 1;
+  bytes data = 2;
+}
+
 // Fit the terminal to the phone's screen, which a phone asks for only when
 // its person turned fitting on: by default it pans across the host's
 // columns. Since 1.5 it needs no lease — refused only while another phone
@@ -591,6 +704,9 @@ message Turn {
   string text = 2;
   // For a tool, its name: "Bash", "Edit".
   string tool = 3;
+  // Since 1.12. For the person, how many images the message carried. The
+  // text leaves out the agent's own marks for them, "[Image #1]".
+  uint32 images = 4;
 }
 
 // Since 1.7. New work from a phone: a worktree in the project, its agent
@@ -602,6 +718,38 @@ message StartWork {
   string prompt = 2;
   // An agent by name — "claude", "codex" — or empty for the project's own.
   string agent = 3;
+  // Since 1.15. Empty selects the project's default base.
+  string base = 4;
+  // These affect the first session only.
+  string model = 5;
+  string effort = 6;
+}
+
+message GetStartOptions {
+  string project_id = 1;
+}
+
+message AgentStartOptions {
+  string agent = 1;
+  repeated string models = 2;
+  repeated string efforts = 3;
+}
+
+message StartOptions {
+  string project_id = 1;
+  string default_base = 2;
+  repeated string local_branches = 3;
+  repeated AgentStartOptions agents = 4;
+}
+
+message StartSession {
+  string worktree_id = 1;
+  // Empty opens a plain shell. An agent opens a fresh session.
+  string agent = 2;
+  // Optional for an agent; ignored for a shell.
+  string prompt = 3;
+  string model = 4;
+  string effort = 5;
 }
 
 // Since 1.9. A project's backlog: notes on work not started yet, kept on the
@@ -736,6 +884,127 @@ message Diff {
 // in the snapshots that follow.
 message MergeWorktree {
   string worktree_id = 1;
+}
+
+// Since 1.11. Hand the failed checks of a worktree's pull request to its
+// agent, as the desktop's Fix checks with agent does: ket reads what the
+// failed jobs printed, saves it on the desktop, and types a message naming
+// them into the worktree's agent — starting one if none is running. Needs a
+// ket window open, as StartWork does. A mutation; answered with
+// ChecksHandedOver once the agent has the message, or one is starting with
+// it, or an Error saying why not. Reading logs and starting an agent can take
+// a minute or two, so the answer does too.
+//
+// The desktop carries on if the phone's connection drops meanwhile. Asked
+// again under the same idempotency key, it answers with how that one went —
+// waiting for it first, if it is still going — rather than doing it again.
+message FixChecks {
+  string worktree_id = 1;
+}
+
+// Since 1.11. The answer to FixChecks: the message is with the agent.
+message ChecksHandedOver {
+  // No agent was running, and the one ket on the desktop is starting —
+  // setting up the worktree first, perhaps — has not taken the message yet.
+  // It will once it is up; asking again would give it the message twice.
+  bool starting = 1;
+}
+
+// Since 1.14. Comments on a worktree's diff, for its agent, as the desktop's
+// Send to agent sends its review: ket on the desktop writes them into one
+// message — whose branch, against what, each comment under its lines — and
+// types it into the worktree's agent. Needs a ket window open, and an agent
+// running there that is not waiting on a prompt — nor, for a local model,
+// busy with other work: a phone's review is not queued behind it. A
+// mutation; answered with Ack once the agent has the message, or an Error
+// saying why not.
+//
+// Asked again under the same idempotency key — after the connection dropped
+// while it waited — it answers with how that one went rather than sending
+// the review twice.
+message SendReview {
+  string worktree_id = 1;
+  repeated ReviewComment comments = 2;
+}
+
+message ReviewComment {
+  // The file, as Changes lists it.
+  string path = 1;
+  // Which lines, as the desktop says them: `line 12`, `lines 12–18`.
+  string lines = 2;
+  // The lines themselves, as the diff showed them, each after its `+`, `-`
+  // or space.
+  string text = 3;
+  // What should change.
+  string comment = 4;
+}
+
+// Since 1.16. What a pull request for a worktree would be, read before
+// anything is pushed: the words the desktop's Pull request… dialog opens
+// with, and the facts it states first. All of it is local — the remote is
+// named, not asked — so it answers at once. Answered with a
+// PullRequestDraft.
+message GetPullRequestDraft {
+  string worktree_id = 1;
+}
+
+message PullRequestDraft {
+  string worktree_id = 1;
+  // The worktree's branch, which becomes the pull request's head.
+  string branch = 2;
+  // The branch it was cut from, which the pull request asks to merge into.
+  string base = 3;
+  // The remote it would be pushed to. Empty when the repository has none,
+  // and so cannot be pushed.
+  string remote = 4;
+  // A title to offer: the backlog note the branch was started from, or the
+  // branch name made readable.
+  string title = 5;
+  // A description to offer: `Closes #142` for a branch named for an issue,
+  // else empty.
+  string body = 6;
+  // How many paths are uncommitted: they are committed first.
+  uint32 changes = 7;
+  // The pull request ket remembers opening for the branch; zero for none.
+  // It may have closed since: OpenPullRequest asks GitHub, pushes to one
+  // still open, and opens another with the words given when none is.
+  uint64 existing_number = 8;
+  string existing_url = 9;
+}
+
+// Since 1.16. Commit a worktree's uncommitted work, push its branch, and
+// open a pull request for it into its base — or, when the branch already
+// has one open, push to that one — as the desktop's Pull request… does.
+// Needs no ket window. A mutation; answered with PullRequestOpened, or an
+// Error saying why not: no remote, a conflict, a rebase half done, a push
+// the remote refused. A push takes a while, and so does the answer.
+//
+// The desktop carries on if the phone's connection drops meanwhile. Asked
+// again under the same idempotency key, it answers with how that one went —
+// waiting for it first, if it is still going — rather than pushing again.
+message OpenPullRequest {
+  string worktree_id = 1;
+  // Required.
+  string title = 2;
+  // Markdown. May be empty.
+  string body = 3;
+  bool draft = 4;
+}
+
+// Since 1.16. The answer to OpenPullRequest.
+message PullRequestOpened {
+  uint64 number = 1;
+  // Its page on GitHub.
+  string url = 2;
+  string branch = 3;
+  string base = 4;
+  // Where the branch was pushed.
+  string remote = 5;
+  // It was open already, so none was made: the branch was pushed to it.
+  bool existed = 6;
+  // How many files the commit made first took; zero when nothing was
+  // uncommitted.
+  uint32 committed = 7;
 }
 
 // Since 1.7. The snippets saved in ket on the desktop, for one-tap replies.

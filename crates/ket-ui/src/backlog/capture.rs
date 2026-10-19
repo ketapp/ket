@@ -83,21 +83,22 @@ impl Quote {
     }
 
     /// The quote as it goes in the note: where it came from, then a fenced
-    /// block — fenced with one more backtick than the longest run in it, so
-    /// a quote holding a fence of its own cannot close this one.
+    /// block — see [`fence_for`].
     fn markdown(&self) -> String {
-        let longest = self
-            .text
-            .split(|c| c != '`')
-            .map(str::len)
-            .max()
-            .unwrap_or(0);
-        let fence = "`".repeat((longest + 1).max(3));
+        let fence = fence_for(&self.text);
         format!(
             "From {}:\n\n{fence}{}\n{}\n{fence}",
             self.from, self.lang, self.text
         )
     }
+}
+
+/// The fence a code block around `text` needs: one more backtick than the
+/// longest run in it, and never fewer than three, so text holding a fence of
+/// its own cannot close this one.
+pub(crate) fn fence_for(text: &str) -> String {
+    let longest = text.split(|c| c != '`').map(str::len).max().unwrap_or(0);
+    "`".repeat((longest + 1).max(3))
 }
 
 /// The panel, while it is up.

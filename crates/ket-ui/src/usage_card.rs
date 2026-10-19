@@ -366,6 +366,11 @@ pub(crate) struct SessionContext {
     /// — see [`ket_core::usage::Record::economy_estimate`]. `None` when the
     /// session started at the default level or could not be priced.
     pub(crate) economy: Option<(EconomyEstimate, u32)>,
+    /// What the output filter saved this session, measured — see
+    /// [`ket_core::usage::Record::filter_saved_micros`]. `None` wherever
+    /// [`Self::economy`] is, and until a command has come back: a session that
+    /// ran none is not one the filter saved nothing on.
+    pub(crate) filtered: Option<i64>,
     /// The level the worktree is set to. What says *why* there is no
     /// saving when there is none: the dial is off, or it is on and there
     /// is nothing yet to measure it against.
@@ -554,6 +559,23 @@ pub(crate) fn usage_card(
         // What the two figures are and how the saving is made is on the
         // website, as it is for the header's Economy popup: the notes under
         // each figure are all the card keeps, so it stays one glance.
+
+        // The saving that is measured rather than assumed, for the whole
+        // session, priced as the popup prices it — so a reader can tell the
+        // estimate above from what was counted.
+        if let Some(micros) = context.filtered {
+            let (figure, ink) = crate::savings::saving(micros, t);
+            rows.push(
+                div()
+                    .flex()
+                    .gap(px(5.0))
+                    .text_size(META)
+                    .text_color(paint(t.text.dim))
+                    .child(div().prose().child("Output filter saved"))
+                    .child(div().text_color(ink).child(figure))
+                    .into_any_element(),
+            );
+        }
 
         // The organisation's own number, under the estimate, because the whole
         // value of it is the contrast: "you are being quoted this and paying
@@ -1129,6 +1151,13 @@ impl Shell {
             .filter(|record| record.level != default)
             .and_then(|record| Some((record.economy_estimate()?, record.turns)));
 
+        let filtered = sessions
+            .current()
+            .and_then(|held| held.reading.session.as_deref())
+            .and_then(|session| self.usage_history.record(session))
+            .filter(|record| economy.is_some() && record.command_calls > 0)
+            .and_then(ket_core::usage::Record::filter_saved_micros);
+
         let started_at = sessions
             .current()
             .and_then(|held| held.reading.session.as_deref())
@@ -1150,6 +1179,7 @@ impl Shell {
                 .get(worktree)
                 .and_then(ket_core::worktree::ContextWeight::warning),
             economy,
+            filtered,
             level,
             started_at,
             command,

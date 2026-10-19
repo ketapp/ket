@@ -27,8 +27,8 @@
 use std::path::PathBuf;
 
 use gpui::{
-    AnyElement, Context, FontWeight, MouseButton, MouseDownEvent, ScrollHandle, SharedString, div,
-    prelude::*, px,
+    AnyElement, ClickEvent, Context, FontWeight, MouseButton, MouseDownEvent, ScrollHandle,
+    SharedString, div, prelude::*, px,
 };
 use ket_core::diff::FileDiff;
 use ket_core::id::WorktreeId;
@@ -42,12 +42,15 @@ use crate::paint::paint;
 use crate::panel::PanelView;
 use crate::tabs::TabKind;
 use crate::tree::WorktreeNode;
-use crate::ui::button::icon_button;
+use crate::ui::button::{button, icon_button};
 use crate::ui::filetype::tree_mark;
 use crate::ui::icon::{Icon, sized_icon};
 
 /// Height of one file row.
 const ROW_HEIGHT: gpui::Pixels = px(26.0);
+
+/// The most of the Review section's rows shown before they scroll: six.
+const REVIEW_ROWS_H: gpui::Pixels = px(156.0);
 
 /// Which comparison the view is showing.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -383,8 +386,154 @@ impl Shell {
             .child(self.panel_strip(cx))
             .child(context)
             .children(scope)
+            .children(self.git_review_section(cx))
             .child(body)
             .into_any_element()
+    }
+
+    /// The worktree's pending review comments, over its changes: one row
+    /// each, which reopens its diff, and the buttons that clear the review
+    /// or send it. Nothing while no comment is pending. See `crate::review`.
+    fn git_review_section(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let t = self.theme;
+        let id = self.panel_node()?.id.clone();
+        let comments = self
+            .reviews
+            .get(&id)
+            .filter(|comments| !comments.is_empty())?;
+        let mono = self.font_family.clone();
+
+        let rows = comments
+            .iter()
+            .map(|comment| {
+                let key = comment.key.clone();
+                let title = comment.name().to_owned();
+                let worktree = id.clone();
+                let which = comment.id;
+                let said = comment
+                    .comment
+                    .lines()
+                    .next()
+                    .unwrap_or_default()
+                    .to_owned();
+                crate::ui::row::sized_row(("review-row", comment.id), false, ROW_HEIGHT, &t)
+                    .mx(px(4.0))
+                    .text_size(px(11.0))
+                    .child(tree_mark(comment.name(), false, mono.clone(), &t))
+                    .child(
+                        div()
+                            .flex_none()
+                            .max_w(px(120.0))
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .whitespace_nowrap()
+                            .child(comment.name().to_owned()),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(px(10.0))
+                            .text_color(paint(t.text.dim))
+                            .child(comment.lines.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .whitespace_nowrap()
+                            .prose()
+                            .text_color(paint(t.text.dim))
+                            .child(said),
+                    )
+                    .child({
+                        let remove = icon_button(("review-remove", comment.id), Icon::Close)
+                            .bare()
+                            .dense()
+                            .render(&t)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.remove_review_comment(&worktree, which);
+                                cx.stop_propagation();
+                                cx.notify();
+                            }))
+                            .into_any_element();
+                        self.tipped(
+                            "review-remove",
+                            comment.id,
+                            remove,
+                            "Remove from the review",
+                            crate::ui::tooltip::Side::Left,
+                            cx,
+                        )
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.open_diff_tab(key.clone(), title.clone(), true, cx);
+                        cx.notify();
+                    }))
+                    .into_any_element()
+            })
+            .collect::<Vec<_>>();
+
+        let clear_id = id.clone();
+        let footer = div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_end()
+            .gap(px(8.0))
+            .px(px(12.0))
+            .pt(px(4.0))
+            .pb(px(8.0))
+            .child(
+                button("review-clear", "Clear")
+                    .ghost()
+                    .small()
+                    .render(&t)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.clear_review(&clear_id);
+                        cx.notify();
+                    })),
+            )
+            .child(
+                button("review-send", "Send to agent")
+                    .primary()
+                    .small()
+                    .render(&t)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.send_review(id.clone(), cx);
+                        cx.notify();
+                    })),
+            );
+
+        Some(
+            div()
+                .flex()
+                .flex_col()
+                .flex_none()
+                .border_t_1()
+                .border_color(paint(t.rule))
+                .child(section(
+                    "REVIEW",
+                    comments.len(),
+                    None,
+                    paint(t.text.dim),
+                    &t,
+                ))
+                // Capped, so a long review scrolls under its header and
+                // Send stays in reach instead of going off the panel.
+                .child(
+                    div()
+                        .id("review-rows")
+                        .flex()
+                        .flex_col()
+                        .max_h(REVIEW_ROWS_H)
+                        .overflow_y_scroll()
+                        .children(rows),
+                )
+                .child(footer)
+                .into_any_element(),
+        )
     }
 
     /// The Uncommitted / Since-base switch.
@@ -747,11 +896,16 @@ impl Shell {
                             cx.notify();
                         })
                     })
-                    .on_click(cx.listener(move |this, _, _, cx| {
+                    .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+                        let preview = !matches!(event, ClickEvent::Mouse(click) if click.down.click_count >= 2);
                         if conflicted {
-                            this.open_editor_tab(abs.clone(), cx);
+                            if preview {
+                                this.open_editor_preview(abs.clone(), cx);
+                            } else {
+                                this.open_editor_tab(abs.clone(), cx);
+                            }
                         } else {
-                            this.open_diff_tab(key.clone(), title.clone(), cx);
+                            this.open_diff_tab(key.clone(), title.clone(), preview, cx);
                         }
                         cx.notify();
                     }))

@@ -10,9 +10,9 @@ use crate::Shell;
 use crate::fonts::Prose;
 use crate::paint::paint;
 use crate::tree::{Selection, row_mark, state_word};
-use crate::ui::ICON_GAP;
 use crate::ui::agent::MARK;
 use crate::ui::row::block_row;
+use crate::ui::{CAPTION, ICON_GAP, LABEL};
 
 struct Entry {
     project: usize,
@@ -95,7 +95,7 @@ impl Shell {
                     .flex_row()
                     .items_center()
                     .gap(ICON_GAP)
-                    .text_size(px(13.5))
+                    .text_size(LABEL)
                     .child(
                         div()
                             .flex()
@@ -117,8 +117,8 @@ impl Shell {
                             .child(
                                 div()
                                     .prose()
-                                    .mt(px(2.0))
-                                    .text_size(px(12.0))
+                                    .mt(px(1.0))
+                                    .text_size(CAPTION)
                                     .truncate()
                                     .text_color(paint(t.text.dim))
                                     .child(

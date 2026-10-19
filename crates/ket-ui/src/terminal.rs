@@ -78,6 +78,13 @@ use ket_core::terminal::alacritty_terminal::grid::{Dimensions, Scroll};
 use ket_core::terminal::alacritty_terminal::index::{Column, Point as GridPoint};
 use ket_core::terminal::alacritty_terminal::selection::{Selection, SelectionType};
 use ket_core::terminal::alacritty_terminal::term::TermMode;
+
+/// Launch choices for one new agent tab, never saved on the worktree.
+#[derive(Clone, Default)]
+pub(crate) struct SessionLaunch {
+    pub(crate) model: Option<String>,
+    pub(crate) effort: Option<String>,
+}
 use ket_core::terminal::{Terminal, TerminalSpec};
 use ket_core::theme::Theme;
 use ket_core::workspace::Workspace;
@@ -121,7 +128,8 @@ fn cli_path_for(exe: &Path) -> Option<PathBuf> {
     }
 }
 
-/// Put ket's CLI on the PATH inherited by shells and the agents they start.
+/// Put ket's CLI on the PATH inherited by shells and the agents they start,
+/// and tell those agents it is there — see `ket_core::agent_hooks::CLI_NOTE`.
 fn expose_cli(spec: &mut TerminalSpec) {
     let Some(cli) = std::env::current_exe()
         .ok()
@@ -146,6 +154,10 @@ fn expose_cli(spec: &mut TerminalSpec) {
         && let Some(path) = path.to_str()
     {
         spec.env.insert("PATH".to_owned(), path.to_owned());
+        spec.env.insert(
+            ket_core::agent_hooks::CLI_NOTE_ENV.to_owned(),
+            ket_core::agent_hooks::CLI_NOTE.to_owned(),
+        );
     }
 }
 
@@ -167,7 +179,7 @@ fn expose_cli(spec: &mut TerminalSpec) {
 pub(crate) struct TerminalId(pub(crate) u64);
 
 /// How long [`Shell::submit_to_terminal`] waits between the paste and Enter.
-const SUBMIT_DELAY: Duration = Duration::from_millis(80);
+const SUBMIT_DELAY: Duration = ket_core::attachments::SUBMIT_DELAY;
 
 /// The closest two repaints of one pane may come while its program is writing
 /// continuously.
@@ -188,16 +200,7 @@ const REPAINT_GAP: Duration = Duration::from_millis(66);
 /// multi-line paste is not executed line by line, and with newlines as
 /// carriage returns, which is what the Enter key sends.
 fn paste_bytes(term: &Terminal, text: &str) -> Vec<u8> {
-    let text = text.replace("\r\n", "\r").replace('\n', "\r");
-    let mut bytes = Vec::with_capacity(text.len() + 12);
-    if mode_of(term).contains(TermMode::BRACKETED_PASTE) {
-        bytes.extend_from_slice(b"\x1b[200~");
-        bytes.extend_from_slice(text.as_bytes());
-        bytes.extend_from_slice(b"\x1b[201~");
-    } else {
-        bytes.extend_from_slice(text.as_bytes());
-    }
-    bytes
+    ket_core::attachments::paste(text, mode_of(term).contains(TermMode::BRACKETED_PASTE))
 }
 
 /// One terminal pane, as a view of its own.
@@ -311,6 +314,40 @@ pub(crate) struct Link {
     cols: Range<usize>,
 }
 
+/// ket's permission rules, told to OpenCode in its inline config: ket has
+/// no hook into OpenCode, so OpenCode enforces them itself — see
+/// `RuleSet::opencode_permissions`. Read with the project and worktree the
+/// hook environment has named, and added after each of `agents`' own rules
+/// as well as the config's. A rule file that cannot be read adds nothing,
+/// as it rules nothing for the hook.
+fn opencode_permissions(
+    env: &mut std::collections::BTreeMap<String, String>,
+    agents: ket_core::Result<Vec<String>>,
+) -> ket_core::Result<()> {
+    use ket_core::permissions::{self, RuleSet};
+    const KEY: &str = "OPENCODE_CONFIG_CONTENT";
+    let path = |key: &str| env.get(key).map(PathBuf::from);
+    let worktree = path(permissions::WORKTREE_ROOT_ENV);
+    let root = path(permissions::PROJECT_ROOT_ENV);
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let project = env.get(permissions::PROJECT_ID_ENV).cloned();
+    let Ok(rules) = RuleSet::load(project.as_deref(), root.as_deref(), home.as_deref()) else {
+        return Ok(());
+    };
+    let rules = rules.opencode_permissions(worktree.as_deref(), home.as_deref());
+    if rules.is_empty() {
+        return Ok(());
+    }
+    let agents = agents?;
+    // A config the person exported themselves keeps everything it says.
+    let config = env.get(KEY).cloned().or_else(|| std::env::var(KEY).ok());
+    env.insert(
+        KEY.to_owned(),
+        permissions::with_opencode_permissions(config.as_deref(), rules, &agents),
+    );
+    Ok(())
+}
+
 /// How to pick up where this worktree's agent left off, if it can.
 fn resume_args(cwd: &std::path::Path, agent: &AgentSpec) -> Option<(String, Vec<String>)> {
     let sessions = Sessions::for_launch(agent);
@@ -352,7 +389,7 @@ impl Shell {
         // stopped opening anything.
         let pane = self.spaces.entry(id).or_default().focused;
         let agent = self.selected_agent();
-        self.open_session_tab_in(pane, agent, true, true, None, cx);
+        self.open_session_tab_in(pane, agent, true, true, None, None, cx);
     }
 
     /// Opens (or focuses) a blank terminal tab for the selected worktree.
@@ -396,7 +433,7 @@ impl Shell {
             if wants {
                 // Adopting, unlike New Terminal: with the ket host running,
                 // the shell this pane had may still be alive in it.
-                self.open_session_tab_in(*pane, None, false, true, None, cx);
+                self.open_session_tab_in(*pane, None, false, true, None, None, cx);
             }
         }
     }
@@ -431,7 +468,7 @@ impl Shell {
                 None => continue,
             };
             let resume = agent.is_some();
-            self.open_session_tab_in(pane, agent, resume, true, Some(restore), cx);
+            self.open_session_tab_in(pane, agent, resume, true, Some(restore), None, cx);
         }
     }
 
@@ -449,7 +486,7 @@ impl Shell {
     /// a worktree, or [`Self::open_agent_tab_in`]'s when you ask for one
     /// explicitly; "terminal" no longer means either.
     pub(crate) fn open_terminal_tab_in(&mut self, pane: PaneId, cx: &mut Context<Self>) {
-        self.open_session_tab_in(pane, None, false, false, None, cx);
+        self.open_session_tab_in(pane, None, false, false, None, None, cx);
     }
 
     /// Opens a fresh session with the named agent in one named pane, never
@@ -474,7 +511,25 @@ impl Shell {
         else {
             return;
         };
-        self.open_session_tab_in(pane, Some(agent), false, false, None, cx);
+        self.open_session_tab_in(pane, Some(agent), false, false, None, None, cx);
+    }
+
+    /// A fresh agent tab with one-session model and effort choices.
+    pub(crate) fn open_agent_tab_with(
+        &mut self,
+        pane: PaneId,
+        agent_name: &str,
+        launch: SessionLaunch,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(agent) = self
+            .runnable_agents()
+            .into_iter()
+            .find(|spec| spec.name == agent_name)
+        else {
+            return;
+        };
+        self.open_session_tab_in(pane, Some(agent), false, false, None, Some(launch), cx);
     }
 
     /// Shared body for the three openers above; `agent` and
@@ -485,6 +540,7 @@ impl Shell {
     /// `restored` is a tab a saved layout brought back: its key, the title
     /// somebody typed for it and whether it was pinned. See `ket_core::host`; without the host neither
     /// does anything.
+    #[allow(clippy::too_many_arguments)]
     fn open_session_tab_in(
         &mut self,
         pane: PaneId,
@@ -492,6 +548,7 @@ impl Shell {
         resume_previous: bool,
         adopt: bool,
         restored: Option<crate::layout::SavedTerminal>,
+        session_launch: Option<SessionLaunch>,
         cx: &mut Context<Self>,
     ) {
         let Some(id) = self.selected_id() else {
@@ -569,6 +626,7 @@ impl Shell {
                 kind: TabKind::Terminal(terminal),
                 renamed: typed_title.is_some(),
                 pinned,
+                preview: false,
             },
         );
         self.persist_layout();
@@ -580,7 +638,7 @@ impl Shell {
         // the settings and the session scan, which are read off this thread.
         let shell_spec = agent
             .is_none()
-            .then(|| self.terminal_spec(&id, cwd.clone(), None, None, None, terminal));
+            .then(|| self.terminal_spec(&id, cwd.clone(), None, None, None, terminal, None));
         let scan_cwd = cwd.clone();
         let scan_agent = agent.clone();
         let prepared = cx.background_executor().spawn(async move {
@@ -596,33 +654,77 @@ impl Shell {
                         .and_then(|agent| resume_args(&scan_cwd, agent))
                 })
                 .flatten();
-            (settings, resume)
+            // OpenCode's agents here, so ket's rules can go after each one's
+            // own — see `opencode_permissions`.
+            let opencode_agents = scan_agent
+                .as_ref()
+                .filter(|agent| ket_core::agents::harness(&agent.name) == "opencode")
+                .map(|agent| {
+                    use ket_core::agents::Prober;
+                    let program = agent
+                        .command
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or("opencode");
+                    let inline = agent
+                        .env
+                        .get("OPENCODE_CONFIG_CONTENT")
+                        .cloned()
+                        .or_else(|| std::env::var("OPENCODE_CONFIG_CONTENT").ok());
+                    match ket_core::agents::ShellProber.find(program) {
+                        Some(found) => ket_core::permissions::opencode_agents(
+                            &found,
+                            &agent.command,
+                            &scan_cwd,
+                            inline.as_deref(),
+                        ),
+                        None => Err(ket_core::KetError::Config(
+                            "OpenCode could not be found to inspect its agents".to_owned(),
+                        )),
+                    }
+                });
+            (settings, resume, opencode_agents)
         });
         cx.spawn(async move |this: WeakEntity<Shell>, cx: &mut AsyncApp| {
             let agent_name = agent.as_ref().map(|agent| agent.name.clone());
-            let spec = match shell_spec {
-                Some(spec) => Some(spec),
+            let (spec, opencode_agents) = match shell_spec {
+                Some(spec) => (Some(spec), None),
                 None => {
-                    let (settings, resume) = prepared.await;
-                    this.update(cx, |shell, _| {
-                        shell.terminal_notes.contains_key(&terminal).then(|| {
-                            shell.terminal_spec(
-                                &id,
-                                cwd,
-                                agent,
-                                resume,
-                                settings.as_ref(),
-                                terminal,
-                            )
+                    let (settings, resume, opencode_agents) = prepared.await;
+                    let spec = this
+                        .update(cx, |shell, _| {
+                            shell.terminal_notes.contains_key(&terminal).then(|| {
+                                shell.terminal_spec(
+                                    &id,
+                                    cwd,
+                                    agent,
+                                    resume,
+                                    settings.as_ref(),
+                                    terminal,
+                                    session_launch,
+                                )
+                            })
                         })
-                    })
-                    .ok()
-                    .flatten()
+                        .ok()
+                        .flatten();
+                    (spec, opencode_agents)
                 }
             };
             let Some(mut spec) = spec else {
                 return;
             };
+            if let Some(agents) = opencode_agents
+                && let Err(error) = opencode_permissions(&mut spec.env, agents)
+            {
+                let _ = this.update(cx, |shell, cx| {
+                    shell.terminal_notes.insert(
+                        terminal,
+                        format!("Could not start OpenCode: {error}").into(),
+                    );
+                    cx.notify();
+                });
+                return;
+            }
             spec.key = Some(key);
             spec.adopt = adopt;
             if let Some(size) = size {
@@ -736,6 +838,7 @@ impl Shell {
     }
 
     /// Builds the launch specification after background preparation finishes.
+    #[allow(clippy::too_many_arguments)]
     fn terminal_spec(
         &self,
         worktree: &WorktreeId,
@@ -744,6 +847,7 @@ impl Shell {
         resume: Option<(String, Vec<String>)>,
         settings: Option<&AgentConfig>,
         id: TerminalId,
+        session_launch: Option<SessionLaunch>,
     ) -> TerminalSpec {
         // The resume words join the agent's command *line*, not an argument
         // vector: a pane types its command at a shell prompt rather than
@@ -790,8 +894,45 @@ impl Shell {
                 limit,
                 compact.as_deref(),
             );
-            extra.extend(launch.args);
+            let mut economy_args = launch.args;
+            if let Some(overrides) = session_launch.as_ref() {
+                // Explicit phone choices win over policy flags, without
+                // leaving duplicate CLI options for the agent to interpret.
+                let mut kept = Vec::new();
+                let mut args = economy_args.into_iter();
+                while let Some(arg) = args.next() {
+                    if (arg == "--model" && overrides.model.is_some())
+                        || ((arg == "--effort" || arg == "--reasoning-effort")
+                            && overrides.effort.is_some())
+                        || (arg == "-c"
+                            && overrides.effort.is_some()
+                            && args
+                                .as_slice()
+                                .first()
+                                .is_some_and(|next| next.starts_with("model_reasoning_effort=")))
+                    {
+                        let _ = args.next();
+                    } else {
+                        kept.push(arg);
+                    }
+                }
+                economy_args = kept;
+            }
+            extra.extend(economy_args);
             economy_env = launch.env;
+            if let Some(overrides) = session_launch.as_ref() {
+                if let Some(model) = &overrides.model {
+                    extra.extend(["--model".to_owned(), model.clone()]);
+                }
+                if let Some(effort) = &overrides.effort {
+                    match agent.name.as_str() {
+                        "codex" => extra
+                            .extend(["-c".to_owned(), format!("model_reasoning_effort={effort}")]),
+                        "grok" => extra.extend(["--reasoning-effort".to_owned(), effort.clone()]),
+                        _ => extra.extend(["--effort".to_owned(), effort.clone()]),
+                    }
+                }
+            }
             // The filter, like the cap: a pack proposes, a config decides.
             match settings.and_then(|agent| agent.command_filter) {
                 Some(false) => {
@@ -1240,6 +1381,14 @@ impl Shell {
             .is_some_and(|space| space.active_terminal_ids().contains(&id))
     }
 
+    /// `Ctrl-C` into a terminal from outside it — the usage popover's Stop:
+    /// the byte, and the verdict a typed one raises, so the row stops saying
+    /// "thinking" for a turn that has been stopped.
+    pub(crate) fn interrupt_terminal(&mut self, id: TerminalId, cx: &mut Context<Self>) {
+        self.terminal_interrupted(id, &[0x03]);
+        self.terminal_input(id, vec![0x03], cx);
+    }
+
     /// Tells whoever owns the terminal's agent status that a turn was stopped
     /// by hand: `Ctrl-C` is a latched verdict, a bare Escape an unlatched
     /// guess — see [`ket_core::agent_status`]. The store decides whether
@@ -1300,9 +1449,10 @@ impl Shell {
     /// rebuilds every view above it. Only a change ket makes itself, which no
     /// echo will carry, is drawn now: a scrolled-back view snapping to the
     /// bottom, or a selection going away.
-    fn terminal_input(&mut self, id: TerminalId, bytes: Vec<u8>, cx: &mut Context<Self>) {
+    /// Says whether the terminal took them: not when it has closed.
+    fn terminal_input(&mut self, id: TerminalId, bytes: Vec<u8>, cx: &mut Context<Self>) -> bool {
         let Some(handle) = self.terminals.get_mut(&id) else {
-            return;
+            return false;
         };
         let moved = handle.term.with_term(|term| {
             let scrolled = term.grid().display_offset() > 0;
@@ -1321,7 +1471,7 @@ impl Shell {
         handle
             .typed_at_ms
             .store(ket_core::now_ms(), std::sync::atomic::Ordering::Release);
-        let _ = handle.term.send_input(bytes);
+        handle.term.send_input(bytes).is_ok()
     }
 
     /// `Cmd-K`: empties the active pane, if it is a shell rather than an
@@ -1446,18 +1596,37 @@ impl Shell {
         text: &str,
         cx: &mut Context<Self>,
     ) {
+        self.submit_to_terminal_then(id, text, cx, |_, _, _| {});
+    }
+
+    /// [`Shell::submit_to_terminal`], then `done` once Enter has gone in —
+    /// told `false` when the terminal closed before the paste or the Enter
+    /// reached it, so the prompt was never submitted. Not called at all if
+    /// the window goes first.
+    pub(crate) fn submit_to_terminal_then(
+        &mut self,
+        id: TerminalId,
+        text: &str,
+        cx: &mut Context<Self>,
+        done: impl FnOnce(&mut Shell, bool, &mut Context<Shell>) + 'static,
+    ) {
         let Some(handle) = self.terminals.get(&id) else {
+            done(self, false, cx);
             return;
         };
         let bytes = paste_bytes(&handle.term, text);
-        self.terminal_input(id, bytes, cx);
+        if !self.terminal_input(id, bytes, cx) {
+            done(self, false, cx);
+            return;
+        }
         // Enter as a write of its own, a beat later. Sent in the same write,
         // a TUI still taking the paste in can read the carriage return as one
         // more line of it rather than as the submit.
         cx.spawn(async move |this: WeakEntity<Shell>, cx: &mut AsyncApp| {
             cx.background_executor().timer(SUBMIT_DELAY).await;
             let _ = this.update(cx, |shell, cx| {
-                shell.terminal_input(id, b"\r".to_vec(), cx);
+                let entered = shell.terminal_input(id, b"\r".to_vec(), cx);
+                done(shell, entered, cx);
             });
         })
         .detach();
@@ -1473,25 +1642,12 @@ impl Shell {
     /// once the agent has read it. Pasting the prompt before then can lose
     /// its Enter, so a sender waits for the count to rise.
     pub(crate) fn images_shown(&self, id: TerminalId) -> usize {
-        /// The rows at the bottom an input box fits in.
-        const INPUT_ROWS: usize = 12;
         let Some(handle) = self.terminals.get(&id) else {
             return 0;
         };
-        handle.term.with_term(|term| {
-            let grid = term.grid();
-            let rows = grid.screen_lines();
-            let cols = grid.columns();
-            (rows.saturating_sub(INPUT_ROWS)..rows)
-                .map(|row| {
-                    let line = Cell { row, col: 0 }.to_grid(0).line;
-                    let text: String = (0..cols)
-                        .map(|col| grid[GridPoint::new(line, Column(col))].c)
-                        .collect();
-                    text.matches("[Image").count()
-                })
-                .sum()
-        })
+        handle
+            .term
+            .with_term(|term| ket_core::attachments::images_shown(term))
     }
 
     pub(crate) fn attach_to_terminal(
@@ -1504,18 +1660,7 @@ impl Shell {
             return paths.to_vec();
         };
         let bracketed = mode_of(&handle.term).contains(TermMode::BRACKETED_PASTE);
-        let mut bytes = Vec::new();
-        let mut left = Vec::new();
-        for path in paths {
-            match bracketed.then(|| image_paste(path)).flatten() {
-                Some(raw) => {
-                    bytes.extend_from_slice(b"\x1b[200~");
-                    bytes.extend_from_slice(raw.as_bytes());
-                    bytes.extend_from_slice(b"\x1b[201~");
-                }
-                None => left.push(path.clone()),
-            }
-        }
+        let (bytes, _, left) = ket_core::attachments::image_pastes(paths, bracketed);
         if !bytes.is_empty() {
             self.terminal_input(id, bytes, cx);
         }
@@ -2411,33 +2556,18 @@ fn shell_quote(path: &std::path::Path) -> String {
     format!("'{}'", path.to_string_lossy().replace('\'', r"'\''"))
 }
 
-/// What the terminal agents read as an image, which is the same list their
-/// own paste handling uses.
-const IMAGE_EXTENSIONS: [&str; 8] = ["png", "jpg", "jpeg", "gif", "svg", "webp", "bmp", "ico"];
-
 /// Whether `path` reaches an agent as an image of its own when it is
 /// handed one — see [`Shell::attach_to_terminal`] — rather than as a path in
 /// the prompt.
 pub(crate) fn pastes_as_image(path: &std::path::Path) -> bool {
-    image_paste(path).is_some()
+    ket_core::attachments::pastes_as_image(path)
 }
 
 /// The path as it should be pasted to attach it, or `None` if it is not an
-/// image or cannot go in unquoted — see [`Shell::terminal_drop_paths`].
-///
-/// The characters refused are the ones a shell would act on if the drop
-/// landed at a prompt rather than in an agent, plus the control bytes, which
-/// a pty would read as keys rather than as text. A space is not among them:
-/// it is only a separator once something splits the line, and the agents do
-/// not split a pasted path.
+/// image or cannot go in unquoted — see [`Shell::terminal_drop_paths`] and
+/// [`ket_core::attachments::image_paste`].
 fn image_paste(path: &std::path::Path) -> Option<&str> {
-    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
-    if !IMAGE_EXTENSIONS.contains(&extension.as_str()) {
-        return None;
-    }
-    let raw = path.to_str()?;
-    let unsafe_here = |c: char| c.is_control() || "\"'`$;&|<>(){}[]*?!#\\".contains(c);
-    (!raw.contains(unsafe_here)).then_some(raw)
+    ket_core::attachments::image_paste(path)
 }
 
 fn terminal_note(theme: &Theme, message: &str) -> AnyElement {

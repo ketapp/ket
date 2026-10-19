@@ -51,6 +51,9 @@ const SETTLE: Duration = Duration::from_secs(15);
 struct QueuedPrompt {
     terminal: TerminalId,
     prompt: String,
+    /// The review comments the prompt was written from, put back in their
+    /// worktree's review if the prompt never goes — see `crate::review`.
+    review: Option<crate::review::QueuedReview>,
 }
 
 /// Local tasks run one at a time: a local model is the Mac's memory and its
@@ -483,8 +486,8 @@ impl Shell {
                 .gap(px(8.0))
                 .child(sized_icon(Icon::Lock, px(13.0), paint(t.text.dim)))
                 .child(caption(
-                    "Models and prompts stay on this Mac. OpenCode's web tools still reach the \
-                     internet.",
+                    "Models and prompts stay on this Mac, unless you pick another model inside \
+                     OpenCode. Its web tools still reach the internet.",
                     t,
                 )),
         ));
@@ -940,6 +943,39 @@ impl Shell {
             .is_some_and(|agent| local_models::model_tag(agent).is_some())
     }
 
+    /// Why a prompt for `terminal` would wait in the local queue rather than
+    /// go now: what the local model is busy with, or the tasks waiting for
+    /// it first. `None` when it would go now.
+    pub(crate) fn local_queue_wait(&self, terminal: TerminalId) -> Option<String> {
+        if !self.runs_local_agent(terminal) {
+            return None;
+        }
+        match self.local_model_busy() {
+            Some(label) => Some(format!("The local model is busy with {label}")),
+            None if !self.local_queue.waiting.is_empty() => {
+                Some("Other tasks are waiting for the local model".to_owned())
+            }
+            None => None,
+        }
+    }
+
+    /// Submits `prompt` to `terminal` at once, as
+    /// [`Shell::submit_or_queue_review`] does when nothing is ahead of it,
+    /// then `done` — see [`Shell::submit_to_terminal_then`]. For a sender
+    /// that would rather refuse than queue: see [`Shell::local_queue_wait`].
+    pub(crate) fn submit_now_then(
+        &mut self,
+        terminal: TerminalId,
+        prompt: &str,
+        cx: &mut Context<Self>,
+        done: impl FnOnce(&mut Shell, bool, &mut Context<Shell>) + 'static,
+    ) {
+        if self.runs_local_agent(terminal) {
+            self.local_queue.released_at = Some(Instant::now());
+        }
+        self.submit_to_terminal_then(terminal, prompt, cx, done);
+    }
+
     /// The worktree a local agent is working in now, by its row's label, or
     /// a prompt let go to one moments ago; `None` when the local model is
     /// free.
@@ -979,15 +1015,29 @@ impl Shell {
         prompt: &str,
         cx: &mut Context<Self>,
     ) {
+        self.submit_or_queue_review(terminal, prompt, None, cx);
+    }
+
+    /// [`Shell::submit_or_queue`], carrying the review `prompt` was written
+    /// from so a queued one that never goes can be given back. Returns
+    /// whether it was queued, which it has already said.
+    pub(crate) fn submit_or_queue_review(
+        &mut self,
+        terminal: TerminalId,
+        prompt: &str,
+        review: Option<crate::review::QueuedReview>,
+        cx: &mut Context<Self>,
+    ) -> bool {
         if !self.runs_local_agent(terminal) {
             self.submit_to_terminal(terminal, prompt, cx);
-            return;
+            return false;
         }
         let busy = self.local_model_busy();
         if busy.is_some() || !self.local_queue.waiting.is_empty() {
             self.local_queue.waiting.push_back(QueuedPrompt {
                 terminal,
                 prompt: prompt.to_owned(),
+                review,
             });
             let ahead = self.local_queue.waiting.len();
             let detail = match busy {
@@ -997,10 +1047,11 @@ impl Shell {
                 None => "It starts after the local tasks ahead of it.".to_owned(),
             };
             self.toast_detail(Tone::Info, format!("Queued, {ahead} waiting"), detail, cx);
-            return;
+            return true;
         }
         self.local_queue.released_at = Some(Instant::now());
         self.submit_to_terminal(terminal, prompt, cx);
+        false
     }
 
     /// Lets the next queued prompt go once the local model is free. On the
@@ -1010,8 +1061,12 @@ impl Shell {
             return;
         }
         while let Some(next) = self.local_queue.waiting.pop_front() {
-            // A tab closed while it waited takes its prompt with it.
+            // A tab closed while it waited takes its prompt with it — but
+            // not the review comments it was written from, which go back.
             if !self.terminals.contains_key(&next.terminal) {
+                if let Some(review) = next.review {
+                    self.restore_review(review, cx);
+                }
                 continue;
             }
             self.local_queue.released_at = Some(Instant::now());

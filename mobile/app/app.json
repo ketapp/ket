@@ -20,7 +20,9 @@
         "NSLocalNetworkUsageDescription": "ket connects to your Mac over your Wi-Fi to show and control the agents running on it.",
         "NSAppTransportSecurity": {
           "NSAllowsLocalNetworking": true
-        }
+        },
+        "NSMicrophoneUsageDescription": "ket uses the microphone when you tap the mic in a chat, to write what you say into your message.",
+        "NSSpeechRecognitionUsageDescription": "ket turns what you say into the words of your message, on this iPhone wherever it can."
       }
     },
     "android": {
@@ -35,7 +37,10 @@
         "android.permission.CAMERA"
       ],
       "package": "dev.ketapp.ket",
-      "versionCode": 1
+      "versionCode": 1,
+      "blockedPermissions": [
+        "android.permission.RECORD_AUDIO"
+      ]
     },
     "plugins": [
       "expo-router",
@@ -57,8 +62,17 @@
       [
         "expo-camera",
         {
-          "cameraPermission": "ket uses the camera to scan the pairing code your Mac shows.",
-          "recordAudioAndroid": false
+          "cameraPermission": "ket uses the camera to scan the pairing code your Mac shows, and to take photos you send to an agent.",
+          "recordAudioAndroid": false,
+          "microphonePermission": "ket uses the microphone when you tap the mic in a chat, to write what you say into your message."
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "ket opens your photos when you attach a screenshot or a picture to a message.",
+          "cameraPermission": "ket uses the camera to scan the pairing code your Mac shows, and to take photos you send to an agent.",
+          "microphonePermission": "ket uses the microphone when you tap the mic in a chat, to write what you say into your message."
         }
       ]
     ],

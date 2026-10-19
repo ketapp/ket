@@ -68,7 +68,10 @@ pub(crate) fn key_hint(
 ///
 /// Named because the sidebar's worktree rows size their mark column to it:
 /// the badge heads the column, and the marks under it share its centre.
-pub(crate) const BADGE: Pixels = px(20.0);
+///
+/// Sixteen, an icon's size: the badge stands beside a 12.5px name, and at
+/// twenty it was the tallest thing in a row that is otherwise all text.
+pub(crate) const BADGE: Pixels = px(16.0);
 
 pub(crate) fn badge(colour: Color, label: impl Into<SharedString>, t: &Theme) -> Div {
     let on_badge = if contrast_ratio(t.surface, colour) >= contrast_ratio(t.text.primary, colour) {
@@ -83,9 +86,9 @@ pub(crate) fn badge(colour: Color, label: impl Into<SharedString>, t: &Theme) ->
         .items_center()
         .justify_center()
         .size(BADGE)
-        .rounded(RADIUS_SM)
+        .rounded(px(4.0))
         .bg(paint(colour))
-        .text_size(px(11.0))
+        .text_size(px(9.5))
         .font_weight(gpui::FontWeight::SEMIBOLD)
         .text_color(paint(on_badge))
         .child(label.into())
@@ -275,20 +278,20 @@ pub(crate) fn readout(t: &Theme) -> Div {
         .flex()
         .flex_none()
         .items_center()
-        .gap(px(7.0))
+        .gap(px(5.0))
         .h(READOUT_H)
-        .px(px(8.0))
+        .px(px(6.0))
         .rounded(RADIUS_SM)
         .bg(paint(t.sunken))
         .font_family(crate::fonts::chrome())
-        .text_size(px(12.0))
+        .text_size(px(11.0))
         .text_color(paint(t.text.primary))
         .whitespace_nowrap()
 }
 
 /// A read-out's height: a step under a small button, so a line of them sits
-/// inside a 32px bar with air above and below.
-const READOUT_H: Pixels = px(22.0);
+/// inside the 28px compact header with air above and below.
+const READOUT_H: Pixels = px(20.0);
 
 /// A caption: secondary text at the size the rest of the chrome uses for it.
 pub(crate) fn caption(text: impl Into<SharedString>, t: &Theme) -> Div {

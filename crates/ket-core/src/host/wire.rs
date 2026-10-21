@@ -20,7 +20,7 @@ use crate::activity::Foreground;
 use crate::agent_hooks::{HookReport, StatusLine};
 use crate::agent_status::AgentStatusSnapshot;
 use crate::rate_limits::ProviderSnapshot;
-use crate::terminal::{TerminalSize, TerminalSpec};
+use crate::terminal::{StopOutcome, TerminalSize, TerminalSpec};
 
 /// Bumped on every incompatible change. A window and a host that disagree do
 /// not talk; hosted terminal opens fail rather than silently losing their
@@ -28,7 +28,7 @@ use crate::terminal::{TerminalSize, TerminalSpec};
 ///
 /// A new request is not an incompatible change: a host logs and skips one it
 /// cannot read, so a window asking an older host for it just gets no answer.
-pub const PROTOCOL: u32 = 5;
+pub const PROTOCOL: u32 = 6;
 
 /// Authority granted to a paired phone. Roles are hierarchical.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -96,6 +96,15 @@ pub enum Request {
     Kill {
         /// Which terminal.
         id: u64,
+    },
+    /// Ask an agent to exit, then force its process group to end after a grace period.
+    Stop {
+        /// Echoed in the reply.
+        req: u64,
+        /// Which terminal.
+        id: u64,
+        /// How long to allow for session data to be written.
+        grace_ms: u64,
     },
     /// Empty a terminal's screen and scrollback.
     Clear {
@@ -201,6 +210,18 @@ pub enum Request {
         /// Why it was not sent, as the desktop's own Send to agent says it,
         /// or `None` once the agent has it.
         error: Option<String>,
+    },
+    /// The result of deleting a worktree a phone asked to delete. The host
+    /// waits for this before answering the phone.
+    DeleteWorkResult {
+        /// The request named in [`Reply::DeleteWork`].
+        req: u64,
+        /// Why it was not deleted, as the desktop's delete dialog says it,
+        /// or `None` once it is gone.
+        error: Option<String>,
+        /// The branch kept because it has unmerged commits.
+        #[serde(default)]
+        kept_branch: Option<String>,
     },
     /// The theme this window is drawn in, for phones to draw in too. Sent on
     /// connecting and whenever it changes; the newest from any window wins.
@@ -308,6 +329,16 @@ pub enum Reply {
         id: u64,
         /// Whether this is a terminal that was already running.
         adopted: bool,
+        /// The process that roots the terminal's tree, when known.
+        #[serde(default)]
+        pid: Option<u32>,
+    },
+    /// The host's decision on a stop request.
+    Stopped {
+        /// From the request.
+        req: u64,
+        /// Why the request succeeded or was refused.
+        outcome: StopOutcome,
     },
     /// A terminal could not be started.
     Failed {
@@ -434,6 +465,22 @@ pub enum Reply {
         /// does not send it twice.
         until_ms: u64,
     },
+    /// A phone asked for a worktree to be deleted, as the worktree menu's
+    /// Delete does once its dialog is confirmed. Sent to one window, which
+    /// deletes it and closes its terminals and tabs, and answers with
+    /// [`Request::DeleteWorkResult`].
+    DeleteWork {
+        /// Used to return the result.
+        req: u64,
+        /// The worktree's id.
+        worktree: String,
+        /// Delete it even though work would be lost, as Delete anyway does.
+        force: bool,
+    },
+    /// Something other than this window changed the worktrees in ket's store
+    /// — a phone pinned one — so the sidebar is to be read again. Sent to
+    /// every window.
+    WorktreesChanged,
     /// The answer to [`Request::Pairings`]; empty when phones are off.
     Pairings {
         /// Waiting, oldest first.

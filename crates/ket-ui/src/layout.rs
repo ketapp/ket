@@ -136,7 +136,18 @@ enum SavedTab {
         title: Option<String>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         pinned: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        asleep: Option<AsleepSaved>,
     },
+}
+
+/// A stopped terminal's exact session, retained across a window restart.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AsleepSaved {
+    pub(crate) session: String,
+    pub(crate) since_ms: u64,
+    pub(crate) freed_bytes: u64,
 }
 
 /// A terminal tab a saved layout wants back, in a worktree not opened since.
@@ -153,6 +164,7 @@ pub(crate) struct SavedTerminal {
     pub(crate) agent: Option<String>,
     pub(crate) title: Option<String>,
     pub(crate) pinned: bool,
+    pub(crate) asleep: Option<AsleepSaved>,
 }
 
 impl SavedTerminal {
@@ -162,6 +174,7 @@ impl SavedTerminal {
             agent: self.agent.clone(),
             title: self.title.clone(),
             pinned: self.pinned,
+            asleep: self.asleep.clone(),
         }
     }
 }
@@ -271,6 +284,7 @@ impl SavedPane {
                         agent: None,
                         title: None,
                         pinned: false,
+                        asleep: None,
                     });
                 }
                 Self::Leaf {
@@ -321,18 +335,22 @@ impl SavedPane {
                         agent,
                         title,
                         pinned,
+                        asleep,
                     } = tab
                     {
                         match key {
-                            Some(key) if hosted => owed.terminals.push(SavedTerminal {
-                                pane: PaneId(id),
-                                key: key.clone(),
-                                // Layouts saved before a tab's terminal had
-                                // started lost its agent; the key still names it.
-                                agent: agent.clone().or_else(|| agent_in_key(key)),
-                                title: title.clone(),
-                                pinned: *pinned,
-                            }),
+                            Some(key) if hosted || asleep.is_some() => {
+                                owed.terminals.push(SavedTerminal {
+                                    pane: PaneId(id),
+                                    key: key.clone(),
+                                    // Layouts saved before a tab's terminal had
+                                    // started lost its agent; the key still names it.
+                                    agent: agent.clone().or_else(|| agent_in_key(key)),
+                                    title: title.clone(),
+                                    pinned: *pinned,
+                                    asleep: asleep.clone(),
+                                })
+                            }
                             _ => wants_shell = true,
                         }
                     }
@@ -430,6 +448,14 @@ impl SavedTab {
                     agent,
                     title,
                     pinned,
+                    asleep: shell
+                        .asleep_terminals
+                        .get(terminal)
+                        .map(|asleep| AsleepSaved {
+                            session: asleep.session.clone(),
+                            since_ms: asleep.since_ms,
+                            freed_bytes: asleep.freed_bytes,
+                        }),
                 })
             }
             // Browser sessions are deliberately private and process-local.
@@ -658,6 +684,37 @@ mod tests {
     use super::*;
 
     #[test]
+    fn asleep_terminal_restores_even_without_a_host() {
+        let saved = SavedSpace {
+            root: SavedPane::Leaf {
+                id: 0,
+                tabs: vec![SavedTab::Terminal {
+                    key: Some("tree|codex|one".to_owned()),
+                    agent: Some("codex".to_owned()),
+                    title: Some("Review".to_owned()),
+                    pinned: false,
+                    asleep: Some(AsleepSaved {
+                        session: "session-one".to_owned(),
+                        since_ms: 42,
+                        freed_bytes: 100,
+                    }),
+                }],
+                active: 0,
+            },
+            focused: 0,
+            next_id: 1,
+        };
+        let (space, owed) = saved.restore_with(false).unwrap();
+        assert!(space.terminal_ids().is_empty());
+        assert!(owed.shells.is_empty());
+        assert_eq!(owed.terminals.len(), 1);
+        assert_eq!(
+            owed.terminals[0].asleep.as_ref().unwrap().session,
+            "session-one"
+        );
+    }
+
+    #[test]
     fn lasting_diff_round_trips_with_its_comparison() {
         let saved = SavedTab::Diff {
             root: "/repo".to_owned(),
@@ -711,6 +768,7 @@ mod tests {
                                     agent: None,
                                     title: None,
                                     pinned: false,
+                                    asleep: None,
                                 }],
                                 active: 0,
                             },
@@ -790,6 +848,7 @@ mod tests {
                         agent: None,
                         title: None,
                         pinned: false,
+                        asleep: None,
                     },
                     SavedTab::Image {
                         path: "/repo/shot.png".to_owned(),

@@ -50,6 +50,22 @@
 //
 // 1.16 adds GetPullRequestDraft and OpenPullRequest: a worktree's branch
 // pushed and opened as a pull request, as the desktop's Pull request… does.
+//
+// 1.17 adds the host's current reachable addresses to HostSnapshot. A phone
+// keeps them for later connections; its pairing code still carries one URL.
+//
+// 1.18 is Sleep.
+//
+// 1.19 adds pull request actions: MergePullRequest, UpdatePullRequest,
+// ReadyPullRequest, ReopenPullRequest, and AddressComments, which hands
+// unresolved review comments to the worktree's agent the way FixChecks
+// hands failed checks. PullRequestSummary gains state, base, behind,
+// unresolved comments, and the merge methods the repository allows.
+//
+// 1.20 adds whether a worktree is pinned (`WorktreeSummary.pinned`),
+// PinWorktree, and DeleteWorktree, answered with WorktreeDeleted — the
+// worktree menu's Pin and Delete. Neither touches a repository's own
+// checkout.
 
 syntax = "proto3";
 
@@ -144,6 +160,23 @@ message Envelope {
     PullRequestDraft pull_request_draft = 108;
     OpenPullRequest open_pull_request = 109;
     PullRequestOpened pull_request_opened = 110;
+
+    // Since 1.19.
+    MergePullRequest merge_pull_request = 111;
+    PullRequestMerged pull_request_merged = 112;
+    UpdatePullRequest update_pull_request = 113;
+    PullRequestUpdated pull_request_updated = 114;
+    ReadyPullRequest ready_pull_request = 115;
+    PullRequestReadied pull_request_readied = 116;
+    ReopenPullRequest reopen_pull_request = 117;
+    PullRequestReopened pull_request_reopened = 118;
+    AddressComments address_comments = 119;
+    CommentsHandedOver comments_handed_over = 120;
+
+    // Since 1.20.
+    PinWorktree pin_worktree = 121;
+    DeleteWorktree delete_worktree = 122;
+    WorktreeDeleted worktree_deleted = 123;
   }
 }
 
@@ -191,6 +224,9 @@ enum ErrorCode {
   // Since 1.6. The pairing was declined on the desktop, or not approved in
   // time.
   DECLINED = 7;
+  // Since 1.20. An unforced DeleteWorktree that would lose work — git
+  // refused it, saying what. Asking again with `force` deletes it anyway.
+  WOULD_LOSE_WORK = 8;
 }
 
 message Error {
@@ -221,6 +257,8 @@ message HostSnapshot {
   // too. Unset until a ket window has reported it; the phone keeps its own
   // then. The desktop's to choose: a phone has no theme setting of its own.
   Palette palette = 4;
+  // Since 1.17. LAN first, then Tailscale when this host listens on it.
+  repeated string addresses = 5;
 }
 
 // The desktop's theme, as the colours a phone draws with. Each is
@@ -353,6 +391,9 @@ message WorktreeSummary {
   // and `question` holds only the newest of them: a phone reading this picks
   // the one for the terminal it is showing. Empty while none waits.
   repeated Question questions = 16;
+  // Since 1.20. Pinned in the desktop's sidebar, which lists pinned
+  // worktrees first; the snapshot's order already has them there.
+  bool pinned = 17;
 }
 
 // Since 1.11. A pull request open from a worktree's branch.
@@ -372,6 +413,22 @@ message PullRequestSummary {
   Review review = 4;
   // In GitHub's order.
   repeated CheckSummary checks = 5;
+  // Since 1.19. Missing on an older desktop, which only sent open ones.
+  enum State {
+    OPEN = 0;
+    CLOSED = 1;
+    MERGED = 2;
+  }
+  State state = 6;
+  // The branch it asks to merge into.
+  string base = 7;
+  // Its branch is behind that base.
+  bool behind = 8;
+  // Review comments still open, as last counted.
+  uint32 unresolved_comments = 9;
+  bool merge_commit_allowed = 10;
+  bool squash_merge_allowed = 11;
+  bool rebase_merge_allowed = 12;
 }
 
 // Since 1.11. One check on a pull request: a GitHub Actions job, or a status
@@ -1005,6 +1062,105 @@ message PullRequestOpened {
   // How many files the commit made first took; zero when nothing was
   // uncommitted.
   uint32 committed = 7;
+}
+
+// Since 1.19. How GitHub lands a pull request.
+enum PullRequestMergeMethod {
+  PULL_REQUEST_MERGE_METHOD_UNSPECIFIED = 0;
+  MERGE_COMMIT = 1;
+  SQUASH = 2;
+  REBASE = 3;
+}
+
+// Since 1.19. Merge a worktree's pull request, as the desktop's Merge pull
+// request does. Needs no ket window. A mutation; answered with
+// PullRequestMerged, or an Error in GitHub's own words when it refuses.
+// Asked again under the same idempotency key, it answers with how that one
+// went rather than merging twice.
+message MergePullRequest {
+  string worktree_id = 1;
+  // Unspecified uses the repository's default of the methods it allows.
+  PullRequestMergeMethod method = 2;
+}
+
+message PullRequestMerged {
+  uint64 number = 1;
+  string url = 2;
+  PullRequestMergeMethod method = 3;
+}
+
+// Since 1.19. Update a worktree's pull request branch from its base
+// (`gh pr update-branch`). Needs no ket window. A mutation.
+message UpdatePullRequest {
+  string worktree_id = 1;
+}
+
+message PullRequestUpdated {
+  uint64 number = 1;
+}
+
+// Since 1.19. Mark a draft pull request ready for review.
+message ReadyPullRequest {
+  string worktree_id = 1;
+}
+
+message PullRequestReadied {
+  uint64 number = 1;
+}
+
+// Since 1.19. Reopen a closed unmerged pull request.
+message ReopenPullRequest {
+  string worktree_id = 1;
+}
+
+message PullRequestReopened {
+  uint64 number = 1;
+}
+
+// Since 1.19. Hand a worktree's unresolved review comments to its agent, as
+// the desktop's Address comments with agent does. Needs a ket window open.
+// A mutation; answered with CommentsHandedOver, or an Error saying why not.
+// Asked again under the same idempotency key, it answers with how that one
+// went rather than giving the agent the message twice.
+message AddressComments {
+  string worktree_id = 1;
+}
+
+message CommentsHandedOver {
+  // No agent was running, and the one ket on the desktop is starting has
+  // not taken the message yet.
+  bool starting = 1;
+}
+
+// Since 1.20. Pin or unpin a worktree, as the desktop's worktree menu does:
+// a pinned worktree is listed first in its project. Not a repository's own
+// checkout, which has no record to carry the pin. Needs no ket window. A
+// mutation; answered with Ack, or an Error saying why not.
+message PinWorktree {
+  string worktree_id = 1;
+  bool pinned = 2;
+}
+
+// Since 1.20. Delete a worktree — its checkout and its branch — as the
+// desktop's worktree menu does once its dialog is confirmed. Not a
+// repository's own checkout. A branch with commits its base does not have
+// is kept, and the answer names it. Needs a ket window open, which closes
+// the worktree's terminals and tabs. A mutation; answered with
+// WorktreeDeleted, or an Error saying why not.
+//
+// Unforced, a delete that would lose work — uncommitted changes, say — is
+// refused with an Error of code WOULD_LOSE_WORK saying what; asking again
+// with `force` deletes it anyway, as the desktop's Delete anyway does. Any
+// other Error is not that, and forcing would not help. Asked again under the same
+// idempotency key, it answers with how that one went.
+message DeleteWorktree {
+  string worktree_id = 1;
+  bool force = 2;
+}
+
+message WorktreeDeleted {
+  // The branch kept because it has unmerged commits; empty when it went too.
+  string kept_branch = 1;
 }
 
 // Since 1.7. The snippets saved in ket on the desktop, for one-tap replies.

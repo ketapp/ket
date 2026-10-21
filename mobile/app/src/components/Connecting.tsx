@@ -24,7 +24,7 @@ export function Connecting({ conn }: { conn: HostConnection }) {
         <Ping stuck={false} />
         <View style={styles.words}>
           <Text style={styles.title}>Connecting to your Mac</Text>
-          <Text style={styles.meta}>through {hostOf(conn.host.relay)}</Text>
+          <Text style={styles.meta}>{conn.addressForDisplay() ? `through ${hostOf(conn.addressForDisplay()!)}` : 'trying saved addresses'}</Text>
         </View>
       </View>
     );

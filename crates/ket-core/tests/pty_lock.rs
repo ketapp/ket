@@ -88,6 +88,7 @@ fn terminal_spec(cwd: &std::path::Path, index: usize) -> TerminalSpec {
         size: TerminalSize::new(80, 24),
         key: None,
         adopt: false,
+        adopt_only: false,
     }
 }
 

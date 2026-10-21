@@ -15,6 +15,18 @@ words; no internal names, no commit hashes. ket reads this file
 
 ### New
 
+- The phone's Worktrees screen looks like your Mac's sidebar: a compact
+  filter with New beside it, and the list running the full height under a
+  floating tab bar. Worktrees at work open up to show what their agent is
+  doing. A quick prompt at the foot starts an agent in the project and with
+  the agent you last used.
+- Hold a worktree on your phone for its menu: pin it to the top of its
+  project, act on its pull request, or delete it. Delete asks first, and
+  offers Delete anyway when it would lose uncommitted work. Your
+  repository's own checkout can't be pinned or deleted.
+- Put idle agents to sleep from a worktree's menu while their tabs stay open, then wake into the same conversation. You can turn on automatic sleep and choose its delay in Settings → General.
+- Merge a pull request, update its branch, mark a draft ready, reopen a closed one, or give its review comments to the agent — from the worktree's menu on your Mac, or from the pull request card on your phone.
+- Reach your Mac from your phone over Tailscale away from home, or add an address for another network without pairing again.
 - Open a pull request from your phone: Pull request… beside Merge on a
   worktree's screen offers the title and description your Mac's dialog
   would, to edit or dictate, then commits what is uncommitted, pushes the
@@ -102,6 +114,10 @@ words; no internal names, no commit hashes. ket reads this file
 
 ### Improved
 
+- ⌘/ in the editor comments out the selected lines, or the line you're on,
+  and uncomments them when you press it again, as in VS Code. Everywhere
+  else ⌘/ still opens your snippets.
+- Worktree names stay as you named them when an agent changes its session title, and their sidebar labels are slightly smaller.
 - In Send Snippet (⌘/), the up and down arrows go round the list: down
   from the last snippet goes to the first, and up from the first goes to the
   last.
@@ -116,6 +132,9 @@ words; no internal names, no commit hashes. ket reads this file
   scrolling in a small box, and Start sits at the far end with Mark done
   beside it. Delete is a bin at the other end, away from Start, and still
   asks first. While you have unsaved changes, Save takes Start's place.
+- The Feedback, Bug and Idea switch at the top of Send feedback is easier to
+  read: each answer has a mark beside it at full size, and the one you chose
+  fills its track instead of floating in the middle of it.
 - The window is more compact: narrower gaps between the sidebar, the tabs and
   the header, tighter rows and smaller type in the sidebar, a shorter tab bar
   and status bar, and an 11-point terminal, so more of your projects and more
@@ -141,6 +160,11 @@ words; no internal names, no commit hashes. ket reads this file
 
 ### Fixed
 
+- Approving a Grok prompt from your phone no longer rejects it. Grok's
+  choices move about from one prompt to the next, so ket now reads the menu
+  on screen and picks the choice you tapped by name. When Grok offers no
+  Always allow for a command, the phone says so instead of guessing.
+- Address comments with agent is offered when a reviewer left comments on lines, even if they did not request changes or write a review body.
 - An agent sitting at its own prompt no longer shows as busy when ket has not
   heard from it yet, such as a session resumed after ket restarts.
 - Starting an OpenCode session no longer fails with “OpenCode listed no

@@ -31,6 +31,7 @@ pulldown-cmark.workspace = true
 # The Android emulator tab's frames, handed to gpui as images — pixels in
 # memory only; nothing here opens a file.
 image = { version = "0.25", default-features = false }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 # Browser tabs are a native child view, not a bundled engine. On macOS Wry is
 # backed by WKWebView; keeping these target-specific avoids pulling Linux's GTK

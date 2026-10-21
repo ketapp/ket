@@ -42,6 +42,7 @@ fn shell(cwd: &Path, script: &str) -> TerminalSpec {
         size: TerminalSize::new(80, 24),
         key: None,
         adopt: false,
+        adopt_only: false,
     }
 }
 
@@ -403,6 +404,51 @@ fn a_program_that_traps_hangup_is_still_killable() {
         "a program that trapped SIGHUP outlived its terminal"
     );
     assert!(terminal.is_closed());
+}
+
+#[test]
+fn graceful_stop_gives_a_hangup_handler_time_to_flush() {
+    let sandbox = Sandbox::new("terminal-graceful-stop");
+    let marker = sandbox.path("flushed");
+    let mut spec = shell(
+        sandbox.root(),
+        "trap 'printf flushed > \"$HUP_MARKER\"' HUP; printf 'ready\\n'; while :; do sleep 1; done",
+    );
+    spec.env.insert(
+        "HUP_MARKER".to_owned(),
+        marker.to_string_lossy().into_owned(),
+    );
+    let terminal = LocalTerminal::open(&spec).expect("open terminal");
+    assert!(wait_for_text(&terminal, "ready"));
+
+    terminal.stop(Duration::from_secs(2));
+
+    assert!(
+        wait_until(Duration::from_secs(3), || marker.exists()),
+        "SIGHUP handler did not flush: pid={:?}, status={:?}, screen={:?}",
+        terminal.pid(),
+        terminal.exit_status(),
+        screen(&terminal)
+    );
+    terminal.kill();
+}
+
+#[test]
+fn graceful_stop_forces_a_program_that_ignores_hangup() {
+    let sandbox = Sandbox::new("terminal-stop-timeout");
+    let terminal = LocalTerminal::open(&shell(
+        sandbox.root(),
+        "trap '' HUP; printf 'ready\\n'; while :; do sleep 1; done",
+    ))
+    .expect("open terminal");
+    assert!(wait_for_text(&terminal, "ready"));
+
+    terminal.stop(Duration::from_millis(50));
+
+    assert!(
+        wait_until(Duration::from_secs(5), || terminal.exit_status().is_some()),
+        "a process that ignored SIGHUP outlived the grace period"
+    );
 }
 
 #[test]

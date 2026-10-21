@@ -20,7 +20,7 @@ jest.mock(
 jest.mock('./store', () => ({
   phoneKey: jest.fn(async () => ({})),
   saveHost: jest.fn(async () => {}),
-  toPaired: (host: { relay: string }) => ({ relay: host.relay }),
+  toPaired: (host: { relay: string; addresses?: string[] }) => ({ relay: host.relay, addresses: host.addresses }),
 }));
 jest.mock('./version', () => ({ versionLabel: '1.0 (1)' }));
 
@@ -41,5 +41,14 @@ describe('connection', () => {
     const fresh = connection(saved('ws://new.local:7979'));
     expect(fresh).not.toBe(old);
     await waitFor(() => expect(mockResume).toHaveBeenLastCalledWith(expect.objectContaining({ relay: 'ws://new.local:7979' }), expect.anything(), expect.anything()));
+  });
+
+  test('a saved address list is offered on the first reconnect', async () => {
+    connection({ ...saved('ws://mac.local:7979'), addresses: ['ws://mac.local:7979', 'ws://100.64.1.2:7979'] });
+    await waitFor(() => expect(mockResume).toHaveBeenCalledWith(
+      expect.objectContaining({ addresses: ['ws://mac.local:7979', 'ws://100.64.1.2:7979'] }),
+      expect.anything(),
+      expect.anything(),
+    ));
   });
 });

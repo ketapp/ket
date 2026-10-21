@@ -85,7 +85,7 @@ pub(crate) struct SessionLaunch {
     pub(crate) model: Option<String>,
     pub(crate) effort: Option<String>,
 }
-use ket_core::terminal::{Terminal, TerminalSpec};
+use ket_core::terminal::{StopOutcome, Terminal, TerminalSpec};
 use ket_core::theme::Theme;
 use ket_core::workspace::Workspace;
 
@@ -294,6 +294,15 @@ pub(crate) struct TerminalHandle {
     find: Option<TerminalFind>,
 }
 
+/// A tab whose agent process has stopped, but whose exact session can wake.
+pub(crate) struct AsleepTerminal {
+    pub(crate) agent: String,
+    pub(crate) session: String,
+    pub(crate) since_ms: u64,
+    pub(crate) freed_bytes: u64,
+    wake_requested: bool,
+}
+
 /// The cursor's blink, when the program asked for one.
 #[derive(Default)]
 pub(crate) struct Blink {
@@ -467,8 +476,470 @@ impl Shell {
                 Some(space) => space.focused,
                 None => continue,
             };
+            if let Some(saved) = restore.asleep.as_ref() {
+                let terminal = TerminalId(self.next_terminal);
+                self.next_terminal += 1;
+                let title = restore.title.clone().unwrap_or_else(|| {
+                    restore
+                        .agent
+                        .clone()
+                        .unwrap_or_else(|| "Terminal".to_owned())
+                });
+                self.terminal_keys.insert(terminal, restore.key.clone());
+                self.asleep_terminals.insert(
+                    terminal,
+                    AsleepTerminal {
+                        agent: restore.agent.clone().unwrap_or_default(),
+                        session: saved.session.clone(),
+                        since_ms: saved.since_ms,
+                        freed_bytes: saved.freed_bytes,
+                        wake_requested: false,
+                    },
+                );
+                self.spaces.entry(id.clone()).or_default().open_tab_in(
+                    pane,
+                    Tab {
+                        title: title.into(),
+                        kind: TabKind::Terminal(terminal),
+                        renamed: restore.title.is_some(),
+                        pinned: restore.pinned,
+                        preview: false,
+                    },
+                );
+                // The layout may have been saved just before a crash, while
+                // the host was still running this process. Adopt by the saved
+                // pane key without ever falling back to spawning another one.
+                // `cwd` is not used to launch anything in adopt-only mode,
+                // so a missing checkout must not prevent host reconciliation.
+                let cwd = self
+                    .selected_path()
+                    .or_else(|| worktree_path(&id))
+                    .unwrap_or_else(|| PathBuf::from("/"));
+                let mut spec = TerminalSpec::shell(cwd);
+                spec.key = Some(restore.key.clone());
+                spec.adopt = true;
+                spec.adopt_only = true;
+                let agent_name = restore.agent.clone();
+                self.terminal_notes
+                    .insert(terminal, "Checking agent…".into());
+                cx.spawn(async move |this: WeakEntity<Shell>, cx: &mut AsyncApp| {
+                    let opened = cx
+                        .background_executor()
+                        .spawn(async move { Terminal::open(&spec) })
+                        .await;
+                    let _ = this.update(cx, |shell, cx| match opened {
+                        Ok(term) => shell.finish_terminal(
+                            terminal,
+                            "agent".to_owned(),
+                            agent_name,
+                            None,
+                            Ok(term),
+                            cx,
+                        ),
+                        Err(_) => {
+                            shell.terminal_notes.remove(&terminal);
+                            let wake = shell
+                                .asleep_terminals
+                                .get(&terminal)
+                                .is_some_and(|asleep| asleep.wake_requested);
+                            if wake {
+                                shell.wake_terminal(terminal, cx);
+                            }
+                            cx.notify();
+                        }
+                    });
+                })
+                .detach();
+                continue;
+            }
             let resume = agent.is_some();
             self.open_session_tab_in(pane, agent, resume, true, Some(restore), None, cx);
+        }
+        self.persist_layout();
+    }
+
+    /// Restart one stopped tab with the session ID it held before sleep.
+    pub(crate) fn wake_terminal(&mut self, terminal: TerminalId, cx: &mut Context<Self>) {
+        if self
+            .terminal_notes
+            .get(&terminal)
+            .is_some_and(|note| note.as_ref() == "Checking agent…")
+        {
+            if let Some(asleep) = self.asleep_terminals.get_mut(&terminal) {
+                asleep.wake_requested = true;
+            }
+            return;
+        }
+        if self.terminals.contains_key(&terminal) {
+            if let Some(asleep) = self.asleep_terminals.get_mut(&terminal) {
+                asleep.wake_requested = true;
+                self.terminal_notes
+                    .insert(terminal, "Waking when the agent stops…".into());
+                cx.notify();
+            }
+            return;
+        }
+        if self
+            .terminal_notes
+            .get(&terminal)
+            .is_some_and(|note| note.as_ref() == "Waking agent…")
+        {
+            return;
+        }
+        let Some(asleep) = self.asleep_terminals.get(&terminal) else {
+            return;
+        };
+        let Some(worktree) = self
+            .spaces
+            .iter()
+            .find_map(|(id, space)| space.terminal_ids().contains(&terminal).then(|| id.clone()))
+        else {
+            return;
+        };
+        let Some(cwd) = self
+            .projects
+            .iter()
+            .flat_map(|project| &project.worktrees)
+            .find(|node| node.id == worktree)
+            .map(|node| node.path.clone())
+            .or_else(|| worktree_path(&worktree))
+        else {
+            self.terminal_notes
+                .insert(terminal, "Worktree directory is unavailable".into());
+            cx.notify();
+            return;
+        };
+        let Some(agent) = self
+            .runnable_agents()
+            .into_iter()
+            .find(|agent| agent.name == asleep.agent)
+        else {
+            self.terminal_notes.insert(
+                terminal,
+                "This agent is unavailable; the tab remains asleep".into(),
+            );
+            cx.notify();
+            return;
+        };
+        let agent = self.project_agent_spec(&worktree, &agent);
+        let session = asleep.session.clone();
+        let launched_with = self
+            .project_agent_override(&worktree, &agent.name)
+            .map(crate::agent_override::short);
+        let key = self.terminal_keys.get(&terminal).cloned();
+        let pane = self
+            .spaces
+            .get(&worktree)
+            .map_or(PaneId(0), |space| space.focused);
+        let size = self.pane_terminal_size(&worktree, pane, cx);
+        self.terminal_notes.insert(terminal, "Waking agent…".into());
+        cx.notify();
+        cx.spawn(async move |this: WeakEntity<Shell>, cx: &mut AsyncApp| {
+            let prepared = cx
+                .background_executor()
+                .spawn(async move {
+                    let sessions = Sessions::for_launch(&agent);
+                    let recorded = sessions.scan(&[&cwd]).remove(&cwd).is_some_and(|found| {
+                        found
+                            .iter()
+                            .any(|found| found.id == session && found.agent == agent.name)
+                    });
+                    let resume = recorded
+                        .then(|| {
+                            sessions.open_args(
+                                ket_core::agents::harness(&agent.name),
+                                &cwd,
+                                &session,
+                            )
+                        })
+                        .flatten()
+                        .map(|args| (session, args));
+                    let settings = Workspace::open()
+                        .ok()
+                        .map(|workspace| workspace.config().agent.clone());
+                    let opencode_agents = (ket_core::agents::harness(&agent.name) == "opencode")
+                        .then(|| {
+                            use ket_core::agents::Prober;
+                            let program = agent
+                                .command
+                                .split_whitespace()
+                                .next()
+                                .unwrap_or("opencode");
+                            let inline = agent
+                                .env
+                                .get("OPENCODE_CONFIG_CONTENT")
+                                .cloned()
+                                .or_else(|| std::env::var("OPENCODE_CONFIG_CONTENT").ok());
+                            match ket_core::agents::ShellProber.find(program) {
+                                Some(found) => ket_core::permissions::opencode_agents(
+                                    &found,
+                                    &agent.command,
+                                    &cwd,
+                                    inline.as_deref(),
+                                ),
+                                None => Err(ket_core::KetError::Config(
+                                    "OpenCode could not be found to inspect its agents".to_owned(),
+                                )),
+                            }
+                        });
+                    (agent, cwd, resume, settings, opencode_agents)
+                })
+                .await;
+            let (agent, cwd, resume, settings, opencode_agents) = prepared;
+            let Some(resume) = resume else {
+                let _ = this.update(cx, |shell, cx| {
+                    shell.terminal_notes.insert(
+                        terminal,
+                        "That session is open elsewhere or cannot be resumed".into(),
+                    );
+                    cx.notify();
+                });
+                return;
+            };
+            let agent_name = agent.name.clone();
+            let spec = this
+                .update(cx, |shell, _| {
+                    if !shell.asleep_terminals.contains_key(&terminal)
+                        || !shell.usage_history.can_resume_with_economy(
+                            &resume.0,
+                            shell.token_reduction_for(&worktree),
+                        )
+                    {
+                        return None;
+                    }
+                    Some(shell.terminal_spec(
+                        &worktree,
+                        cwd,
+                        Some(agent),
+                        Some(resume),
+                        settings.as_ref(),
+                        terminal,
+                        None,
+                    ))
+                })
+                .ok()
+                .flatten();
+            let Some(mut spec) = spec else {
+                let _ = this.update(cx, |shell, cx| {
+                    shell
+                        .terminal_notes
+                        .insert(terminal, "Economy prevents resuming this session".into());
+                    cx.notify();
+                });
+                return;
+            };
+            if let Some(agents) = opencode_agents
+                && let Err(error) = opencode_permissions(&mut spec.env, agents)
+            {
+                let _ = this.update(cx, |shell, cx| {
+                    shell
+                        .terminal_notes
+                        .insert(terminal, format!("Could not wake OpenCode: {error}").into());
+                    cx.notify();
+                });
+                return;
+            }
+            spec.key = key;
+            if let Some(size) = size {
+                spec.size = size;
+            }
+            let command = spec.command.clone();
+            let opened = cx
+                .background_executor()
+                .spawn(async move { Terminal::open(&spec) })
+                .await;
+            let _ = this.update(cx, |shell, cx| {
+                shell.finish_terminal(
+                    terminal,
+                    command,
+                    Some(agent_name),
+                    launched_with,
+                    opened,
+                    cx,
+                );
+            });
+        })
+        .detach();
+    }
+
+    /// Stop an idle agent while retaining its tab and exact session.
+    pub(crate) fn sleep_terminal(
+        &mut self,
+        terminal: TerminalId,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        if self.window_active && self.active_terminal_id() == Some(terminal) {
+            return Err("the selected tab is in the focused window".to_owned());
+        }
+        let handle = self
+            .terminals
+            .get(&terminal)
+            .ok_or("terminal is not running")?;
+        let agent = handle.agent.clone().ok_or("plain shells cannot sleep")?;
+        let term = handle.term.clone();
+        if term.is_closed() {
+            return Err("terminal has already exited".to_owned());
+        }
+        let key = self
+            .terminal_keys
+            .get(&terminal)
+            .ok_or("terminal has no session key")?;
+        let pane = self
+            .activity
+            .pane_status(key)
+            .ok_or("agent has not reported its state")?;
+        if pane.agent != agent
+            || pane.state != ket_core::event::AgentState::Idle
+            || self
+                .activity
+                .pane(key, ket_core::now_ms())
+                .is_none_or(|(_, signal)| signal != ket_core::activity::Signal::Quiet)
+        {
+            return Err("agent is still working or waiting".to_owned());
+        }
+        let session = pane
+            .session
+            .clone()
+            .ok_or("agent has not reported a session ID")?;
+        let resume = Sessions::new().resume_args(ket_core::agents::harness(&agent), &session);
+        if resume.is_none_or(|args| args.is_empty()) {
+            return Err(format!("{agent} cannot resume a session"));
+        }
+        let worktree = self
+            .spaces
+            .iter()
+            .find_map(|(id, space)| space.terminal_ids().contains(&terminal).then_some(id))
+            .ok_or("terminal has no worktree")?;
+        if !self
+            .usage_history
+            .can_resume_with_economy(&session, self.token_reduction_for(worktree))
+        {
+            return Err("Economy prevents resuming this session".to_owned());
+        }
+        self.refresh_overhead();
+        let freed_bytes = term
+            .pid()
+            .and_then(|pid| self.overhead.terminal_memory(pid))
+            .unwrap_or(0);
+        self.asleep_terminals.insert(
+            terminal,
+            AsleepTerminal {
+                agent,
+                session,
+                since_ms: ket_core::now_ms(),
+                freed_bytes,
+                wake_requested: false,
+            },
+        );
+        self.terminal_notes.remove(&terminal);
+        self.persist_layout();
+        cx.notify();
+        cx.spawn(async move |this: WeakEntity<Shell>, cx: &mut AsyncApp| {
+            let stopped = cx
+                .background_executor()
+                .spawn(async move { term.stop(Duration::from_secs(2)) })
+                .await;
+            if !matches!(stopped, Ok(StopOutcome::Stopped | StopOutcome::Gone)) {
+                let _ = this.update(cx, |shell, cx| {
+                    // A failed round trip does not prove whether the stop was
+                    // applied. Only a live phone lease lets us safely undo
+                    // sleep; a closed terminal must keep its saved session.
+                    if matches!(stopped, Ok(StopOutcome::Controlled))
+                        && shell
+                            .terminals
+                            .get(&terminal)
+                            .is_some_and(|term| !term.term.is_closed())
+                    {
+                        shell.asleep_terminals.remove(&terminal);
+                        shell.persist_layout();
+                    }
+                    shell.note = Some(match stopped {
+                        Ok(StopOutcome::Controlled) => {
+                            "The terminal is controlled by a phone".into()
+                        }
+                        _ => "Could not confirm that the agent stopped".into(),
+                    });
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+        Ok(())
+    }
+
+    /// Apply the menu action to every eligible agent tab in one worktree.
+    pub(crate) fn sleep_worktree(&mut self, worktree: &WorktreeId, cx: &mut Context<Self>) {
+        let ids = self
+            .spaces
+            .get(worktree)
+            .map_or_else(Vec::new, |space| space.terminal_ids());
+        let mut slept = 0;
+        let mut reasons = Vec::new();
+        for id in ids {
+            match self.sleep_terminal(id, cx) {
+                Ok(()) => slept += 1,
+                Err(reason) => reasons.push(reason),
+            }
+        }
+        self.note = Some(if slept == 0 {
+            format!(
+                "No agent could sleep: {}",
+                reasons
+                    .first()
+                    .map_or("no agent tab is running", String::as_str)
+            )
+            .into()
+        } else {
+            format!(
+                "Putting {slept} agent{} to sleep",
+                if slept == 1 { "" } else { "s" }
+            )
+            .into()
+        });
+        cx.notify();
+    }
+
+    /// Wake every asleep agent tab in one worktree.
+    pub(crate) fn wake_worktree(&mut self, worktree: &WorktreeId, cx: &mut Context<Self>) {
+        let ids = self
+            .spaces
+            .get(worktree)
+            .map_or_else(Vec::new, |space| space.terminal_ids());
+        for id in ids {
+            if self.asleep_terminals.contains_key(&id) {
+                self.wake_terminal(id, cx);
+            }
+        }
+    }
+
+    /// Check each agent pane independently; a busy neighbour does not hide an idle one.
+    pub(crate) fn sweep_idle_agents(&mut self, cx: &mut Context<Self>) {
+        let Ok(config) = ket_core::config::Config::load() else {
+            return;
+        };
+        if !config.sleep.enabled() {
+            return;
+        }
+        let now = ket_core::now_ms();
+        let threshold = u64::from(config.sleep.after_minutes) * 60_000;
+        let ids: Vec<_> = self
+            .spaces
+            .values()
+            .flat_map(|space| space.terminal_ids())
+            .collect();
+        for id in ids {
+            let Some(key) = self.terminal_keys.get(&id) else {
+                continue;
+            };
+            let Some(pane) = self.activity.pane_status(key) else {
+                continue;
+            };
+            if pane.state == ket_core::event::AgentState::Idle
+                && now.saturating_sub(pane.at_ms) >= threshold
+                && now.saturating_sub(pane.heard_at_ms()) >= threshold
+            {
+                let _ = self.sleep_terminal(id, cx);
+            }
         }
     }
 
@@ -1050,6 +1521,8 @@ impl Shell {
                 return;
             }
         };
+        self.asleep_terminals.remove(&id);
+        self.persist_layout();
         self.terminal_notes.remove(&id);
 
         let mut frames = term.frames();
@@ -1189,6 +1662,30 @@ impl Shell {
             // itself went with it — whether or not the tab stays.
             let _ = this.update(cx, |shell, _| shell.clear_agent_status(id));
 
+            // Sleeping keeps the tab and its saved session, even though its
+            // process and renderer have ended.
+            if this
+                .update(cx, |shell, cx| {
+                    if shell.asleep_terminals.contains_key(&id) {
+                        let wake = shell
+                            .asleep_terminals
+                            .get_mut(&id)
+                            .is_some_and(|asleep| std::mem::take(&mut asleep.wake_requested));
+                        shell.terminals.remove(&id);
+                        if wake {
+                            shell.wake_terminal(id, cx);
+                        }
+                        cx.notify();
+                        true
+                    } else {
+                        false
+                    }
+                })
+                .unwrap_or(false)
+            {
+                return;
+            }
+
             // Exited cleanly, or lived long enough to have been used: that is
             // someone quitting their shell, and the tab goes.
             let used = opened.elapsed() >= STARTUP_GRACE;
@@ -1245,6 +1742,7 @@ impl Shell {
     /// tab without a handle is the pane that could not be got out of.
     pub(crate) fn close_terminal(&mut self, terminal: TerminalId) {
         self.clear_agent_status(terminal);
+        self.asleep_terminals.remove(&terminal);
         self.terminal_notes.remove(&terminal);
         self.terminal_keys.remove(&terminal);
         if let Some(handle) = self.terminals.remove(&terminal) {
@@ -1301,6 +1799,14 @@ impl Shell {
         let Some(id) = self.active_terminal_id() else {
             return false;
         };
+        if self.asleep_terminals.contains_key(&id) {
+            if !event.keystroke.modifiers.platform {
+                self.wake_terminal(id, cx);
+                cx.stop_propagation();
+                return true;
+            }
+            return false;
+        }
         if !self.terminals.contains_key(&id) {
             return false;
         }
@@ -1451,6 +1957,10 @@ impl Shell {
     /// bottom, or a selection going away.
     /// Says whether the terminal took them: not when it has closed.
     fn terminal_input(&mut self, id: TerminalId, bytes: Vec<u8>, cx: &mut Context<Self>) -> bool {
+        if self.asleep_terminals.contains_key(&id) {
+            self.wake_terminal(id, cx);
+            return true;
+        }
         let Some(handle) = self.terminals.get_mut(&id) else {
             return false;
         };
@@ -2110,6 +2620,44 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        if let Some(asleep) = self.asleep_terminals.get(&id) {
+            let since =
+                chrono::DateTime::<chrono::Utc>::from_timestamp_millis(asleep.since_ms as i64)
+                    .map_or_else(
+                        || "earlier".to_owned(),
+                        |time| {
+                            time.with_timezone(&chrono::Local)
+                                .format("%H:%M")
+                                .to_string()
+                        },
+                    );
+            let message = if asleep.freed_bytes > 0 {
+                format!(
+                    "Asleep since {since} · freed {} MB",
+                    asleep.freed_bytes / 1_000_000
+                )
+            } else {
+                format!("Asleep since {since}")
+            };
+            return div()
+                .flex()
+                .flex_col()
+                .size_full()
+                .justify_center()
+                .items_center()
+                .gap_3()
+                .text_color(paint(self.theme.text.dim))
+                .child(message)
+                .when_some(self.terminal_notes.get(&id), |element, note| {
+                    element.child(note.clone())
+                })
+                .child(
+                    crate::ui::button::button(("wake-terminal", id.0), "Wake")
+                        .render(&self.theme)
+                        .on_click(cx.listener(move |this, _, _, cx| this.wake_terminal(id, cx))),
+                )
+                .into_any_element();
+        }
         let Some(view) = self.terminal_view(id) else {
             let note = self
                 .terminal_notes

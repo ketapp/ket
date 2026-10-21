@@ -225,6 +225,21 @@ pub struct TerminalSpec {
     /// showing, instead of starting a new one. What a window restoring its
     /// tabs asks for; a new tab never does.
     pub adopt: bool,
+    /// Refuse to spawn if there is no existing host terminal under `key`.
+    /// Used to reconcile a saved asleep tab after a window crash.
+    pub adopt_only: bool,
+}
+
+/// The host's decision on a request to stop a terminal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StopOutcome {
+    /// The stop signal was sent.
+    Stopped,
+    /// A phone currently controls this terminal.
+    Controlled,
+    /// The terminal had already closed or been removed.
+    Gone,
 }
 
 impl TerminalSpec {
@@ -243,6 +258,7 @@ impl TerminalSpec {
             size: TerminalSize::default(),
             key: None,
             adopt: false,
+            adopt_only: false,
         }
     }
 
@@ -281,6 +297,7 @@ impl TerminalSpec {
             size: TerminalSize::default(),
             key: None,
             adopt: false,
+            adopt_only: false,
         }
     }
 }
@@ -529,6 +546,10 @@ pub struct LocalTerminal {
 }
 
 impl LocalTerminal {
+    /// The process that roots this terminal's process group.
+    pub fn pid(&self) -> Option<u32> {
+        self.pid
+    }
     /// Opens a pty, starts `spec`'s program in it, and begins parsing.
     ///
     /// Returns as soon as the program is spawned. There is no handshake to wait
@@ -912,6 +933,26 @@ impl LocalTerminal {
             kill_group(pid);
         }
     }
+
+    /// Requests a clean exit, then ends the process group after `grace`.
+    pub fn stop(&self, grace: std::time::Duration) {
+        let Some(pid) = self.pid else {
+            self.kill();
+            return;
+        };
+        signal_group(pid, "-HUP");
+        let closed = self.closed.clone();
+        let shutdown = self.shutdown.clone();
+        let output = self.output.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(grace);
+            if !closed.load(Ordering::Acquire) {
+                shutdown.store(true, Ordering::Release);
+                let _ = output.try_send(Pulse::Wake);
+                kill_group(pid);
+            }
+        });
+    }
 }
 
 impl Drop for LocalTerminal {
@@ -971,6 +1012,10 @@ macro_rules! either {
 }
 
 impl Terminal {
+    /// The process that roots this terminal's process group, when known.
+    pub fn pid(&self) -> Option<u32> {
+        either!(self, t => t.pid())
+    }
     /// Starts `spec`'s program — in the host by default, or in this process
     /// only when hosting was explicitly disabled.
     pub fn open(spec: &TerminalSpec) -> Result<Self> {
@@ -978,6 +1023,11 @@ impl Terminal {
             return remote::RemoteTerminal::open(spec).map(|remote| Self {
                 inner: Inner::Remote(remote),
             });
+        }
+        if spec.adopt_only {
+            return Err(crate::KetError::Conflict(
+                "No hosted terminal is available to adopt".to_owned(),
+            ));
         }
         LocalTerminal::open(spec).map(|local| Self {
             inner: Inner::Local(Box::new(local)),
@@ -1067,6 +1117,20 @@ impl Terminal {
     /// window going away — dropping a hosted terminal only lets go of it.
     pub fn kill(&self) {
         either!(self, t => t.kill());
+    }
+
+    /// Requests a clean exit before forcing the process group to end.
+    pub fn stop(&self, grace: std::time::Duration) -> Result<StopOutcome> {
+        match &self.inner {
+            Inner::Local(local) => {
+                if local.is_closed() {
+                    return Ok(StopOutcome::Gone);
+                }
+                local.stop(grace);
+                Ok(StopOutcome::Stopped)
+            }
+            Inner::Remote(remote) => remote.stop(grace),
+        }
     }
 }
 
@@ -1316,18 +1380,24 @@ impl ScrollbackTrim {
 /// the process is already gone — and there is no second thing to try.
 #[cfg(unix)]
 fn kill_group(pid: u32) {
+    signal_group(pid, "-KILL");
+}
+
+#[cfg(unix)]
+fn signal_group(pid: u32, signal: &str) {
     use std::process::{Command, Stdio};
 
     for program in ["/bin/kill", "kill"] {
         let sent = Command::new(program)
-            .arg("-KILL")
+            .arg(signal)
+            .arg("--")
             .arg(format!("-{pid}"))
             .arg(pid.to_string())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
-        if sent.is_ok() {
+        if sent.is_ok_and(|status| status.success()) {
             return;
         }
     }
@@ -1337,6 +1407,9 @@ fn kill_group(pid: u32) {
 /// Nothing to escalate to off unix; `ChildKiller` is the whole story there.
 #[cfg(not(unix))]
 fn kill_group(_pid: u32) {}
+
+#[cfg(not(unix))]
+fn signal_group(_pid: u32, _signal: &str) {}
 
 /// Spawns a named thread, naming the terminal if it cannot.
 ///

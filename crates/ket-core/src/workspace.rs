@@ -830,7 +830,6 @@ impl Workspace {
             project_id: project_id.clone(),
             branch: branch.to_owned(),
             name: None,
-            agent_title: None,
             path,
             base,
             base_commit,
@@ -1323,7 +1322,6 @@ impl Workspace {
             project_id: project_id.clone(),
             branch,
             name: None,
-            agent_title: None,
             path: wanted,
             base,
             base_commit,
@@ -2330,39 +2328,6 @@ impl Workspace {
         })
     }
 
-    /// Imports a title created by an agent's rename command.
-    ///
-    /// Returns whether the stored name changed. Repeated polls of the same
-    /// title do nothing, including after a person has manually renamed the row.
-    pub fn sync_worktree_name_from_agent(&self, id: &WorktreeId, title: &str) -> Result<bool> {
-        let id = id.clone();
-        let Some(title) = clean_worktree_name(title) else {
-            return Ok(false);
-        };
-        let current = self.store.load()?;
-        let worktree = current
-            .worktrees
-            .iter()
-            .find(|worktree| worktree.id == id)
-            .ok_or_else(|| KetError::UnknownWorktree(id.to_string()))?;
-        if worktree.agent_title.as_deref() == Some(title.as_str()) {
-            return Ok(false);
-        }
-        self.store.update(move |state| {
-            let worktree = state
-                .worktrees
-                .iter_mut()
-                .find(|worktree| worktree.id == id)
-                .ok_or_else(|| KetError::UnknownWorktree(id.to_string()))?;
-            if worktree.agent_title.as_deref() == Some(title.as_str()) {
-                return Ok(false);
-            }
-            worktree.name = Some(title.clone());
-            worktree.agent_title = Some(title);
-            Ok(true)
-        })
-    }
-
     /// Applies `change` to the project owning `id`, returning that project.
     fn mutate_project_state(
         &self,
@@ -2483,7 +2448,6 @@ impl Workspace {
                         project_id: project.id.clone(),
                         branch: project.default_base.clone(),
                         name: None,
-                        agent_title: None,
                         path: project.root.clone(),
                         base: project.default_base.clone(),
                         base_commit: None,

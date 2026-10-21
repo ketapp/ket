@@ -29,7 +29,7 @@ use ket_core::agent_hooks::{self, Listener};
 use ket_core::subagents::{Subagent, SubagentState};
 
 use crate::fonts::Prose;
-use crate::ui::{CAPTION, ICON, ICON_GAP, LABEL, WELL_XS};
+use crate::ui::{CAPTION, ICON, ICON_GAP, WELL_XS};
 
 /// How often the usage history is written.
 ///
@@ -816,6 +816,29 @@ pub(crate) fn row_mark(activity: &Activity, dirty: bool, missing: bool, t: &Them
     }
 }
 
+impl Shell {
+    fn worktree_row_mark(
+        &self,
+        id: &WorktreeId,
+        activity: &Activity,
+        dirty: bool,
+        missing: bool,
+        t: &Theme,
+    ) -> AnyElement {
+        let asleep = self.spaces.get(id).is_some_and(|space| {
+            space
+                .terminal_ids()
+                .iter()
+                .any(|terminal| self.asleep_terminals.contains_key(terminal))
+        });
+        if asleep {
+            sized_icon(Icon::Moon, MARK, paint(t.text.dim)).into_any_element()
+        } else {
+            row_mark(activity, dirty, missing, t)
+        }
+    }
+}
+
 /// The tag text for a git operation caught mid-flight.
 ///
 /// Present tense and lower case, to read the same as `primary`/`missing`
@@ -1076,10 +1099,24 @@ impl Shell {
             let checks = live
                 .map(ket_core::github::PullRequestStatus::checks_summary)
                 .unwrap_or_default();
-            let words = if checks.is_empty() {
-                format!("#{} on GitHub", open.number)
-            } else {
-                format!("#{} on GitHub \u{b7} {checks}", open.number)
+            let words = {
+                use ket_core::github::PullRequestState;
+                let mut parts = vec![format!("#{} on GitHub", open.number)];
+                if let Some(live) = live {
+                    match live.state {
+                        PullRequestState::Closed => parts.push("closed".to_owned()),
+                        PullRequestState::Merged => parts.push("merged".to_owned()),
+                        PullRequestState::Open if live.draft => parts.push("draft".to_owned()),
+                        PullRequestState::Open => {}
+                    }
+                    if live.behind {
+                        parts.push("behind".to_owned());
+                    }
+                }
+                if !checks.is_empty() {
+                    parts.push(checks);
+                }
+                parts.join(" \u{b7} ")
             };
             crate::ui::tooltip::tooltip(
                 ("worktree-pull-request", row),
@@ -2614,47 +2651,20 @@ impl Shell {
                 nodes.iter().map(|(_, path)| path.as_path()).collect();
             let found = ket_core::sessions::Sessions::new().scan(&paths);
 
-            let records = nodes
+            nodes
                 .iter()
                 .filter_map(|(id, path)| {
                     // Newest first out of `scan`, so the first is the one to offer.
                     let newest = found.get(path)?.first()?;
                     Some((id.clone(), newest.clone()))
                 })
-                .collect::<Vec<_>>();
-
-            let mut renamed = Vec::new();
-            if let Ok(workspace) = Workspace::open() {
-                for (id, session) in &records {
-                    let Some(title) = session.explicit_title.as_deref() else {
-                        continue;
-                    };
-                    if workspace
-                        .sync_worktree_name_from_agent(id, title)
-                        .unwrap_or(false)
-                    {
-                        renamed.push((id.clone(), title.to_owned()));
-                    }
-                }
-            }
-
-            (records, renamed)
+                .collect::<Vec<_>>()
         });
 
         cx.spawn(async move |shell: gpui::WeakEntity<Shell>, cx| {
-            let (records, renamed) = scan.await;
+            let records = scan.await;
             let _ = shell.update(cx, |shell, cx| {
                 shell.reading_records = false;
-                for (id, title) in renamed {
-                    for node in shell
-                        .projects
-                        .iter_mut()
-                        .flat_map(|project| project.worktrees.iter_mut())
-                        .filter(|node| node.id == id)
-                    {
-                        node.name = Some(title.clone().into());
-                    }
-                }
                 shell.activity.sync_records(now, records);
                 cx.notify();
             });
@@ -3562,11 +3572,6 @@ impl Shell {
                                         block_row(("worktree", pi * 1000 + wi), is_selected, t)
                                             .group(row_group.clone())
                                             .relative()
-                                            // `LABEL`, as the project names above it are: a
-                                            // worktree row carries a branch name, a status
-                                            // line and a run of tags at once, and that density
-                                            // reads better small.
-                                            .text_size(LABEL)
                                             // The rail stands in the row's own leading
                                             // padding, so the bar itself costs no width — and
                                             // what it frees is the slot the light used to
@@ -3620,7 +3625,8 @@ impl Shell {
                                                                 .bg(paint(t.hover)),
                                                         )
                                                     })
-                                                    .child(row_mark(
+                                                    .child(self.worktree_row_mark(
+                                                        &node.id,
                                                         &activity,
                                                         node.dirty,
                                                         node.missing,
@@ -3654,6 +3660,7 @@ impl Shell {
                                                             .child(
                                                                 div()
                                                                     .min_w_0()
+                                                                    .text_size(px(11.5))
                                                                     // One line, cut short with an
                                                                     // ellipsis. Without `flex_1`
                                                                     // a name that may shrink is

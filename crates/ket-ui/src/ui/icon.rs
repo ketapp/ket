@@ -281,6 +281,11 @@ pub(crate) enum Icon {
     ArrowRight,
     /// Feedback: a speech bubble, the status bar's way to write to the team.
     MessageSquare,
+    /// A bug report: what a feedback report is about when something broke.
+    Bug,
+    /// An idea: what a feedback report is about when it asks for something
+    /// ket does not do yet.
+    Lightbulb,
     /// A backlog note's priority: the first of three bars. Drawn over
     /// [`Icon::PriorityTrack`], which shows the bars that are not lit.
     PriorityLow,
@@ -406,6 +411,8 @@ impl Icon {
             Icon::ArrowLeft => "icons/arrow-left.svg",
             Icon::ArrowRight => "icons/arrow-right.svg",
             Icon::MessageSquare => "icons/message-square.svg",
+            Icon::Bug => "icons/bug.svg",
+            Icon::Lightbulb => "icons/lightbulb.svg",
             Icon::PriorityLow => "icons/priority-low.svg",
             Icon::PriorityMedium => "icons/priority-medium.svg",
             Icon::PriorityHigh => "icons/priority-high.svg",
@@ -456,7 +463,7 @@ pub(crate) fn sized_icon(which: Icon, size: Pixels, colour: Rgba) -> Svg {
 pub(crate) struct Assets;
 
 /// The bytes for every path [`Icon::asset`] can return.
-const FILES: [(&str, &[u8]); 107] = [
+const FILES: [(&str, &[u8]); 109] = [
     (
         "icons/chevron-down.svg",
         include_bytes!("../../assets/icons/chevron-down.svg"),
@@ -802,6 +809,14 @@ const FILES: [(&str, &[u8]); 107] = [
         include_bytes!("../../assets/icons/message-square.svg"),
     ),
     (
+        "icons/bug.svg",
+        include_bytes!("../../assets/icons/bug.svg"),
+    ),
+    (
+        "icons/lightbulb.svg",
+        include_bytes!("../../assets/icons/lightbulb.svg"),
+    ),
+    (
         "icons/priority-low.svg",
         include_bytes!("../../assets/icons/priority-low.svg"),
     ),
@@ -1035,6 +1050,8 @@ mod tests {
             Icon::ArrowLeft,
             Icon::ArrowRight,
             Icon::MessageSquare,
+            Icon::Bug,
+            Icon::Lightbulb,
             Icon::PriorityLow,
             Icon::PriorityMedium,
             Icon::PriorityHigh,

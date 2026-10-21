@@ -9,6 +9,7 @@ jest.mock('@ket/remote', () => ({
   keypairFrom: (privateKey: Uint8Array) => ({ privateKey, publicKey: Uint8Array.of(9) }),
   toBase64Url: (bytes: Uint8Array) => [...bytes].join('-'),
   utf8: (bytes: Uint8Array) => String.fromCharCode(...bytes),
+  validRelayUrl: (url: string) => /^wss?:\/\/[^/\s]+$/.test(url),
 }));
 
 const values = new Map<string, string>();
@@ -52,7 +53,7 @@ describe('web storage', () => {
     await store.saveLock(null);
     expect(await store.getLock()).toBeNull();
 
-    expect(store.toPaired(host)).toEqual({ hostId: Uint8Array.of(1, 2), hostPublic: Uint8Array.of(3, 4), relay: host.relay });
+    expect(store.toPaired(host)).toEqual({ hostId: Uint8Array.of(1, 2), hostPublic: Uint8Array.of(3, 4), relay: host.relay, addresses: [host.relay] });
     await store.forgetHost(host.id);
     expect(await store.listHosts()).toEqual([]);
     expect(await store.getCollapsed(host.id)).toEqual([]);

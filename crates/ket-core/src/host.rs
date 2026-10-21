@@ -75,6 +75,11 @@ pub fn lan_name() -> String {
     phones::lan_host()
 }
 
+/// This Mac's current Tailscale IPv4 address, if its interfaces have one.
+pub fn tailnet_ip() -> Option<std::net::Ipv4Addr> {
+    relay_url().is_none().then(phones::tailnet_ip).flatten()
+}
+
 /// A one-time pairing code from the running host, for a phone to scan. Fails
 /// when no host is running, or it has no relay.
 pub fn pairing_code() -> Result<String> {
@@ -566,6 +571,49 @@ pub fn finish_phone_review(req: u64, error: Option<String>) {
     if let Some(conn) = client::current() {
         let _ = conn.request(&wire::Request::SendReviewResult { req, error });
     }
+}
+
+/// A worktree a phone asked this window to delete — see
+/// [`take_phone_delete`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PhoneDelete {
+    /// Answered with [`finish_phone_delete`].
+    pub req: u64,
+    /// The worktree's id.
+    pub worktree: String,
+    /// Delete it even though work would be lost, as Delete anyway does.
+    pub force: bool,
+}
+
+/// The oldest of the deletes phones asked this window for.
+pub fn take_phone_delete() -> Option<PhoneDelete> {
+    let mut asked = client::PHONE_DELETES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    (!asked.is_empty()).then(|| asked.remove(0))
+}
+
+/// Answers the host's waiting phone: the worktree is gone, keeping the
+/// branch named when it has unmerged commits, or why it is not.
+pub fn finish_phone_delete(req: u64, outcome: std::result::Result<Option<String>, String>) {
+    if let Some(conn) = client::current() {
+        let (error, kept_branch) = match outcome {
+            Ok(kept) => (None, kept),
+            Err(why) => (Some(why), None),
+        };
+        let _ = conn.request(&wire::Request::DeleteWorkResult {
+            req,
+            error,
+            kept_branch,
+        });
+    }
+}
+
+/// Whether the host has said ket's store changed under this window's
+/// sidebar since the last call — a phone pinned a worktree — so the sidebar
+/// is to be read again.
+pub fn take_worktrees_changed() -> bool {
+    client::WORKTREES_CHANGED.swap(false, std::sync::atomic::Ordering::AcqRel)
 }
 
 /// The host's newest agent status snapshot, if one has arrived since the last

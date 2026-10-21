@@ -41,6 +41,12 @@ impl Shell {
         }
     }
 
+    /// Whether the tab in front is an editor, which takes ⌘/ for comments
+    /// rather than the shell's snippet picker.
+    pub(crate) fn editor_in_front(&self) -> bool {
+        self.active_editor_key().is_some()
+    }
+
     /// The absolute path of `id`'s worktree.
     ///
     /// Looked up fresh each time by reopening the workspace — spike-grade,

@@ -18,9 +18,9 @@ use crate::subagents::SubagentState;
 
 /// A pull request as a phone is sent it.
 fn pull_request_summary(open: &crate::github::PullRequestStatus) -> proto::PullRequestSummary {
-    use crate::github::{CheckState, Review};
+    use crate::github::{CheckState, PullRequestState, Review};
     use proto::check_summary::State;
-    use proto::pull_request_summary::Review as Reviewed;
+    use proto::pull_request_summary::{Review as Reviewed, State as Shown};
     proto::PullRequestSummary {
         number: open.number,
         url: open.url.clone(),
@@ -45,6 +45,17 @@ fn pull_request_summary(open: &crate::github::PullRequestStatus) -> proto::PullR
                 url: check.url.clone(),
             })
             .collect(),
+        state: match open.state {
+            PullRequestState::Open => Shown::Open,
+            PullRequestState::Closed => Shown::Closed,
+            PullRequestState::Merged => Shown::Merged,
+        } as i32,
+        base: open.base.clone(),
+        behind: open.behind,
+        unresolved_comments: open.unresolved_comments,
+        merge_commit_allowed: open.merge_methods.merge,
+        squash_merge_allowed: open.merge_methods.squash,
+        rebase_merge_allowed: open.merge_methods.rebase,
     }
 }
 
@@ -101,6 +112,7 @@ pub(super) fn snapshot(host: &Host, phones: &Phones) -> proto::HostSnapshot {
                     name: place.map_or_else(|| worktree.clone(), |p| p.name.clone()),
                     branch: place.map(|p| p.branch.clone()).unwrap_or_default(),
                     base: place.and_then(|p| p.base.clone()).unwrap_or_default(),
+                    pinned: place.is_some_and(|p| p.pinned),
                     files_changed: figure.files_changed,
                     lines_added: figure.lines_added,
                     lines_removed: figure.lines_removed,
@@ -127,6 +139,7 @@ pub(super) fn snapshot(host: &Host, phones: &Phones) -> proto::HostSnapshot {
             name: place.name.clone(),
             branch: place.branch.clone(),
             base: place.base.clone().unwrap_or_default(),
+            pinned: place.pinned,
             files_changed: figure.files_changed,
             lines_added: figure.lines_added,
             lines_removed: figure.lines_removed,
@@ -247,6 +260,7 @@ pub(super) fn snapshot(host: &Host, phones: &Phones) -> proto::HostSnapshot {
         palette: host.theme().as_ref().map(palette),
         usage: host.usage().iter().map(provider_usage).collect(),
         agents: host.agents(),
+        addresses: phones.relay.addresses(),
     }
 }
 

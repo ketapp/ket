@@ -25,10 +25,18 @@ import {
   type Envelope,
   ErrorCode,
   FixChecksSchema,
+  AddressCommentsSchema,
   GetPullRequestDraftSchema,
   OpenPullRequestSchema,
+  MergePullRequestSchema,
+  UpdatePullRequestSchema,
+  ReadyPullRequestSchema,
+  ReopenPullRequestSchema,
+  PinWorktreeSchema,
+  DeleteWorktreeSchema,
   type PullRequestDraft,
   type PullRequestOpened,
+  type PullRequestMergeMethod,
   GetChangesSchema,
   GetConversationSchema,
   GetDiffSchema,
@@ -60,9 +68,11 @@ import {
   envelope,
   resume,
   toBase64Url,
+  validRelayUrl,
 } from '@ket/remote';
 
 import { phoneKey, saveHost, type SavedHost, toPaired } from './store';
+import { addManualAddress, dialAddresses, removeManualAddress } from './addresses';
 import { versionLabel } from './version';
 
 export type Status = 'connecting' | 'connected' | 'offline';
@@ -102,6 +112,10 @@ const REVIEW_WAIT_MS = 20_000;
  * a commit that runs the repository's hooks, a push, and two `gh` calls. */
 const PULL_REQUEST_WAIT_MS = 180_000;
 
+/** How long a delete is waited for: the desktop gives its window two
+ * minutes to walk the checkout and ask git, and this is a little longer. */
+const DELETE_WAIT_MS = 150_000;
+
 /** How opening a pull request went: opened, or pushed to one already open —
  * or why not. */
 export type OpenedPullRequest = { opened: PullRequestOpened } | { why: string };
@@ -115,6 +129,9 @@ const DROPPED = 'the connection to the desktop dropped';
 /** How a Fix checks with agent went: given to the agent — to one still
  * starting, when `starting` — or why it was not. */
 export type FixedChecks = { starting: boolean } | { why: string };
+
+/** How Address comments with agent went, the same shape as Fix checks. */
+export type AddressedComments = { starting: boolean } | { why: string };
 
 /** A fresh idempotency key, naming one change however often it is sent. */
 function newKey(): string {
@@ -159,6 +176,8 @@ export class HostConnection {
   /** The desktop's protocol minor, from its welcome — what it can answer.
    * 7 reads sessions as conversations and takes new work. */
   hostMinor = 0;
+  /** The address of the open session, or null between sessions. */
+  activeAddress: string | null = null;
   /** When the phone last lost the desktop — or first tried to reach it —
    * while it has not got it back; `null` while connected. */
   downSince: number | null = Date.now();
@@ -225,6 +244,29 @@ export class HostConnection {
     for (const callback of this.changed) callback();
   }
 
+  /** The live address, or the last one that worked while reconnecting. */
+  addressForDisplay(): string | null {
+    const addresses = dialAddresses(this.host);
+    return this.activeAddress ?? this.host.lastAddress ?? (addresses.length === 1 ? addresses[0] : null);
+  }
+
+  /** Addresses added by this phone stay separate from the desktop's list. */
+  async addAddress(address: string): Promise<void> {
+    Object.assign(this.host, addManualAddress(this.host, address));
+    await saveHost(this.host);
+    this.notify();
+    if (this.status !== 'connected') this.retry();
+  }
+
+  async removeAddress(address: string): Promise<void> {
+    Object.assign(this.host, removeManualAddress(this.host, address));
+    if (this.host.lastAddress === address && !dialAddresses(this.host).includes(address)) {
+      delete this.host.lastAddress;
+    }
+    await saveHost(this.host);
+    this.notify();
+  }
+
   private async run(): Promise<void> {
     while (!this.closed) {
       try {
@@ -235,6 +277,7 @@ export class HostConnection {
       }
       this.redialing = false;
       this.remote = null;
+      this.activeAddress = null;
       this.clearLeases();
       for (const { reject } of this.pending.values()) reject(new Error(DROPPED));
       this.pending.clear();
@@ -274,6 +317,12 @@ export class HostConnection {
       resumeSeq: cursor ? BigInt(cursor.seq) : 0n,
     });
     this.remote = remote;
+    this.activeAddress = remote.address ?? null;
+    if (this.activeAddress && this.host.lastAddress !== this.activeAddress) {
+      this.host.lastAddress = this.activeAddress;
+      void saveHost(this.host);
+    }
+    this.notify();
     let epoch = cursor ? BigInt(cursor.epoch) : 0n;
     let seq = cursor ? BigInt(cursor.seq) : 0n;
     let lastSaved = Date.now();
@@ -299,6 +348,16 @@ export class HostConnection {
           this.notify();
           break;
         case 'snapshot':
+          if (this.hostMinor >= 17) {
+            const addresses = (message.payload.value.addresses ?? []).filter(validRelayUrl);
+            if (JSON.stringify(this.host.addresses) !== JSON.stringify(addresses)) {
+              this.host.addresses = addresses;
+              if (this.host.lastAddress && !dialAddresses(this.host).includes(this.host.lastAddress)) {
+                delete this.host.lastAddress;
+              }
+              void saveHost(this.host);
+            }
+          }
           this.snapshot = message.payload.value;
           this.settleStarting();
           this.notify();
@@ -607,6 +666,130 @@ export class HostConnection {
         default:
           return { starting: false };
       }
+    }
+  }
+
+  /** Hands a worktree's unresolved review comments to its agent, as the
+   * desktop's Address comments with agent does (desktop 1.19). */
+  async addressComments(worktreeId: string): Promise<AddressedComments> {
+    const payload: Envelope['payload'] = { case: 'addressComments', value: create(AddressCommentsSchema, { worktreeId }) };
+    const key = newKey();
+    const until = Date.now() + FIX_CHECKS_WAIT_MS;
+    for (;;) {
+      let reply: Envelope;
+      try {
+        reply = await this.request(payload, key, Math.max(until - Date.now(), 1));
+      } catch (error) {
+        const dropped = error instanceof Error && error.message === DROPPED;
+        if (dropped && (await this.reconnected(until))) continue;
+        throw error;
+      }
+      switch (reply.payload.case) {
+        case 'error':
+          return { why: reply.payload.value.message };
+        case 'commentsHandedOver':
+          return { starting: reply.payload.value.starting };
+        default:
+          return { starting: false };
+      }
+    }
+  }
+
+  /** Merges a worktree's pull request on GitHub (desktop 1.19). `null` once
+   * GitHub has it, or why it refused. Unspecified method uses the repository's
+   * default of the methods it allows. */
+  async mergePullRequest(worktreeId: string, method?: PullRequestMergeMethod): Promise<string | null> {
+    return this.prAction(
+      { case: 'mergePullRequest', value: create(MergePullRequestSchema, { worktreeId, method }) },
+      'pullRequestMerged',
+    );
+  }
+
+  /** Updates a worktree's pull request branch from its base (desktop 1.19). */
+  async updatePullRequest(worktreeId: string): Promise<string | null> {
+    return this.prAction(
+      { case: 'updatePullRequest', value: create(UpdatePullRequestSchema, { worktreeId }) },
+      'pullRequestUpdated',
+    );
+  }
+
+  /** Marks a draft pull request ready for review (desktop 1.19). */
+  async readyPullRequest(worktreeId: string): Promise<string | null> {
+    return this.prAction(
+      { case: 'readyPullRequest', value: create(ReadyPullRequestSchema, { worktreeId }) },
+      'pullRequestReadied',
+    );
+  }
+
+  /** Reopens a closed unmerged pull request (desktop 1.19). */
+  async reopenPullRequest(worktreeId: string): Promise<string | null> {
+    return this.prAction(
+      { case: 'reopenPullRequest', value: create(ReopenPullRequestSchema, { worktreeId }) },
+      'pullRequestReopened',
+    );
+  }
+
+  /** Pins or unpins a worktree, as the desktop's worktree menu does (desktop
+   * 1.20): a pinned one is listed first in its project. `null` once it is,
+   * or the desktop's reason it is not. */
+  async pinWorktree(worktreeId: string, pinned: boolean): Promise<string | null> {
+    const reply = await this.send(
+      { case: 'pinWorktree', value: create(PinWorktreeSchema, { worktreeId, pinned }) },
+      true,
+    );
+    return reply.payload.case === 'error' ? reply.payload.value.message : null;
+  }
+
+  /** Deletes a worktree — its checkout and its branch — as the desktop's
+   * worktree menu does (desktop 1.20). The branch it kept because it has
+   * unmerged commits, empty when that went too; or why not. Unforced, a
+   * delete that would lose work is refused, saying what, with `losesWork`
+   * set: `force` deletes it anyway. Any other refusal forcing would not help.
+   *
+   * Asked again from the next session under the same key if the connection
+   * drops meanwhile, so the desktop answers with how that went. */
+  async deleteWorktree(
+    worktreeId: string,
+    force: boolean,
+  ): Promise<{ keptBranch: string } | { why: string; losesWork: boolean }> {
+    const payload: Envelope['payload'] = {
+      case: 'deleteWorktree',
+      value: create(DeleteWorktreeSchema, { worktreeId, force }),
+    };
+    const key = newKey();
+    const until = Date.now() + DELETE_WAIT_MS;
+    for (;;) {
+      let reply: Envelope;
+      try {
+        reply = await this.request(payload, key, Math.max(until - Date.now(), 1));
+      } catch (error) {
+        const dropped = error instanceof Error && error.message === DROPPED;
+        if (dropped && (await this.reconnected(until))) continue;
+        throw error;
+      }
+      if (reply.payload.case === 'error') {
+        return { why: reply.payload.value.message, losesWork: reply.payload.value.code === ErrorCode.WOULD_LOSE_WORK };
+      }
+      if (reply.payload.case === 'worktreeDeleted') return { keptBranch: reply.payload.value.keptBranch };
+      return { why: 'the desktop did not say how it went', losesWork: false };
+    }
+  }
+
+  private async prAction(payload: Envelope['payload'], ok: Envelope['payload']['case']): Promise<string | null> {
+    const key = newKey();
+    const until = Date.now() + PULL_REQUEST_WAIT_MS;
+    for (;;) {
+      let reply: Envelope;
+      try {
+        reply = await this.request(payload, key, Math.max(until - Date.now(), 1));
+      } catch (error) {
+        const dropped = error instanceof Error && error.message === DROPPED;
+        if (dropped && (await this.reconnected(until))) continue;
+        throw error;
+      }
+      if (reply.payload.case === 'error') return reply.payload.value.message;
+      if (reply.payload.case === ok) return null;
+      return 'the desktop did not say how it went';
     }
   }
 

@@ -1,12 +1,26 @@
 import { describe, expect, jest, test } from '@jest/globals';
 import type { PullRequestSummary } from '@ket/remote';
 
-import { checkWord, checksColor, checksInOrder, checksState, checksSummary, failedChecks, reviewWords } from './checks';
+import {
+  checkWord,
+  checksColor,
+  checksInOrder,
+  checksState,
+  checksSummary,
+  failedChecks,
+  mergeMethods,
+  prIsClosed,
+  prIsOpen,
+  prLine,
+  reviewWords,
+} from './checks';
 import { t } from './theme';
 
 jest.mock('@ket/remote', () => ({
   CheckSummary_State: { STATE_UNSPECIFIED: 0, PASSED: 1, FAILED: 2, PENDING: 3, SKIPPED: 4 },
+  PullRequestMergeMethod: { UNSPECIFIED: 0, MERGE_COMMIT: 1, SQUASH: 2, REBASE: 3 },
   PullRequestSummary_Review: { REVIEW_UNSPECIFIED: 0, APPROVED: 1, CHANGES_REQUESTED: 2, REVIEW_REQUIRED: 3 },
+  PullRequestSummary_State: { OPEN: 0, CLOSED: 1, MERGED: 2 },
 }));
 
 const PASSED = 1;
@@ -63,5 +77,18 @@ describe('pull request checks', () => {
     expect(reviewWords(pr([], 2))).toBe('changes requested');
     expect(reviewWords(pr([], 3))).toBe('review required');
     expect(reviewWords(pr([], 0))).toBe('');
+  });
+
+  test('names closed and behind pull requests on the card line', () => {
+    expect(prLine({ ...pr([FAILED]), draft: true } as PullRequestSummary)).toBe('Draft · 1 check failing');
+    expect(prIsOpen(pr([]))).toBe(true);
+    const closed = { ...pr([]), state: 1, behind: true, base: 'main' } as unknown as PullRequestSummary;
+    expect(prIsClosed(closed)).toBe(true);
+    expect(prIsOpen(closed)).toBe(false);
+    expect(prLine(closed)).toBe('Closed · behind main');
+    expect(mergeMethods(pr([])).map((method) => method.label)).toEqual(['Merge commit', 'Squash', 'Rebase']);
+    expect(
+      mergeMethods({ ...pr([]), squashMergeAllowed: true } as PullRequestSummary).map((method) => method.label),
+    ).toEqual(['Squash']);
   });
 });

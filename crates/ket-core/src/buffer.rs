@@ -1164,9 +1164,9 @@ impl Buffer {
         let added = isize::try_from(unit.chars().count()).unwrap_or(0);
         self.reindent(|line, several| {
             if several && line.trim().is_empty() {
-                (line.to_owned(), 0)
+                (line.to_owned(), 0, 0)
             } else {
-                (format!("{unit}{line}"), added)
+                (format!("{unit}{line}"), 0, added)
             }
         });
     }
@@ -1191,23 +1191,95 @@ impl Buffer {
             };
             (
                 line.chars().skip(taken).collect(),
+                0,
                 -isize::try_from(taken).unwrap_or(0),
             )
         });
     }
 
-    /// Rewrites each line the selection touches with `change`, which is
-    /// handed the line without its break and whether several are being
-    /// changed, and answers the new line and how many characters it gained at
-    /// its start (negative for lost).
-    fn reindent(&mut self, change: impl Fn(&str, bool) -> (String, isize)) {
+    /// ⌘/: comments out every line the selection touches, or the cursor's
+    /// line, with the first of `tokens` — or, when each of those lines that
+    /// is not blank already starts with one of `tokens`, takes the comment
+    /// back off, with the space after it. The marker goes in at the
+    /// shallowest indent among the lines, so a block's markers line up, and
+    /// blank lines among several are left alone. One undo step, as ⌘] is.
+    pub fn toggle_line_comment(&mut self, tokens: &[&str]) {
+        let Some(&token) = tokens.first() else {
+            return;
+        };
+        let (first, last) = self.touched_lines();
+        // The shallowest indent among the lines with something on them, and
+        // whether every one of those is a comment already.
+        let mut indent = None::<usize>;
+        let mut commented = true;
+        for line in first..=last {
+            let text = self.line_text(line);
+            let body = text.trim_start();
+            if body.is_empty() {
+                continue;
+            }
+            let lead = text.chars().count() - body.chars().count();
+            indent = Some(indent.map_or(lead, |indent| indent.min(lead)));
+            commented &= tokens.iter().any(|known| body.starts_with(known));
+        }
+        let uncomment = indent.is_some() && commented;
+        let added = isize::try_from(token.chars().count() + 1).unwrap_or(0);
+
+        self.reindent(|line, several| {
+            let body = line.trim_start();
+            let lead_bytes = line.len() - body.len();
+            let lead = line[..lead_bytes].chars().count();
+            if uncomment {
+                let Some(known) = tokens.iter().find(|known| body.starts_with(**known)) else {
+                    return (line.to_owned(), lead, 0);
+                };
+                let after = &body[known.len()..];
+                let rest = after.strip_prefix(' ').unwrap_or(after);
+                let taken = body.chars().count() - rest.chars().count();
+                (
+                    format!("{}{rest}", &line[..lead_bytes]),
+                    lead,
+                    -isize::try_from(taken).unwrap_or(0),
+                )
+            } else if body.is_empty() && several {
+                (line.to_owned(), 0, 0)
+            } else {
+                // A lone blank line takes the marker at its own indent.
+                let at = if body.is_empty() {
+                    lead
+                } else {
+                    indent.unwrap_or(lead)
+                };
+                let byte = line.char_indices().nth(at).map_or(line.len(), |(i, _)| i);
+                (
+                    format!("{}{token} {}", &line[..byte], &line[byte..]),
+                    at,
+                    added,
+                )
+            }
+        });
+    }
+
+    /// The first and last lines the selection touches, or the cursor's line
+    /// twice. A selection that ends at the start of a line does not take it
+    /// in: selecting whole lines leaves the cursor there.
+    fn touched_lines(&self) -> (usize, usize) {
         let range = self.selection();
         let first = self.rope.char_to_line(range.start);
         let mut last = self.rope.char_to_line(range.end);
-        // A selection that ends at the start of a line does not take it in.
         if range.end > range.start && last > first && range.end == self.rope.line_to_char(last) {
             last -= 1;
         }
+        (first, last)
+    }
+
+    /// Rewrites each line the selection touches with `change`, which is
+    /// handed the line without its break and whether several are being
+    /// changed, and answers the new line, the column its change was made at,
+    /// and how many characters it gained there (negative for lost).
+    fn reindent(&mut self, change: impl Fn(&str, bool) -> (String, usize, isize)) {
+        let range = self.selection();
+        let (first, last) = self.touched_lines();
         let several = last > first;
         let start = self.rope.line_to_char(first);
         let end = self.line_end_char(last);
@@ -1215,11 +1287,11 @@ impl Buffer {
         let mut lines = Vec::new();
         let mut shifts = Vec::new();
         for line in first..=last {
-            let (text, shift) = change(&self.line_text(line), several);
+            let (text, at, shift) = change(&self.line_text(line), several);
             lines.push(text);
-            shifts.push(shift);
+            shifts.push((isize::try_from(at).unwrap_or(0), shift));
         }
-        if shifts.iter().all(|shift| *shift == 0) {
+        if shifts.iter().all(|(_, shift)| *shift == 0) {
             return;
         }
 
@@ -1229,14 +1301,15 @@ impl Buffer {
             let line = self.rope.char_to_line(pos).clamp(first, last);
             let line_start = self.rope.line_to_char(line);
             let column = isize::try_from(pos.saturating_sub(line_start)).unwrap_or(0);
-            let before: isize = shifts[..line - first].iter().sum();
-            let shift = shifts[line - first];
-            // A selection from the start of a line keeps the new indent in
-            // it, so pressing again goes on moving the whole line.
-            let column = if keep_line_start && column == 0 {
-                0
+            let before: isize = shifts[..line - first].iter().map(|(_, shift)| shift).sum();
+            let (at, shift) = shifts[line - first];
+            // What sits before the change stays put. A selection from where
+            // the change was made keeps the new text in it, so pressing again
+            // goes on moving the whole line.
+            let column = if column < at || (keep_line_start && column == at) {
+                column
             } else {
-                (column + shift).max(0)
+                (column + shift).max(at)
             };
             let moved = isize::try_from(line_start).unwrap_or(0) + before + column;
             usize::try_from(moved).unwrap_or(0)

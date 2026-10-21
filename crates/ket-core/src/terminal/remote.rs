@@ -31,6 +31,7 @@ use crate::{KetError, Result};
 /// applies what the host sends.
 pub(crate) struct Shared {
     id: u64,
+    pid: Option<u32>,
     term: Arc<FairMutex<Term<Notifier>>>,
     parser: Mutex<Processor>,
     frames: watch::Sender<u64>,
@@ -46,7 +47,7 @@ pub(crate) struct Shared {
 }
 
 impl Shared {
-    pub(crate) fn new(id: u64, spec: &TerminalSpec, adopted: bool) -> Arc<Self> {
+    pub(crate) fn new(id: u64, spec: &TerminalSpec, adopted: bool, pid: Option<u32>) -> Arc<Self> {
         let size = TerminalSize::new(spec.size.cols, spec.size.rows);
         let shared_size = Arc::new(AtomicU32::new(size.pack()));
         let title = Arc::new(Mutex::new(None));
@@ -60,6 +61,7 @@ impl Shared {
         let limit = super::scrollback_limit(size);
         Arc::new(Self {
             id,
+            pid,
             term: Arc::new(FairMutex::new(Term::new(
                 term_config(limit),
                 &size,
@@ -215,6 +217,14 @@ impl RemoteTerminal {
 
     pub(crate) fn kill(&self) {
         let _ = self.conn.request(&Request::Kill { id: self.shared.id });
+    }
+
+    pub(crate) fn pid(&self) -> Option<u32> {
+        self.shared.pid
+    }
+
+    pub(crate) fn stop(&self, grace: std::time::Duration) -> Result<super::StopOutcome> {
+        self.conn.stop(self.shared.id, grace)
     }
 }
 

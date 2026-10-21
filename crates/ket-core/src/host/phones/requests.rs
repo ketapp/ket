@@ -10,15 +10,15 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
 use ket_remote::proto::{self, envelope::Payload};
 
-use super::keys::{answer_keys, is_interrupt};
+use super::keys::{answer_on_screen, is_interrupt};
 use super::places::{Place, Places};
 use super::session::{Phone, pump};
 use super::typing::Typed;
 use super::{Event, MAX_ATTACHMENTS, MAX_SUBSCRIPTIONS, epoch, lock};
 use crate::agent_hooks::{Decision, Prompt};
 use crate::agent_status::CancelSource;
-use crate::github::PullRequestStatus;
-use crate::host::server::{AnswerRefused, Handed, Host};
+use crate::github::{MergeMethod, PullRequestStatus};
+use crate::host::server::{AnswerRefused, Handed, Host, NotDeleted};
 use crate::host::wire::DeviceRole;
 use crate::id::{ProjectId, WorktreeId};
 use crate::terminal::TerminalSize;
@@ -63,6 +63,30 @@ static REVIEWS: Mutex<Fixes> = Mutex::new(Fixes {
 /// [`FIXES`]: a phone whose connection dropped during the push asks again
 /// under the same key, and is told how it went rather than pushing twice.
 static PULLS: Mutex<Fixes> = Mutex::new(Fixes {
+    asks: BTreeMap::new(),
+    going: BTreeSet::new(),
+    finished: VecDeque::new(),
+});
+
+/// Merge, update, ready and reopen, kept the same way as [`PULLS`].
+static PR_ACTIONS: Mutex<Fixes> = Mutex::new(Fixes {
+    asks: BTreeMap::new(),
+    going: BTreeSet::new(),
+    finished: VecDeque::new(),
+});
+
+/// Address comments with agent, kept the same way as [`FIXES`].
+static COMMENTS: Mutex<Fixes> = Mutex::new(Fixes {
+    asks: BTreeMap::new(),
+    going: BTreeSet::new(),
+    finished: VecDeque::new(),
+});
+
+/// Deletes of worktrees, kept the same way as [`FIXES`]: a phone whose
+/// connection dropped while the window was deleting asks again under the
+/// same key, and is told how it went rather than being told the worktree is
+/// not there.
+static DELETES: Mutex<Fixes> = Mutex::new(Fixes {
     asks: BTreeMap::new(),
     going: BTreeSet::new(),
     finished: VecDeque::new(),
@@ -193,6 +217,13 @@ pub(super) fn handle(
             | Payload::SendFiles(_)
             | Payload::SendReview(_)
             | Payload::OpenPullRequest(_)
+            | Payload::MergePullRequest(_)
+            | Payload::UpdatePullRequest(_)
+            | Payload::ReadyPullRequest(_)
+            | Payload::ReopenPullRequest(_)
+            | Payload::AddressComments(_)
+            | Payload::PinWorktree(_)
+            | Payload::DeleteWorktree(_)
     );
     let key = request.idempotency_key.as_str();
     if mutation {
@@ -243,11 +274,20 @@ pub(super) fn handle(
     let succeeded = reply
         .as_ref()
         .is_none_or(|reply| !matches!(reply.payload, Some(Payload::Error(_))));
-    // A fix of checks, a review and a pull request keep their own records,
-    // with their answers: see `FIXES`, `REVIEWS` and `PULLS`.
+    // A fix of checks, a review, a pull request and the actions on one keep
+    // their own records, with their answers: see `FIXES`, `REVIEWS`, `PULLS`,
+    // `PR_ACTIONS`, `COMMENTS` and `DELETES`.
     let kept_here = !matches!(
         payload,
-        Payload::FixChecks(_) | Payload::SendReview(_) | Payload::OpenPullRequest(_)
+        Payload::FixChecks(_)
+            | Payload::SendReview(_)
+            | Payload::OpenPullRequest(_)
+            | Payload::MergePullRequest(_)
+            | Payload::UpdatePullRequest(_)
+            | Payload::ReadyPullRequest(_)
+            | Payload::ReopenPullRequest(_)
+            | Payload::AddressComments(_)
+            | Payload::DeleteWorktree(_)
     );
     if mutation && succeeded && kept_here {
         lock(&phone.phones.devices)
@@ -279,7 +319,16 @@ fn expensive_cost(payload: &Payload) -> Option<u32> {
         | Payload::MergeWorktree(_)
         | Payload::StartNote(_)
         | Payload::FixChecks(_)
-        | Payload::OpenPullRequest(_) => Some(10),
+        | Payload::OpenPullRequest(_)
+        | Payload::MergePullRequest(_)
+        | Payload::UpdatePullRequest(_)
+        | Payload::ReadyPullRequest(_)
+        | Payload::ReopenPullRequest(_)
+        | Payload::AddressComments(_) => Some(10),
+        // A delete walks the checkout and asks git twice.
+        Payload::DeleteWorktree(_) => Some(10),
+        // One write to ket's store.
+        Payload::PinWorktree(_) => Some(1),
         _ => None,
     }
 }
@@ -300,6 +349,13 @@ fn payload_name(payload: &Payload) -> &'static str {
         Payload::SendReview(_) => "send_review",
         Payload::GetPullRequestDraft(_) => "get_pull_request_draft",
         Payload::OpenPullRequest(_) => "open_pull_request",
+        Payload::MergePullRequest(_) => "merge_pull_request",
+        Payload::UpdatePullRequest(_) => "update_pull_request",
+        Payload::ReadyPullRequest(_) => "ready_pull_request",
+        Payload::ReopenPullRequest(_) => "reopen_pull_request",
+        Payload::AddressComments(_) => "address_comments",
+        Payload::PinWorktree(_) => "pin_worktree",
+        Payload::DeleteWorktree(_) => "delete_worktree",
         _ => "other",
     }
 }
@@ -323,7 +379,15 @@ fn apply(
         | Payload::StartSession(_)
         | Payload::MergeWorktree(_)
         | Payload::StartNote(_)
-        | Payload::OpenPullRequest(_) => DeviceRole::Operator,
+        | Payload::OpenPullRequest(_)
+        | Payload::MergePullRequest(_)
+        | Payload::UpdatePullRequest(_)
+        | Payload::ReadyPullRequest(_)
+        | Payload::ReopenPullRequest(_)
+        | Payload::AddressComments(_)
+        // A worktree's place in the sidebar, and the worktree itself.
+        | Payload::PinWorktree(_)
+        | Payload::DeleteWorktree(_) => DeviceRole::Operator,
         // Fixing checks and a review are messages typed into the
         // worktree's agent, which a controller may type itself.
         Payload::Input(_)
@@ -1089,6 +1153,87 @@ fn apply(
                 }
             }
         }
+        Payload::MergePullRequest(merge) => start_pr_action(
+            host,
+            phone,
+            request,
+            feed,
+            id,
+            &merge.worktree_id,
+            PrAction::Merge(merge.method),
+        ),
+        Payload::UpdatePullRequest(update) => start_pr_action(
+            host,
+            phone,
+            request,
+            feed,
+            id,
+            &update.worktree_id,
+            PrAction::Update,
+        ),
+        Payload::ReadyPullRequest(ready) => start_pr_action(
+            host,
+            phone,
+            request,
+            feed,
+            id,
+            &ready.worktree_id,
+            PrAction::Ready,
+        ),
+        Payload::ReopenPullRequest(reopen) => start_pr_action(
+            host,
+            phone,
+            request,
+            feed,
+            id,
+            &reopen.worktree_id,
+            PrAction::Reopen,
+        ),
+        Payload::AddressComments(ask) => {
+            address_comments_from_phone(host, phone, request, feed, id, &ask.worktree_id)
+        }
+        Payload::PinWorktree(pin) => {
+            let places = phone.phones.places();
+            match places.get(&pin.worktree_id) {
+                None => Some(error(
+                    id,
+                    proto::ErrorCode::NotFound,
+                    "no such worktree on this desktop",
+                )),
+                // No record carries a pin for it, as the desktop's menu says.
+                Some(place) if place.base.is_none() => Some(error(
+                    id,
+                    proto::ErrorCode::Unspecified,
+                    "the repository's own checkout can't be pinned",
+                )),
+                Some(_) => {
+                    let pinned = crate::workspace::Workspace::open().and_then(|workspace| {
+                        workspace.set_worktree_pinned(
+                            &WorktreeId::new(pin.worktree_id.as_str()),
+                            pin.pinned,
+                        )
+                    });
+                    match pinned {
+                        Ok(()) => {
+                            phone.phones.forget_places();
+                            host.worktrees_changed();
+                            ack(id)
+                        }
+                        Err(why) => Some(error(
+                            id,
+                            proto::ErrorCode::Unspecified,
+                            &format!(
+                                "could not {} it: {why}",
+                                if pin.pinned { "pin" } else { "unpin" }
+                            ),
+                        )),
+                    }
+                }
+            }
+        }
+        Payload::DeleteWorktree(delete) => {
+            delete_from_phone(host, phone, request, feed, id, delete)
+        }
         Payload::GetSnippets(_) => {
             let snippets = crate::snippets::Snippets::load()
                 .map(|saved| saved.items)
@@ -1112,10 +1257,11 @@ fn apply(
             let choice = proto::answer::Choice::try_from(answer.choice).ok()?;
             // The very prompt the phone showed, checked and answered in one
             // step on the host — see `Host::answer_prompt`.
-            let refused =
-                host.answer_prompt(answer.terminal_id, answer.question_id, |agent, tool| {
-                    answer_keys(agent, tool, choice)
-                });
+            let refused = host.answer_prompt_on_screen(
+                answer.terminal_id,
+                answer.question_id,
+                |agent, tool, rows| answer_on_screen(agent, tool, choice, rows),
+            );
             match refused {
                 Ok(()) => ack(id),
                 Err(why) => Some(refusal(id, why)),
@@ -1314,6 +1460,11 @@ fn open_pull_request(
             draft: options.draft && !report.existed,
             review: crate::github::Review::None,
             checks: Vec::new(),
+            state: crate::github::PullRequestState::Open,
+            base: report.base.clone(),
+            behind: false,
+            unresolved_comments: 0,
+            merge_methods: crate::github::MergeMethods::default(),
         },
     );
     Payload::PullRequestOpened(proto::PullRequestOpened {
@@ -1327,6 +1478,394 @@ fn open_pull_request(
             .committed
             .map_or(0, |commit| u32::try_from(commit.files).unwrap_or(u32::MAX)),
     })
+}
+
+#[derive(Clone, Copy)]
+enum PrAction {
+    Merge(i32),
+    Update,
+    Ready,
+    Reopen,
+}
+
+fn start_pr_action(
+    host: &Arc<Host>,
+    phone: &Phone<'_>,
+    request: &proto::Envelope,
+    feed: &mpsc::Sender<Event>,
+    id: u64,
+    worktree: &str,
+    action: PrAction,
+) -> Option<proto::Envelope> {
+    let ask: FixAsk = (phone.device.clone(), request.idempotency_key.clone());
+    if lock(&PR_ACTIONS).again(&ask, id, feed) {
+        return None;
+    }
+    let places = phone.phones.places();
+    let (place, status) = match pr_place(&places, host, worktree) {
+        Ok(found) => found,
+        Err((code, why)) => return Some(error(id, code, why)),
+    };
+    if let Err(why) = action.allowed_for(&status) {
+        return Some(error(id, proto::ErrorCode::Unspecified, why));
+    }
+    {
+        let mut actions = lock(&PR_ACTIONS);
+        if actions.again(&ask, id, feed) {
+            return None;
+        }
+        if !actions.start(ask.clone(), worktree, id, feed) {
+            return Some(error(
+                id,
+                proto::ErrorCode::Unspecified,
+                "ket is already changing this pull request",
+            ));
+        }
+    }
+    let project = ProjectId::new(place.project.clone());
+    let owned = worktree.to_owned();
+    let host = Arc::clone(host);
+    let running = ask.clone();
+    let spawned = std::thread::Builder::new()
+        .name("ket-host-pr-action".into())
+        .spawn(move || {
+            let answer = run_pr_action(&host, &project, &owned, status, action);
+            lock(&PR_ACTIONS).finish(running, &owned, answer);
+        });
+    match spawned {
+        Ok(_) => None,
+        Err(why) => {
+            lock(&PR_ACTIONS).forget(&ask, worktree);
+            Some(error(
+                id,
+                proto::ErrorCode::Unspecified,
+                &format!("could not start: {why}"),
+            ))
+        }
+    }
+}
+
+fn address_comments_from_phone(
+    host: &Arc<Host>,
+    phone: &Phone<'_>,
+    request: &proto::Envelope,
+    feed: &mpsc::Sender<Event>,
+    id: u64,
+    worktree: &str,
+) -> Option<proto::Envelope> {
+    let ask: FixAsk = (phone.device.clone(), request.idempotency_key.clone());
+    if lock(&COMMENTS).again(&ask, id, feed) {
+        return None;
+    }
+    let places = phone.phones.places();
+    let (place, status) = match pr_place(&places, host, worktree) {
+        Ok(found) => found,
+        Err((code, why)) => return Some(error(id, code, why)),
+    };
+    if !status.can_address_comments() {
+        return Some(error(
+            id,
+            proto::ErrorCode::Unspecified,
+            "this pull request has no review comments to address",
+        ));
+    }
+    if !host.has_window() {
+        return Some(error(
+            id,
+            proto::ErrorCode::NotFound,
+            "open ket on your Mac to address comments from here",
+        ));
+    }
+    {
+        let mut comments = lock(&COMMENTS);
+        if comments.again(&ask, id, feed) {
+            return None;
+        }
+        if !comments.start(ask.clone(), worktree, id, feed) {
+            return Some(error(
+                id,
+                proto::ErrorCode::Unspecified,
+                "ket is already giving this pull request's comments to the agent",
+            ));
+        }
+    }
+    let project = ProjectId::new(place.project.clone());
+    let owned = worktree.to_owned();
+    let host = Arc::clone(host);
+    let running = ask.clone();
+    let spawned = std::thread::Builder::new()
+        .name("ket-host-address-comments".into())
+        .spawn(move || {
+            let answer = address_comments(&host, &project, owned.clone(), &status);
+            lock(&COMMENTS).finish(running, &owned, answer);
+        });
+    match spawned {
+        Ok(_) => None,
+        Err(why) => {
+            lock(&COMMENTS).forget(&ask, worktree);
+            Some(error(
+                id,
+                proto::ErrorCode::Unspecified,
+                &format!("could not start reading the comments: {why}"),
+            ))
+        }
+    }
+}
+
+/// Hands a phone's delete to a window — see [`Host::delete_work`] — off
+/// this thread, since a delete takes seconds; the answer goes to whoever is
+/// waiting for it then: see [`DELETES`].
+fn delete_from_phone(
+    host: &Arc<Host>,
+    phone: &Phone<'_>,
+    request: &proto::Envelope,
+    feed: &mpsc::Sender<Event>,
+    id: u64,
+    delete: &proto::DeleteWorktree,
+) -> Option<proto::Envelope> {
+    let ask: FixAsk = (phone.device.clone(), request.idempotency_key.clone());
+    if lock(&DELETES).again(&ask, id, feed) {
+        return None;
+    }
+    let places = phone.phones.places();
+    match places.get(&delete.worktree_id) {
+        None => {
+            return Some(error(
+                id,
+                proto::ErrorCode::NotFound,
+                "no such worktree on this desktop",
+            ));
+        }
+        // It is the repository: deleting it is not a worktree's delete.
+        Some(place) if place.base.is_none() => {
+            return Some(error(
+                id,
+                proto::ErrorCode::Unspecified,
+                "the repository's own checkout can't be deleted",
+            ));
+        }
+        Some(_) => {}
+    }
+    if !host.has_window() {
+        return Some(error(
+            id,
+            proto::ErrorCode::NotFound,
+            "open ket on your Mac to delete a worktree from here",
+        ));
+    }
+    {
+        let mut deletes = lock(&DELETES);
+        if deletes.again(&ask, id, feed) {
+            return None;
+        }
+        if !deletes.start(ask.clone(), &delete.worktree_id, id, feed) {
+            return Some(error(
+                id,
+                proto::ErrorCode::Unspecified,
+                "ket is already deleting this worktree",
+            ));
+        }
+    }
+    let worktree = delete.worktree_id.clone();
+    let force = delete.force;
+    let host = Arc::clone(host);
+    let deleting = ask.clone();
+    let spawned = std::thread::Builder::new()
+        .name("ket-host-delete-worktree".into())
+        .spawn(move || {
+            let answer = match host.delete_work(worktree.clone(), force) {
+                Ok(kept) => Payload::WorktreeDeleted(proto::WorktreeDeleted {
+                    kept_branch: kept.unwrap_or_default(),
+                }),
+                // Only an unforced refusal is one forcing would get past.
+                Err(NotDeleted::Refused(message)) if !force => Payload::Error(proto::Error {
+                    code: proto::ErrorCode::WouldLoseWork as i32,
+                    message,
+                }),
+                Err(NotDeleted::Refused(message) | NotDeleted::Failed(message)) => {
+                    Payload::Error(proto::Error {
+                        code: proto::ErrorCode::Unspecified as i32,
+                        message,
+                    })
+                }
+            };
+            lock(&DELETES).finish(deleting, &worktree, answer);
+        });
+    match spawned {
+        Ok(_) => None,
+        Err(why) => {
+            lock(&DELETES).forget(&ask, &delete.worktree_id);
+            Some(error(
+                id,
+                proto::ErrorCode::Unspecified,
+                &format!("could not start deleting it: {why}"),
+            ))
+        }
+    }
+}
+
+fn pr_place<'a>(
+    places: &'a super::places::Places,
+    host: &Host,
+    worktree: &str,
+) -> std::result::Result<
+    (&'a super::places::Place, PullRequestStatus),
+    (proto::ErrorCode, &'static str),
+> {
+    match places.get(worktree) {
+        None => Err((
+            proto::ErrorCode::NotFound,
+            "no such worktree on this desktop",
+        )),
+        Some(place) if place.base.is_none() => Err((
+            proto::ErrorCode::Unspecified,
+            "the repository's own checkout has no pull request of its own",
+        )),
+        Some(_) => match host.pull_request(worktree) {
+            None => Err((
+                proto::ErrorCode::NotFound,
+                "ket on your Mac has not found a pull request for this worktree",
+            )),
+            Some(status) => Ok((places.get(worktree).expect("still there"), status)),
+        },
+    }
+}
+
+impl PrAction {
+    fn allowed_for(self, status: &PullRequestStatus) -> std::result::Result<(), &'static str> {
+        match self {
+            Self::Merge(_) if !status.can_merge() => Err("this pull request cannot be merged yet"),
+            Self::Update if !status.can_update() => {
+                Err("this pull request's branch is not behind its base")
+            }
+            Self::Ready if !status.can_ready() => Err("this pull request is not a draft"),
+            Self::Reopen if !status.can_reopen() => Err("this pull request is not closed"),
+            _ => Ok(()),
+        }
+    }
+}
+
+fn run_pr_action(
+    host: &Host,
+    project: &ProjectId,
+    worktree: &str,
+    status: PullRequestStatus,
+    action: PrAction,
+) -> Payload {
+    let failed = |message: String| {
+        Payload::Error(proto::Error {
+            code: proto::ErrorCode::Unspecified as i32,
+            message,
+        })
+    };
+    let at = match crate::checks::checkout(project) {
+        Ok(at) => at,
+        Err(why) => return failed(why.to_string()),
+    };
+    let method = match action {
+        PrAction::Merge(raw) => match pick_merge_method(raw, status.merge_methods) {
+            Ok(method) => Some(method),
+            Err(why) => return failed(why.to_owned()),
+        },
+        _ => None,
+    };
+    let ran = match action {
+        PrAction::Merge(_) => {
+            crate::github::merge_pull_request(&at, status.number, method.expect("picked"))
+        }
+        PrAction::Update => crate::github::update_branch(&at, status.number),
+        PrAction::Ready => crate::github::mark_ready(&at, status.number),
+        PrAction::Reopen => crate::github::reopen_pull_request(&at, status.number),
+    };
+    if let Err(why) = ran {
+        tracing::info!(worktree, %why, "a phone's pull request action was refused");
+        return failed(why.to_string());
+    }
+    let mut next = crate::github::pull_request(&at, status.number).unwrap_or_else(|_| {
+        let mut next = status.clone();
+        match action {
+            PrAction::Merge(_) => next.state = crate::github::PullRequestState::Merged,
+            PrAction::Ready => next.draft = false,
+            PrAction::Reopen => next.state = crate::github::PullRequestState::Open,
+            PrAction::Update => next.behind = false,
+        }
+        next
+    });
+    next.merge_methods = status.merge_methods;
+    host.replace_pull_request(worktree, next.clone());
+    match action {
+        PrAction::Merge(_) => Payload::PullRequestMerged(proto::PullRequestMerged {
+            number: next.number,
+            url: next.url,
+            method: match method.expect("picked") {
+                MergeMethod::Merge => proto::PullRequestMergeMethod::MergeCommit as i32,
+                MergeMethod::Squash => proto::PullRequestMergeMethod::Squash as i32,
+                MergeMethod::Rebase => proto::PullRequestMergeMethod::Rebase as i32,
+            },
+        }),
+        PrAction::Update => Payload::PullRequestUpdated(proto::PullRequestUpdated {
+            number: next.number,
+        }),
+        PrAction::Ready => Payload::PullRequestReadied(proto::PullRequestReadied {
+            number: next.number,
+        }),
+        PrAction::Reopen => Payload::PullRequestReopened(proto::PullRequestReopened {
+            number: next.number,
+        }),
+    }
+}
+
+fn pick_merge_method(
+    raw: i32,
+    allowed: crate::github::MergeMethods,
+) -> std::result::Result<MergeMethod, &'static str> {
+    let method = match proto::PullRequestMergeMethod::try_from(raw) {
+        Ok(proto::PullRequestMergeMethod::Unspecified) | Err(_) => allowed
+            .default_method()
+            .ok_or("this repository allows no merge methods")?,
+        Ok(proto::PullRequestMergeMethod::MergeCommit) => MergeMethod::Merge,
+        Ok(proto::PullRequestMergeMethod::Squash) => MergeMethod::Squash,
+        Ok(proto::PullRequestMergeMethod::Rebase) => MergeMethod::Rebase,
+    };
+    if allowed.allows(method) {
+        Ok(method)
+    } else {
+        Err("that merge method is not allowed on this repository")
+    }
+}
+
+fn address_comments(
+    host: &Host,
+    project: &ProjectId,
+    worktree: String,
+    status: &PullRequestStatus,
+) -> Payload {
+    let failed = |message: String| {
+        Payload::Error(proto::Error {
+            code: proto::ErrorCode::Unspecified as i32,
+            message,
+        })
+    };
+    let handed = crate::checks::checkout(project).and_then(|at| {
+        crate::address_comments::hand_over(&at, &WorktreeId::new(worktree.as_str()), status)
+    });
+    let prompt = match handed {
+        Ok(prompt) => prompt,
+        Err(why) => {
+            tracing::warn!(%why, "could not read review comments for a phone");
+            return failed(format!(
+                "could not read #{}'s review comments: {why}",
+                status.number
+            ));
+        }
+    };
+    match host.fix_checks(worktree, prompt) {
+        Handed::Given => Payload::CommentsHandedOver(proto::CommentsHandedOver { starting: false }),
+        Handed::Starting => {
+            Payload::CommentsHandedOver(proto::CommentsHandedOver { starting: true })
+        }
+        Handed::Failed(why) => failed(why),
+    }
 }
 
 /// Whether a phone's review is one to send: some comments, each saying
@@ -1574,6 +2113,10 @@ fn refusal(id: u64, why: AnswerRefused) -> proto::Envelope {
         AnswerRefused::Unfit => (
             proto::ErrorCode::Unspecified,
             "that answer doesn't fit the question — look again before answering",
+        ),
+        AnswerRefused::NotOffered => (
+            proto::ErrorCode::Unspecified,
+            "this prompt offers no always allow — approve it once, or answer it in the terminal",
         ),
     };
     error(id, code, message)

@@ -22,7 +22,7 @@ use super::{EXITED_KEPT, IDLE_EXIT, host_error};
 use crate::Result;
 use crate::agent_hooks::{self, HookReport, Listener, StatusLine};
 use crate::agent_status::{CancelSource, StatusStore};
-use crate::terminal::{LocalTerminal, OutputCursor, Since, TerminalSize};
+use crate::terminal::{LocalTerminal, OutputCursor, Since, StopOutcome, TerminalSize};
 
 /// How often housekeeping runs: foregrounds, reaping, idleness.
 const TICK: Duration = Duration::from_secs(1);
@@ -59,6 +59,28 @@ const REVIEW_WAIT: Duration = if cfg!(test) {
 /// again without the agent getting it twice. The rest is for the answer's
 /// way back.
 const REVIEW_GRACE: Duration = Duration::from_millis(1500);
+
+/// How long a phone's delete waits for the window to say the worktree is
+/// gone. A delete walks the checkout and asks git twice, which takes seconds
+/// on a big tree; past this the phone is told it did not hear back.
+const DELETE_WAIT: Duration = if cfg!(test) {
+    Duration::from_secs(2)
+} else {
+    Duration::from_secs(120)
+};
+
+/// What a window says of a phone's delete: the branch it kept, or why not.
+pub(super) type Deleted = std::result::Result<Option<String>, String>;
+
+/// Why a phone's delete did not happen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum NotDeleted {
+    /// The window tried, and git refused — for an unforced delete, because
+    /// work would be lost.
+    Refused(String),
+    /// It never got that far: no window, or none that answered.
+    Failed(String),
+}
 
 /// How a window took a phone's failed checks — see [`Host::fix_checks`].
 #[derive(Debug, PartialEq, Eq)]
@@ -174,6 +196,9 @@ pub(super) enum AnswerRefused {
     Unknown,
     /// The answer does not fit what the prompt asked.
     Unfit,
+    /// The prompt on screen has no option for that answer: Grok offers no
+    /// Always allow for a chained command.
+    NotOffered,
 }
 
 impl Entry {
@@ -243,6 +268,9 @@ pub(super) struct Host {
     /// Phone reviews waiting for a window to say the agent has them.
     review_waiting: Mutex<BTreeMap<u64, mpsc::Sender<std::result::Result<(), String>>>>,
     next_review: AtomicU64,
+    /// Phone deletes waiting for a window to say the worktree is gone.
+    delete_waiting: Mutex<BTreeMap<u64, mpsc::Sender<Deleted>>>,
+    next_delete: AtomicU64,
 }
 
 impl Host {
@@ -435,6 +463,21 @@ impl Host {
         }
     }
 
+    /// Replaces `worktree`'s pull request with one a phone just merged,
+    /// updated, readied or reopened, so phones see that now.
+    pub(super) fn replace_pull_request(
+        &self,
+        worktree: &str,
+        status: crate::github::PullRequestStatus,
+    ) {
+        let mut open = lock(&self.pull_requests);
+        if let Some(existing) = open.iter_mut().find(|(id, _)| id == worktree) {
+            existing.1 = status;
+        } else {
+            open.push((worktree.to_owned(), status));
+        }
+    }
+
     /// Forgets the panes of terminals that have gone, and tells the windows.
     fn clear_panes(&self, keys: &[String]) {
         self.hook_bindings.unbind(keys);
@@ -474,21 +517,55 @@ impl Host {
     /// What remains is the agent itself moving on inside its TUI without a
     /// keystroke from anyone — a timeout — before its hook says so; nothing
     /// outside the agent can close that.
+    ///
+    /// Keys fixed per agent and tool; phones answer through
+    /// [`Host::answer_prompt_on_screen`], which this is the fixed case of.
+    #[cfg(test)]
     pub(super) fn answer_prompt(
         &self,
         id: u64,
         question: u64,
         keys_for: impl Fn(&str, &str) -> Option<&'static [u8]>,
     ) -> std::result::Result<(), AnswerRefused> {
+        self.answer_prompt_on_screen(id, question, |agent, tool, _| {
+            keys_for(agent, tool)
+                .map(<[u8]>::to_vec)
+                .ok_or(AnswerRefused::Unknown)
+        })
+    }
+
+    /// [`Host::answer_prompt`], for keys that can depend on what the screen
+    /// shows: `keys_for` is also given the bottom
+    /// [`crate::screen::DIALOG_ROWS`] rows, read under the same locks if it
+    /// asks for them — Grok's menu, whose digits change with the prompt.
+    pub(super) fn answer_prompt_on_screen(
+        &self,
+        id: u64,
+        question: u64,
+        keys_for: impl FnOnce(
+            &str,
+            &str,
+            &dyn Fn() -> Vec<String>,
+        ) -> std::result::Result<Vec<u8>, AnswerRefused>,
+    ) -> std::result::Result<(), AnswerRefused> {
         let terminals = lock(&self.terminals);
         let entry = terminals.get(&id).ok_or(AnswerRefused::Gone)?;
         let mut status = lock(&self.status);
         let (key, pane) = showing(entry, &status, question)?;
         let current = pane.question.as_ref().ok_or(AnswerRefused::Changed)?;
-        let keys = keys_for(&pane.agent, &current.tool).ok_or(AnswerRefused::Unknown)?;
+        let rows = || {
+            entry
+                .terminal
+                .with_term(|term| crate::screen::bottom_rows(term, crate::screen::DIALOG_ROWS))
+        };
+        let keys = keys_for(&pane.agent, &current.tool, &rows)?;
+        // Nothing to press is nothing known to press.
+        if keys.is_empty() {
+            return Err(AnswerRefused::Unknown);
+        }
         // Declining with Escape ends the turn, as it would typed.
         let escaped = keys == [0x1b] && status.escape(&key, crate::now_ms());
-        let sent = entry.terminal.send_input(keys.to_vec());
+        let sent = entry.terminal.send_input(keys);
         drop(status);
         drop(terminals);
         if escaped {
@@ -735,6 +812,64 @@ impl Host {
         !windows(&self.outs).is_empty()
     }
 
+    /// Tells every window to read its sidebar again: something other than a
+    /// window — a phone — changed the worktrees in ket's store.
+    pub(super) fn worktrees_changed(&self) {
+        let Ok(frame) = wire::json(&Reply::WorktreesChanged) else {
+            return;
+        };
+        for out in windows(&self.outs) {
+            out.send(&frame);
+        }
+    }
+
+    /// Hands a phone's delete to one window, which deletes the worktree as
+    /// its own dialog does and closes its terminals and tabs, and waits up to
+    /// [`DELETE_WAIT`] for it to say how that went.
+    pub(super) fn delete_work(
+        &self,
+        worktree: String,
+        force: bool,
+    ) -> std::result::Result<Option<String>, NotDeleted> {
+        let failed = |why: &str| Err(NotDeleted::Failed(why.to_owned()));
+        let Some(out) = windows(&self.outs).into_iter().next() else {
+            return failed("open ket on your Mac to delete a worktree from here");
+        };
+        let req = self.next_delete.fetch_add(1, Ordering::Relaxed);
+        let (sender, receiver) = mpsc::channel();
+        lock(&self.delete_waiting).insert(req, sender);
+        if !out.reply(&Reply::DeleteWork {
+            req,
+            worktree,
+            force,
+        }) {
+            lock(&self.delete_waiting).remove(&req);
+            return failed("the ket window closed before it could delete the worktree");
+        }
+        let deadline = Instant::now() + DELETE_WAIT;
+        let deleted = loop {
+            match receiver.recv_timeout(FIX_CHECKS_LOOK) {
+                Ok(answer) => break answer.map_err(NotDeleted::Refused),
+                Err(_) if !out.alive.load(Ordering::Acquire) => {
+                    break failed("the ket window closed before it said the worktree was deleted");
+                }
+                Err(_) if Instant::now() >= deadline => {
+                    break failed("ket on your Mac didn't say whether the worktree was deleted");
+                }
+                Err(_) => {}
+            }
+        };
+        lock(&self.delete_waiting).remove(&req);
+        deleted
+    }
+
+    /// Delivers the window's answer to the phone's waiting delete.
+    pub(super) fn finish_delete_work(&self, req: u64, answer: Deleted) {
+        if let Some(waiting) = lock(&self.delete_waiting).remove(&req) {
+            let _ = waiting.send(answer);
+        }
+    }
+
     /// The window to hand work for `worktree`'s agent to: one showing an
     /// agent's terminal there, since only the window with its tab can type
     /// into it — another would say none is running, or start a second — and
@@ -975,6 +1110,8 @@ impl Host {
             next_fix_checks: AtomicU64::new(1),
             review_waiting: Mutex::new(BTreeMap::new()),
             next_review: AtomicU64::new(1),
+            delete_waiting: Mutex::new(BTreeMap::new()),
+            next_delete: AtomicU64::new(1),
         })
     }
 
@@ -1108,6 +1245,8 @@ pub(super) fn run() -> Result<()> {
         next_fix_checks: AtomicU64::new(1),
         review_waiting: Mutex::new(BTreeMap::new()),
         next_review: AtomicU64::new(1),
+        delete_waiting: Mutex::new(BTreeMap::new()),
+        next_delete: AtomicU64::new(1),
     });
 
     watch_signals(host.clone());
@@ -1508,6 +1647,13 @@ fn handle(host: &Arc<Host>, conn: u64, out: &Arc<Out>, request: Request) -> bool
                 .adopt
                 .then(|| adoptable(host, spec.key.as_deref()))
                 .flatten();
+            if spec.adopt_only && adopted.is_none() {
+                out.reply(&Reply::Failed {
+                    req,
+                    error: "No live terminal is available to adopt".to_owned(),
+                });
+                return true;
+            }
             let (id, terminal, adopted) = match adopted {
                 Some((id, terminal)) => (id, terminal, true),
                 None => match LocalTerminal::open(&spec) {
@@ -1545,7 +1691,12 @@ fn handle(host: &Arc<Host>, conn: u64, out: &Arc<Out>, request: Request) -> bool
             }
             // The reply goes before the pump starts, so the window knows the
             // id before the checkpoint for it arrives.
-            out.reply(&Reply::Opened { req, id, adopted });
+            out.reply(&Reply::Opened {
+                req,
+                id,
+                adopted,
+                pid: terminal.pid(),
+            });
             watch(host, conn, out, id, terminal);
             true
         }
@@ -1577,6 +1728,35 @@ fn handle(host: &Arc<Host>, conn: u64, out: &Arc<Out>, request: Request) -> bool
             }
             true
         }
+        Request::Stop { req, id, grace_ms } => {
+            let (outcome, key) = match lock(&host.terminals).get_mut(&id) {
+                Some(entry)
+                    if !entry.killed
+                        && !entry.terminal.is_closed()
+                        && !entry.lease.is_some_and(|(_, until)| until > Instant::now()) =>
+                {
+                    entry.killed = true;
+                    let key = entry.key.clone();
+                    entry
+                        .terminal
+                        .stop(std::time::Duration::from_millis(grace_ms.min(2_000)));
+                    (StopOutcome::Stopped, key)
+                }
+                Some(entry)
+                    if entry.lease.is_some_and(|(_, until)| until > Instant::now())
+                        && !entry.killed
+                        && !entry.terminal.is_closed() =>
+                {
+                    (StopOutcome::Controlled, None)
+                }
+                _ => (StopOutcome::Gone, None),
+            };
+            if let Some(key) = key {
+                host.clear_panes(&[key]);
+            }
+            out.reply(&Reply::Stopped { req, outcome });
+            true
+        }
         Request::Worktrees { worktrees } => {
             lock(&host.registries).insert(conn, worktrees);
             host.merge_worktrees();
@@ -1600,6 +1780,14 @@ fn handle(host: &Arc<Host>, conn: u64, out: &Arc<Out>, request: Request) -> bool
         }
         Request::SendReviewResult { req, error } => {
             host.finish_send_review(req, error);
+            true
+        }
+        Request::DeleteWorkResult {
+            req,
+            error,
+            kept_branch,
+        } => {
+            host.finish_delete_work(req, error.map_or(Ok(kept_branch), Err));
             true
         }
         Request::StartWork {
@@ -1943,6 +2131,7 @@ mod tests {
             size: TerminalSize::new(80, 24),
             key: None,
             adopt: false,
+            adopt_only: false,
         }
     }
 
@@ -2181,7 +2370,9 @@ mod tests {
         ));
 
         let id = match next_reply(&mut reader) {
-            Reply::Opened { req, id, adopted } => {
+            Reply::Opened {
+                req, id, adopted, ..
+            } => {
                 assert_eq!(req, 7);
                 assert!(!adopted);
                 id
@@ -2233,6 +2424,7 @@ mod tests {
                 req: 2,
                 spec: Box::new(TerminalSpec {
                     adopt: true,
+                    adopt_only: true,
                     ..keyed_spec("k1")
                 }),
             }
@@ -2452,6 +2644,92 @@ mod tests {
         assert!(host.acquire(id, 2), "a released lease is free");
 
         host.find(id).expect("filed").kill();
+    }
+
+    #[test]
+    fn stop_refuses_a_phone_lease_then_accepts_after_release() {
+        let host = Host::for_tests();
+        let id = host.file_for_tests(
+            LocalTerminal::open(&spec("sh", &["-c", "sleep 30"])).expect("a terminal"),
+        );
+        let (out, mut reader) = out_pair();
+        assert!(host.acquire(id, 1));
+        assert!(handle(
+            &host,
+            1,
+            &out,
+            Request::Stop {
+                req: 7,
+                id,
+                grace_ms: 10
+            }
+        ));
+        assert!(matches!(
+            next_reply(&mut reader),
+            Reply::Stopped {
+                req: 7,
+                outcome: StopOutcome::Controlled
+            }
+        ));
+        assert!(!host.find(id).expect("filed").is_closed());
+        host.release(id, 1);
+        assert!(handle(
+            &host,
+            1,
+            &out,
+            Request::Stop {
+                req: 8,
+                id,
+                grace_ms: 10
+            }
+        ));
+        assert!(matches!(
+            next_reply(&mut reader),
+            Reply::Stopped {
+                req: 8,
+                outcome: StopOutcome::Stopped
+            }
+        ));
+        assert!(handle(
+            &host,
+            1,
+            &out,
+            Request::Stop {
+                req: 9,
+                id,
+                grace_ms: 10
+            }
+        ));
+        assert!(matches!(
+            next_reply(&mut reader),
+            Reply::Stopped {
+                req: 9,
+                outcome: StopOutcome::Gone
+            }
+        ));
+    }
+
+    #[test]
+    fn adopt_only_never_starts_a_missing_terminal() {
+        let host = Host::for_tests();
+        let (out, mut reader) = out_pair();
+        let mut spec = keyed_spec("missing-pane");
+        spec.adopt = true;
+        spec.adopt_only = true;
+        assert!(handle(
+            &host,
+            1,
+            &out,
+            Request::Open {
+                req: 10,
+                spec: Box::new(spec)
+            }
+        ));
+        assert!(matches!(
+            next_reply(&mut reader),
+            Reply::Failed { req: 10, .. }
+        ));
+        assert!(lock(&host.terminals).is_empty());
     }
 
     #[test]

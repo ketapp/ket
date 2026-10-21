@@ -8,6 +8,7 @@
 //! from a browser to `gpui` without the engine noticing.
 
 pub mod activity;
+pub mod address_comments;
 pub mod admin;
 pub mod agent;
 pub mod agent_hooks;

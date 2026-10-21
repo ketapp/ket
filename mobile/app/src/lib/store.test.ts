@@ -19,6 +19,7 @@ import {
   type LockConfig,
   type SavedHost,
 } from './store';
+import { addManualAddress } from './addresses';
 
 const mockStorage = new Map<string, string>();
 const mockPrivate = Uint8Array.of(1, 2, 3);
@@ -35,6 +36,7 @@ jest.mock('@ket/remote', () => ({
   keypairFrom: (privateKey: Uint8Array) => ({ privateKey, publicKey: Uint8Array.of(9) }),
   toBase64Url: (bytes: Uint8Array) => [...bytes].join('-'),
   utf8: (bytes: Uint8Array) => String.fromCharCode(...bytes),
+  validRelayUrl: (url: string) => /^wss?:\/\/[^/\s]+$/.test(url),
 }));
 
 const host = (id: string): SavedHost => ({
@@ -64,7 +66,7 @@ describe('secure mobile storage', () => {
 
     expect(await getHost('one')).toMatchObject({ name: 'Renamed' });
     expect(await getHost('missing')).toBeNull();
-    expect(await listHosts()).toEqual([{ ...one, name: 'Renamed' }]);
+    expect(await listHosts()).toEqual([{ ...one, name: 'Renamed', addresses: [one.relay], manualAddresses: [] }]);
 
     await saveCollapsed('one', ['project']);
     await saveLastWork('one', { project: 'project', agent: '' });
@@ -107,6 +109,19 @@ describe('secure mobile storage', () => {
       hostId: Uint8Array.of(1, 2),
       hostPublic: Uint8Array.of(7, 8),
       relay: 'ws://1-2',
+      addresses: ['ws://1-2'],
     });
+  });
+
+  test('migrates a host saved before address lists', async () => {
+    const old = host('old');
+    mockStorage.set('ket.host.old', JSON.stringify(old));
+    const migrated = await getHost('old');
+    expect(migrated).toMatchObject({ addresses: [old.relay], manualAddresses: [] });
+    expect(JSON.parse(mockStorage.get('ket.host.old') ?? '{}')).toMatchObject({ addresses: [old.relay] });
+  });
+
+  test('rejects a bad hand-added address', () => {
+    expect(() => addManualAddress(host('one'), 'https://example.com')).toThrow('ws:// or wss://');
   });
 });

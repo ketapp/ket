@@ -3773,6 +3773,9 @@ impl Shell {
                                 file_mark(key.rel.as_ref(), !active, mono.clone(), t)
                                     .into_any_element()
                             }
+                            TabKind::Terminal(id) if self.asleep_terminals.contains_key(id) => {
+                                icon_mark(Icon::Moon, paint(t.text.dim), !active).into_any_element()
+                            }
                             TabKind::Terminal(id) => match self
                                 .terminals
                                 .get(id)

@@ -31,6 +31,27 @@ const WAIT: Duration = Duration::from_secs(10);
 /// Set in the child a test runs in.
 const SANDBOXED: &str = "KET_PHONES_TEST_SANDBOX";
 
+#[test]
+fn picks_tailnet_ipv4_from_interface_addresses() {
+    use std::net::Ipv4Addr;
+
+    let addresses = [
+        Ipv4Addr::new(192, 168, 1, 4),
+        Ipv4Addr::new(100, 63, 255, 255),
+        Ipv4Addr::new(100, 64, 0, 1),
+        Ipv4Addr::new(100, 127, 255, 254),
+    ];
+    assert_eq!(
+        tailnet_ip_from(addresses),
+        Some(Ipv4Addr::new(100, 64, 0, 1))
+    );
+    assert_eq!(
+        tailnet_ip_from([Ipv4Addr::new(100, 127, 255, 254)]),
+        Some(Ipv4Addr::new(100, 127, 255, 254))
+    );
+    assert_eq!(tailnet_ip_from([Ipv4Addr::new(100, 128, 0, 1)]), None);
+}
+
 /// In the parent: runs test `name` again in a child whose data directory
 /// is a temporary one, checks it passed, and returns `true`. In that
 /// child: `false`, and the test goes on.
@@ -309,6 +330,7 @@ fn terminal(rig: &Rig, command: &str, args: &[&str]) -> (u64, Arc<LocalTerminal>
         size: TerminalSize::new(80, 24),
         key: None,
         adopt: false,
+        adopt_only: false,
     };
     let id = rig
         .host
@@ -870,6 +892,7 @@ fn the_first_snapshot_lists_the_desktops_projects_and_worktrees() {
         size: TerminalSize::new(80, 24),
         key: None,
         adopt: false,
+        adopt_only: false,
     };
     let filed = rig.host.file_keyed_for_tests(
         LocalTerminal::open(&spec).unwrap(),
@@ -922,6 +945,11 @@ fn open_pull_request(failed: bool) -> crate::github::PullRequestStatus {
         branch: "phone-work".to_owned(),
         draft: true,
         review: Review::ChangesRequested,
+        state: crate::github::PullRequestState::Open,
+        base: "main".to_owned(),
+        behind: false,
+        unresolved_comments: 0,
+        merge_methods: crate::github::MergeMethods::default(),
         checks: vec![
             Check {
                 name: "rust".to_owned(),
@@ -955,6 +983,7 @@ fn a_worktrees_pull_request_is_sent_with_its_checks_as_a_window_read_them() {
         size: TerminalSize::new(80, 24),
         key: None,
         adopt: false,
+        adopt_only: false,
     };
     let filed = rig.host.file_keyed_for_tests(
         LocalTerminal::open(&spec).unwrap(),
@@ -990,6 +1019,12 @@ fn a_worktrees_pull_request_is_sent_with_its_checks_as_a_window_read_them() {
         open.checks[1].url,
         "https://github.com/o/r/actions/runs/1/job/2"
     );
+    assert_eq!(open.state, proto::pull_request_summary::State::Open as i32);
+    assert_eq!(open.base, "main");
+    assert!(!open.behind);
+    assert!(open.merge_commit_allowed);
+    assert!(open.squash_merge_allowed);
+    assert!(open.rebase_merge_allowed);
     rig.host.find(filed).unwrap().kill();
 }
 
@@ -1021,6 +1056,64 @@ fn fixing_checks_is_checked_then_handed_to_a_window() {
     rig.host
         .pull_requests_for_tests(vec![(worktree.clone(), open_pull_request(true))]);
     assert!(message(&change(&mut session, 4, fix(&worktree))).contains("open ket on your Mac"));
+}
+
+#[test]
+fn pull_request_actions_are_refused_when_they_do_not_apply() {
+    if rerun_sandboxed("pull_request_actions_are_refused_when_they_do_not_apply") {
+        return;
+    }
+    let (_, worktree, _) = place();
+    let rig = rig();
+    let (mut session, _) = paired(&rig, &Keypair::generate().unwrap());
+    let merge = |worktree: &str| {
+        Payload::MergePullRequest(proto::MergePullRequest {
+            worktree_id: worktree.to_owned(),
+            method: proto::PullRequestMergeMethod::Squash as i32,
+        })
+    };
+    assert_eq!(
+        error_code(&change(&mut session, 1, merge("nowhere"))),
+        Some(proto::ErrorCode::NotFound)
+    );
+    assert!(
+        message(&change(&mut session, 2, merge(&worktree)))
+            .contains("has not found a pull request")
+    );
+    rig.host
+        .pull_requests_for_tests(vec![(worktree.clone(), open_pull_request(false))]);
+    // The fixture is a draft, not behind, not closed.
+    assert!(message(&change(&mut session, 3, merge(&worktree))).contains("cannot be merged yet"));
+    assert!(
+        message(&change(
+            &mut session,
+            4,
+            Payload::UpdatePullRequest(proto::UpdatePullRequest {
+                worktree_id: worktree.clone(),
+            })
+        ))
+        .contains("not behind")
+    );
+    assert!(
+        message(&change(
+            &mut session,
+            5,
+            Payload::ReopenPullRequest(proto::ReopenPullRequest {
+                worktree_id: worktree.clone(),
+            })
+        ))
+        .contains("not closed")
+    );
+    assert!(
+        message(&change(
+            &mut session,
+            6,
+            Payload::AddressComments(proto::AddressComments {
+                worktree_id: worktree,
+            })
+        ))
+        .contains("open ket on your Mac")
+    );
 }
 
 /// A request to fix `worktree`'s checks under `key`.
@@ -1672,4 +1765,159 @@ fn a_local_agent_is_answered_with_opencodes_keys() {
         answer_keys("opencode", "bash", Choice::Deny)
     );
     assert!(answer_keys(local, "bash", Choice::AllowOnce).is_some());
+}
+
+/// Reads what the host tells `window` until `want` picks something out of
+/// a reply. `None` once the window hears nothing for its read timeout.
+fn told<T>(
+    window: &mut std::os::unix::net::UnixStream,
+    want: impl Fn(crate::host::wire::Reply) -> Option<T>,
+) -> Option<T> {
+    use crate::host::wire::{self, Frame, Reply};
+    loop {
+        let Ok(frame) = wire::read(window) else {
+            return None;
+        };
+        if let Frame::Json(body) = frame
+            && let Ok(reply) = serde_json::from_slice::<Reply>(&body)
+            && let Some(found) = want(reply)
+        {
+            return Some(found);
+        }
+    }
+}
+
+#[test]
+fn a_phone_pins_a_worktree_but_never_the_repositorys_own_checkout() {
+    if rerun_sandboxed("a_phone_pins_a_worktree_but_never_the_repositorys_own_checkout") {
+        return;
+    }
+    let (project, worktree, _) = place();
+    let rig = rig();
+    let mut window = rig.host.window_for_tests();
+    window.set_read_timeout(Some(WAIT)).expect("a read timeout");
+    let (mut session, _) = paired(&rig, &Keypair::generate().unwrap());
+    let pin = |worktree: &str, pinned: bool| {
+        Payload::PinWorktree(proto::PinWorktree {
+            worktree_id: worktree.to_owned(),
+            pinned,
+        })
+    };
+    let pinned = || {
+        crate::store::Store::open_default()
+            .and_then(|store| store.load())
+            .unwrap()
+            .worktrees
+            .iter()
+            .find(|w| w.id.to_string() == worktree)
+            .expect("the worktree")
+            .pinned
+    };
+
+    assert_eq!(
+        error_code(&change(&mut session, 1, pin("nowhere", true))),
+        Some(proto::ErrorCode::NotFound)
+    );
+    assert!(
+        message(&change(
+            &mut session,
+            2,
+            pin(&format!("primary-{project}"), true)
+        ))
+        .contains("can't be pinned")
+    );
+
+    // Pinned in the store, and every window told to read its sidebar again.
+    assert!(is_ack(&change(&mut session, 3, pin(&worktree, true))));
+    assert!(pinned());
+    assert!(
+        told(&mut window, |reply| matches!(
+            reply,
+            crate::host::wire::Reply::WorktreesChanged
+        )
+        .then_some(()))
+        .is_some(),
+        "the window was not told"
+    );
+    assert!(is_ack(&change(&mut session, 4, pin(&worktree, false))));
+    assert!(!pinned());
+}
+
+#[test]
+fn deleting_a_worktree_is_checked_then_handed_to_a_window_which_may_refuse() {
+    if rerun_sandboxed("deleting_a_worktree_is_checked_then_handed_to_a_window_which_may_refuse") {
+        return;
+    }
+    let (project, worktree, _) = place();
+    let rig = rig();
+    let (mut session, _) = paired(&rig, &Keypair::generate().unwrap());
+    let delete = |id: u64, worktree: &str, force: bool| {
+        let mut request = ket_remote::envelope(
+            id,
+            Payload::DeleteWorktree(proto::DeleteWorktree {
+                worktree_id: worktree.to_owned(),
+                force,
+            }),
+        );
+        request.idempotency_key = format!("delete-{id}");
+        request
+    };
+    let send = |session: &mut PhoneSession, request: proto::Envelope| {
+        let id = request.request_id;
+        session.send_envelope(&request).expect("the request");
+        answer_to(session, id)
+    };
+
+    assert_eq!(
+        error_code(&send(&mut session, delete(1, "nowhere", false))),
+        Some(proto::ErrorCode::NotFound)
+    );
+    // The repository itself is never a worktree's delete.
+    assert!(
+        message(&send(
+            &mut session,
+            delete(2, &format!("primary-{project}"), true)
+        ))
+        .contains("can't be deleted")
+    );
+    // No window: nothing forcing would get past.
+    let alone = send(&mut session, delete(3, &worktree, false));
+    assert_ne!(error_code(&alone), Some(proto::ErrorCode::WouldLoseWork));
+    assert!(message(&alone).contains("open ket on your Mac"));
+
+    // With a window: an unforced delete it refuses comes back saying why.
+    let mut window = rig.host.window_for_tests();
+    window.set_read_timeout(Some(WAIT)).expect("a read timeout");
+    let deleting = |window: &mut std::os::unix::net::UnixStream| {
+        told(window, |reply| match reply {
+            crate::host::wire::Reply::DeleteWork {
+                req,
+                worktree,
+                force,
+            } => Some((req, worktree, force)),
+            _ => None,
+        })
+        .expect("the window is told")
+    };
+    session.send_envelope(&delete(4, &worktree, false)).unwrap();
+    let (req, asked, force) = deleting(&mut window);
+    assert_eq!((asked.as_str(), force), (worktree.as_str(), false));
+    rig.host.finish_delete_work(
+        req,
+        Err("it has uncommitted changes that would be lost".to_owned()),
+    );
+    let refused = answer_to(&mut session, 4);
+    assert_eq!(error_code(&refused), Some(proto::ErrorCode::WouldLoseWork));
+    assert!(message(&refused).contains("uncommitted changes"));
+
+    // Asked again with force, it goes, keeping a branch with unmerged work.
+    session.send_envelope(&delete(5, &worktree, true)).unwrap();
+    let (req, _, force) = deleting(&mut window);
+    assert!(force);
+    rig.host
+        .finish_delete_work(req, Ok(Some("phone-work".to_owned())));
+    match answer_to(&mut session, 5).payload {
+        Some(Payload::WorktreeDeleted(deleted)) => assert_eq!(deleted.kept_branch, "phone-work"),
+        other => panic!("not deleted: {other:?}"),
+    }
 }

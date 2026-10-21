@@ -446,7 +446,6 @@ mod tests {
             project_id: ProjectId::new("proj"),
             branch: id.to_owned(),
             name: None,
-            agent_title: None,
             path: PathBuf::from(format!("/tmp/{id}")),
             base: "main".to_owned(),
             base_commit: None,

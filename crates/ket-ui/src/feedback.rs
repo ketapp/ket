@@ -124,6 +124,16 @@ fn prompt(kind: Kind) -> &'static str {
     }
 }
 
+/// The mark beside what a report is about, in the switch at the top of the
+/// form.
+fn mark(kind: Kind) -> Icon {
+    match kind {
+        Kind::Feedback => Icon::MessageSquare,
+        Kind::Bug => Icon::Bug,
+        Kind::Idea => Icon::Lightbulb,
+    }
+}
+
 impl Shell {
     // ---- opening ---------------------------------------------------------------
 
@@ -490,12 +500,18 @@ impl Shell {
         let t = &self.theme;
         let connected = feedback::endpoint().is_some();
 
+        // The full-size track, in a band of its own: the first thing to
+        // answer, and a mark on each answer so it reads at a glance.
         let kinds = button_group("feedback-kind")
             .fill()
-            .small()
             .children(Kind::ALL.map(|which| {
+                let on = which == kind;
                 segment(("feedback-kind", which as usize), which.label())
-                    .selected(which == kind)
+                    .leading(
+                        mark(which),
+                        paint(if on { t.text.primary } else { t.text.dim }),
+                    )
+                    .selected(on)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if let Some(form) = this.feedback.form.as_mut() {
                             form.kind = which;

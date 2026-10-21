@@ -1,4 +1,5 @@
-//! The snippet picker: ⌘/ from anywhere, a snippet picked, sent.
+//! The snippet picker: ⌘/ from anywhere but an editor tab, a snippet
+//! picked, sent.
 //!
 //! The menus in [`crate::snippets`] hang off a worktree row or an agent tab,
 //! which means reaching for the mouse and finding the row first. This is the

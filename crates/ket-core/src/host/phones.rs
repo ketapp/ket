@@ -259,6 +259,48 @@ impl Relay {
             Self::External(url) => url.clone(),
         }
     }
+
+    /// Addresses a paired phone may try. The pairing URL stays separate.
+    fn addresses(&self) -> Vec<String> {
+        match self {
+            Self::Local { port } => {
+                let mut addresses = vec![format!("ws://{}:{port}", lan_host())];
+                if let Some(ip) = tailnet_ip() {
+                    addresses.push(format!("ws://{ip}:{port}"));
+                }
+                addresses
+            }
+            Self::External(url) => vec![url.clone()],
+        }
+    }
+}
+
+/// Picks an IPv4 address in the Tailscale address range from interface IPs.
+fn tailnet_ip_from(
+    addresses: impl IntoIterator<Item = std::net::Ipv4Addr>,
+) -> Option<std::net::Ipv4Addr> {
+    addresses.into_iter().find(|ip| {
+        let octets = ip.octets();
+        octets[0] == 100 && (64..=127).contains(&octets[1])
+    })
+}
+
+/// This machine's current Tailscale IPv4 interface address, if present.
+pub(super) fn tailnet_ip() -> Option<std::net::Ipv4Addr> {
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        let interfaces = nix::ifaddrs::getifaddrs().ok()?;
+        tailnet_ip_from(interfaces.filter_map(|interface| {
+            interface
+                .address?
+                .as_sockaddr_in()
+                .map(|address| address.ip())
+        }))
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        None
+    }
 }
 
 /// The name a phone on the same network reaches this Mac by: its Bonjour

@@ -5,7 +5,15 @@
 // waiting to go to the agent, and what a merge would bring — merged from
 // here, or pushed and opened as a pull request.
 
-import { Activity, Answer_Choice, type Changes, CheckSummary_State, FileChange_Status, type PullRequestSummary } from '@ket/remote';
+import {
+  Activity,
+  Answer_Choice,
+  type Changes,
+  CheckSummary_State,
+  FileChange_Status,
+  type PullRequestMergeMethod,
+  type PullRequestSummary,
+} from '@ket/remote';
 import { router, useIsFocused, useLocalSearchParams } from 'expo-router';
 import { useEffect, useState } from 'react';
 import { Alert, Linking, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
@@ -15,10 +23,11 @@ import { RiskBadge } from '../../../components/Risk';
 import { AgentMark, Close, TerminalGlyph } from '../../../components/icons';
 import { Banner, Bar, Button, Card, Dot, Figure, Heading, IconButton, Prose, Row, Screen, Value } from '../../../components/ui';
 import { agentTerminal, detail, everyWorktree, stateOf } from '../../../lib/activity';
-import { checkWord, checksInOrder, checksSummary, failedChecks, reviewWords } from '../../../lib/checks';
+import { checkWord, checksInOrder, prLine } from '../../../lib/checks';
 import type { HostConnection } from '../../../lib/connection';
 import { useHost } from '../../../lib/hosts';
 import { confirmIdentity } from '../../../lib/lock';
+import { askMerge, prActions } from '../../../lib/pr-actions';
 import { commentsSaid, review, sendReview, useReview } from '../../../lib/review';
 import { agentLabel, font, size, t } from '../../../lib/theme';
 
@@ -328,37 +337,41 @@ function PullRequest({
   worktreeId: string;
   agentTerminal: bigint | null;
 }) {
-  const [fixing, setFixing] = useState(false);
+  const [busy, setBusy] = useState<string | null>(null);
   const [said, setSaid] = useState<{ text: string; failed: boolean } | null>(null);
   const [everyCheck, setEveryCheck] = useState(false);
 
-  const failed = failedChecks(pr);
-  // A desktop from 1.11 takes the fix; an older one sends no pull request.
-  const canFix = failed > 0 && conn.hostMinor >= 11;
-  const line = [pr.draft ? 'Draft' : '', reviewWords(pr), checksSummary(pr)].filter(Boolean).join(' · ');
+  const {
+    fix: canFix,
+    address: canAddress,
+    merge: canMerge,
+    update: canUpdate,
+    ready: canReady,
+    reopen: canReopen,
+  } = prActions(pr, conn.hostMinor);
+  const line = prLine(pr);
   const ordered = checksInOrder(pr);
   const settled = (state: CheckSummary_State) => state !== CheckSummary_State.FAILED && state !== CheckSummary_State.PENDING;
   const folded = everyCheck ? [] : ordered.filter((check) => settled(check.state));
   const shown = everyCheck ? ordered : ordered.filter((check) => !settled(check.state));
+  const working = busy !== null;
 
-  // Straight to the agent, as asked: one tap sends it, and the conversation
-  // it lands in opens once the desktop has read the logs and started the
-  // agent. Startup failures show here.
-  const fix = async () => {
-    setFixing(true);
+  const handOver = async (
+    kind: 'checks' | 'comments',
+    run: () => Promise<{ starting: boolean } | { why: string }>,
+  ) => {
+    setBusy(kind);
     setSaid(null);
-    const fixed = await conn
-      .fixChecks(worktreeId)
-      .catch((e: unknown) => ({ why: e instanceof Error ? e.message : String(e) }));
-    setFixing(false);
-    if ('why' in fixed) {
-      setSaid({ text: fixed.why, failed: true });
+    const handed = await run().catch((e: unknown) => ({ why: e instanceof Error ? e.message : String(e) }));
+    setBusy(null);
+    if ('why' in handed) {
+      setSaid({ text: handed.why, failed: true });
       return;
     }
-    // Not a failure: tapping again would give it the checks twice.
-    if (fixed.starting) {
+    const what = kind === 'checks' ? 'failed checks' : 'review comments';
+    if (handed.starting) {
       setSaid({
-        text: `ket on ${conn.host.name || 'your Mac'} is still starting the agent. It gets the failed checks once it's up.`,
+        text: `ket on ${conn.host.name || 'your Mac'} is still starting the agent. It gets the ${what} once it's up.`,
         failed: false,
       });
       return;
@@ -367,8 +380,24 @@ function PullRequest({
       router.push(`/session/${conn.host.id}/${terminal.toString()}`);
       return;
     }
-    setSaid({ text: `The agent on ${conn.host.name || 'your Mac'} has the failed checks.`, failed: false });
+    setSaid({ text: `The agent on ${conn.host.name || 'your Mac'} has the ${what}.`, failed: false });
   };
+
+  const act = async (label: string, run: () => Promise<string | null>) => {
+    setBusy(label);
+    setSaid(null);
+    const why = await run().catch((e: unknown) => (e instanceof Error ? e.message : String(e)));
+    setBusy(null);
+    if (why) setSaid({ text: why, failed: true });
+  };
+
+  const merge = () =>
+    askMerge(pr, (method: PullRequestMergeMethod) => {
+      void (async () => {
+        if (!(await confirmIdentity(`Merge #${pr.number.toString()}`))) return;
+        await act('merge', () => conn.mergePullRequest(worktreeId, method));
+      })();
+    });
 
   return (
     <Card style={styles.list}>
@@ -403,14 +432,59 @@ function PullRequest({
         {canFix ? (
           <Button
             kind="primary"
-            title={fixing ? 'Reading the checks…' : 'Fix checks with agent'}
-            disabled={fixing}
+            title={busy === 'checks' ? 'Reading the checks…' : 'Fix checks with agent'}
+            disabled={working}
             style={styles.grow}
-            onPress={() => void fix()}
+            onPress={() => void handOver('checks', () => conn.fixChecks(worktreeId))}
+          />
+        ) : null}
+        {canAddress ? (
+          <Button
+            kind={canFix ? 'ghost' : 'primary'}
+            title={busy === 'comments' ? 'Reading the comments…' : 'Address comments with agent'}
+            disabled={working}
+            style={styles.grow}
+            onPress={() => void handOver('comments', () => conn.addressComments(worktreeId))}
+          />
+        ) : null}
+        {canMerge ? (
+          <Button
+            kind={canFix || canAddress ? 'ghost' : 'primary'}
+            title={busy === 'merge' ? 'Merging…' : 'Merge'}
+            disabled={working}
+            style={styles.grow}
+            onPress={merge}
+          />
+        ) : null}
+        {canUpdate ? (
+          <Button
+            kind="ghost"
+            title={busy === 'update' ? 'Updating…' : 'Update branch'}
+            disabled={working}
+            style={styles.grow}
+            onPress={() => void act('update', () => conn.updatePullRequest(worktreeId))}
+          />
+        ) : null}
+        {canReady ? (
+          <Button
+            kind="ghost"
+            title={busy === 'ready' ? 'Marking ready…' : 'Ready for review'}
+            disabled={working}
+            style={styles.grow}
+            onPress={() => void act('ready', () => conn.readyPullRequest(worktreeId))}
+          />
+        ) : null}
+        {canReopen ? (
+          <Button
+            kind="ghost"
+            title={busy === 'reopen' ? 'Reopening…' : 'Reopen'}
+            disabled={working}
+            style={styles.grow}
+            onPress={() => void act('reopen', () => conn.reopenPullRequest(worktreeId))}
           />
         ) : null}
         <Button
-          kind={canFix ? 'ghost' : undefined}
+          kind={canFix || canAddress || canMerge ? 'ghost' : undefined}
           title="Open on GitHub"
           style={styles.grow}
           onPress={() => void Linking.openURL(pr.url)}

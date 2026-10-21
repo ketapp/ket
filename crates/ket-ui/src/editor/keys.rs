@@ -8,7 +8,7 @@ use gpui::{App, ClipboardItem, Context, KeyDownEvent, Keystroke, ScrollStrategy,
 use ket_core::buffer::LineCol;
 
 use crate::Shell;
-use crate::shortcuts::global_shortcut;
+use crate::shortcuts::{GlobalShortcut, global_shortcut};
 
 use super::selection::line_range;
 
@@ -94,9 +94,12 @@ impl Shell {
         // finder (Cmd-P) and the terminal (Ctrl-`) stay reachable with the
         // editor focused. `main.rs` handles the rest of the table ahead of
         // this pane; these are the ones that come after it, so a buffer with
-        // focus would otherwise swallow them as unrecognised chords.
-        if global_shortcut(&keystroke).is_some() {
-            return false;
+        // focus would otherwise swallow them as unrecognised chords. Cmd-/ is
+        // the exception: in a buffer it comments lines, as in VS Code, and
+        // `main.rs` lets it through to here for that.
+        match global_shortcut(&keystroke) {
+            None | Some(GlobalShortcut::SendSnippet) => {}
+            Some(_) => return false,
         }
 
         if self
@@ -127,7 +130,7 @@ impl Shell {
     }
 
     /// Mode-switching and whole-buffer chords: find, save, undo/redo,
-    /// select-all, indenting, the clipboard, wrap, and the external handoffs. Anything
+    /// select-all, indenting, comments, the clipboard, wrap, and the external handoffs. Anything
     /// else falls to [`Shell::handle_buffer_key`].
     fn handle_editor_key(
         &mut self,
@@ -189,6 +192,17 @@ impl Shell {
                 if let Some(state) = self.editors.get_mut(editor_key) {
                     let unit = state.buffer.indent_unit();
                     state.buffer.outdent_lines(&unit);
+                }
+            }
+            // ⌘/: comment out every line the selection touches, or take the
+            // comment back off, in the file's own line-comment syntax. A
+            // file ket knows no language for is left alone, as VS Code
+            // leaves plain text.
+            "/" if cmd => {
+                if let Some(state) = self.editors.get_mut(editor_key)
+                    && let Some(language) = state.language
+                {
+                    state.buffer.toggle_line_comment(language.line_comment);
                 }
             }
             "c" if cmd => {

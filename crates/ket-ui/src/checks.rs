@@ -57,7 +57,7 @@ impl Shell {
     }
 
     /// The project `worktree` is in.
-    fn project_of_worktree(&self, worktree: &WorktreeId) -> Option<ProjectId> {
+    pub(crate) fn project_of_worktree(&self, worktree: &WorktreeId) -> Option<ProjectId> {
         self.projects
             .iter()
             .find(|project| project.worktrees.iter().any(|w| &w.id == worktree))
@@ -88,9 +88,36 @@ impl Shell {
 
     fn read_pull_requests(&mut self, project: ProjectId, cx: &mut Context<Self>) {
         self.pull_requests.reading.insert(project.clone());
+        let remembered: Vec<String> = self
+            .projects
+            .iter()
+            .find(|node| node.id == project)
+            .map(|node| {
+                node.worktrees
+                    .iter()
+                    .filter(|worktree| !worktree.primary && !worktree.missing)
+                    .filter(|worktree| {
+                        self.pull_requests.open.contains_key(&worktree.id)
+                            || worktree.pull_request.is_some()
+                    })
+                    .map(|worktree| worktree.branch.to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
         let read = cx.background_executor().spawn({
             let project = project.clone();
-            async move { github::open_pull_requests(&checkout(&project)?) }
+            async move {
+                let at = checkout(&project)?;
+                let mut listed = github::open_pull_requests(&at)?;
+                for branch in remembered {
+                    if !listed.iter().any(|pr| pr.branch == branch)
+                        && let Ok(Some(pr)) = github::pull_request_for_branch(&at, &branch)
+                    {
+                        listed.push(pr);
+                    }
+                }
+                Ok(listed)
+            }
         });
         cx.spawn(async move |shell: WeakEntity<Shell>, cx| {
             let read = read.await;
@@ -137,10 +164,7 @@ impl Shell {
         };
         let mut changed = false;
         for worktree in node.worktrees.iter().filter(|w| !w.primary) {
-            let found = open
-                .iter()
-                .find(|pr| pr.branch == worktree.branch.as_ref())
-                .cloned();
+            let found = github::best_for_branch(&open, worktree.branch.as_ref()).cloned();
             changed |= match found {
                 Some(pr) if self.pull_requests.open.get(&worktree.id) == Some(&pr) => false,
                 Some(pr) => {
@@ -172,6 +196,94 @@ impl Shell {
             })
             .collect();
         ket_core::host::publish_pull_requests(open);
+    }
+
+    /// Puts `status` on `id` at once, rather than waiting for the next poll,
+    /// and tells the host.
+    pub(crate) fn remember_pull_request(&mut self, id: WorktreeId, status: PullRequestStatus) {
+        self.pull_requests.open.insert(id, status);
+        self.publish_pull_requests();
+    }
+
+    /// Reads `id`'s pull request from GitHub now, after a merge or similar.
+    pub(crate) fn refresh_pull_request(
+        &mut self,
+        id: WorktreeId,
+        number: u64,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(project) = self.project_of_worktree(&id) else {
+            return;
+        };
+        let read = cx
+            .background_executor()
+            .spawn(async move { github::pull_request(&checkout(&project)?, number) });
+        cx.spawn(async move |shell: WeakEntity<Shell>, cx| {
+            let read = read.await;
+            let _ = shell.update(cx, |shell, cx| {
+                if let Ok(status) = read {
+                    shell.remember_pull_request(id, status);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Hands `id`'s unresolved review comments to its agent, from the
+    /// worktree menu: reads them, and types a message naming each into the
+    /// agent's terminal — opening an agent there first when none is running,
+    /// as Fix checks does. The row is selected, so its agent is in view.
+    pub(crate) fn address_comments(&mut self, id: WorktreeId, cx: &mut Context<Self>) {
+        let Some(project) = self.project_of_worktree(&id) else {
+            self.toast(Tone::Error, "That worktree isn't here any more", cx);
+            return;
+        };
+        let Some(status) = self
+            .pull_requests
+            .of(&id)
+            .filter(|status| status.can_address_comments())
+            .cloned()
+        else {
+            self.toast(
+                Tone::Error,
+                "This pull request has no review comments to address",
+                cx,
+            );
+            return;
+        };
+        if let Some(selection) = self.position_of(&id) {
+            self.select(selection, cx);
+        }
+        self.toast(
+            Tone::Info,
+            format!("Reading #{}'s review comments\u{2026}", status.number),
+            cx,
+        );
+        let number = status.number;
+        let handed = cx.background_executor().spawn({
+            let id = id.clone();
+            async move { ket_core::address_comments::hand_over(&checkout(&project)?, &id, &status) }
+        });
+        cx.spawn(async move |shell: WeakEntity<Shell>, cx| {
+            let handed = handed.await;
+            let _ = shell.update(cx, |shell, cx| match handed {
+                Ok(prompt) => {
+                    shell.send_prompt_to_worktree(id, prompt, cx);
+                    shell.toast(
+                        Tone::Info,
+                        format!("Gave #{number}'s review comments to the agent"),
+                        cx,
+                    );
+                }
+                Err(error) => shell.toast(
+                    Tone::Error,
+                    format!("Couldn't read #{number}'s review comments: {error}"),
+                    cx,
+                ),
+            });
+        })
+        .detach();
     }
 
     /// Hands `id`'s failed checks to its agent, from the worktree menu: reads

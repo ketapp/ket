@@ -527,6 +527,51 @@ impl Shell {
             );
         }
 
+        if !self.asleep_terminals.is_empty() {
+            let count = self.asleep_terminals.len();
+            let freed: u64 = self
+                .asleep_terminals
+                .values()
+                .map(|tab| tab.freed_bytes)
+                .sum();
+            let summary = if freed > 0 {
+                format!("Asleep: {count} agents · {} freed", format_bytes(freed))
+            } else {
+                format!("Asleep: {count} agents")
+            };
+            rows = rows.child(
+                div()
+                    .mt(px(7.0))
+                    .h(LINE_H)
+                    .flex()
+                    .items_center()
+                    .text_size(ITEM)
+                    .text_color(paint(t.text.dim))
+                    .child(summary),
+            );
+            let asleep: Vec<_> = self
+                .asleep_terminals
+                .iter()
+                .map(|(id, tab)| (*id, tab.agent.clone()))
+                .collect();
+            for (id, agent) in asleep {
+                rows = rows.child(
+                    sized_row(("overhead-asleep", id.0), false, LINE_H, t)
+                        .child(sized_icon(Icon::Moon, px(13.0), paint(t.text.dim)))
+                        .child(div().flex_1().min_w_0().child(agent))
+                        .child(
+                            button(("overhead-wake", id.0), "Wake")
+                                .small()
+                                .render(t)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.wake_terminal(id, cx);
+                                    cx.stop_propagation();
+                                })),
+                        ),
+                );
+            }
+        }
+
         // An `ollama serve` in one of ket's own terminals is in that
         // session's tree already, its models with it: listing them again
         // would count them twice.
@@ -821,6 +866,19 @@ impl Shell {
                 agent: node.agent.clone(),
             })
             .collect()
+    }
+}
+
+impl OverheadItems {
+    /// The latest footprint attributed to a terminal's process tree.
+    pub(crate) fn terminal_memory(&self, pid: u32) -> Option<u64> {
+        self.meter
+            .latest()?
+            .agents
+            .sessions
+            .iter()
+            .find(|session| session.root_pid == pid as i32)
+            .map(|session| session.reading.memory)
     }
 }
 
@@ -1458,6 +1516,7 @@ mod tests {
 
     fn session(kind: SessionKind, program: &str, cwd: &str, cpu: Option<f32>) -> Session {
         Session {
+            root_pid: 0,
             kind,
             program: program.to_owned(),
             cwd: Some(PathBuf::from(cwd)),

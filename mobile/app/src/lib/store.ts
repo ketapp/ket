@@ -7,6 +7,7 @@ import './polyfills';
 
 import * as SecureStore from 'expo-secure-store';
 import { type Keypair, type PairedHost, fromBase64Url, generateKeypair, keypairFrom, toBase64Url } from '@ket/remote';
+import { dialAddresses, normalizeHost } from './addresses';
 
 const KEY = 'ket.phone.key';
 const HOSTS = 'ket.hosts';
@@ -84,6 +85,12 @@ export interface SavedHost {
   id: string;
   name: string;
   relay: string;
+  /** Addresses most recently advertised by a 1.17 or newer host. */
+  addresses?: string[];
+  /** Addresses this phone's owner added. */
+  manualAddresses?: string[];
+  /** Address that most recently connected. */
+  lastAddress?: string;
   hostPublic: string;
   pairedAt: number;
   /** Where the last session left off, for resuming. */
@@ -107,11 +114,15 @@ export async function listHosts(): Promise<SavedHost[]> {
 
 export async function getHost(id: string): Promise<SavedHost | null> {
   const stored = await get(hostEntry(id));
-  return stored ? (JSON.parse(stored) as SavedHost) : null;
+  if (!stored) return null;
+  const host = JSON.parse(stored) as SavedHost;
+  const migrated = normalizeHost(host);
+  if (!host.addresses || !host.manualAddresses) await set(hostEntry(id), JSON.stringify(migrated));
+  return migrated;
 }
 
 export async function saveHost(host: SavedHost): Promise<void> {
-  await set(hostEntry(host.id), JSON.stringify(host));
+  await set(hostEntry(host.id), JSON.stringify(normalizeHost(host)));
   const ids: string[] = JSON.parse((await get(HOSTS)) ?? '[]');
   if (!ids.includes(host.id)) {
     ids.push(host.id);
@@ -198,5 +209,6 @@ export function toPaired(host: SavedHost): PairedHost {
     hostId: fromBase64Url(host.id),
     hostPublic: fromBase64Url(host.hostPublic),
     relay: host.relay,
+    addresses: dialAddresses(host),
   };
 }

@@ -8,6 +8,7 @@ import './polyfills';
 import { type Keypair, type PairedHost, fromBase64Url, generateKeypair, keypairFrom, toBase64Url } from '@ket/remote';
 
 import type { LastWork, LockConfig, SavedHost } from './store';
+import { dialAddresses, normalizeHost } from './addresses';
 
 export type { LastWork, LockConfig, SavedHost } from './store';
 
@@ -39,11 +40,15 @@ export async function listHosts(): Promise<SavedHost[]> {
 
 export async function getHost(id: string): Promise<SavedHost | null> {
   const stored = get(hostEntry(id));
-  return stored ? (JSON.parse(stored) as SavedHost) : null;
+  if (!stored) return null;
+  const host = JSON.parse(stored) as SavedHost;
+  const migrated = normalizeHost(host);
+  if (!host.addresses || !host.manualAddresses) set(hostEntry(id), JSON.stringify(migrated));
+  return migrated;
 }
 
 export async function saveHost(host: SavedHost): Promise<void> {
-  set(hostEntry(host.id), JSON.stringify(host));
+  set(hostEntry(host.id), JSON.stringify(normalizeHost(host)));
   const ids: string[] = JSON.parse(get(HOSTS) ?? '[]');
   if (!ids.includes(host.id)) {
     ids.push(host.id);
@@ -99,6 +104,7 @@ export function toPaired(host: SavedHost): PairedHost {
     hostId: fromBase64Url(host.id),
     hostPublic: fromBase64Url(host.hostPublic),
     relay: host.relay,
+    addresses: dialAddresses(host),
   };
 }
 

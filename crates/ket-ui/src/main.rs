@@ -62,6 +62,7 @@ mod input;
 mod ios_simulator;
 mod layout;
 mod local_models;
+mod merge_pull_request;
 mod merge_worktree;
 mod motion;
 mod notify;
@@ -566,6 +567,11 @@ struct Shell {
     /// The worktree whose push and pull request are in flight, if any. One
     /// at a time, as a merge is.
     pub(crate) opening_pull_request: crate::pull_request::OpeningPullRequest,
+    /// Merge a GitHub pull request, while the dialog is up.
+    pub(crate) confirm_merge_pull_request:
+        Option<crate::merge_pull_request::MergePullRequestConfirm>,
+    /// A GitHub pull-request action running for one worktree.
+    pub(crate) pull_request_action: crate::merge_pull_request::PullRequestAction,
     /// The tab whose title is being edited in the strip, if any. One at a
     /// time: the field is what holds the keyboard, and two of them would be
     /// two places a character could land.
@@ -909,6 +915,7 @@ struct Shell {
     /// Running terminals, one per terminal *tab*. A tab absent here has never
     /// opened one; see `crate::terminal`.
     pub(crate) terminals: HashMap<TerminalId, TerminalHandle>,
+    pub(crate) asleep_terminals: HashMap<TerminalId, terminal::AsleepTerminal>,
     /// Status shown while a terminal tab is waiting for its backend, or when
     /// opening that backend failed. Kept separately so the tab can appear in
     /// the first frame instead of waiting on filesystem scans and pty setup.
@@ -1056,6 +1063,7 @@ impl Shell {
             || self.confirm_close_session.is_some()
             || self.confirm_merge_worktree.is_some()
             || self.confirm_pull_request.is_some()
+            || self.confirm_merge_pull_request.is_some()
             || self.worktree_rename.is_some()
             || self.quick_prompt.is_some()
             || self.backlog.is_some()
@@ -1195,6 +1203,23 @@ impl Shell {
                         skipped = 0;
                         shell.poll_tick(cx);
                     })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        })
+        .detach();
+
+        // Sleeping is measured from each pane's last report, so a quiet
+        // window needs a clock even when no hook or terminal frame arrives.
+        cx.spawn(async move |shell, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(60))
+                    .await;
+                if shell
+                    .update(cx, |shell, cx| shell.sweep_idle_agents(cx))
                     .is_err()
                 {
                     return;
@@ -1343,6 +1368,8 @@ impl Shell {
                     merging: None,
                     confirm_pull_request: None,
                     opening_pull_request: None,
+                    confirm_merge_pull_request: None,
+                    pull_request_action: None,
                     tab_rename: None,
                     worktree_rename: None,
                     quick_prompt: None,
@@ -1439,6 +1466,7 @@ impl Shell {
                     activity: Tracker::default(),
                     next_terminal: 0,
                     terminals: HashMap::new(),
+                    asleep_terminals: HashMap::new(),
                     terminal_notes: HashMap::new(),
                     note: Some(format!("could not open the workspace: {e}").into()),
                     project_menu: None,
@@ -1514,6 +1542,8 @@ impl Shell {
             merging: None,
             confirm_pull_request: None,
             opening_pull_request: None,
+            confirm_merge_pull_request: None,
+            pull_request_action: None,
             tab_rename: None,
             worktree_rename: None,
             quick_prompt: None,
@@ -1610,6 +1640,7 @@ impl Shell {
             activity: Tracker::new(known_agents),
             next_terminal: 0,
             terminals: HashMap::new(),
+            asleep_terminals: HashMap::new(),
             terminal_notes: HashMap::new(),
             note: None,
             project_menu: None,
@@ -1909,6 +1940,7 @@ impl Render for Shell {
         let discard = self.discard_view(cx);
         let merge_worktree = self.merge_worktree_view(cx);
         let pull_request = self.pull_request_view(window, cx);
+        let merge_pull_request = self.merge_pull_request_view(cx);
         let rename_worktree = self.worktree_rename_view(window, cx);
         let quick_prompt = self.quick_prompt_view(window, cx);
         let backlog = self.backlog_view(window, cx);
@@ -1927,6 +1959,7 @@ impl Render for Shell {
             .or(discard)
             .or(merge_worktree)
             .or(pull_request)
+            .or(merge_pull_request)
             .or(rename_worktree)
             .or(quick_prompt)
             .or(backlog)
@@ -2784,6 +2817,11 @@ impl Render for Shell {
                         stop_unless_text(event, cx);
                         return;
                     }
+                    if this.merge_pull_request_key(event, cx) {
+                        cx.notify();
+                        stop_unless_text(event, cx);
+                        return;
+                    }
                     if this.close_session_key(event, cx) {
                         cx.notify();
                         stop_unless_text(event, cx);
@@ -2971,7 +3009,11 @@ impl Render for Shell {
                         stop_unless_text(event, cx);
                         return;
                     }
-                    if let Some(GlobalShortcut::SendSnippet) = shortcut {
+                    // Not in an editor tab, where ⌘/ comments lines instead:
+                    // see `editor/keys.rs`.
+                    if let Some(GlobalShortcut::SendSnippet) = shortcut
+                        && !this.editor_in_front()
+                    {
                         this.open_snippet_picker(cx);
                         cx.notify();
                         stop_unless_text(event, cx);

@@ -178,6 +178,7 @@ export function Row({
   chevron,
   small,
   onPress,
+  onLongPress,
   children,
 }: {
   mark?: ReactNode;
@@ -190,12 +191,15 @@ export function Row({
   chevron?: boolean;
   small?: boolean;
   onPress?: () => void;
+  /** Held: the row's menu. */
+  onLongPress?: () => void;
   children?: ReactNode;
 }) {
   return (
     <Pressable
       onPress={onPress}
-      disabled={!onPress}
+      onLongPress={onLongPress}
+      disabled={!onPress && !onLongPress}
       style={({ pressed }) => [
         styles.row,
         small && { minHeight: size.rowSm },
@@ -252,6 +256,8 @@ export interface Segment<K extends string> {
   count?: number;
   /** A mark before the label. */
   icon?: ReactNode;
+  /** What a screen reader calls it, for a segment with no label of its own. */
+  name?: string;
 }
 
 /**
@@ -283,15 +289,18 @@ export function Segmented<K extends string>({
           <Pressable
             key={segment.key}
             accessibilityRole="button"
+            accessibilityLabel={segment.name}
             accessibilityState={{ selected: on, disabled }}
             disabled={disabled}
             onPress={() => onChange(segment.key)}
             style={[styles.segment, tall && styles.segmentTall, on && styles.segmentOn]}
           >
             {segment.icon}
-            <Text style={[styles.segmentText, on && { color: t.text }]} numberOfLines={1}>
-              {segment.label}
-            </Text>
+            {segment.label ? (
+              <Text style={[styles.segmentText, on && { color: t.text }]} numberOfLines={1}>
+                {segment.label}
+              </Text>
+            ) : null}
             {segment.count !== undefined ? (
               <Text style={[styles.segmentCount, on && { color: t.dim }]}>{segment.count}</Text>
             ) : null}
@@ -752,14 +761,15 @@ export function TabBar({
   if (split && !sidebar) return null;
   const tabs = [
     { key: 'worktrees', label: 'Worktrees', path: '/', icon: Tree },
-    { key: 'needs', label: 'Needs you', path: '/needs', icon: Inbox },
     { key: 'usage', label: 'Usage', path: '/usage', icon: Gauge },
+    { key: 'needs', label: 'Needs you', path: '/needs', icon: Inbox },
     { key: 'settings', label: 'Settings', path: '/settings', icon: Sliders },
   ] as const;
-  // A capsule of icons, no words; the open tab is a lit green disc.
+  // A float of icons, no words; the open tab is raised, as the desktop's
+  // segmented track raises its chosen segment.
   return (
     <View style={styles.tabDock}>
-      <View style={[styles.tabBar, { marginBottom: Math.max(insets.bottom - 10, 10) }]}>
+      <View style={[styles.tabBar, { marginBottom: tabBarFoot(insets.bottom) }]}>
         {tabs.map(({ key, label, path, icon: Icon }) => {
           const on = key === active;
           return (
@@ -772,7 +782,7 @@ export function TabBar({
               style={[styles.tab, on && styles.tabOn]}
             >
               <View>
-                <Icon size={23} color={on ? t.onBrand : t.dim} weight={on ? 1.7 : 1.6} />
+                <Icon size={21} color={on ? t.text : t.dim} weight={on ? 1.7 : 1.6} />
                 {key === 'needs' && needs > 0 ? (
                   <View style={styles.tabCount}>
                     <Text style={styles.tabCountText}>{needs}</Text>
@@ -789,6 +799,15 @@ export function TabBar({
 
 /** Room a scrolling screen leaves under its content for the tab bar. */
 export const TAB_BAR_ROOM = 104;
+
+/** The tab bar's height, edge to edge. */
+export const TAB_BAR_HEIGHT = 58;
+
+/** How far the tab bar floats above the screen's foot, given the safe area's
+ * inset there — what anything floating over it stands on. */
+export function tabBarFoot(insetBottom: number): number {
+  return Math.max(insetBottom - 10, 10);
+}
 
 /** A text field's well, for a `TextInput`. */
 export const field: TextStyle = {
@@ -992,27 +1011,21 @@ export const styles = StyleSheet.create({
   knobOn: { backgroundColor: t.onAccent },
   tabDock: { position: 'absolute', left: 0, right: 0, bottom: 0, alignItems: 'center', pointerEvents: 'box-none' },
   tabBar: {
+    height: TAB_BAR_HEIGHT,
     flexDirection: 'row',
-    gap: 14,
-    paddingVertical: 6,
-    paddingHorizontal: 8,
-    backgroundColor: t.card,
+    gap: 2,
+    padding: 5,
+    backgroundColor: t.elevated,
     borderWidth: 1,
     borderColor: t.border,
-    borderRadius: 34,
+    borderRadius: 29,
     shadowColor: '#000',
     shadowOpacity: 0.6,
     shadowRadius: 18,
     shadowOffset: { width: 0, height: 16 },
   },
-  tab: { width: 54, height: 54, borderRadius: 27, alignItems: 'center', justifyContent: 'center' },
-  tabOn: {
-    backgroundColor: t.brand,
-    shadowColor: t.brand,
-    shadowOpacity: 0.45,
-    shadowRadius: 11,
-    shadowOffset: { width: 0, height: 0 },
-  },
+  tab: { width: 64, height: 46, borderRadius: 23, alignItems: 'center', justifyContent: 'center' },
+  tabOn: { backgroundColor: t.selection },
   tabCount: {
     position: 'absolute',
     top: -8,
@@ -1022,7 +1035,7 @@ export const styles = StyleSheet.create({
     paddingHorizontal: 5,
     borderRadius: 11,
     borderWidth: 2.5,
-    borderColor: t.card,
+    borderColor: t.elevated,
     backgroundColor: t.attention,
     alignItems: 'center',
     justifyContent: 'center',

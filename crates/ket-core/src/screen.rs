@@ -11,6 +11,10 @@
 //! Read only for a Codex pane already waiting on a prompt, on the host's
 //! one-second tick, [`DIALOG_ROWS`] rows under the parser's lock: nothing
 //! for any other agent, and nothing for a Codex pane at work or idle.
+//!
+//! Grok's own permission menu is read here too, but only when a phone
+//! answers it: its rows change with the prompt, so the number to press is
+//! found by label at that moment — see [`grok_permission_menu`].
 
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line};
@@ -112,4 +116,73 @@ fn numbered_option(row: &str) -> Option<String> {
     }
     let rest = rest.trim();
     (!rest.is_empty()).then(|| rest.to_owned())
+}
+
+/// Grok's permission menu, as Grok 1.0.62's TUI draws it: the options in
+/// order, each with the digit that takes it.
+///
+/// ```text
+/// ┃  1 (○) Yes, and don't ask again for anything (always-approve mode)
+/// ┃  2 (○) Always allow: rm a.txt
+/// ┃  3 (●) Yes, proceed
+/// ┃  4 (○) No, reject (type to add feedback)
+/// ┃  5 (○) Never allow: rm a.txt
+///
+/// 1/5:select  │  Tab:next option  │  ←/→:scope  │  e:edit pattern  │  …
+/// ```
+///
+/// The rows are not fixed. A chained command, or one Grok cannot remember
+/// a grant for, gets no Always allow and no Never allow, and the same
+/// prompt is then `1` always-approve, `2` Yes, proceed, `3` No, reject —
+/// which is why a number pressed blind turned a phone's Approve into a
+/// rejection. `None` unless the options run from `1` without a gap and the
+/// footer, within [`FOOTER_ROWS`] of the bottom, counts the same number of
+/// them: that is what says the menu is up now, whole. Only the footer's
+/// `n/N:select` is relied on, not the hints after it, which a terminal a
+/// phone has narrowed cuts off.
+pub fn grok_permission_menu(rows: &[String]) -> Option<Vec<(u8, String)>> {
+    let live_from = rows.len().saturating_sub(FOOTER_ROWS);
+    let footer = rows
+        .iter()
+        .rposition(|row| row.trim_start().split_once(":select").is_some())
+        .filter(|at| *at >= live_from)?;
+    let counted: usize = rows[footer]
+        .trim()
+        .split_once(":select")
+        .and_then(|(count, _)| count.split_once('/'))
+        .and_then(|(_, of)| of.trim().parse().ok())?;
+    let mut options: Vec<(u8, String)> = Vec::new();
+    for row in &rows[..footer] {
+        let Some((digit, label)) = grok_option(row) else {
+            continue;
+        };
+        // A `1` starts the menu over: anything numbered above it was not
+        // this menu.
+        if digit == 1 {
+            options.clear();
+        }
+        let next = u8::try_from(options.len() + 1).ok()?;
+        if digit != next {
+            return None;
+        }
+        options.push((digit, label));
+    }
+    (!options.is_empty() && options.len() == counted).then_some(options)
+}
+
+/// `┃  3 (●) Yes, proceed`: the digit and the label, with or without the
+/// bar and whichever row is selected.
+fn grok_option(row: &str) -> Option<(u8, String)> {
+    let row = row.trim_start_matches(['\u{2503}', '\u{2502}', ' ']);
+    let (number, rest) = row.split_once(' ')?;
+    let digit: u8 = number
+        .parse()
+        .ok()
+        .filter(|digit| (1..=9).contains(digit))?;
+    let rest = rest
+        .trim_start()
+        .strip_prefix("(\u{25cb})")
+        .or_else(|| rest.trim_start().strip_prefix("(\u{25cf})"))?;
+    let label = rest.trim();
+    (!label.is_empty()).then(|| (digit, label.to_owned()))
 }

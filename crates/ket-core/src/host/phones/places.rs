@@ -34,6 +34,8 @@ pub(super) struct Place {
     pub(super) path: std::path::PathBuf,
     /// The branch it was cut from; `None` for a repository's own checkout.
     pub(super) base: Option<String>,
+    /// Pinned in the sidebar. Never a repository's own checkout.
+    pub(super) pinned: bool,
 }
 
 /// Every worktree's figures, by id.
@@ -98,6 +100,7 @@ impl Places {
                 branch: project.default_base.clone(),
                 path: project.root.clone(),
                 base: None,
+                pinned: false,
             });
         }
         for worktree in crate::workspace::sidebar_worktrees(&state) {
@@ -107,11 +110,11 @@ impl Places {
                 name: worktree
                     .name
                     .clone()
-                    .or_else(|| worktree.agent_title.clone())
                     .unwrap_or_else(|| worktree.branch.clone()),
                 branch: worktree.branch,
                 path: worktree.path,
                 base: Some(worktree.base),
+                pinned: worktree.pinned,
             });
         }
         let settings = state.project_settings;
@@ -186,6 +189,12 @@ impl Phones {
     /// Recounts the backlogs on the next snapshot, after a phone changed one.
     pub(super) fn forget_backlogs(&self) {
         *lock(&self.backlogs) = None;
+    }
+
+    /// Reads ket's store again on the next snapshot, after a phone changed
+    /// the worktrees in it.
+    pub(super) fn forget_places(&self) {
+        *lock(&self.places) = None;
     }
 
     pub(super) fn places(&self) -> Arc<Places> {

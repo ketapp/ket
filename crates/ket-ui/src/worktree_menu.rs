@@ -5,11 +5,7 @@
 //! same hint column, and a second menu implementation is how those three drift
 //! apart.
 //!
-//! **Everything but Sleep is wired.** Sleep is drawn because the shape of the
-//! menu is itself information — someone who learns where it sits can find it
-//! again the day it works — and it is disabled rather than doing nothing. A
-//! menu item that silently no-ops is indistinguishable from a bug, and this
-//! project has already spent an afternoon on exactly that confusion.
+//! Sleep keeps agent tabs and their exact sessions available to wake later.
 //!
 //! **Delete asks first.** `Workspace::remove_worktree` refuses to discard
 //! uncommitted work unless forced, which is the right default and a poor
@@ -24,6 +20,7 @@ use gpui::{
     Pixels, Point, Rgba, SharedString, WeakEntity, Window, canvas, div, fill, point, prelude::*,
     px, size,
 };
+use ket_core::github::PullRequestStatus;
 use ket_core::id::WorktreeId;
 use ket_core::keybinding::Chord;
 use ket_core::theme::Theme;
@@ -77,6 +74,8 @@ pub(crate) enum WorktreeAction {
     Pin,
     /// Suspend its agent without removing it.
     Sleep,
+    /// Resume the saved sessions in this worktree's asleep tabs.
+    Wake,
     /// Change how hard the agents launched here are asked to cut their own
     /// token usage. Opens a second menu of levels.
     TokenReduction,
@@ -89,34 +88,21 @@ pub(crate) enum WorktreeAction {
     PullRequest,
     /// Give its pull request's failed checks to its agent.
     FixChecks,
+    /// Give its pull request's unresolved review comments to its agent.
+    AddressComments,
+    /// Merge its GitHub pull request.
+    MergePullRequest,
+    /// Update its pull request branch from the base.
+    UpdatePullRequest,
+    /// Mark its draft pull request ready for review.
+    ReadyPullRequest,
+    /// Reopen its closed unmerged pull request.
+    ReopenPullRequest,
     /// Hand a local agent's task to a cloud agent, in a new tab here: the
     /// one explicit step that lets a local task leave the Mac.
     Escalate,
     /// Remove the worktree.
     Delete,
-}
-
-impl WorktreeAction {
-    /// The label, for the "not wired up" note.
-    ///
-    /// Duplicating the menu's own titles is deliberate: the note should name
-    /// what the reader clicked, in their words, and reaching back into the
-    /// open menu for it would break the moment the menu closed first.
-    fn label(self) -> &'static str {
-        match self {
-            Self::Rename => "Rename",
-            Self::CopyPath => "Copy Path",
-            Self::Pin => "Pin",
-            Self::Sleep => "Sleep",
-            Self::TokenReduction => "Economy",
-            Self::Snippets => "Send snippet",
-            Self::ClearBuildOutput => "Clear build output",
-            Self::PullRequest => "Push and open pull request",
-            Self::FixChecks => "Fix checks with agent",
-            Self::Escalate => "Hand to a cloud agent",
-            Self::Delete => "Delete",
-        }
-    }
 }
 
 /// The worktree a menu or a confirmation is about.
@@ -208,8 +194,9 @@ const HANDOFF: &str = "A local model has been working on a task in this worktree
 /// worktree ket created, and removing it would take the project with it. It
 /// stays visible so the menu has one shape rather than two.
 ///
-/// `failed_checks` is how many of its pull request's checks failed, which
-/// **Fix checks with agent** says and is disabled without.
+/// `pull_request` is the branch's GitHub pull request, which **Fix checks
+/// with agent** and the actions beside it enable from. `has_agent_tab` and
+/// `has_asleep_tab` choose Sleep or Wake.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn worktree_menu(
     at: Point<Pixels>,
@@ -218,9 +205,12 @@ pub(crate) fn worktree_menu(
     token_reduction: u8,
     build_bytes: Option<u64>,
     escalate_to: Option<SharedString>,
-    failed_checks: usize,
+    pull_request: Option<&PullRequestStatus>,
+    has_agent_tab: bool,
+    has_asleep_tab: bool,
     t: &Theme,
 ) -> OpenMenu<WorktreeAction> {
+    let failed_checks = pull_request.map_or(0, |open| open.failed().count());
     let clear_build = match build_bytes.filter(|bytes| *bytes > 0) {
         Some(bytes) => MenuItem::new(WorktreeAction::ClearBuildOutput, "Clear build output")
             .icon(Icon::Eraser)
@@ -287,6 +277,76 @@ pub(crate) fn worktree_menu(
                     fix.subtitle(format!("{failed_checks} failed"))
                 }
             }),
+            MenuEntry::Item({
+                let comments = MenuItem::new(
+                    WorktreeAction::AddressComments,
+                    "Address comments with agent",
+                )
+                .icon(Icon::MessageSquare);
+                match pull_request {
+                    Some(open) if open.can_address_comments() => {
+                        if open.unresolved_comments > 0 {
+                            comments.subtitle(format!(
+                                "{} comment{}",
+                                open.unresolved_comments,
+                                if open.unresolved_comments == 1 {
+                                    ""
+                                } else {
+                                    "s"
+                                }
+                            ))
+                        } else {
+                            comments
+                        }
+                    }
+                    _ => comments.disabled(),
+                }
+            }),
+            MenuEntry::Item({
+                let merge = MenuItem::new(WorktreeAction::MergePullRequest, "Merge pull request…")
+                    .icon(Icon::GitMerge);
+                match pull_request {
+                    Some(open) if open.can_merge() => {
+                        if open.base.is_empty() {
+                            merge
+                        } else {
+                            merge.subtitle(format!("into {}", open.base))
+                        }
+                    }
+                    _ => merge.disabled(),
+                }
+            }),
+            MenuEntry::Item({
+                let update = MenuItem::new(WorktreeAction::UpdatePullRequest, "Update branch")
+                    .icon(Icon::Refresh);
+                match pull_request {
+                    Some(open) if open.can_update() => {
+                        if open.base.is_empty() {
+                            update
+                        } else {
+                            update.subtitle(format!("from {}", open.base))
+                        }
+                    }
+                    _ => update.disabled(),
+                }
+            }),
+            MenuEntry::Item({
+                let ready = MenuItem::new(WorktreeAction::ReadyPullRequest, "Ready for review")
+                    .icon(Icon::CircleCheck);
+                match pull_request {
+                    Some(open) if open.can_ready() => ready,
+                    _ => ready.disabled(),
+                }
+            }),
+            MenuEntry::Item({
+                let reopen =
+                    MenuItem::new(WorktreeAction::ReopenPullRequest, "Reopen pull request")
+                        .icon(Icon::GitBranch);
+                match pull_request {
+                    Some(open) if open.can_reopen() => reopen,
+                    _ => reopen.disabled(),
+                }
+            }),
             // Named with its current level rather than just "Economy":
             // this is the only place a worktree's level can be read after it
             // was created, and a reader opening the menu to change it wants to
@@ -318,11 +378,15 @@ pub(crate) fn worktree_menu(
             }),
             MenuEntry::Item(MenuItem::new(WorktreeAction::CopyPath, "Copy Path").icon(Icon::Copy)),
             MenuEntry::Separator,
-            MenuEntry::Item(
+            MenuEntry::Item(if has_asleep_tab {
+                MenuItem::new(WorktreeAction::Wake, "Wake").icon(Icon::Moon)
+            } else if has_agent_tab {
+                MenuItem::new(WorktreeAction::Sleep, "Sleep").icon(Icon::Moon)
+            } else {
                 MenuItem::new(WorktreeAction::Sleep, "Sleep")
                     .icon(Icon::Moon)
-                    .disabled(),
-            ),
+                    .disabled()
+            }),
             MenuEntry::Item(if primary { delete.disabled() } else { delete }),
         ])
         .collect(),
@@ -536,10 +600,17 @@ impl Shell {
         let escalate_to = self
             .escalation_target(node.agent.as_ref().map(|agent| agent.as_ref()))
             .map(|agent| crate::ui::agent::agent_label(&agent).into());
-        let failed_checks = self
-            .pull_requests
-            .of(&node.id)
-            .map_or(0, |open| open.failed().count());
+        let pull_request = self.pull_requests.of(&node.id);
+        let ids = self
+            .spaces
+            .get(&node.id)
+            .map_or_else(Vec::new, |space| space.terminal_ids());
+        let has_agent_tab = ids.iter().any(|id| {
+            self.terminals
+                .get(id)
+                .is_some_and(|handle| handle.agent.is_some())
+        });
+        let has_asleep_tab = ids.iter().any(|id| self.asleep_terminals.contains_key(id));
         self.worktree_menu = Some(worktree_menu(
             at,
             node.primary,
@@ -547,7 +618,9 @@ impl Shell {
             node.token_reduction,
             build_bytes,
             escalate_to,
-            failed_checks,
+            pull_request,
+            has_agent_tab,
+            has_asleep_tab,
             &self.theme,
         ));
     }
@@ -586,18 +659,36 @@ impl Shell {
                 self.popup = None;
                 self.fix_checks(target.id, cx);
             }
+            WorktreeAction::AddressComments => {
+                self.popup = None;
+                self.address_comments(target.id, cx);
+            }
+            WorktreeAction::MergePullRequest => {
+                self.popup = None;
+                self.request_merge_pull_request(target, cx);
+            }
+            WorktreeAction::UpdatePullRequest => {
+                self.popup = None;
+                self.update_pull_request(target.id, cx);
+            }
+            WorktreeAction::ReadyPullRequest => {
+                self.popup = None;
+                self.ready_pull_request(target.id, cx);
+            }
+            WorktreeAction::ReopenPullRequest => {
+                self.popup = None;
+                self.reopen_pull_request(target.id, cx);
+            }
             WorktreeAction::Escalate => {
                 self.popup = None;
                 self.escalate_worktree(target, cx);
             }
             WorktreeAction::Pin => self.set_worktree_pinned(&target, !target.pinned, cx),
+            WorktreeAction::Sleep => self.sleep_worktree(&target.id, cx),
+            WorktreeAction::Wake => self.wake_worktree(&target.id, cx),
             WorktreeAction::CopyPath => {
                 cx.write_to_clipboard(ClipboardItem::new_string(target.path.to_string()));
                 self.toast_detail(Tone::Info, "Copied path", target.path, cx);
-            }
-            // Said rather than swallowed. See the module docs.
-            other => {
-                self.note = Some(format!("{} is not wired up yet", other.label()).into());
             }
         }
     }
@@ -1029,28 +1120,7 @@ impl Shell {
             Ok(report) => {
                 self.confirm_remove_worktree = None;
                 self.worktree_target = None;
-                // Every terminal the worktree had, not "the" one: they are
-                // per tab now, and a handle left behind is a shell nothing can
-                // reach and nothing will ever kill. Read before the layout
-                // goes, since the layout is what lists them.
-                for terminal in self
-                    .spaces
-                    .get(&id)
-                    .map(|space| space.terminal_ids())
-                    .unwrap_or_default()
-                {
-                    if let Some(handle) = self.terminals.remove(&terminal) {
-                        handle.term.kill();
-                    }
-                }
-                // Its pane layout and its running shell go with it. Left
-                // behind, they would be resurrected by the next worktree that
-                // happened to be given the same id.
-                self.spaces.remove(&id);
-                // The same argument for its last usage reading: shown against a
-                // new worktree, it would be another session's spend under this
-                // one's name.
-                self.session_usage.remove(&id);
+                self.forget_deleted_worktree(&id);
                 // A kept branch is said out loud, and in the tone that says
                 // "not all of it". Someone who asked for the branch to go and
                 // was quietly given half of that would find out much later,
@@ -1092,6 +1162,120 @@ impl Shell {
                 }
             }
         }
+    }
+
+    /// What a deleted worktree leaves behind in the window, let go of.
+    fn forget_deleted_worktree(&mut self, id: &WorktreeId) {
+        // Every terminal the worktree had, not "the" one: they are per tab
+        // now, and a handle left behind is a shell nothing can reach and
+        // nothing will ever kill. Read before the layout goes, since the
+        // layout is what lists them.
+        for terminal in self
+            .spaces
+            .get(id)
+            .map(|space| space.terminal_ids())
+            .unwrap_or_default()
+        {
+            if let Some(handle) = self.terminals.remove(&terminal) {
+                handle.term.kill();
+            }
+        }
+        // Its pane layout and its running shell go with it. Left behind, they
+        // would be resurrected by the next worktree that happened to be given
+        // the same id.
+        self.spaces.remove(id);
+        // The same argument for its last usage reading: shown against a new
+        // worktree, it would be another session's spend under this one's
+        // name.
+        self.session_usage.remove(id);
+    }
+
+    /// Deletes a worktree a phone asked to delete — see
+    /// `ket_core::host::take_phone_delete`. The phone asked its person
+    /// first, as this window's dialog does, so there is no dialog here: an
+    /// unforced refusal goes back to the phone, which offers Delete anyway.
+    pub(crate) fn delete_worktree_from_phone(
+        &mut self,
+        ask: ket_core::host::PhoneDelete,
+        cx: &mut Context<Self>,
+    ) {
+        let req = ask.req;
+        let id = WorktreeId::from(ask.worktree.as_str());
+        let Some(node) = self.position_of(&id).and_then(|at| {
+            self.projects
+                .get(at.project)
+                .and_then(|project| project.worktrees.get(at.worktree))
+        }) else {
+            ket_core::host::finish_phone_delete(
+                req,
+                Err("ket on your Mac doesn't have that worktree".into()),
+            );
+            return;
+        };
+        if node.primary {
+            ket_core::host::finish_phone_delete(
+                req,
+                Err("the repository's own checkout can't be deleted".into()),
+            );
+            return;
+        }
+        // This window's own delete of it, running behind its dialog.
+        if self
+            .confirm_remove_worktree
+            .as_ref()
+            .is_some_and(|confirm| confirm.pending && confirm.target.id == id)
+        {
+            ket_core::host::finish_phone_delete(
+                req,
+                Err("ket on your Mac is already deleting this worktree".into()),
+            );
+            return;
+        }
+        let branch = node.branch.clone();
+        let force = ask.force;
+        let work = cx.background_executor().spawn({
+            let id = id.clone();
+            async move {
+                let workspace =
+                    Workspace::open().map_err(|e| format!("could not open the workspace: {e}"))?;
+                workspace
+                    .remove_worktree(&id, force, true)
+                    .map_err(|e| e.to_string())
+            }
+        });
+        cx.spawn(async move |shell: WeakEntity<Shell>, cx| {
+            let outcome = work.await;
+            let answer = match &outcome {
+                Ok(report) => Ok(report.preserved_branch.as_ref().map(|_| branch.to_string())),
+                Err(why) => Err(why.clone()),
+            };
+            let _ = shell.update(cx, |shell, cx| {
+                if outcome.is_ok() {
+                    // A dialog this window had up about it has nothing left
+                    // to ask.
+                    if shell
+                        .confirm_remove_worktree
+                        .as_ref()
+                        .is_some_and(|confirm| confirm.target.id == id)
+                    {
+                        shell.confirm_remove_worktree = None;
+                    }
+                    if shell
+                        .worktree_target
+                        .as_ref()
+                        .is_some_and(|target| target.id == id)
+                    {
+                        shell.worktree_target = None;
+                    }
+                    shell.forget_deleted_worktree(&id);
+                    shell.toast_detail(Tone::Info, "Deleted from your phone", branch.clone(), cx);
+                    shell.reload(cx);
+                }
+                cx.notify();
+            });
+            ket_core::host::finish_phone_delete(req, answer);
+        })
+        .detach();
     }
 
     /// Handles a key while the confirmation is up.
@@ -1415,6 +1599,7 @@ mod tests {
     }
 
     fn menu_with_failed_checks(primary: bool, failed: usize) -> OpenMenu<WorktreeAction> {
+        let pull_request = (failed > 0).then(|| status_with_failed(failed));
         worktree_menu(
             Point::default(),
             primary,
@@ -1422,9 +1607,45 @@ mod tests {
             ket_core::worktree::default_token_reduction(),
             None,
             None,
-            failed,
+            pull_request.as_ref(),
+            false,
+            false,
             &Theme::dark(),
         )
+    }
+
+    fn status_with_failed(failed: usize) -> ket_core::github::PullRequestStatus {
+        use ket_core::github::{Check, CheckState, MergeMethods, PullRequestState, Review};
+        ket_core::github::PullRequestStatus {
+            number: 17,
+            url: "https://github.com/o/r/pull/17".to_owned(),
+            branch: "fix".to_owned(),
+            draft: false,
+            review: Review::None,
+            checks: (0..failed)
+                .map(|at| Check {
+                    name: format!("check {at}"),
+                    state: CheckState::Failed,
+                    url: String::new(),
+                })
+                .collect(),
+            state: PullRequestState::Open,
+            base: "main".to_owned(),
+            behind: false,
+            unresolved_comments: 0,
+            merge_methods: MergeMethods::default(),
+        }
+    }
+
+    fn item<'a>(
+        menu: &'a OpenMenu<WorktreeAction>,
+        title: &str,
+    ) -> &'a crate::ui::menu::MenuItem<WorktreeAction> {
+        menu.sections()
+            .into_iter()
+            .flatten()
+            .find(|item| item.title == title)
+            .unwrap_or_else(|| panic!("{title} is in the menu"))
     }
 
     #[test]
@@ -1448,18 +1669,149 @@ mod tests {
     }
 
     #[test]
-    fn sleep_is_visible_but_cannot_be_picked() {
-        // Drawn dim rather than dropped: a menu whose shape changes with
-        // context is one nobody can aim at from memory.
-        let menu = default_menu(false);
-        let sleep = menu
-            .sections()
-            .into_iter()
-            .flatten()
-            .find(|item| item.title == "Sleep")
-            .expect("Sleep is in the menu");
+    fn sleep_and_wake_follow_agent_tabs() {
+        let menu = worktree_menu(
+            Point::default(),
+            false,
+            false,
+            ket_core::worktree::default_token_reduction(),
+            None,
+            None,
+            None,
+            true,
+            false,
+            &Theme::dark(),
+        );
+        assert!(
+            menu.sections()
+                .into_iter()
+                .flatten()
+                .any(|item| item.title == "Sleep" && item.enabled)
+        );
+        let menu = worktree_menu(
+            Point::default(),
+            false,
+            false,
+            ket_core::worktree::default_token_reduction(),
+            None,
+            None,
+            None,
+            false,
+            true,
+            &Theme::dark(),
+        );
+        assert!(
+            menu.sections()
+                .into_iter()
+                .flatten()
+                .any(|item| item.title == "Wake" && item.enabled)
+        );
+    }
 
-        assert!(!sleep.enabled);
+    #[test]
+    fn pull_request_actions_wait_for_a_pull_request_that_allows_them() {
+        use ket_core::github::{PullRequestState, Review};
+
+        let idle = default_menu(false);
+        assert!(!item(&idle, "Merge pull request…").enabled);
+        assert!(!item(&idle, "Update branch").enabled);
+        assert!(!item(&idle, "Ready for review").enabled);
+        assert!(!item(&idle, "Reopen pull request").enabled);
+        assert!(!item(&idle, "Address comments with agent").enabled);
+
+        let mut open = status_with_failed(0);
+        open.draft = false;
+        let merge = worktree_menu(
+            Point::default(),
+            false,
+            false,
+            ket_core::worktree::default_token_reduction(),
+            None,
+            None,
+            Some(&open),
+            false,
+            false,
+            &Theme::dark(),
+        );
+        let merge_item = item(&merge, "Merge pull request…");
+        assert!(merge_item.enabled);
+        assert_eq!(
+            merge_item.subtitle.as_ref().map(ToString::to_string),
+            Some("into main".to_owned())
+        );
+        assert!(!item(&merge, "Ready for review").enabled);
+
+        open.behind = true;
+        let update = worktree_menu(
+            Point::default(),
+            false,
+            false,
+            ket_core::worktree::default_token_reduction(),
+            None,
+            None,
+            Some(&open),
+            false,
+            false,
+            &Theme::dark(),
+        );
+        assert!(item(&update, "Update branch").enabled);
+
+        open.draft = true;
+        let draft = worktree_menu(
+            Point::default(),
+            false,
+            false,
+            ket_core::worktree::default_token_reduction(),
+            None,
+            None,
+            Some(&open),
+            false,
+            false,
+            &Theme::dark(),
+        );
+        assert!(!item(&draft, "Merge pull request…").enabled);
+        assert!(item(&draft, "Ready for review").enabled);
+
+        open.draft = false;
+        open.behind = false;
+        open.review = Review::ChangesRequested;
+        open.unresolved_comments = 2;
+        let comments = worktree_menu(
+            Point::default(),
+            false,
+            false,
+            ket_core::worktree::default_token_reduction(),
+            None,
+            None,
+            Some(&open),
+            false,
+            false,
+            &Theme::dark(),
+        );
+        let comments_item = item(&comments, "Address comments with agent");
+        assert!(comments_item.enabled);
+        assert_eq!(
+            comments_item.subtitle.as_ref().map(ToString::to_string),
+            Some("2 comments".to_owned())
+        );
+
+        open.state = PullRequestState::Closed;
+        open.review = Review::None;
+        open.unresolved_comments = 0;
+        let closed = worktree_menu(
+            Point::default(),
+            false,
+            false,
+            ket_core::worktree::default_token_reduction(),
+            None,
+            None,
+            Some(&open),
+            false,
+            false,
+            &Theme::dark(),
+        );
+        assert!(item(&closed, "Reopen pull request").enabled);
+        assert!(!item(&closed, "Merge pull request…").enabled);
     }
 
     #[test]
@@ -1509,14 +1861,5 @@ mod tests {
             .collect();
 
         assert_eq!(submenus, ["Send snippet", "Economy"]);
-    }
-
-    #[test]
-    fn every_unwired_action_names_itself() {
-        // The note the shell shows has to say what was clicked, so a label
-        // that went missing would leave "is not wired up yet" on its own.
-        for action in [WorktreeAction::CopyPath, WorktreeAction::Sleep] {
-            assert!(!action.label().is_empty());
-        }
     }
 }

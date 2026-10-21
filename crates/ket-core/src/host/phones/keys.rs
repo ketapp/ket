@@ -2,6 +2,8 @@
 
 use ket_remote::proto;
 
+use crate::host::server::AnswerRefused;
+
 /// The keys that answer an agent's permission prompt with `choice`, or `None`
 /// when ket does not know that agent's menu well enough to press them.
 ///
@@ -86,13 +88,11 @@ fn opencode_keys(choice: proto::answer::Choice) -> Option<&'static [u8]> {
     }
 }
 
-/// Grok's permission menu, as Grok 1.0.44's TUI draws it: numbered options,
-/// each taken by its digit with no Enter. `3` allows once and `4` rejects
-/// and ends the turn. `2` always allows that command (a shell command), every
-/// edit for the session (an edit or a new file), or that domain for the
-/// project (a fetch). The menu can open on `1`, which turns off every prompt
-/// for the session — never pressed. Escape does not decline: it moves focus
-/// off the menu and leaves the prompt open.
+/// Which of Grok's prompts a phone can answer, and with what. Grok's menu
+/// takes each option by its digit, with no Enter, but which digit is which
+/// changes from prompt to prompt (see [`crate::screen::grok_permission_menu`]),
+/// so nothing here is pressed: [`READ_OFF_MENU`] says the digit is found on
+/// the screen when the answer is given, by [`answer_on_screen`].
 ///
 /// Checked for a shell command, an edit, a new file and a fetch — Grok's
 /// `run_terminal_command`, `search_replace`, `write` and `web_fetch`, which
@@ -103,12 +103,63 @@ fn grok_keys(tool: &str, choice: proto::answer::Choice) -> Option<&'static [u8]>
     if !matches!(tool, "Bash" | "Edit" | "Write" | "WebFetch") {
         return None;
     }
-    match choice {
-        Choice::AllowOnce => Some(b"3"),
-        Choice::AllowAlways => Some(b"2"),
-        Choice::Deny => Some(b"4"),
-        _ => None,
+    matches!(
+        choice,
+        Choice::AllowOnce | Choice::AllowAlways | Choice::Deny
+    )
+    .then_some(READ_OFF_MENU)
+}
+
+/// What [`answer_keys`] gives for an agent whose keys are read off its menu
+/// at the moment of answering: no keys of its own, so pressing it presses
+/// nothing.
+pub(super) const READ_OFF_MENU: &[u8] = &[];
+
+/// The keys that answer terminal `rows`' prompt with `choice`: Grok's read
+/// off the menu it is showing, every other agent's from [`answer_keys`].
+///
+/// For Grok, the option for each choice is found by its label: Yes, proceed
+/// (or Yes, allow once) to allow; the prompt's own Always allow — the
+/// command, every edit this session, or the domain for this project — to
+/// always allow; No to decline. Never always-approve mode, Always allow on
+/// all sessions or Never allow, which change more than the one prompt.
+/// Refused rather than guessed: no menu on screen is a prompt that has
+/// moved on, and a menu without the option asked for — a chained command
+/// has no Always allow — is said so.
+pub(super) fn answer_on_screen(
+    agent: &str,
+    tool: &str,
+    choice: proto::answer::Choice,
+    rows: &dyn Fn() -> Vec<String>,
+) -> Result<Vec<u8>, AnswerRefused> {
+    let keys = answer_keys(agent, tool, choice).ok_or(AnswerRefused::Unknown)?;
+    if !crate::agents::harness(agent).eq_ignore_ascii_case("grok") {
+        return Ok(keys.to_vec());
     }
+    let menu = crate::screen::grok_permission_menu(&rows()).ok_or(AnswerRefused::Changed)?;
+    let digit = grok_pick(&menu, choice).ok_or(AnswerRefused::NotOffered)?;
+    Ok(vec![b'0' + digit])
+}
+
+/// The digit of the option in Grok's `menu` that answers with `choice`.
+fn grok_pick(menu: &[(u8, String)], choice: proto::answer::Choice) -> Option<u8> {
+    use proto::answer::Choice;
+    let fits = |label: &str| match choice {
+        Choice::AllowOnce => {
+            label.starts_with("Yes, proceed") || label.starts_with("Yes, allow once")
+        }
+        Choice::AllowAlways => {
+            label.starts_with("Always allow:")
+                || label.starts_with("Yes, allow all edits during this session")
+                || (label.starts_with("Yes, always allow") && label.contains("for this project"))
+        }
+        Choice::Deny => label.starts_with("No, reject") || label.starts_with("No, and tell Grok"),
+        _ => false,
+    };
+    let mut found = menu.iter().filter(|(_, label)| fits(label));
+    let (digit, _) = found.next()?;
+    // Two rows that both fit is a menu read wrong: press neither.
+    found.next().is_none().then_some(*digit)
 }
 
 /// Whether Claude Code's prompt for `tool` has the three-line menu whose

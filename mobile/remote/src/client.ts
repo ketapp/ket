@@ -30,7 +30,7 @@ import {
 import { Session } from './session.ts';
 
 export const MAJOR = 1;
-export const MINOR = 16;
+export const MINOR = 20;
 
 const MAGIC = new TextEncoder().encode('KET1');
 const MODE_PAIR = 1;
@@ -64,7 +64,7 @@ class Link {
   }
 
   /** Dials the relay and asks for the host. */
-  static open(relay: string, hostId: Uint8Array): Promise<Link> {
+  static open(relay: string, hostId: Uint8Array, signal?: AbortSignal): Promise<Link> {
     return new Promise((resolve, reject) => {
       const socket = new WebSocket(relay);
       socket.binaryType = 'arraybuffer';
@@ -77,6 +77,17 @@ class Link {
         socket.close();
         reject(why);
       }, DIAL_TIMEOUT_MS);
+      const abort = () => {
+        const why = new Error('the address dial was cancelled');
+        link.fail(why);
+        clearTimeout(dialling);
+        if (!connected) reject(why);
+      };
+      signal?.addEventListener('abort', abort, { once: true });
+      if (signal?.aborted) {
+        abort();
+        return;
+      }
       socket.onopen = () => socket.send(connectFrame(hostId));
       socket.onmessage = (event: MessageEvent) => {
         let frame: ReturnType<typeof decodeFrame>;
@@ -203,6 +214,37 @@ export interface PairedHost {
   hostId: Uint8Array;
   hostPublic: Uint8Array;
   relay: string;
+  /** Addresses to race on resume, including the pairing URL as fallback. */
+  addresses?: string[];
+}
+
+/** Opens all addresses together and closes every link that loses the race. */
+export async function firstOpen<T extends { close(): void }>(
+  addresses: string[],
+  open: (address: string, signal: AbortSignal) => Promise<T>,
+): Promise<{ link: T; address: string }> {
+  const controllers = addresses.map(() => new AbortController());
+  let winnerIndex: number | null = null;
+  const attempts = addresses.map((address, index) =>
+    open(address, controllers[index].signal).then((link) => ({ link, address, index })),
+  );
+  let winner: { link: T; address: string; index: number };
+  try {
+    winner = await Promise.any(attempts);
+  } catch {
+    controllers.forEach((controller) => controller.abort());
+    throw new Error('could not reach the desktop at any saved address');
+  }
+  winnerIndex = winner.index;
+  attempts.forEach((attempt) => {
+    void attempt.then(({ link, index }) => {
+      if (index !== winnerIndex) link.close();
+    }).catch(() => {});
+  });
+  controllers.forEach((controller, index) => {
+    if (index !== winner.index) controller.abort();
+  });
+  return { link: winner.link, address: winner.address };
 }
 
 /** An envelope from this build around `payload`. */
@@ -214,10 +256,13 @@ export function envelope(requestId: bigint, payload: Envelope['payload']): Envel
 export class Remote {
   private readonly link: Link;
   private readonly session: Session;
+  /** The address this session opened through. */
+  readonly address: string;
 
-  constructor(link: Link, session: Session) {
+  constructor(link: Link, session: Session, address: string) {
     this.link = link;
     this.session = session;
+    this.address = address;
   }
 
   send(message: Envelope): void {
@@ -302,7 +347,7 @@ export async function pair(
       new Initiator({ staticKey: keys, remoteStatic: offer.hostPublic, prologue: header, psk: offer.secret }),
     ),
   );
-  const remote = new Remote(link, session);
+  const remote = new Remote(link, session, offer.relay);
   remote.send(hello(greeting));
   return {
     remote,
@@ -314,13 +359,14 @@ export async function pair(
 /** Reconnects to a host this phone has paired with. Give the greeting a
  * resume cursor to pick up where the last session left off. */
 export async function resume(host: PairedHost, keys: Keypair, greeting: Greeting): Promise<Remote> {
-  const link = await Link.open(host.relay, host.hostId);
+  const addresses = [...new Set(host.addresses?.length ? host.addresses : [host.relay])];
+  const { link, address } = await firstOpen(addresses, (url, signal) => Link.open(url, host.hostId, signal));
   const header = concat(MAGIC, Uint8Array.of(MODE_RESUME), host.hostId, new Uint8Array(16));
   const { session } = await closingOnFailure(
     link,
     handshake(link, header, new Initiator({ staticKey: keys, remoteStatic: host.hostPublic, prologue: header })),
   );
-  const remote = new Remote(link, session);
+  const remote = new Remote(link, session, address);
   remote.send(hello(greeting));
   return remote;
 }

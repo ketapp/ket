@@ -519,6 +519,33 @@ impl Default for GeneralConfig {
     }
 }
 
+/// When idle agent terminals are stopped and kept ready to resume.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SleepConfig {
+    /// Explicit choice, or the memory-based default when absent.
+    pub enabled: Option<bool>,
+    /// Minutes since the last report from the lead or a subagent.
+    pub after_minutes: u32,
+}
+
+impl Default for SleepConfig {
+    fn default() -> Self {
+        Self {
+            enabled: None,
+            after_minutes: 30,
+        }
+    }
+}
+
+impl SleepConfig {
+    /// Automatic sleep requires an explicit choice until resume after SIGHUP
+    /// has been verified for supported agents.
+    pub fn enabled(&self) -> bool {
+        self.enabled.unwrap_or(false)
+    }
+}
+
 /// How often a release build looks for a newer ket.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -968,6 +995,8 @@ pub struct Config {
     pub jev: JevConfig,
     /// What selecting and deleting a worktree do, and where new ones go.
     pub general: GeneralConfig,
+    /// Automatic idle agent sleep.
+    pub sleep: SleepConfig,
     /// How ket updates itself.
     pub updates: UpdatesConfig,
 }
@@ -1389,6 +1418,7 @@ impl Default for Config {
             phones: PhonesConfig::default(),
             jev: JevConfig::default(),
             general: GeneralConfig::default(),
+            sleep: SleepConfig::default(),
             updates: UpdatesConfig::default(),
         }
     }
@@ -1609,6 +1639,11 @@ impl Config {
 
     /// Checks internal consistency.
     pub fn validate(&self) -> Result<()> {
+        if !(5..=1440).contains(&self.sleep.after_minutes) {
+            return Err(KetError::Config(
+                "sleep.after_minutes must be between 5 and 1440".to_owned(),
+            ));
+        }
         if self.agents.is_empty() {
             return Err(KetError::Config("no agents configured".to_owned()));
         }
@@ -1766,6 +1801,27 @@ mod tests {
     #[test]
     fn defaults_are_valid() {
         Config::default().validate().unwrap();
+    }
+
+    #[test]
+    fn sleep_choice_survives_round_trip_and_interval_is_bounded() {
+        assert!(!SleepConfig::default().enabled());
+        assert!(
+            SleepConfig {
+                enabled: Some(true),
+                ..SleepConfig::default()
+            }
+            .enabled()
+        );
+        let mut config: Config =
+            toml::from_str("[sleep]\nenabled = false\nafter_minutes = 120\n").unwrap();
+        assert!(!config.sleep.enabled());
+        assert_eq!(config.sleep.after_minutes, 120);
+        config.validate().unwrap();
+        config.sleep.after_minutes = 4;
+        assert!(config.validate().is_err());
+        config.sleep.after_minutes = 1441;
+        assert!(config.validate().is_err());
     }
 
     #[test]

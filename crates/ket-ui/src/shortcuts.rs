@@ -218,7 +218,8 @@ pub(crate) fn global_shortcut(keystroke: &Keystroke) -> Option<GlobalShortcut> {
     }
 
     // Cmd-/ / Ctrl-/: the chord the quick prompt already gives its snippet
-    // menu, so one chord means snippets wherever it is pressed.
+    // menu, so one chord means snippets wherever it is pressed — except in an
+    // editor tab, which comments lines with it as VS Code does.
     if cmd_or_ctrl && keystroke.key == "/" {
         return Some(GlobalShortcut::SendSnippet);
     }

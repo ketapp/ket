@@ -91,6 +91,8 @@ pub enum SessionKind {
 /// One terminal session or agent, with everything it started.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Session {
+    /// The process that roots this session's tree.
+    pub root_pid: i32,
     /// What it was started as.
     pub kind: SessionKind,
     /// What runs in it, as the system names the program: a terminal's
@@ -326,6 +328,7 @@ impl Meter {
         let sessions = trees
             .iter()
             .map(|tree| Session {
+                root_pid: tree.id.0,
                 kind: tree.kind,
                 program: tree.program.clone(),
                 cwd: tree.cwd.clone(),

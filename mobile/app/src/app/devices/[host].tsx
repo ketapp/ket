@@ -6,10 +6,10 @@
 
 import { router, useLocalSearchParams } from 'expo-router';
 import { useCallback, useEffect, useState } from 'react';
-import { ScrollView, StyleSheet, View } from 'react-native';
+import { ScrollView, StyleSheet, TextInput, View } from 'react-native';
 import type { Device } from '@ket/remote';
 
-import { Bar, Button, Card, Dot, Heading, Prose, Row, Screen } from '../../components/ui';
+import { Bar, Button, Card, Dot, Heading, Prose, Row, Screen, field } from '../../components/ui';
 import { confirm } from '../../lib/confirm';
 import { dropConnection, type HostConnection } from '../../lib/connection';
 import { useHost } from '../../lib/hosts';
@@ -21,6 +21,8 @@ export default function Devices() {
   const conn = useHost(id);
   const [devices, setDevices] = useState<Device[] | null>(null);
   const [error, setError] = useState('');
+  const [address, setAddress] = useState('');
+  const [addressError, setAddressError] = useState('');
 
   const load = useCallback(async (c: HostConnection) => {
     try {
@@ -68,6 +70,22 @@ export default function Devices() {
     router.replace('/settings');
   };
 
+  const addAddress = async () => {
+    if (!conn) return;
+    try {
+      await conn.addAddress(address);
+      setAddress('');
+      setAddressError('');
+    } catch (cause) {
+      setAddressError(cause instanceof Error ? cause.message : String(cause));
+    }
+  };
+
+  const removeAddress = async (url: string) => {
+    if (!conn) return;
+    await conn.removeAddress(url).catch((cause: Error) => setAddressError(cause.message));
+  };
+
   return (
     <Screen>
       <Bar back title="Devices" detail={conn?.host.name} />
@@ -93,6 +111,32 @@ export default function Devices() {
           ))}
         {devices === null && !error ? <Prose style={styles.note}>Asking the desktop…</Prose> : null}
         </Card>
+        <Card style={styles.card}>
+          <Heading>Addresses</Heading>
+          <Prose style={styles.note}>The Mac shares its LAN and Tailscale addresses. Add another address for a work VPN, port forwarding, or your own relay.</Prose>
+          {(conn?.host.addresses ?? [conn?.host.relay].filter((url): url is string => !!url)).map((url) => (
+            <Row key={`host-${url}`} small title={url} detail="From your Mac" />
+          ))}
+          {(conn?.host.manualAddresses ?? []).map((url) => (
+            <View key={`manual-${url}`} style={styles.addressRow}>
+              <View style={styles.addressText}><Row small title={url} detail="Added on this phone" /></View>
+              <Button title="Remove" onPress={() => void removeAddress(url)} />
+            </View>
+          ))}
+          <TextInput
+            style={field}
+            value={address}
+            onChangeText={setAddress}
+            placeholder="ws:// or wss:// address"
+            placeholderTextColor={t.dim}
+            autoCapitalize="none"
+            autoCorrect={false}
+            keyboardType="url"
+            accessibilityLabel="New desktop address"
+          />
+          {addressError ? <Prose color={t.failed} style={styles.note}>{addressError}</Prose> : null}
+          <View style={styles.footer}><Button title="Add address" onPress={() => void addAddress()} /></View>
+        </Card>
         <View style={styles.footer}>
           <Button kind="danger" title="Forget this desktop" onPress={() => void forget()} />
         </View>
@@ -106,4 +150,6 @@ const styles = StyleSheet.create({
   card: { padding: 8, gap: 2 },
   note: { padding: 8 },
   footer: { alignItems: 'flex-start' },
+  addressRow: { flexDirection: 'row', alignItems: 'center' },
+  addressText: { flex: 1 },
 });

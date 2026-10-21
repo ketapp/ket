@@ -34,12 +34,11 @@ export function useWaited(conn: HostConnection): number {
 /** The things that stop a phone reaching its desktop, most likely first. */
 export function checks(conn: HostConnection): ReactNode[] {
   return [
-    'This phone is on the same Wi-Fi as the Mac — not mobile data.',
+    'At home, connect this phone to the same Wi-Fi as the Mac. Away from home, connect both to Tailscale.',
     'ket is open on the Mac, and Settings › Devices is turned on.',
     'The Mac is awake. A closed lid or sleep drops every phone.',
     <>
-      Safari can reach <Text style={styles.address}>{hostOf(conn.host.relay)}</Text> — if the Mac changed network since
-      pairing, pair again.
+      Check the saved address <Text style={styles.address}>{conn.addressForDisplay() ? hostOf(conn.addressForDisplay()!) : 'in Settings'}</Text>. You can add a new address in Settings › Paired desktops without pairing again.
     </>,
   ];
 }

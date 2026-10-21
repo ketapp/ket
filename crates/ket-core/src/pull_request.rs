@@ -98,7 +98,6 @@ mod tests {
             project_id: ProjectId::new("p"),
             branch: branch.to_owned(),
             name: None,
-            agent_title: None,
             path: std::path::PathBuf::from("/tmp/wt-1"),
             base: "main".to_owned(),
             base_commit: None,

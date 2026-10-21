@@ -112,6 +112,8 @@ pub(crate) struct PhonesPane {
     pairing_open: bool,
     /// This desktop's name on the network, once asked.
     desktop: Option<String>,
+    /// The current Tailscale address, when there is one.
+    tailnet: Option<String>,
     /// Wakes the pane every [`TICK`] while the settings view is open.
     /// Dropping it — closing the view — stops it.
     ticker: Option<Task<()>>,
@@ -153,6 +155,8 @@ struct Snapshot {
     scoped_roles: bool,
     /// This desktop's name on the network, asked along with a code.
     desktop: Option<String>,
+    /// The current Tailscale address, when there is one.
+    tailnet: Option<String>,
 }
 
 /// Asks the host everything the pane shows. Blocks; run it in the
@@ -187,6 +191,10 @@ fn fetch(want_code: bool) -> Snapshot {
     } else {
         (Vec::new(), false)
     };
+    let tailnet = (host == HostState::Serving)
+        .then(host::tailnet_ip)
+        .flatten()
+        .map(|ip| ip.to_string());
     Snapshot {
         host,
         pairing,
@@ -194,6 +202,7 @@ fn fetch(want_code: bool) -> Snapshot {
         pairings,
         scoped_roles,
         desktop: want_code.then(host::lan_name),
+        tailnet,
     }
 }
 
@@ -314,6 +323,7 @@ impl Shell {
         if let Some(desktop) = snapshot.desktop {
             pane.desktop = Some(desktop);
         }
+        pane.tailnet = snapshot.tailnet;
         // A phone that has scanned the code waits here, and the code it used
         // is spent: the pane shows the phone to approve in its place.
         if !snapshot.pairings.is_empty() && pane.pairings.is_empty() {
@@ -686,8 +696,9 @@ impl Shell {
         out.push(Entry::layout(div().pt(px(16.0)).child(banner(
             "phones-note",
             Tone::Info,
-            "Only devices you pair can connect, and only on this Wi-Fi. Everything between \
-             them is end-to-end encrypted, and revoking one disconnects it at once.",
+            "Only devices you pair can connect. On Tailscale, they can also reach this Mac away \
+             from home. Everything between them is end-to-end encrypted, and revoking one \
+             disconnects it at once.",
             t,
         ))));
         out
@@ -736,7 +747,7 @@ impl Shell {
             None => (name, ""),
         };
 
-        div()
+        let row = div()
             .flex()
             .items_center()
             .gap(ICON_GAP)
@@ -756,7 +767,16 @@ impl Shell {
             )
             .child(div().flex_1())
             .child(state)
-            .child(control)
+            .child(control);
+        div()
+            .flex()
+            .flex_col()
+            .child(row)
+            .children(pane.tailnet.iter().map(|ip| {
+                caption(format!("Reachable over Tailscale at {ip}"), t)
+                    .px(PAD_X)
+                    .pb(px(8.0))
+            }))
             .into_any_element()
     }
 

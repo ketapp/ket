@@ -10,7 +10,7 @@ import { readU64BE, utf8 } from './bytes.ts';
 
 export const OFFER_PREFIX = 'ket://pair/';
 
-function validRelayUrl(url: string): boolean {
+export function validRelayUrl(url: string): boolean {
   if (
     url.length === 0 ||
     url.length > 2048 ||

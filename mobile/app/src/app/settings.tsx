@@ -61,7 +61,7 @@ export default function Settings() {
               chevron
               mark={<Desktop size={16} />}
               title={conn.host.name}
-              detail={`${statusLine(conn).text} · ${hostOf(conn.host.relay)}`}
+              detail={`${statusLine(conn).text} · ${conn.addressForDisplay() ? hostOf(conn.addressForDisplay()!) : 'trying saved addresses'}`}
               onPress={() => router.push(`/devices/${conn.host.id}`)}
             />
           ))}

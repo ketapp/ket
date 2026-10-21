@@ -2,7 +2,13 @@
 // ket's sidebar tints its GitHub mark, and in the words its tooltip uses.
 // The same rules as `ket_core::github::PullRequestStatus` on the desktop.
 
-import { CheckSummary_State, type PullRequestSummary, PullRequestSummary_Review } from '@ket/remote';
+import {
+  CheckSummary_State,
+  type PullRequestSummary,
+  PullRequestMergeMethod,
+  PullRequestSummary_Review,
+  PullRequestSummary_State,
+} from '@ket/remote';
 
 import { t } from './theme';
 
@@ -82,6 +88,47 @@ export function checkWord(state: CheckSummary_State): { word: string; color: str
     default:
       return { word: 'skipped', color: t.faint };
   }
+}
+
+/** Whether the pull request is still open. Missing on an older desktop,
+ * which only sent open ones. */
+export function prIsOpen(pr: PullRequestSummary): boolean {
+  return pr.state !== PullRequestSummary_State.CLOSED && pr.state !== PullRequestSummary_State.MERGED;
+}
+
+/** Closed without merging. */
+export function prIsClosed(pr: PullRequestSummary): boolean {
+  return pr.state === PullRequestSummary_State.CLOSED;
+}
+
+/** Merge methods the repository allows. An older desktop sent none of the
+ * flags, which proto3 reads as all false — treat that as all three. */
+export function mergeMethods(pr: PullRequestSummary): { method: PullRequestMergeMethod; label: string }[] {
+  const allowed: { method: PullRequestMergeMethod; label: string }[] = [];
+  if (pr.mergeCommitAllowed) allowed.push({ method: PullRequestMergeMethod.MERGE_COMMIT, label: 'Merge commit' });
+  if (pr.squashMergeAllowed) allowed.push({ method: PullRequestMergeMethod.SQUASH, label: 'Squash' });
+  if (pr.rebaseMergeAllowed) allowed.push({ method: PullRequestMergeMethod.REBASE, label: 'Rebase' });
+  if (allowed.length > 0) return allowed;
+  return [
+    { method: PullRequestMergeMethod.MERGE_COMMIT, label: 'Merge commit' },
+    { method: PullRequestMergeMethod.SQUASH, label: 'Squash' },
+    { method: PullRequestMergeMethod.REBASE, label: 'Rebase' },
+  ];
+}
+
+/** The status line on the pull request card: draft or closed, behind, review,
+ * checks. */
+export function prLine(pr: PullRequestSummary): string {
+  const state =
+    pr.state === PullRequestSummary_State.CLOSED
+      ? 'Closed'
+      : pr.state === PullRequestSummary_State.MERGED
+        ? 'Merged'
+        : pr.draft
+          ? 'Draft'
+          : '';
+  const behind = pr.behind ? `behind ${pr.base || 'base'}` : '';
+  return [state, behind, reviewWords(pr), checksSummary(pr)].filter(Boolean).join(' · ');
 }
 
 /** Its checks in the order a person wants them: what failed, what is still

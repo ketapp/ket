@@ -14,6 +14,7 @@ const connection = (fields: Partial<HostConnection> = {}) =>
     attempts: 2,
     error: null,
     host: { name: 'Studio Mac', relay: 'ws://studio.local:7979' },
+    addressForDisplay: () => 'ws://studio.local:7979',
     retry: jest.fn(),
     ...fields,
   }) as HostConnection;
@@ -42,6 +43,7 @@ describe('ConnectionHelp', () => {
     expect(getByText('Can’t reach Studio Mac')).toBeTruthy();
     expect(getByText('Connection refused.')).toBeTruthy();
     expect(getByText('studio.local:7979')).toBeTruthy();
+    expect(getByText(/Tailscale/)).toBeTruthy();
     await fireEvent.press(getByText('Retry now'));
     await fireEvent.press(getByText('Pair again'));
     expect(conn.retry).toHaveBeenCalled();
@@ -51,7 +53,7 @@ describe('ConnectionHelp', () => {
 
   test('falls back to an invalid relay address', async () => {
     const view = await render(
-      <ConnectionHelp conn={connection({ host: { id: 'mac', name: 'Mac', relay: 'not a url', hostPublic: '', pairedAt: 0 } })} />,
+      <ConnectionHelp conn={connection({ host: { id: 'mac', name: 'Mac', relay: 'not a url', hostPublic: '', pairedAt: 0 }, addressForDisplay: () => 'not a url' })} />,
     );
     const { getByText } = view;
     expect(getByText('not a url')).toBeTruthy();

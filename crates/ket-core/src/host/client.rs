@@ -20,8 +20,8 @@ use super::wire::{self, Frame, Reply, Request};
 use super::{SERVE_ARG, host_error};
 use crate::Result;
 use crate::agent_status::AgentStatusSnapshot;
-use crate::terminal::TerminalSpec;
 use crate::terminal::remote::Shared;
+use crate::terminal::{StopOutcome, TerminalSpec};
 
 /// How long a window waits for the host to answer an open.
 const OPEN_TIMEOUT: Duration = Duration::from_secs(10);
@@ -44,6 +44,7 @@ pub(crate) struct Connection {
     next_req: AtomicU64,
     /// Opens waiting for their reply, with the spec they asked for.
     opening: Mutex<HashMap<u64, (TerminalSpec, Opening)>>,
+    stopping: Mutex<HashMap<u64, std::sync::mpsc::SyncSender<StopOutcome>>>,
     /// Terminals this process is showing, by the host's id.
     terminals: Mutex<HashMap<u64, Weak<Shared>>>,
     /// The host's process, from the kernel when the socket connected — see
@@ -77,6 +78,12 @@ pub(crate) static PHONE_FIX_CHECKS: Mutex<Vec<(u64, String, String)>> = Mutex::n
 /// Reviews phones asked this window to send to their worktrees' agents — see
 /// [`super::take_phone_review`].
 pub(crate) static PHONE_REVIEWS: Mutex<Vec<super::PhoneReview>> = Mutex::new(Vec::new());
+/// Worktrees phones asked this window to delete — see
+/// [`super::take_phone_delete`].
+pub(crate) static PHONE_DELETES: Mutex<Vec<super::PhoneDelete>> = Mutex::new(Vec::new());
+/// Whether the host has said the store's worktrees changed since the window
+/// last looked — see [`super::take_worktrees_changed`].
+pub(crate) static WORKTREES_CHANGED: AtomicBool = AtomicBool::new(false);
 /// The serial the next [`Connection`] gets. See [`AGENT_STATUS`].
 static NEXT_SERIAL: AtomicU64 = AtomicU64::new(1);
 /// This window's worktrees, as last published — sent again on every new
@@ -456,6 +463,7 @@ impl Connection {
             alive: AtomicBool::new(true),
             next_req: AtomicU64::new(1),
             opening: Mutex::new(HashMap::new()),
+            stopping: Mutex::new(HashMap::new()),
             terminals: Mutex::new(HashMap::new()),
         });
         let weak = Arc::downgrade(&conn);
@@ -486,6 +494,28 @@ impl Connection {
 
     pub(crate) fn input(&self, id: u64, bytes: &[u8]) -> Result<()> {
         self.send(&wire::input(id, bytes))
+    }
+
+    /// Requests a graceful stop and waits for the host's lease check.
+    pub(crate) fn stop(&self, id: u64, grace: Duration) -> Result<StopOutcome> {
+        let req = self.next_req.fetch_add(1, Ordering::Relaxed);
+        let (tx, rx) = sync_channel(1);
+        lock(&self.stopping).insert(req, tx);
+        if let Err(error) = self.request(&Request::Stop {
+            req,
+            id,
+            grace_ms: grace.as_millis().try_into().unwrap_or(u64::MAX),
+        }) {
+            lock(&self.stopping).remove(&req);
+            return Err(error);
+        }
+        match rx.recv_timeout(OPEN_TIMEOUT) {
+            Ok(outcome) => Ok(outcome),
+            Err(_) => {
+                lock(&self.stopping).remove(&req);
+                Err(host_error("no answer to a stop"))
+            }
+        }
     }
 
     /// Starts or adopts a terminal, and waits for it to exist.
@@ -571,15 +601,25 @@ fn read_loop(conn: &Weak<Connection>, stream: UnixStream) {
 
 fn route(conn: &Arc<Connection>, reply: Reply) {
     match reply {
-        Reply::Opened { req, id, adopted } => {
+        Reply::Opened {
+            req,
+            id,
+            adopted,
+            pid,
+        } => {
             let Some((spec, tx)) = lock(&conn.opening).remove(&req) else {
                 return;
             };
             // Created and registered here, on the reader thread, before the
             // next frame is read: that frame is this terminal's checkpoint.
-            let shared = Shared::new(id, &spec, adopted);
+            let shared = Shared::new(id, &spec, adopted, pid);
             lock(&conn.terminals).insert(id, Arc::downgrade(&shared));
             let _ = tx.send(Ok(shared));
+        }
+        Reply::Stopped { req, outcome } => {
+            if let Some(tx) = lock(&conn.stopping).remove(&req) {
+                let _ = tx.send(outcome);
+            }
         }
         Reply::Failed { req, error } => {
             if let Some((_, tx)) = lock(&conn.opening).remove(&req) {
@@ -646,6 +686,16 @@ fn route(conn: &Arc<Connection>, reply: Reply) {
             comments,
             until_ms,
         }),
+        Reply::DeleteWork {
+            req,
+            worktree,
+            force,
+        } => lock(&PHONE_DELETES).push(super::PhoneDelete {
+            req,
+            worktree,
+            force,
+        }),
+        Reply::WorktreesChanged => WORKTREES_CHANGED.store(true, Ordering::Release),
         Reply::Welcome { .. }
         | Reply::PairingCode { .. }
         | Reply::Devices { .. }

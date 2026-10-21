@@ -168,7 +168,6 @@ fn a_discovered_worktree_that_is_later_registered_stops_being_discovered() {
         project_id: project.id.clone(),
         branch: "to-be-adopted".to_owned(),
         name: None,
-        agent_title: None,
         path: adopted.canonicalize().unwrap(),
         base: "main".to_owned(),
         base_commit: None,

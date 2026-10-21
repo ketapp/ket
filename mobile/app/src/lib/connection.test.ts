@@ -12,8 +12,15 @@ jest.mock('./store', () => ({
 jest.mock('./version', () => ({ versionLabel: 'test' }));
 jest.mock('@ket/remote', () => ({
   AnswerSchema: 'answer',
-  ErrorCode: { UNSUPPORTED_VERSION: 1, NOT_CONTROLLER: 2 },
+  ErrorCode: { UNSUPPORTED_VERSION: 1, NOT_CONTROLLER: 2, WOULD_LOSE_WORK: 8 },
+  AddressCommentsSchema: 'addressComments',
   FixChecksSchema: 'fixChecks',
+  MergePullRequestSchema: 'mergePullRequest',
+  ReadyPullRequestSchema: 'readyPullRequest',
+  ReopenPullRequestSchema: 'reopenPullRequest',
+  PinWorktreeSchema: 'pinWorktree',
+  DeleteWorktreeSchema: 'deleteWorktree',
+  UpdatePullRequestSchema: 'updatePullRequest',
   GetChangesSchema: 'getChanges',
   GetConversationSchema: 'getConversation',
   GetDiffSchema: 'getDiff',
@@ -36,6 +43,7 @@ jest.mock('@ket/remote', () => ({
   envelope: (requestId: bigint, payload: Envelope['payload']) => ({ requestId, payload, idempotencyKey: '' }),
   resume: jest.fn(),
   toBase64Url: (bytes: Uint8Array) => `key-${bytes[0]}`,
+  validRelayUrl: (url: string) => /^wss?:\/\/[^/\s]+$/.test(url),
   utf8: (bytes: Uint8Array) => String.fromCharCode(...bytes),
 }));
 
@@ -108,6 +116,18 @@ afterEach(() => {
 });
 
 describe('HostConnection requests', () => {
+  test('adds and removes a hand-entered address without changing the pairing URL', async () => {
+    Object.assign(conn.host, { relay: 'ws://mac.local:7979', addresses: ['ws://mac.local:7979'] });
+    await expect(conn.addAddress('https://bad.example')).rejects.toThrow('ws:// or wss://');
+    await conn.addAddress('wss://vpn.example');
+    expect(conn.host).toMatchObject({
+      relay: 'ws://mac.local:7979',
+      manualAddresses: ['wss://vpn.example'],
+    });
+    await conn.removeAddress('wss://vpn.example');
+    expect(conn.host.manualAddresses).toEqual([]);
+  });
+
   test('subscribes and unsubscribes', async () => {
     conn.subscribe(4n);
     conn.unsubscribe(4n);
@@ -174,6 +194,38 @@ describe('HostConnection requests', () => {
     await expect(conn.fixChecks('tree')).resolves.toEqual({ starting: true });
     nextReply = reply({ case: 'ack', value: {} });
     await expect(conn.merge('tree')).resolves.toBeNull();
+    nextReply = reply({ case: 'error', value: { code: 0, message: 'not mergeable' } });
+    await expect(conn.mergePullRequest('tree', 2)).resolves.toBe('not mergeable');
+    expect(sent.at(-1)?.payload).toEqual({ case: 'mergePullRequest', value: { worktreeId: 'tree', method: 2 } });
+    nextReply = reply({ case: 'pullRequestMerged', value: { number: 17n, url: 'https://github.com/o/r/pull/17', method: 2 } });
+    await expect(conn.mergePullRequest('tree', 2)).resolves.toBeNull();
+    nextReply = reply({ case: 'pullRequestUpdated', value: { number: 17n } });
+    await expect(conn.updatePullRequest('tree')).resolves.toBeNull();
+    nextReply = reply({ case: 'pullRequestReadied', value: { number: 17n } });
+    await expect(conn.readyPullRequest('tree')).resolves.toBeNull();
+    nextReply = reply({ case: 'pullRequestReopened', value: { number: 17n } });
+    await expect(conn.reopenPullRequest('tree')).resolves.toBeNull();
+    nextReply = reply({ case: 'commentsHandedOver', value: { starting: false } });
+    await expect(conn.addressComments('tree')).resolves.toEqual({ starting: false });
+  });
+
+  test('pins and deletes worktrees, returning the desktop’s refusals', async () => {
+    nextReply = reply({ case: 'ack', value: {} });
+    await expect(conn.pinWorktree('tree', true)).resolves.toBeNull();
+    expect(sent.at(-1)?.payload).toEqual({ case: 'pinWorktree', value: { worktreeId: 'tree', pinned: true } });
+    nextReply = reply({ case: 'error', value: { code: 0, message: "the repository's own checkout can't be pinned" } });
+    await expect(conn.pinWorktree('primary-p', true)).resolves.toBe("the repository's own checkout can't be pinned");
+
+    nextReply = reply({ case: 'error', value: { code: 8, message: 'it has uncommitted changes' } });
+    await expect(conn.deleteWorktree('tree', false)).resolves.toEqual({ why: 'it has uncommitted changes', losesWork: true });
+    nextReply = reply({ case: 'error', value: { code: 3, message: 'open ket on your Mac' } });
+    await expect(conn.deleteWorktree('tree', false)).resolves.toEqual({ why: 'open ket on your Mac', losesWork: false });
+    expect(sent.at(-1)?.payload).toEqual({ case: 'deleteWorktree', value: { worktreeId: 'tree', force: false } });
+    nextReply = reply({ case: 'worktreeDeleted', value: { keptBranch: 'tree' } });
+    await expect(conn.deleteWorktree('tree', true)).resolves.toEqual({ keptBranch: 'tree' });
+    expect(sent.at(-1)?.payload).toEqual({ case: 'deleteWorktree', value: { worktreeId: 'tree', force: true } });
+    nextReply = reply({ case: 'ack', value: {} });
+    await expect(conn.deleteWorktree('tree', false)).resolves.toEqual({ why: 'the desktop did not say how it went', losesWork: false });
   });
 
   test('sends explicit start choices and opens fresh sessions', async () => {

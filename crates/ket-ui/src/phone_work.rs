@@ -44,6 +44,13 @@ impl Shell {
             let id = ket_core::id::WorktreeId::from(worktree.as_str());
             self.fix_checks_from_phone(req, id, prompt, cx);
         }
+        while let Some(delete) = ket_core::host::take_phone_delete() {
+            self.delete_worktree_from_phone(delete, cx);
+        }
+        // A phone pinned a worktree: the store has it, the sidebar does not.
+        if ket_core::host::take_worktrees_changed() {
+            self.reload(cx);
+        }
         // Operator authority is the approval to merge. Keep later requests
         // queued while one merge is running rather than acknowledging work
         // that only opened a desktop dialog.

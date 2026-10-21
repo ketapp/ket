@@ -14,8 +14,8 @@ use std::path::{Path, PathBuf};
 
 use ket_core::checks;
 use ket_core::github::{
-    self, Check, CheckState, Checkout, CloseReason, IssueLink, PullRequestLink, PullRequestStatus,
-    Review, close_issue, create_issue, open_issues, reopen_issue, repository,
+    self, Check, CheckState, Checkout, CloseReason, IssueLink, MergeMethod, PullRequestLink,
+    PullRequestStatus, Review, close_issue, create_issue, open_issues, reopen_issue, repository,
 };
 use ket_core::id::WorktreeId;
 
@@ -298,23 +298,49 @@ fn the_credential_helper_names_this_gh_and_the_picked_accounts_token() {
 #[test]
 fn open_pull_requests_are_listed_with_their_checks_in_one_call() {
     let sandbox = Sandbox::new("gh-pr-checks");
+    let json = "number,url,headRefName,baseRefName,isDraft,isCrossRepository,reviewDecision,statusCheckRollup,state,mergeStateStatus,reviews";
     let gh = FakeGh::new(
         &sandbox,
-        "\"pr list\") echo '[{\"number\": 5, \"url\": \"https://github.com/o/r/pull/5\", \
-         \"headRefName\": \"fix\", \"isDraft\": false, \"isCrossRepository\": false, \
+        "\"repo view\") echo '{\"mergeCommitAllowed\":true,\"squashMergeAllowed\":false,\"rebaseMergeAllowed\":true}' ;;\n\
+         \"pr list\") if [ \"$4\" = closed ]; then echo '[]'; else echo '[{\"number\": 5, \"url\": \"https://github.com/o/r/pull/5\", \
+         \"headRefName\": \"fix\", \"baseRefName\": \"main\", \"isDraft\": false, \
+         \"isCrossRepository\": false, \"state\": \"OPEN\", \"mergeStateStatus\": \"BEHIND\", \
          \"reviewDecision\": \"APPROVED\", \"statusCheckRollup\": [{\"__typename\": \"CheckRun\", \
          \"name\": \"rust\", \"status\": \"COMPLETED\", \"conclusion\": \"SUCCESS\", \
-         \"detailsUrl\": \"\"}]}]' ;;",
+         \"detailsUrl\": \"\"}]}]'; fi ;;\n\
+         \"api graphql\") printf '%s\\n' '{\"data\":{\"repository\":{\"n5\":{\"reviewThreads\":{\"nodes\":[{\"isResolved\":false,\"comments\":{\"totalCount\":2}}]}}}}}' ;;",
     );
     let open = github::open_pull_requests(&gh.checkout(sandbox.root(), None)).unwrap();
     assert_eq!(open.len(), 1);
     assert_eq!(open[0].branch, "fix");
+    assert_eq!(open[0].base, "main");
+    assert!(open[0].behind);
     assert_eq!(open[0].review, Review::Approved);
+    assert_eq!(open[0].unresolved_comments, 2);
+    assert!(open[0].can_address_comments());
     assert_eq!(open[0].checks_state(), Some(CheckState::Passed));
+    assert!(open[0].merge_methods.merge);
+    assert!(!open[0].merge_methods.squash);
+    let calls = gh.calls();
     assert_eq!(
-        gh.calls(),
-        ["none|pr list --state open --limit 100 --json \
-          number,url,headRefName,isDraft,isCrossRepository,reviewDecision,statusCheckRollup"]
+        calls[0],
+        "none|repo view --json mergeCommitAllowed,squashMergeAllowed,rebaseMergeAllowed"
+    );
+    assert_eq!(
+        calls[1],
+        format!("none|pr list --state open --limit 100 --json {json}")
+    );
+    assert_eq!(
+        calls[2],
+        format!("none|pr list --state closed --limit 100 --json {json}")
+    );
+    assert!(
+        calls[3].contains("none|api graphql -f query=")
+            && calls[3].contains("n5:pullRequest(number:5)")
+            && calls[3].contains("comments(first:1){totalCount}")
+            && calls[3].contains("-F owner=o")
+            && calls[3].contains("-F name=r"),
+        "{calls:?}"
     );
 }
 
@@ -336,6 +362,11 @@ fn failed_checks_are_handed_over_with_what_they_printed_saved_beside() {
         branch: "fix".to_owned(),
         draft: false,
         review: Review::None,
+        state: github::PullRequestState::Open,
+        base: "main".to_owned(),
+        behind: false,
+        unresolved_comments: 0,
+        merge_methods: github::MergeMethods::default(),
         checks: vec![
             failed("lint", "https://github.com/o/r/actions/runs/1/job/2"),
             Check {
@@ -389,6 +420,114 @@ fn failed_checks_are_handed_over_with_what_they_printed_saved_beside() {
 }
 
 #[test]
+fn a_pull_request_is_merged_updated_readied_and_reopened_with_gh_s_flags() {
+    let sandbox = Sandbox::new("gh-pr-actions");
+    let gh = FakeGh::new(
+        &sandbox,
+        "\"pr merge\") ;;\n\
+         \"pr update-branch\") ;;\n\
+         \"pr ready\") ;;\n\
+         \"pr reopen\") ;;",
+    );
+    let at = gh.checkout(sandbox.root(), None);
+    github::merge_pull_request(&at, 17, MergeMethod::Squash).unwrap();
+    github::merge_pull_request(&at, 18, MergeMethod::Merge).unwrap();
+    github::merge_pull_request(&at, 19, MergeMethod::Rebase).unwrap();
+    github::update_branch(&at, 17).unwrap();
+    github::mark_ready(&at, 17).unwrap();
+    github::reopen_pull_request(&at, 17).unwrap();
+    assert_eq!(
+        gh.calls(),
+        [
+            "none|pr merge 17 --squash",
+            "none|pr merge 18 --merge",
+            "none|pr merge 19 --rebase",
+            "none|pr update-branch 17",
+            "none|pr ready 17",
+            "none|pr reopen 17",
+        ]
+    );
+}
+
+#[test]
+fn github_s_refusal_is_kept_when_a_merge_is_blocked() {
+    let sandbox = Sandbox::new("gh-pr-merge-refused");
+    let gh = FakeGh::new(
+        &sandbox,
+        "\"pr merge\") echo 'X Pull request #17 is not mergeable: the merge commit cannot be created' >&2; exit 1 ;;",
+    );
+    let err =
+        github::merge_pull_request(&gh.checkout(sandbox.root(), None), 17, MergeMethod::Merge)
+            .unwrap_err()
+            .to_string();
+    assert!(err.contains("the merge commit cannot be created"), "{err}");
+}
+
+#[test]
+fn review_comments_are_asked_of_graphql_as_the_picked_account() {
+    let sandbox = Sandbox::new("gh-pr-comments");
+    let gh = FakeGh::new(
+        &sandbox,
+        "\"repo view\") echo 'ketapp/ket' ;;\n\
+         \"api graphql\") printf '%s\\n' '{\"data\":{\"repository\":{\"pullRequest\":{\"reviewThreads\":{\"nodes\":[{\"isResolved\":false,\"comments\":{\"nodes\":[{\"author\":{\"login\":\"sam\"},\"body\":\"rename me\",\"path\":\"a.rs\",\"line\":3}]}}]}}}}}' ;;",
+    );
+    let comments =
+        github::unresolved_review_comments(&gh.checkout(sandbox.root(), Some("work")), 17).unwrap();
+    assert_eq!(comments.len(), 1);
+    assert_eq!(comments[0].author, "sam");
+    assert_eq!(comments[0].path, "a.rs");
+    assert_eq!(comments[0].line, Some(3));
+    let calls = gh.calls();
+    assert_eq!(
+        calls[0],
+        "none|auth token --hostname github.com --user work"
+    );
+    assert!(
+        calls[1].starts_with("tok-work|repo view --json nameWithOwner"),
+        "{calls:?}"
+    );
+    let graphql = calls
+        .iter()
+        .find(|line| line.contains("api graphql"))
+        .expect("graphql call");
+    assert!(
+        graphql.contains("tok-work|api graphql -f query=")
+            && graphql.contains("-F owner=ketapp")
+            && graphql.contains("-F name=ket")
+            && graphql.contains("-F number:int=17"),
+        "{calls:?}"
+    );
+}
+
+#[test]
+fn a_closed_pull_request_is_found_by_its_branch() {
+    let sandbox = Sandbox::new("gh-pr-for-branch");
+    let json = "number,url,headRefName,baseRefName,isDraft,isCrossRepository,reviewDecision,statusCheckRollup,state,mergeStateStatus,reviews";
+    let gh = FakeGh::new(
+        &sandbox,
+        "\"pr list\") echo '[{\"number\": 9, \"url\": \"https://github.com/o/r/pull/9\", \
+         \"headRefName\": \"fix\", \"baseRefName\": \"main\", \"isDraft\": false, \
+         \"isCrossRepository\": false, \"state\": \"CLOSED\", \"mergeStateStatus\": \"DIRTY\", \
+         \"reviewDecision\": \"\", \"statusCheckRollup\": []}]' ;;\n\
+         \"api graphql\") printf '%s\\n' '{\"data\":{\"repository\":{\"n9\":{\"reviewThreads\":{\"nodes\":[]}}}}}' ;;",
+    );
+    let found = github::pull_request_for_branch(&gh.checkout(sandbox.root(), None), "fix").unwrap();
+    let found = found.expect("the closed pull request");
+    assert_eq!(found.number, 9);
+    assert_eq!(found.state, github::PullRequestState::Closed);
+    assert!(found.can_reopen());
+    let calls = gh.calls();
+    assert_eq!(
+        calls[0],
+        format!("none|pr list --head fix --state all --limit 1 --json {json}")
+    );
+    assert!(
+        calls[1].contains("none|api graphql") && calls[1].contains("n9:pullRequest(number:9)"),
+        "{calls:?}"
+    );
+}
+
+#[test]
 fn a_pull_request_with_nothing_failed_has_nothing_to_hand_over() {
     let sandbox = Sandbox::new("gh-checks-none-failed");
     let gh = FakeGh::new(&sandbox, "");
@@ -398,6 +537,11 @@ fn a_pull_request_with_nothing_failed_has_nothing_to_hand_over() {
         branch: "b".to_owned(),
         draft: false,
         review: Review::None,
+        state: github::PullRequestState::Open,
+        base: String::new(),
+        behind: false,
+        unresolved_comments: 0,
+        merge_methods: github::MergeMethods::default(),
         checks: Vec::new(),
     };
     let err = checks::hand_over(

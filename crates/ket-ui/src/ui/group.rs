@@ -287,13 +287,9 @@ impl<'a> ButtonGroup<'a> {
         self
     }
 
-    /// Draws the group.
-    ///
-    /// Returns an element rather than a builder: unlike a button, nothing is
-    /// left for the call site to attach — every handler is already on a
-    /// segment, and a click on the track between them should do nothing.
     /// Stretches the track across its parent and shares the width out
-    /// evenly, for a group that is a view switch rather than a setting.
+    /// evenly, for a group that is a view switch rather than a setting —
+    /// in a row of other controls or in a column of its own.
     pub(crate) fn fill(mut self) -> Self {
         self.fill = true;
         self
@@ -313,17 +309,29 @@ impl<'a> ButtonGroup<'a> {
         self
     }
 
+    /// Draws the group.
+    ///
+    /// Returns an element rather than a builder: unlike a button, nothing is
+    /// left for the call site to attach — every handler is already on a
+    /// segment, and a click on the track between them should do nothing.
     pub(crate) fn render(self, t: &Theme) -> AnyElement {
         let fill = self.fill;
         let small = self.small;
         let dense = self.dense;
+        let height = if small { SMALL_TRACK_H } else { TRACK_H };
         div()
             .id(self.id)
             .flex()
             .when(fill, |el| el.flex_1())
             .when(!fill, |el| el.flex_none())
             .items_center()
-            .h(if small { SMALL_TRACK_H } else { TRACK_H })
+            // Held at its height rather than only given one: `flex_1` grows
+            // along whichever way the parent runs, so a filled group stacked
+            // in a column stood taller than its segments, which floated in
+            // the middle of the well.
+            .h(height)
+            .min_h(height)
+            .max_h(height)
             .p(if small { px(2.0) } else { INSET })
             .gap(px(2.0))
             .rounded(RADIUS_MD)

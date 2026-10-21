@@ -55,6 +55,28 @@ fn set_worktree_name_on_an_unknown_worktree_errors() {
 }
 
 #[test]
+fn saved_name_survives_legacy_agent_title() {
+    let sandbox = Sandbox::new("meta-legacy-agent-title");
+    let repo = sandbox.path("repo");
+    init_repo(&repo);
+
+    let ws = workspace(&sandbox);
+    let project = ws.add_project(&repo).expect("add project");
+    let worktree = ws
+        .create_worktree(&project.id, "attempt-a", None, None)
+        .unwrap();
+    ws.set_worktree_name(&worktree.id, "Saved label").unwrap();
+
+    let mut previous_state = serde_json::to_value(&ws.worktrees(Some(&project.id)).unwrap()[0])
+        .expect("serialize worktree");
+    previous_state["agentTitle"] = serde_json::json!("Old agent title");
+    let restored: ket_core::worktree::Worktree =
+        serde_json::from_value(previous_state).expect("load previous worktree");
+
+    assert_eq!(restored.name.as_deref(), Some("Saved label"));
+}
+
+#[test]
 fn set_worktree_pinned_toggles_the_flag() {
     let sandbox = Sandbox::new("meta-pin");
     let repo = sandbox.path("repo");
@@ -72,90 +94,6 @@ fn set_worktree_pinned_toggles_the_flag() {
 
     ws.set_worktree_pinned(&a.id, false).unwrap();
     assert!(!ws.worktrees(Some(&project.id)).unwrap()[0].pinned);
-}
-
-#[test]
-fn sync_worktree_name_from_agent_sets_the_name_once() {
-    let sandbox = Sandbox::new("meta-sync-agent");
-    let repo = sandbox.path("repo");
-    init_repo(&repo);
-
-    let ws = workspace(&sandbox);
-    let project = ws.add_project(&repo).expect("add project");
-    let a = ws
-        .create_worktree(&project.id, "attempt-a", None, None)
-        .unwrap();
-
-    let changed = ws
-        .sync_worktree_name_from_agent(&a.id, "Fix the login bug")
-        .unwrap();
-    assert!(changed);
-
-    let updated = &ws.worktrees(Some(&project.id)).unwrap()[0];
-    assert_eq!(updated.name.as_deref(), Some("Fix the login bug"));
-    assert_eq!(updated.agent_title.as_deref(), Some("Fix the login bug"));
-
-    // A repeated poll of the same title is not a change.
-    let changed_again = ws
-        .sync_worktree_name_from_agent(&a.id, "Fix the login bug")
-        .unwrap();
-    assert!(!changed_again);
-}
-
-#[test]
-fn sync_worktree_name_from_agent_does_not_override_a_manual_rename() {
-    let sandbox = Sandbox::new("meta-sync-manual");
-    let repo = sandbox.path("repo");
-    init_repo(&repo);
-
-    let ws = workspace(&sandbox);
-    let project = ws.add_project(&repo).expect("add project");
-    let a = ws
-        .create_worktree(&project.id, "attempt-a", None, None)
-        .unwrap();
-
-    ws.sync_worktree_name_from_agent(&a.id, "Agent's title")
-        .unwrap();
-    ws.set_worktree_name(&a.id, "Person's own title").unwrap();
-
-    // The agent repeats its old title; the person's rename must not be
-    // clobbered by it, since the stored `agent_title` has not moved.
-    let changed = ws
-        .sync_worktree_name_from_agent(&a.id, "Agent's title")
-        .unwrap();
-    assert!(!changed);
-    assert_eq!(
-        ws.worktrees(Some(&project.id)).unwrap()[0].name.as_deref(),
-        Some("Person's own title")
-    );
-
-    // A genuinely new title from the agent still lands, replacing the manual
-    // one — the agent's title is what future syncs compare against.
-    let changed = ws
-        .sync_worktree_name_from_agent(&a.id, "Agent's new title")
-        .unwrap();
-    assert!(changed);
-    assert_eq!(
-        ws.worktrees(Some(&project.id)).unwrap()[0].name.as_deref(),
-        Some("Agent's new title")
-    );
-}
-
-#[test]
-fn sync_worktree_name_from_agent_ignores_a_blank_title() {
-    let sandbox = Sandbox::new("meta-sync-blank");
-    let repo = sandbox.path("repo");
-    init_repo(&repo);
-
-    let ws = workspace(&sandbox);
-    let project = ws.add_project(&repo).expect("add project");
-    let a = ws
-        .create_worktree(&project.id, "attempt-a", None, None)
-        .unwrap();
-
-    let changed = ws.sync_worktree_name_from_agent(&a.id, "   ").unwrap();
-    assert!(!changed);
-    assert!(ws.worktrees(Some(&project.id)).unwrap()[0].name.is_none());
 }
 
 #[test]

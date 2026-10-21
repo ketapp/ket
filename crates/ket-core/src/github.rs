@@ -222,6 +222,143 @@ pub struct PullRequestStatus {
     pub review: Review,
     /// Its checks, in GitHub's order.
     pub checks: Vec<Check>,
+    /// Open, closed unmerged, or merged.
+    #[serde(default)]
+    pub state: PullRequestState,
+    /// The branch it asks to merge into.
+    #[serde(default)]
+    pub base: String,
+    /// Whether its branch is behind that base, as GitHub last said.
+    #[serde(default)]
+    pub behind: bool,
+    /// Unresolved review-thread comments, as last counted. Line comments
+    /// included; a review body with no threads is not. Zero when GitHub did
+    /// not say.
+    #[serde(default)]
+    pub unresolved_comments: u32,
+    /// Merge methods the repository allows. All of them until ket has asked.
+    #[serde(default)]
+    pub merge_methods: MergeMethods,
+}
+
+/// Whether a pull request is still open, was closed, or has landed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PullRequestState {
+    /// Open, draft or ready.
+    #[default]
+    Open,
+    /// Closed without merging.
+    Closed,
+    /// Merged into its base.
+    Merged,
+}
+
+/// How GitHub will land a pull request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MergeMethod {
+    /// A merge commit.
+    Merge,
+    /// Squash into one commit.
+    Squash,
+    /// Rebase onto the base.
+    Rebase,
+}
+
+impl MergeMethod {
+    /// The `gh pr merge` flag for this method.
+    pub fn flag(self) -> &'static str {
+        match self {
+            Self::Merge => "--merge",
+            Self::Squash => "--squash",
+            Self::Rebase => "--rebase",
+        }
+    }
+
+    /// The word the dialog and the phone use: "merge", "squash", "rebase".
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Merge => "merge",
+            Self::Squash => "squash",
+            Self::Rebase => "rebase",
+        }
+    }
+
+    /// A short label for a picker: "Merge commit", "Squash", "Rebase".
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Merge => "Merge commit",
+            Self::Squash => "Squash",
+            Self::Rebase => "Rebase",
+        }
+    }
+}
+
+/// Which merge methods a repository allows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MergeMethods {
+    /// A merge commit.
+    pub merge: bool,
+    /// Squash into one commit.
+    pub squash: bool,
+    /// Rebase onto the base.
+    pub rebase: bool,
+}
+
+impl Default for MergeMethods {
+    fn default() -> Self {
+        Self {
+            merge: true,
+            squash: true,
+            rebase: true,
+        }
+    }
+}
+
+impl MergeMethods {
+    /// The methods GitHub will accept, in the order a picker shows them.
+    pub fn allowed(self) -> Vec<MergeMethod> {
+        let mut methods = Vec::new();
+        if self.merge {
+            methods.push(MergeMethod::Merge);
+        }
+        if self.squash {
+            methods.push(MergeMethod::Squash);
+        }
+        if self.rebase {
+            methods.push(MergeMethod::Rebase);
+        }
+        methods
+    }
+
+    /// The repository's default: a merge commit when that is allowed, else
+    /// squash, else rebase.
+    pub fn default_method(self) -> Option<MergeMethod> {
+        self.allowed().into_iter().next()
+    }
+
+    /// Whether `method` is allowed.
+    pub fn allows(self, method: MergeMethod) -> bool {
+        match method {
+            MergeMethod::Merge => self.merge,
+            MergeMethod::Squash => self.squash,
+            MergeMethod::Rebase => self.rebase,
+        }
+    }
+}
+
+/// One unresolved review comment, as Address comments hands it to an agent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewComment {
+    /// Who wrote it, a GitHub login. Empty when GitHub did not say.
+    pub author: String,
+    /// The file it is on. Empty for a review body with no line.
+    pub path: String,
+    /// The line in the new file, when GitHub named one.
+    pub line: Option<u32>,
+    /// What they wrote.
+    pub body: String,
 }
 
 /// Where a pull request's review stands.
@@ -292,6 +429,33 @@ impl PullRequestStatus {
             .filter(|check| check.state == CheckState::Failed)
     }
 
+    /// Whether it can be merged from ket: open and not a draft.
+    pub fn can_merge(&self) -> bool {
+        self.state == PullRequestState::Open && !self.draft
+    }
+
+    /// Whether it can be marked ready: an open draft.
+    pub fn can_ready(&self) -> bool {
+        self.state == PullRequestState::Open && self.draft
+    }
+
+    /// Whether it can be reopened: closed without merging.
+    pub fn can_reopen(&self) -> bool {
+        self.state == PullRequestState::Closed
+    }
+
+    /// Whether its branch can be updated from the base: open and behind.
+    pub fn can_update(&self) -> bool {
+        self.state == PullRequestState::Open && self.behind
+    }
+
+    /// Whether Address comments applies: open, and there are review comments
+    /// or a reviewer asked for changes.
+    pub fn can_address_comments(&self) -> bool {
+        self.state == PullRequestState::Open
+            && (self.unresolved_comments > 0 || self.review == Review::ChangesRequested)
+    }
+
     /// Its checks in a few words, as a tooltip or a detail line says them:
     /// "2 of 9 checks failing", "3 checks running", "all 9 checks passed".
     /// Empty when it has none that say anything.
@@ -328,13 +492,79 @@ impl PullRequestStatus {
     }
 }
 
-/// The open pull requests of the repository `at` is a checkout of, with
-/// their checks — one call for every worktree of a project, matched to them
-/// by branch. Opened by ket or by an agent that ran `gh pr create` itself.
+/// The pull request for `branch` to show: an open one over a closed or
+/// merged one, then the highest number.
+pub fn best_for_branch<'a>(
+    prs: &'a [PullRequestStatus],
+    branch: &str,
+) -> Option<&'a PullRequestStatus> {
+    prs.iter()
+        .filter(|pr| pr.branch == branch)
+        .max_by_key(|pr| (matches!(pr.state, PullRequestState::Open) as u8, pr.number))
+}
+
+/// JSON fields every pull-request list and view asks for.
+const STATUS_JSON: &str = "number,url,headRefName,baseRefName,isDraft,isCrossRepository,reviewDecision,statusCheckRollup,state,mergeStateStatus,reviews";
+
+/// The pull requests of the repository `at` is a checkout of, with their
+/// checks — open ones, and recently closed or merged ones, so a worktree
+/// whose pull request was closed still shows it. One call for every
+/// worktree of a project, matched to them by branch. Opened by ket or by
+/// an agent that ran `gh pr create` itself.
 ///
 /// Pull requests from forks are left out: a fork's branch names are
 /// someone else's, and a fork's `fix-typo` is not this repository's.
 pub fn open_pull_requests(at: &Checkout) -> Result<Vec<PullRequestStatus>> {
+    let methods = merge_methods(at).ok();
+    let mut prs = list_pull_requests(at, "open")?;
+    let closed = list_pull_requests(at, "closed")?;
+    prs.extend(closed);
+    if let Some(methods) = methods {
+        for pr in &mut prs {
+            pr.merge_methods = methods;
+        }
+    }
+    fill_unresolved_comments(at, &mut prs);
+    Ok(prs)
+}
+
+/// The pull request whose head is `head`, in any state — so a closed one
+/// is still found. `None` when there is none.
+pub fn pull_request_for_branch(at: &Checkout, head: &str) -> Result<Option<PullRequestStatus>> {
+    let out = run(
+        at,
+        &[
+            "pr",
+            "list",
+            "--head",
+            head,
+            "--state",
+            "all",
+            "--limit",
+            "1",
+            "--json",
+            STATUS_JSON,
+        ],
+        None,
+    )?;
+    let mut prs = read_pull_request_statuses(&out)?;
+    fill_unresolved_comments(at, &mut prs);
+    Ok(prs.into_iter().next())
+}
+
+/// Pull request `number`, as GitHub has it now.
+pub fn pull_request(at: &Checkout, number: u64) -> Result<PullRequestStatus> {
+    let number = number.to_string();
+    let out = run(at, &["pr", "view", &number, "--json", STATUS_JSON], None)?;
+    let listed = format!("[{}]", out.trim());
+    let mut prs = read_pull_request_statuses(&listed)?;
+    fill_unresolved_comments(at, &mut prs);
+    prs.into_iter()
+        .next()
+        .ok_or_else(|| failed(format!("gh did not describe pull request {number}")))
+}
+
+fn list_pull_requests(at: &Checkout, state: &str) -> Result<Vec<PullRequestStatus>> {
     let limit = PULL_REQUEST_LIMIT.to_string();
     let out = run(
         at,
@@ -342,15 +572,383 @@ pub fn open_pull_requests(at: &Checkout) -> Result<Vec<PullRequestStatus>> {
             "pr",
             "list",
             "--state",
-            "open",
+            state,
             "--limit",
             &limit,
             "--json",
-            "number,url,headRefName,isDraft,isCrossRepository,reviewDecision,statusCheckRollup",
+            STATUS_JSON,
         ],
         None,
     )?;
     read_pull_request_statuses(&out)
+}
+
+/// Overwrites [`PullRequestStatus::unresolved_comments`] with unresolved
+/// review-thread comments, line comments included. `gh pr list`'s `reviews`
+/// field is bodies on submitted reviews, so a reviewer who only commented
+/// on lines would otherwise look like they said nothing. A GraphQL miss
+/// leaves the list's fallback count.
+fn fill_unresolved_comments(at: &Checkout, prs: &mut [PullRequestStatus]) {
+    if prs.is_empty() {
+        return;
+    }
+    let Some((owner, name)) = prs
+        .iter()
+        .find_map(|pr| owner_and_name_from_pull_url(&pr.url))
+    else {
+        return;
+    };
+    let numbers: Vec<u64> = prs.iter().map(|pr| pr.number).collect();
+    let Ok(counts) = fetch_unresolved_comment_counts(at, &owner, &name, &numbers) else {
+        return;
+    };
+    for pr in prs {
+        if let Some(&count) = counts.get(&pr.number) {
+            pr.unresolved_comments = count;
+        }
+    }
+}
+
+/// `owner` and `name` from a pull request page, `https://host/owner/name/pull/17`.
+fn owner_and_name_from_pull_url(url: &str) -> Option<(String, String)> {
+    let path = url.split_once("://")?.1;
+    let mut parts = path.split('/');
+    let _host = parts.next()?;
+    let owner = parts.next()?.to_owned();
+    let name = parts.next()?.to_owned();
+    if parts.next() != Some("pull") || owner.is_empty() || name.is_empty() {
+        return None;
+    }
+    Some((owner, name))
+}
+
+fn fetch_unresolved_comment_counts(
+    at: &Checkout,
+    owner: &str,
+    name: &str,
+    numbers: &[u64],
+) -> Result<std::collections::HashMap<u64, u32>> {
+    if numbers.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+    let mut query = String::from(
+        "query=query($owner:String!,$name:String!){repository(owner:$owner,name:$name){",
+    );
+    for number in numbers {
+        query.push('n');
+        query.push_str(&number.to_string());
+        query.push_str(":pullRequest(number:");
+        query.push_str(&number.to_string());
+        query.push_str(
+            "){reviewThreads(first:100){nodes{isResolved comments(first:1){totalCount}}}}",
+        );
+    }
+    query.push_str("}}");
+    let owner_arg = format!("owner={owner}");
+    let name_arg = format!("name={name}");
+    let out = run(
+        at,
+        &[
+            "api", "graphql", "-f", &query, "-F", &owner_arg, "-F", &name_arg,
+        ],
+        None,
+    )?;
+    read_unresolved_comment_counts(&out)
+}
+
+fn read_unresolved_comment_counts(out: &str) -> Result<std::collections::HashMap<u64, u32>> {
+    #[derive(Deserialize)]
+    struct Envelope {
+        #[serde(default)]
+        data: Option<Data>,
+        #[serde(default)]
+        errors: Option<Vec<GraphErr>>,
+    }
+    #[derive(Deserialize)]
+    struct GraphErr {
+        #[serde(default)]
+        message: String,
+    }
+    #[derive(Deserialize)]
+    struct Data {
+        #[serde(default)]
+        repository: std::collections::HashMap<String, Option<Pr>>,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Pr {
+        review_threads: Option<Threads>,
+    }
+    #[derive(Deserialize)]
+    struct Threads {
+        #[serde(default)]
+        nodes: Vec<Thread>,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Thread {
+        #[serde(default)]
+        is_resolved: bool,
+        comments: Option<Count>,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Count {
+        #[serde(default)]
+        total_count: u32,
+    }
+
+    let parsed: Envelope = serde_json::from_str(out).map_err(|e| {
+        failed(format!(
+            "could not read the pull request's review comments: {e}"
+        ))
+    })?;
+    let Some(data) = parsed.data else {
+        if let Some(errors) = parsed.errors.filter(|errors| !errors.is_empty()) {
+            let why = errors
+                .iter()
+                .map(|error| error.message.as_str())
+                .filter(|message| !message.is_empty())
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(failed(if why.is_empty() {
+                "GitHub refused to read the pull request's review comments".to_owned()
+            } else {
+                why
+            }));
+        }
+        return Ok(std::collections::HashMap::new());
+    };
+    let mut counts = std::collections::HashMap::new();
+    for (alias, pr) in data.repository {
+        let Some(number) = alias
+            .strip_prefix('n')
+            .and_then(|rest| rest.parse::<u64>().ok())
+        else {
+            continue;
+        };
+        let Some(pr) = pr else {
+            continue;
+        };
+        let threads = pr
+            .review_threads
+            .map(|threads| threads.nodes)
+            .unwrap_or_default();
+        let count = threads
+            .iter()
+            .filter(|thread| !thread.is_resolved)
+            .map(
+                |thread| match thread.comments.as_ref().map(|c| c.total_count) {
+                    Some(0) | None => 1,
+                    Some(n) => n,
+                },
+            )
+            .sum();
+        counts.insert(number, count);
+    }
+    Ok(counts)
+}
+
+/// Merge methods the repository `at` is a checkout of allows.
+pub fn merge_methods(at: &Checkout) -> Result<MergeMethods> {
+    let out = run(
+        at,
+        &[
+            "repo",
+            "view",
+            "--json",
+            "mergeCommitAllowed,squashMergeAllowed,rebaseMergeAllowed",
+        ],
+        None,
+    )?;
+    read_merge_methods(&out)
+}
+
+fn read_merge_methods(out: &str) -> Result<MergeMethods> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Allowed {
+        #[serde(default)]
+        merge_commit_allowed: bool,
+        #[serde(default)]
+        squash_merge_allowed: bool,
+        #[serde(default)]
+        rebase_merge_allowed: bool,
+    }
+    let allowed: Allowed = serde_json::from_str(out).map_err(|e| {
+        failed(format!(
+            "could not read the repository's merge methods: {e}"
+        ))
+    })?;
+    let methods = MergeMethods {
+        merge: allowed.merge_commit_allowed,
+        squash: allowed.squash_merge_allowed,
+        rebase: allowed.rebase_merge_allowed,
+    };
+    if methods.allowed().is_empty() {
+        return Err(failed("this repository allows no merge methods".to_owned()));
+    }
+    Ok(methods)
+}
+
+/// Merges pull request `number` with `method`. Does not delete the branch.
+pub fn merge_pull_request(at: &Checkout, number: u64, method: MergeMethod) -> Result<()> {
+    run(
+        at,
+        &["pr", "merge", &number.to_string(), method.flag()],
+        None,
+    )
+    .map(|_| ())
+}
+
+/// Updates pull request `number`'s branch from its base.
+pub fn update_branch(at: &Checkout, number: u64) -> Result<()> {
+    run(at, &["pr", "update-branch", &number.to_string()], None).map(|_| ())
+}
+
+/// Marks pull request `number` ready for review.
+pub fn mark_ready(at: &Checkout, number: u64) -> Result<()> {
+    run(at, &["pr", "ready", &number.to_string()], None).map(|_| ())
+}
+
+/// Reopens pull request `number`.
+pub fn reopen_pull_request(at: &Checkout, number: u64) -> Result<()> {
+    run(at, &["pr", "reopen", &number.to_string()], None).map(|_| ())
+}
+
+/// Unresolved review comments on pull request `number`, line comments
+/// included, with who wrote each.
+pub fn unresolved_review_comments(at: &Checkout, number: u64) -> Result<Vec<ReviewComment>> {
+    let repo = repository(at)?;
+    let Some((owner, name)) = repo.split_once('/') else {
+        return Err(failed(format!("repository {repo} has no owner/name")));
+    };
+    let number = number.to_string();
+    let out = run(
+        at,
+        &[
+            "api",
+            "graphql",
+            "-f",
+            REVIEW_THREADS_QUERY,
+            "-F",
+            &format!("owner={owner}"),
+            "-F",
+            &format!("name={name}"),
+            "-F",
+            &format!("number:int={number}"),
+        ],
+        None,
+    )?;
+    read_review_threads(&out)
+}
+
+/// `gh api graphql -f` value: the query document, named `query`.
+const REVIEW_THREADS_QUERY: &str = "query=query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100){nodes{isResolved comments(first:30){nodes{author{login} body path line originalLine}}}}}}}";
+
+fn read_review_threads(out: &str) -> Result<Vec<ReviewComment>> {
+    #[derive(Deserialize)]
+    struct Envelope {
+        #[serde(default)]
+        data: Option<Data>,
+        #[serde(default)]
+        errors: Option<Vec<GraphErr>>,
+    }
+    #[derive(Deserialize)]
+    struct GraphErr {
+        #[serde(default)]
+        message: String,
+    }
+    #[derive(Deserialize)]
+    struct Data {
+        repository: Option<Repo>,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Repo {
+        pull_request: Option<Pr>,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Pr {
+        review_threads: Option<Threads>,
+    }
+    #[derive(Deserialize)]
+    struct Threads {
+        #[serde(default)]
+        nodes: Vec<Thread>,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Thread {
+        #[serde(default)]
+        is_resolved: bool,
+        comments: Option<Comments>,
+    }
+    #[derive(Deserialize)]
+    struct Comments {
+        #[serde(default)]
+        nodes: Vec<Node>,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Node {
+        author: Option<Author>,
+        #[serde(default)]
+        body: String,
+        #[serde(default)]
+        path: String,
+        line: Option<u32>,
+        original_line: Option<u32>,
+    }
+    #[derive(Deserialize)]
+    struct Author {
+        #[serde(default)]
+        login: String,
+    }
+
+    let parsed: Envelope = serde_json::from_str(out).map_err(|e| {
+        failed(format!(
+            "could not read the pull request's review comments: {e}"
+        ))
+    })?;
+    if let Some(errors) = parsed.errors.filter(|errors| !errors.is_empty()) {
+        let why = errors
+            .iter()
+            .map(|error| error.message.as_str())
+            .filter(|message| !message.is_empty())
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(failed(if why.is_empty() {
+            "GitHub refused to read the pull request's review comments".to_owned()
+        } else {
+            why
+        }));
+    }
+    let threads = parsed
+        .data
+        .and_then(|data| data.repository)
+        .and_then(|repo| repo.pull_request)
+        .and_then(|pr| pr.review_threads)
+        .map(|threads| threads.nodes)
+        .unwrap_or_default();
+    Ok(threads
+        .into_iter()
+        .filter(|thread| !thread.is_resolved)
+        .flat_map(|thread| {
+            thread
+                .comments
+                .unwrap_or(Comments { nodes: Vec::new() })
+                .nodes
+        })
+        .filter(|node| !node.body.trim().is_empty())
+        .map(|node| ReviewComment {
+            author: node.author.map(|author| author.login).unwrap_or_default(),
+            path: node.path,
+            line: node.line.or(node.original_line),
+            body: node.body.trim().to_owned(),
+        })
+        .collect())
 }
 
 /// The pull requests [`open_pull_requests`] had `gh` print, forks left out.
@@ -362,6 +960,8 @@ fn read_pull_request_statuses(out: &str) -> Result<Vec<PullRequestStatus>> {
         url: String,
         head_ref_name: String,
         #[serde(default)]
+        base_ref_name: String,
+        #[serde(default)]
         is_draft: bool,
         #[serde(default)]
         is_cross_repository: bool,
@@ -369,6 +969,20 @@ fn read_pull_request_statuses(out: &str) -> Result<Vec<PullRequestStatus>> {
         review_decision: Option<String>,
         #[serde(default)]
         status_check_rollup: Option<Vec<Rolled>>,
+        #[serde(default)]
+        state: String,
+        #[serde(default)]
+        merge_state_status: String,
+        #[serde(default)]
+        reviews: Vec<ListedReview>,
+    }
+
+    #[derive(Deserialize)]
+    struct ListedReview {
+        #[serde(default)]
+        body: String,
+        #[serde(default)]
+        state: String,
     }
 
     /// One entry of `statusCheckRollup`: a check run, or a commit status.
@@ -421,6 +1035,21 @@ fn read_pull_request_statuses(out: &str) -> Result<Vec<PullRequestStatus>> {
                 Some("REVIEW_REQUIRED") => Review::Required,
                 _ => Review::None,
             },
+            state: match pr.state.as_str() {
+                "MERGED" => PullRequestState::Merged,
+                "CLOSED" => PullRequestState::Closed,
+                _ => PullRequestState::Open,
+            },
+            base: pr.base_ref_name,
+            behind: pr.merge_state_status.eq_ignore_ascii_case("BEHIND"),
+            unresolved_comments: pr
+                .reviews
+                .iter()
+                .filter(|review| {
+                    !review.body.trim().is_empty() || review.state.eq_ignore_ascii_case("COMMENTED")
+                })
+                .count() as u32,
+            merge_methods: MergeMethods::default(),
             checks: pr
                 .status_check_rollup
                 .unwrap_or_default()
@@ -1309,8 +1938,10 @@ mod tests {
     /// ketapp/ket's #17 printed it, trimmed to the fields ket reads.
     const LISTED: &str = r#"[
       {"number": 17, "url": "https://github.com/ketapp/ket/pull/17",
-       "headRefName": "deps-expo", "isDraft": false, "isCrossRepository": false,
+       "headRefName": "deps-expo", "baseRefName": "main", "isDraft": false,
+       "isCrossRepository": false, "state": "OPEN", "mergeStateStatus": "BEHIND",
        "reviewDecision": "",
+       "reviews": [{"body": "please rename this"}],
        "statusCheckRollup": [
          {"__typename": "CheckRun", "name": "rust-advisories-and-licenses",
           "status": "COMPLETED", "conclusion": "FAILURE", "workflowName": "Dependency security",
@@ -1326,10 +1957,12 @@ mod tests {
          {"__typename": "SomethingNew", "name": "ignored"}
        ]},
       {"number": 18, "url": "https://github.com/ketapp/ket/pull/18",
-       "headRefName": "fix-typo", "isDraft": true, "isCrossRepository": true,
+       "headRefName": "fix-typo", "baseRefName": "main", "isDraft": true,
+       "isCrossRepository": true, "state": "OPEN", "mergeStateStatus": "CLEAN",
        "reviewDecision": "APPROVED", "statusCheckRollup": []},
       {"number": 19, "url": "https://github.com/ketapp/ket/pull/19",
-       "headRefName": "quiet", "isDraft": true, "isCrossRepository": false,
+       "headRefName": "quiet", "baseRefName": "main", "isDraft": true,
+       "isCrossRepository": false, "state": "CLOSED", "mergeStateStatus": "UNKNOWN",
        "reviewDecision": "CHANGES_REQUESTED", "statusCheckRollup": null}
     ]"#;
 
@@ -1341,8 +1974,34 @@ mod tests {
         let deps = &read[0];
         assert_eq!(deps.number, 17);
         assert_eq!(deps.branch, "deps-expo");
+        assert_eq!(deps.base, "main");
         assert!(!deps.draft);
+        assert!(deps.behind);
+        assert_eq!(deps.state, PullRequestState::Open);
+        assert_eq!(deps.unresolved_comments, 1);
         assert_eq!(deps.review, Review::None);
+        assert!(deps.can_address_comments());
+        let inline_only = read_pull_request_statuses(
+            r#"[{"number": 4, "url": "https://github.com/o/r/pull/4",
+                "headRefName": "fix", "baseRefName": "main", "isDraft": false,
+                "isCrossRepository": false, "state": "OPEN",
+                "reviewDecision": "", "reviews": [{"body": "", "state": "COMMENTED"}],
+                "statusCheckRollup": []}]"#,
+        )
+        .unwrap();
+        assert_eq!(inline_only[0].unresolved_comments, 1);
+        assert_eq!(inline_only[0].review, Review::None);
+        assert!(inline_only[0].can_address_comments());
+        let approved_silent = read_pull_request_statuses(
+            r#"[{"number": 5, "url": "https://github.com/o/r/pull/5",
+                "headRefName": "fix", "baseRefName": "main", "isDraft": false,
+                "isCrossRepository": false, "state": "OPEN",
+                "reviewDecision": "APPROVED", "reviews": [{"body": "", "state": "APPROVED"}],
+                "statusCheckRollup": []}]"#,
+        )
+        .unwrap();
+        assert_eq!(approved_silent[0].unresolved_comments, 0);
+        assert!(!approved_silent[0].can_address_comments());
         let states: Vec<(&str, CheckState)> = deps
             .checks
             .iter()
@@ -1362,6 +2021,9 @@ mod tests {
 
         let quiet = &read[1];
         assert!(quiet.draft);
+        assert_eq!(quiet.state, PullRequestState::Closed);
+        assert!(quiet.can_reopen());
+        assert!(!quiet.can_merge());
         assert_eq!(quiet.review, Review::ChangesRequested);
         assert!(quiet.checks.is_empty(), "a null rollup is no checks");
         assert_eq!(quiet.checks_state(), None);
@@ -1375,6 +2037,11 @@ mod tests {
             branch: "b".to_owned(),
             draft: false,
             review: Review::None,
+            state: PullRequestState::Open,
+            base: "main".to_owned(),
+            behind: false,
+            unresolved_comments: 0,
+            merge_methods: MergeMethods::default(),
             checks: states
                 .iter()
                 .enumerate()
@@ -1465,5 +2132,153 @@ mod tests {
         let out = "job\tUNKNOWN STEP\t2026-10-15T20:31:18.1053761Z one\n\
                    job\tUNKNOWN STEP\t2026-10-15T20:31:18.1053762Z two\n";
         assert_eq!(readable_log(out), "one\ntwo\n");
+    }
+
+    #[test]
+    fn merge_methods_are_read_and_the_default_is_the_first_allowed() {
+        let methods = read_merge_methods(
+            r#"{"mergeCommitAllowed":false,"squashMergeAllowed":true,"rebaseMergeAllowed":true}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            methods.allowed(),
+            [MergeMethod::Squash, MergeMethod::Rebase]
+        );
+        assert_eq!(methods.default_method(), Some(MergeMethod::Squash));
+        assert!(methods.allows(MergeMethod::Squash));
+        assert!(!methods.allows(MergeMethod::Merge));
+        assert_eq!(MergeMethod::Squash.flag(), "--squash");
+        assert!(read_merge_methods(
+            r#"{"mergeCommitAllowed":false,"squashMergeAllowed":false,"rebaseMergeAllowed":false}"#
+        )
+        .is_err());
+        assert!(read_merge_methods("not json").is_err());
+    }
+
+    #[test]
+    fn the_open_pull_request_for_a_branch_beats_a_closed_one() {
+        let closed = PullRequestStatus {
+            number: 20,
+            url: String::new(),
+            branch: "fix".to_owned(),
+            draft: false,
+            review: Review::None,
+            checks: Vec::new(),
+            state: PullRequestState::Closed,
+            base: "main".to_owned(),
+            behind: false,
+            unresolved_comments: 0,
+            merge_methods: MergeMethods::default(),
+        };
+        let older_open = PullRequestStatus {
+            number: 9,
+            state: PullRequestState::Open,
+            ..closed.clone()
+        };
+        let open = PullRequestStatus {
+            number: 12,
+            state: PullRequestState::Open,
+            ..closed.clone()
+        };
+        let other = PullRequestStatus {
+            number: 99,
+            branch: "other".to_owned(),
+            state: PullRequestState::Open,
+            ..closed.clone()
+        };
+        let listed = [closed.clone(), older_open, other, open.clone()];
+        let found = best_for_branch(&listed, "fix").expect("the open one");
+        assert_eq!(found.number, 12);
+        assert_eq!(
+            best_for_branch(std::slice::from_ref(&closed), "fix")
+                .expect("the closed one")
+                .number,
+            20
+        );
+        assert!(best_for_branch(&listed, "missing").is_none());
+    }
+
+    #[test]
+    fn unresolved_review_threads_are_read_with_author_file_and_line() {
+        let out = r#"{
+          "data": {
+            "repository": {
+              "pullRequest": {
+                "reviewThreads": {
+                  "nodes": [
+                    {"isResolved": true, "comments": {"nodes": [
+                      {"author": {"login": "done"}, "body": "fixed", "path": "a.rs", "line": 1}
+                    ]}},
+                    {"isResolved": false, "comments": {"nodes": [
+                      {"author": {"login": "alice"}, "body": "please rename\n", "path": "src/lib.rs", "line": 42, "originalLine": 40},
+                      {"author": {"login": "bob"}, "body": "agreed", "path": "src/lib.rs", "line": 42}
+                    ]}},
+                    {"isResolved": false, "comments": {"nodes": [
+                      {"author": {"login": "carol"}, "body": "  ", "path": "skip.rs", "line": 3}
+                    ]}}
+                  ]
+                }
+              }
+            }
+          }
+        }"#;
+        let comments = read_review_threads(out).unwrap();
+        assert_eq!(
+            comments,
+            [
+                ReviewComment {
+                    author: "alice".to_owned(),
+                    path: "src/lib.rs".to_owned(),
+                    line: Some(42),
+                    body: "please rename".to_owned(),
+                },
+                ReviewComment {
+                    author: "bob".to_owned(),
+                    path: "src/lib.rs".to_owned(),
+                    line: Some(42),
+                    body: "agreed".to_owned(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn github_s_own_words_are_kept_when_it_refuses_the_threads() {
+        let err = read_review_threads(
+            r#"{"data":null,"errors":[{"message":"Resource not accessible by integration"}]}"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("Resource not accessible by integration"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn unresolved_thread_counts_are_read_per_pull_request() {
+        let counts = read_unresolved_comment_counts(
+            r#"{
+              "data": {
+                "repository": {
+                  "n17": {"reviewThreads": {"nodes": [
+                    {"isResolved": true, "comments": {"totalCount": 2}},
+                    {"isResolved": false, "comments": {"totalCount": 3}},
+                    {"isResolved": false, "comments": {"totalCount": 1}}
+                  ]}},
+                  "n18": {"reviewThreads": {"nodes": []}},
+                  "n19": null
+                }
+              }
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(counts.get(&17), Some(&4));
+        assert_eq!(counts.get(&18), Some(&0));
+        assert_eq!(counts.get(&19), None);
+        assert_eq!(
+            owner_and_name_from_pull_url("https://github.com/ketapp/ket/pull/17"),
+            Some(("ketapp".to_owned(), "ket".to_owned()))
+        );
     }
 }

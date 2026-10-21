@@ -23,12 +23,6 @@ pub struct Worktree {
     /// Optional display name for the worktree row. The git branch is unchanged.
     #[serde(default)]
     pub name: Option<String>,
-    /// Last explicit session title imported from an agent.
-    ///
-    /// Kept separately so a manual rename is not overwritten on every poll;
-    /// only a later agent rename replaces it.
-    #[serde(default)]
-    pub agent_title: Option<String>,
     /// Absolute path to the worktree directory.
     pub path: PathBuf,
     /// Ref this worktree was branched from, exactly as the caller named it.
@@ -1691,7 +1685,6 @@ mod tests {
             project_id: ProjectId::new("p1"),
             branch: "work".to_owned(),
             name: None,
-            agent_title: None,
             path: PathBuf::from("/tmp/w1"),
             base: "main".to_owned(),
             base_commit: None,

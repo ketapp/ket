@@ -375,6 +375,8 @@ pub(crate) struct Preferences {
     worktree_dir_menu: Option<OpenMenu<DirPick>>,
     /// The General pane's Check for updates dropdown, when open.
     update_menu: Option<OpenMenu<UpdateCheck>>,
+    /// The General pane's idle sleep interval choices.
+    sleep_menu: Option<OpenMenu<u32>>,
     /// The Phones pane: the pairing code, the paired phones, and the clock
     /// that keeps both current. Dropped with the view, which stops it.
     pub(crate) phones: crate::phones::PhonesPane,
@@ -842,6 +844,7 @@ impl Shell {
             code_font_menu: None,
             worktree_dir_menu: None,
             update_menu: None,
+            sleep_menu: None,
             phones: crate::phones::PhonesPane::default(),
             local_models: Default::default(),
             snippets: crate::snippets::SnippetsPane::load(),
@@ -932,10 +935,11 @@ impl Shell {
         let theme = view.theme_menu.take().is_some();
         let dir = view.worktree_dir_menu.take().is_some();
         let update = view.update_menu.take().is_some();
+        let sleep = view.sleep_menu.take().is_some();
         let ui_font = view.ui_font_menu.take().is_some();
         let code_font = view.code_font_menu.take().is_some();
         let local_model = view.local_models.menu.take().is_some();
-        theme || dir || update || ui_font || code_font || local_model
+        theme || dir || update || sleep || ui_font || code_font || local_model
     }
 
     /// Opens or closes the Worktree directory dropdown.
@@ -1053,6 +1057,43 @@ impl Shell {
             view.update_menu = Some(
                 OpenMenu::new("preferences-updates".into(), None, SELECT_WIDTH, items)
                     .selected(selected)
+                    .offset(px(0.0), px(6.0)),
+            );
+        }
+    }
+
+    /// Opens or closes the idle sleep interval choices.
+    fn toggle_sleep_menu(&mut self) {
+        let Some(view) = self.preferences.as_ref() else {
+            return;
+        };
+        let open = view.sleep_menu.is_some();
+        let current = view.config.sleep.after_minutes;
+        self.close_preference_menus();
+        if open {
+            return;
+        }
+        let choices = [15, 30, 60, 120];
+        let items = choices
+            .into_iter()
+            .map(|minutes| {
+                let item = MenuItem::new(minutes, format!("{minutes} minutes"));
+                MenuEntry::Item(if minutes == current {
+                    item.checked()
+                } else {
+                    item
+                })
+            })
+            .collect();
+        if let Some(view) = self.preferences.as_mut() {
+            view.sleep_menu = Some(
+                OpenMenu::new("preferences-sleep".into(), None, SELECT_WIDTH, items)
+                    .selected(
+                        choices
+                            .iter()
+                            .position(|minutes| *minutes == current)
+                            .unwrap_or(1),
+                    )
                     .offset(px(0.0), px(6.0)),
             );
         }
@@ -3790,6 +3831,8 @@ impl Shell {
         let open_terminal = view.config.general.open_terminal;
         let confirm_delete = view.config.general.confirm_delete;
         let notify_waiting = view.config.general.notify_waiting;
+        let sleep_enabled = view.config.sleep.enabled();
+        let sleep_after = view.config.sleep.after_minutes;
         let check = view.config.updates.check;
         let dir = view
             .config
@@ -3863,6 +3906,40 @@ impl Shell {
         )
         .into_any_element();
 
+        let sleep_menu = view.sleep_menu.as_ref().map(|menu| {
+            menu.view(
+                t,
+                cx,
+                |this, minutes, cx| {
+                    let minutes = *minutes;
+                    this.close_preference_menus();
+                    this.save_setting(|config| config.sleep.after_minutes = minutes);
+                    cx.notify();
+                },
+                |this, cx| {
+                    this.close_preference_menus();
+                    cx.notify();
+                },
+            )
+        });
+        let sleep_select = dropdown(
+            "preferences-sleep-select",
+            crate::ui::select::select("preferences-sleep", format!("{sleep_after} minutes"))
+                .open(view.sleep_menu.is_some())
+                .render(t)
+                .w(SELECT_WIDTH),
+            sleep_menu,
+        )
+        .cursor_pointer()
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, _, _, cx| {
+                this.toggle_sleep_menu();
+                cx.notify();
+            }),
+        )
+        .into_any_element();
+
         // There is no updater yet; the choice is kept for the one that comes.
         // Every build is a dev build until then, and a dev build never looks.
         let updates = match ket_core::build_info::CHANNEL {
@@ -3921,6 +3998,25 @@ impl Shell {
                             }))
                     })
                     .into_any_element(),
+                t,
+            ),
+            setting(
+                "Sleep idle agents",
+                "Stop idle agents and keep their tabs ready to wake.",
+                switch("general-sleep-agents", sleep_enabled, t)
+                    .when(writable, |el| {
+                        el.on_click(cx.listener(move |this, _, _, cx| {
+                            this.save_setting(|config| config.sleep.enabled = Some(!sleep_enabled));
+                            cx.notify();
+                        }))
+                    })
+                    .into_any_element(),
+                t,
+            ),
+            setting(
+                "Sleep after",
+                "How long an agent and its subagents must be idle.",
+                sleep_select,
                 t,
             ),
             setting(

@@ -460,6 +460,7 @@ fn record(s: &Scenario, dir: &Path) -> Result<(), String> {
         size: s.size,
         key: None,
         adopt: false,
+        adopt_only: false,
     };
     let terminal = LocalTerminal::open(&spec).map_err(|e| e.to_string())?;
     let mut rec = Collector::new(&terminal);

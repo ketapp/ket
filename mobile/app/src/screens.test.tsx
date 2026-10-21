@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, jest, test } from '@jest/globals';
 import { fireEvent, render, waitFor } from '@testing-library/react-native';
 import { useEffect as mockUseEffect } from 'react';
-import { Linking } from 'react-native';
+import { Alert, Linking } from 'react-native';
 import Needs from './app/needs';
 import Settings from './app/settings';
 import Usage from './app/usage';
@@ -49,12 +49,19 @@ jest.mock('expo-router', () => {
 });
 jest.mock('react-native-safe-area-context', () => ({ useSafeAreaInsets: () => ({ top: 0, bottom: 0 }) }));
 jest.mock('./components/Unpaired', () => ({ Unpaired: () => null }));
+// Nothing is laid out under test: a held row or a picked pill is anywhere.
+jest.mock('./components/FloatMenu', () => ({
+  ...jest.requireActual<typeof import('./components/FloatMenu')>('./components/FloatMenu'),
+  placeOf: (_view: unknown, then: (place: object) => void) => then({ x: 10, y: 200, width: 360, height: 80 }),
+}));
 jest.mock('@ket/remote', () => ({
   Activity: { QUIET: 0, RUNNING: 1, WORKING: 2, MERGING: 3, BLOCKED: 4, FAILED: 5 },
   Answer_Choice: { ALLOW_ONCE: 1, ALLOW_ALWAYS: 2, DENY: 3 },
   CheckSummary_State: { STATE_UNSPECIFIED: 0, PASSED: 1, FAILED: 2, PENDING: 3, SKIPPED: 4 },
   FileChange_Status: { ADDED: 1, DELETED: 2 },
+  PullRequestMergeMethod: { UNSPECIFIED: 0, MERGE_COMMIT: 1, SQUASH: 2, REBASE: 3 },
   PullRequestSummary_Review: { REVIEW_UNSPECIFIED: 0, APPROVED: 1, CHANGES_REQUESTED: 2, REVIEW_REQUIRED: 3 },
+  PullRequestSummary_State: { OPEN: 0, CLOSED: 1, MERGED: 2 },
   SubagentSummary_State: { WORKING: 1, BLOCKED: 2, IDLE: 3 },
   UsageStatus: { UNSPECIFIED: 0, FRESH: 1, STALE: 2, UNAVAILABLE: 3, UNSUPPORTED: 4 },
 }));
@@ -118,6 +125,7 @@ const connection = (projects: object[], usage: object[] = []) =>
     answer: jest.fn(async () => null),
     merge: jest.fn(async () => null),
     retry: jest.fn(),
+    addressForDisplay: () => 'ws://studio.local:7979',
   }) as unknown as HostConnection;
 
 beforeEach(() => {
@@ -155,11 +163,163 @@ describe('top-level screens', () => {
     expect(view.getByText('+1 more')).toBeTruthy();
     await fireEvent.press(view.getByLabelText('New task'));
     expect(mockRouter.push).toHaveBeenCalledWith('/new/host');
-    await fireEvent.press(view.getAllByText('Waiting').at(-1)!);
-    await fireEvent.press(view.getByText('Project'));
+    await fireEvent.press(view.getByLabelText('Waiting, 1'));
+    // The heading, not the quick prompt's project: the list comes first.
+    await fireEvent.press(view.getAllByText('Project')[0]);
     expect(mockSaveCollapsed).toHaveBeenCalled();
     await fireEvent.press(view.getByLabelText('Switch desktop'));
     await fireEvent.press(view.getByText('Other Mac'));
+    await view.unmount();
+  });
+
+  test('Worktrees opens up running work, holds a worktree for its pull request, and starts work from the quick prompt', async () => {
+    const pr = {
+      number: 21n,
+      url: '',
+      draft: false,
+      review: 0,
+      unresolvedComments: 0,
+      behind: true,
+      base: 'main',
+      state: 0,
+      squashMergeAllowed: true,
+      checks: [{ name: 'rust', state: 2, url: '' }],
+    };
+    const conn = Object.assign(
+      connection([
+        project([
+          tree('busy', 2, { agentState: 'compile workspace', pullRequest: pr }),
+          tree('fresh', 0),
+          tree('main', 0, { base: '' }),
+        ]),
+      ]),
+      {
+        hostMinor: 19,
+        fixChecks: jest.fn(async (_worktree: string) => ({ starting: false })),
+        updatePullRequest: jest.fn(async (_worktree: string) => 'Nothing to update'),
+        mergePullRequest: jest.fn(async (_worktree: string, _method: number) => null),
+      },
+    );
+    (conn.snapshot as unknown as { agents: string[] }).agents = ['claude', 'codex'];
+    mockConns = [conn];
+    const alert = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    const view = await render(<Worktrees />);
+
+    // At work, a worktree opens up: its step in a terminal's well, its lines,
+    // its pull request.
+    expect(view.getByText('Compile workspace')).toBeTruthy();
+    expect(view.getByText('#21')).toBeTruthy();
+
+    // The badge says how the line is kept.
+    await fireEvent.press(view.getByLabelText('Secure: end-to-end encrypted'));
+    expect(alert).toHaveBeenLastCalledWith('End-to-end encrypted', expect.stringContaining('Studio Mac'));
+
+    // Held, a row lifts out with its menu.
+    const holdAt = async (id: string) => {
+      await fireEvent(view.getByText(id), 'longPress');
+    };
+    await holdAt('busy');
+    expect(view.getByLabelText('busy actions')).toBeTruthy();
+    expect(view.getByText('Pull request #21')).toBeTruthy();
+    expect(view.queryByText('Address comments with agent')).toBeNull();
+    await fireEvent.press(view.getByText('Fix checks with agent'));
+    await waitFor(() => expect(conn.fixChecks).toHaveBeenCalledWith('busy'));
+    expect(mockRouter.push).toHaveBeenLastCalledWith('/session/host/7');
+
+    await holdAt('busy');
+    await fireEvent.press(view.getByText('Update branch'));
+    await waitFor(() => expect(alert).toHaveBeenLastCalledWith("Couldn't update the branch", 'Nothing to update.'));
+
+    await holdAt('busy');
+    await fireEvent.press(view.getByText('Merge pull request…'));
+    const [, , buttons] = alert.mock.calls.at(-1)! as [string, string, { text: string; onPress?: () => void }[]];
+    buttons.find((b) => b.text === 'Squash')!.onPress!();
+    await waitFor(() => expect(conn.mergePullRequest).toHaveBeenCalledWith('busy', 2));
+    expect(mockConfirmIdentity).toHaveBeenLastCalledWith('Merge #21');
+
+    // With none open, a worktree offers to open one; a repository's own
+    // checkout, the base one would merge into, offers nothing.
+    await holdAt('fresh');
+    await fireEvent.press(view.getByText('Open pull request…'));
+    expect(mockRouter.push).toHaveBeenLastCalledWith('/pull-request/host/fresh');
+    await holdAt('main');
+    expect(view.queryByText('Open pull request…')).toBeNull();
+
+    // The quick prompt starts work in the project and with the agent picked.
+    expect(view.getByLabelText('Start task').props.accessibilityState).toEqual({ disabled: true });
+    await fireEvent.changeText(view.getByLabelText('Quick prompt'), '  Fix the flaky test  ');
+    await fireEvent.press(view.getByLabelText("Agent: Project's own"));
+    await fireEvent.press(view.getByText('Codex'));
+    await fireEvent.press(view.getByLabelText('Start task'));
+    await waitFor(() => expect(conn.startWork).toHaveBeenCalledWith('project', 'Fix the flaky test', 'codex'));
+    await waitFor(() => expect(view.getByLabelText('Quick prompt').props.value).toBe(''));
+
+    // The tab bar: Worktrees, Usage, Needs you, Settings.
+    const tabs = view.getAllByRole('tab').map((tab) => tab.props.accessibilityLabel);
+    expect(tabs).toEqual(['Worktrees', 'Usage', 'Needs you', 'Settings']);
+    alert.mockRestore();
+    await view.unmount();
+  });
+
+  test('Worktrees pins and deletes a worktree from its menu, but never the repository’s own checkout', async () => {
+    const conn = Object.assign(
+      connection([project([tree('fresh', 0), tree('kept', 0, { pinned: true }), tree('main', 0, { base: '' })])]),
+      {
+        hostMinor: 20,
+        pinWorktree: jest.fn(async (_worktree: string, _pinned: boolean) => null),
+        deleteWorktree: jest.fn(async (_worktree: string, force: boolean) =>
+          force ? { keptBranch: 'branch-fresh' } : { why: 'it has uncommitted changes', losesWork: true },
+        ),
+      },
+    );
+    mockConns = [conn];
+    const alert = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    const buttons = () => (alert.mock.calls.at(-1)![2] ?? []) as { text: string; style?: string; onPress?: () => void }[];
+    const press = (text: string) => buttons().find((button) => button.text === text)!.onPress?.();
+    const view = await render(<Worktrees />);
+    const hold = async (id: string) => fireEvent(view.getByText(id), 'longPress');
+
+    // A pinned worktree wears its pin, and its menu unpins it.
+    expect(view.getByLabelText('Pinned')).toBeTruthy();
+    await hold('kept');
+    await fireEvent.press(view.getByText('Unpin'));
+    await waitFor(() => expect(conn.pinWorktree).toHaveBeenLastCalledWith('kept', false));
+    await hold('fresh');
+    await fireEvent.press(view.getByText('Pin'));
+    await waitFor(() => expect(conn.pinWorktree).toHaveBeenLastCalledWith('fresh', true));
+
+    // The repository's own checkout has neither, nor anything else to hold.
+    await hold('main');
+    expect(view.queryByText('Pin')).toBeNull();
+    expect(view.queryByText('Delete…')).toBeNull();
+
+    // Delete asks first. Cancelled, or not you, nothing goes.
+    await hold('fresh');
+    await fireEvent.press(view.getByText('Delete…'));
+    expect(alert).toHaveBeenLastCalledWith('Delete fresh?', expect.stringContaining('Unmerged commits keep their branch'), expect.any(Array));
+    expect(buttons().find((button) => button.text === 'Cancel')?.style).toBe('cancel');
+    mockConfirmIdentity.mockResolvedValueOnce(false);
+    press('Delete');
+    await waitFor(() => expect(mockConfirmIdentity).toHaveBeenLastCalledWith('Delete fresh'));
+    expect(conn.deleteWorktree).not.toHaveBeenCalled();
+
+    // Confirmed: git refuses it for the work it would lose, which is said,
+    // with Delete anyway; that keeps the branch's unmerged commits.
+    await hold('fresh');
+    await fireEvent.press(view.getByText('Delete…'));
+    press('Delete');
+    await waitFor(() => expect(conn.deleteWorktree).toHaveBeenLastCalledWith('fresh', false));
+    await waitFor(() =>
+      expect(alert).toHaveBeenLastCalledWith('Delete fresh anyway?', 'It has uncommitted changes.', expect.any(Array)),
+    );
+    press('Delete anyway');
+    await waitFor(() => expect(conn.deleteWorktree).toHaveBeenLastCalledWith('fresh', true));
+    await waitFor(() =>
+      expect(alert).toHaveBeenLastCalledWith('Worktree deleted', 'Kept the branch branch-fresh: it has unmerged commits.'),
+    );
+    // Gone from the list before the desktop's next snapshot says so.
+    expect(view.queryByText('fresh')).toBeNull();
+    alert.mockRestore();
     await view.unmount();
   });
 
@@ -361,6 +521,61 @@ describe('work screens', () => {
     expect(old.getByText('Open on GitHub')).toBeTruthy();
     expect(old.queryByText('Fix checks with agent')).toBeNull();
     await old.unmount();
+  });
+
+  test('offers merge, update, ready, reopen and address comments on a 1.19 desktop', async () => {
+    mockParams = { host: 'host', worktree: 'pr' };
+    const ready = {
+      ...pullRequest,
+      draft: false,
+      behind: true,
+      base: 'main',
+      mergeCommitAllowed: true,
+      squashMergeAllowed: true,
+      rebaseMergeAllowed: false,
+      unresolvedComments: 2,
+    };
+    const conn = Object.assign(connection([project([tree('pr', 0, { pullRequest: ready })])]), {
+      hostMinor: 19,
+      mergePullRequest: jest.fn(async () => null),
+      updatePullRequest: jest.fn(async () => null),
+      addressComments: jest.fn(async () => ({ starting: false })),
+    });
+    mockHost = conn;
+    const alert = jest.spyOn(Alert, 'alert').mockImplementation((_title, _msg, buttons) => {
+      const squash = buttons?.find((button) => 'text' in button && button.text === 'Squash');
+      if (squash && 'onPress' in squash) squash.onPress?.();
+    });
+    const view = await render(<Worktree />);
+    expect(view.getByText('behind main · changes requested · 1 of 2 checks failing')).toBeTruthy();
+    await fireEvent.press(view.getByText('Merge'));
+    await waitFor(() => expect(mockConfirmIdentity).toHaveBeenCalled());
+    await waitFor(() => expect(conn.mergePullRequest).toHaveBeenCalledWith('pr', 2));
+    await fireEvent.press(view.getByText('Update branch'));
+    await waitFor(() => expect(conn.updatePullRequest).toHaveBeenCalledWith('pr'));
+    await fireEvent.press(view.getByText('Address comments with agent'));
+    await waitFor(() => expect(conn.addressComments).toHaveBeenCalledWith('pr'));
+    await view.unmount();
+    alert.mockRestore();
+
+    mockHost = Object.assign(
+      connection([project([tree('pr', 0, { pullRequest: { ...pullRequest, state: 1 } })])]),
+      { hostMinor: 19, reopenPullRequest: jest.fn(async () => null) },
+    );
+    const closed = await render(<Worktree />);
+    expect(closed.getByText('Closed · changes requested · 1 of 2 checks failing')).toBeTruthy();
+    await fireEvent.press(closed.getByText('Reopen'));
+    await waitFor(() => expect(mockHost?.reopenPullRequest).toHaveBeenCalledWith('pr'));
+    await closed.unmount();
+
+    mockHost = Object.assign(connection([project([tree('pr', 0, { pullRequest })])]), {
+      hostMinor: 19,
+      readyPullRequest: jest.fn(async () => null),
+    });
+    const draft = await render(<Worktree />);
+    await fireEvent.press(draft.getByText('Ready for review'));
+    await waitFor(() => expect(mockHost?.readyPullRequest).toHaveBeenCalledWith('pr'));
+    await draft.unmount();
   });
 
   test('a worktree row wears its pull request in its checks’ colour', async () => {

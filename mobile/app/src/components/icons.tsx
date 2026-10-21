@@ -377,3 +377,69 @@ export const Info = (p: IconProps) => (
     <Path d="M12 16h.01" />
   </Stroke>
 );
+
+/** End-to-end encrypted: a padlock, shut. */
+export const Padlock = (p: IconProps) => (
+  <Stroke {...p}>
+    <Rect x={5} y={10.5} width={14} height={10} rx={2} />
+    <Path d="M8 10.5V7.5a4 4 0 0 1 8 0v3" />
+  </Stroke>
+);
+
+/** Hand failed checks to the agent: a tick in a ring. */
+export const CheckCircle = (p: IconProps) => (
+  <Stroke {...p}>
+    <Circle cx={12} cy={12} r={8.5} />
+    <Path d="m8.5 12 2.5 2.5 4.5-5" />
+  </Stroke>
+);
+
+/** Review comments: a speech bubble. */
+export const Comment = (p: IconProps) => (
+  <Stroke {...p}>
+    <Path d="M4.5 5h15v10.5H10l-4.5 4v-4h-1z" />
+  </Stroke>
+);
+
+/** Bring a branch up to date: two arrows round. */
+export const Refresh = (p: IconProps) => (
+  <Stroke {...p}>
+    <Path d="M19.5 11A7.5 7.5 0 0 0 6 6.5M4.5 3.5v4h4" />
+    <Path d="M4.5 13A7.5 7.5 0 0 0 18 17.5M19.5 20.5v-4h-4" />
+  </Stroke>
+);
+
+/** Merge: a branch joining its trunk. */
+export const Merge = (p: IconProps) => (
+  <Stroke {...p}>
+    <Circle cx={6} cy={5.5} r={2} />
+    <Circle cx={6} cy={18.5} r={2} />
+    <Circle cx={18} cy={12} r={2} />
+    <Path d="M6 7.5v9M6 7.5c0 3 3 4.5 10 4.5" />
+  </Stroke>
+);
+
+/** A pull request: a branch with its arrow back to the base. */
+export const PullRequestGlyph = (p: IconProps) => (
+  <Stroke {...p}>
+    <Circle cx={6} cy={5.5} r={2} />
+    <Circle cx={6} cy={18.5} r={2} />
+    <Circle cx={18} cy={18.5} r={2} />
+    <Path d="M6 7.5v9M18 16.5V9a3 3 0 0 0-3-3h-4" />
+  </Stroke>
+);
+
+/** Pin a worktree to the top of its project: a pushpin. */
+export const Pin = (p: IconProps) => (
+  <Stroke {...p}>
+    <Path d="M12 16.5V21M9 3.5h6l-1 5.5 3 3v2H7v-2l3-3z" />
+  </Stroke>
+);
+
+/** Unpin: the pushpin, struck through. */
+export const PinOff = (p: IconProps) => (
+  <Stroke {...p}>
+    <Path d="M12 16.5V21M9 3.5h6l-1 5.5 3 3v2H7v-2l3-3z" />
+    <Path d="M4 4l16 16" />
+  </Stroke>
+);

@@ -9,9 +9,10 @@
 //   node test/protocol.ts
 
 import { readFileSync } from 'node:fs';
+import { firstOpen } from '../src/client.ts';
 
 import { Initiator, type Keypair, type Transport, generateKeypair, keypairFrom } from '../src/noise.ts';
-import { OFFER_PREFIX, parseOffer, toBase64Url } from '../src/offer.ts';
+import { OFFER_PREFIX, parseOffer, toBase64Url, validRelayUrl } from '../src/offer.ts';
 import { HEADER, KIND_CONTROL, KIND_DATA, MAX_FRAME, decodeFrame, encodeFrame } from '../src/relay.ts';
 import { MAX_MESSAGE, Session } from '../src/session.ts';
 
@@ -325,6 +326,25 @@ const text = (raw: Uint8Array) => OFFER_PREFIX + toBase64Url(raw);
     if (!survives(() => decodeFrame(raw))) quiet = false;
   }
   check('random relay bytes only ever decode or throw an Error', quiet);
+}
+
+check('address validation rejects a non-WebSocket URL', !validRelayUrl('https://example.com'));
+
+{
+  const openers = new Map<string, (link: { close(): void }) => void>();
+  const signals = new Map<string, AbortSignal>();
+  let closedSlow = 0;
+  let closedFast = 0;
+  const raced = firstOpen(['ws://slow', 'ws://fast'], (address, signal) => {
+    signals.set(address, signal);
+    return new Promise<{ close(): void }>((resolve) => openers.set(address, resolve));
+  });
+  openers.get('ws://fast')?.({ close: () => closedFast++ });
+  const winner = await raced;
+  openers.get('ws://slow')?.({ close: () => closedSlow++ });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  check('parallel dial keeps the first open link', winner.address === 'ws://fast' && closedFast === 0);
+  check('parallel dial closes a later link', signals.get('ws://slow')?.aborted === true && closedSlow === 1);
 }
 
 console.log(`${passed} passed, ${failures} failed`);

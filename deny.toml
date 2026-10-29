@@ -1,5 +1,9 @@
 [advisories]
 yanked = "deny"
+# Crates that are unmaintained only block the check when ket depends on them
+# itself. The rest sit deep in gpui's and the image codecs' trees, where the
+# fix is theirs to make, not ours.
+unmaintained = "workspace"
 
 [licenses]
 confidence-threshold = 0.8

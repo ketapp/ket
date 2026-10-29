@@ -278,6 +278,8 @@ words; no internal names, no commit hashes. ket reads this file
 
 ### Fixed
 
+- Sleep in a worktree's menu now works on the selected idle agent and shows
+  a message when an agent cannot sleep.
 - Returning to Worktrees on your phone keeps the list in place, including
   its scroll position, filter and folded projects.
 - In New task on your phone, a field's menu opens just above that field

@@ -1,14 +1,14 @@
 [
   {
     "dir": "mobile/app",
-    "id": "GHSA-vfj7-8cjw-p6xm",
-    "package": "braces",
-    "reason": "no patched release (3.0.3 is the latest); reached only through jest via micromatch, a test-time glob over our own paths"
-  },
-  {
-    "dir": "mobile/app",
     "id": "GHSA-86w9-cpqp-85rv",
     "package": "node-forge",
     "reason": "no patched release (1.4.0 is the latest); reached only through the Expo CLI's update code-signing, which the app's local builds do not use"
+  },
+  {
+    "dir": "mobile/app",
+    "id": "GHSA-mrhx-c7xc-m3w5",
+    "package": "zod",
+    "reason": "no patched 3.x release (3.25.76 is the latest; the fix is 4.6.6); reached only through the Expo CLI, which pins ^3.25.76 and uses it to validate its own dev-tools plugin schemas, never input from the network"
   }
 ]

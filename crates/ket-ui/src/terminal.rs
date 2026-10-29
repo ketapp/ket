@@ -66,8 +66,8 @@ use gpui::{
     WeakEntity, Window, div, prelude::*, px,
 };
 
-use ket_core::activity::Foreground;
-use ket_core::agent_status::CancelSource;
+use ket_core::activity::{Foreground, Signal};
+use ket_core::agent_status::{CancelSource, PaneAgentStatus};
 use ket_core::agents::{Catalogue, Resolution, ShellProber};
 use ket_core::config::{AgentConfig, AgentSpec};
 use ket_core::id::WorktreeId;
@@ -92,6 +92,7 @@ use ket_core::workspace::Workspace;
 use crate::Shell;
 use crate::paint::paint;
 use crate::tabs::{PaneId, Tab, TabKind};
+use crate::ui::toast::Tone;
 
 use self::element::{FrameState, GridCache, GridFont, Owners, TerminalElement, mode_of};
 use self::find::{FindPaint, TerminalFind};
@@ -112,6 +113,37 @@ const BLINK_INTERVAL: Duration = Duration::from_millis(530);
 /// it is, because whatever it printed on the way out is the only explanation
 /// anyone is going to get.
 const STARTUP_GRACE: Duration = Duration::from_secs(3);
+
+/// Only automatic sleep protects the selected tab in the focused window.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SleepTrigger {
+    Manual,
+    Automatic,
+}
+
+/// The exact session an idle agent can keep through sleep. Manual requests
+/// may sleep the selected tab, but still require the agent to be quiet.
+fn sleep_session<'a>(
+    trigger: SleepTrigger,
+    focused: bool,
+    agent: &str,
+    pane: Option<&'a PaneAgentStatus>,
+    signal: Option<Signal>,
+) -> Result<&'a str, String> {
+    if trigger == SleepTrigger::Automatic && focused {
+        return Err("the selected tab is in the focused window".to_owned());
+    }
+    let pane = pane.ok_or("agent has not reported its state")?;
+    if pane.agent != agent
+        || pane.state != ket_core::event::AgentState::Idle
+        || signal != Some(Signal::Quiet)
+    {
+        return Err("agent is still working or waiting".to_owned());
+    }
+    pane.session
+        .as_deref()
+        .ok_or_else(|| "agent has not reported a session ID".to_owned())
+}
 
 /// The CLI shipped beside the app, or beside a development `ket-ui` binary.
 fn cli_path_for(exe: &Path) -> Option<PathBuf> {
@@ -882,14 +914,12 @@ impl Shell {
     }
 
     /// Stop an idle agent while retaining its tab and exact session.
-    pub(crate) fn sleep_terminal(
+    fn sleep_terminal(
         &mut self,
         terminal: TerminalId,
+        trigger: SleepTrigger,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
-        if self.window_active && self.active_terminal_id() == Some(terminal) {
-            return Err("the selected tab is in the focused window".to_owned());
-        }
         let handle = self
             .terminals
             .get(&terminal)
@@ -903,23 +933,16 @@ impl Shell {
             .terminal_keys
             .get(&terminal)
             .ok_or("terminal has no session key")?;
-        let pane = self
-            .activity
-            .pane_status(key)
-            .ok_or("agent has not reported its state")?;
-        if pane.agent != agent
-            || pane.state != ket_core::event::AgentState::Idle
-            || self
-                .activity
+        let session = sleep_session(
+            trigger,
+            self.window_active && self.active_terminal_id() == Some(terminal),
+            &agent,
+            self.activity.pane_status(key),
+            self.activity
                 .pane(key, ket_core::now_ms())
-                .is_none_or(|(_, signal)| signal != ket_core::activity::Signal::Quiet)
-        {
-            return Err("agent is still working or waiting".to_owned());
-        }
-        let session = pane
-            .session
-            .clone()
-            .ok_or("agent has not reported a session ID")?;
+                .map(|(_, signal)| signal),
+        )?
+        .to_owned();
         let resume = Sessions::new().resume_args(ket_core::agents::harness(&agent), &session);
         if resume.is_none_or(|args| args.is_empty()) {
             return Err(format!("{agent} cannot resume a session"));
@@ -975,13 +998,13 @@ impl Shell {
                         shell.persist_layout();
                         shell.sync_asleep_tabs();
                     }
-                    shell.note = Some(match stopped {
+                    let message = match stopped {
                         Ok(StopOutcome::Controlled) => {
-                            "The terminal is controlled by a phone".into()
+                            "Could not put the agent to sleep: the terminal is controlled by a phone"
                         }
-                        _ => "Could not confirm that the agent stopped".into(),
-                    });
-                    cx.notify();
+                        _ => "Could not confirm that the agent stopped",
+                    };
+                    shell.toast(Tone::Error, message, cx);
                 });
             }
         })
@@ -997,28 +1020,53 @@ impl Shell {
             .map_or_else(Vec::new, |space| space.terminal_ids());
         let mut slept = 0;
         let mut reasons = Vec::new();
+        let mut skipped = 0;
         for id in ids {
-            match self.sleep_terminal(id, cx) {
+            // Shells are not agents, and must not hide an agent's refusal.
+            if !self
+                .terminals
+                .get(&id)
+                .is_some_and(|handle| handle.agent.is_some())
+            {
+                continue;
+            }
+            match self.sleep_terminal(id, SleepTrigger::Manual, cx) {
                 Ok(()) => slept += 1,
-                Err(reason) => reasons.push(reason),
+                Err(reason) => {
+                    skipped += 1;
+                    if !reasons.contains(&reason) {
+                        reasons.push(reason);
+                    }
+                }
             }
         }
-        self.note = Some(if slept == 0 {
-            format!(
-                "No agent could sleep: {}",
-                reasons
-                    .first()
-                    .map_or("no agent tab is running", String::as_str)
-            )
-            .into()
+        if slept == 0 {
+            self.toast_detail(
+                Tone::Error,
+                "No agent could sleep",
+                if reasons.is_empty() {
+                    "No agent tab is running".to_owned()
+                } else {
+                    reasons.join("; ")
+                },
+                cx,
+            );
         } else {
-            format!(
+            let message = format!(
                 "Putting {slept} agent{} to sleep",
                 if slept == 1 { "" } else { "s" }
-            )
-            .into()
-        });
-        cx.notify();
+            );
+            if skipped == 0 {
+                self.toast(Tone::Info, message, cx);
+            } else {
+                self.toast_detail(
+                    Tone::Warning,
+                    message,
+                    format!("{skipped} could not sleep: {}", reasons.join("; ")),
+                    cx,
+                );
+            }
+        }
     }
 
     /// Wake every asleep agent tab in one worktree.
@@ -1060,7 +1108,7 @@ impl Shell {
                 && now.saturating_sub(pane.at_ms) >= threshold
                 && now.saturating_sub(pane.heard_at_ms()) >= threshold
             {
-                let _ = self.sleep_terminal(id, cx);
+                let _ = self.sleep_terminal(id, SleepTrigger::Automatic, cx);
             }
         }
     }
@@ -3299,6 +3347,62 @@ pub(crate) fn runnable_specs() -> Vec<AgentSpec> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn idle_sleep_pane() -> PaneAgentStatus {
+        let mut activity = ket_core::activity::Tracker::new(["claude".to_owned()]);
+        let report = serde_json::from_value(serde_json::json!({
+            "agent": "claude",
+            "event": "stop",
+            "worktree": "wt",
+            "pane": "wt|claude|a",
+            "session": "saved-session",
+            "mutatingGit": false,
+            "atMs": 1000,
+        }))
+        .unwrap();
+        activity.report(&report, |_| true);
+        activity.pane_status("wt|claude|a").unwrap().clone()
+    }
+
+    #[test]
+    fn manual_sleep_allows_the_selected_idle_agent_but_automatic_sleep_protects_it() {
+        let pane = idle_sleep_pane();
+        let session = |trigger, focused| {
+            sleep_session(trigger, focused, "claude", Some(&pane), Some(Signal::Quiet))
+        };
+        assert_eq!(session(SleepTrigger::Manual, true), Ok("saved-session"));
+        assert_eq!(session(SleepTrigger::Manual, false), Ok("saved-session"));
+        assert!(session(SleepTrigger::Automatic, true).is_err());
+        assert_eq!(session(SleepTrigger::Automatic, false), Ok("saved-session"));
+    }
+
+    #[test]
+    fn manual_sleep_still_requires_a_matching_idle_agent_and_a_saved_session() {
+        fn check(pane: Option<&PaneAgentStatus>, signal: Option<Signal>) -> Result<&str, String> {
+            sleep_session(SleepTrigger::Manual, true, "claude", pane, signal)
+        }
+
+        let mut pane = idle_sleep_pane();
+        assert!(check(None, Some(Signal::Quiet)).is_err());
+        assert!(check(Some(&pane), None).is_err());
+        // A quiet lead can still have a working or blocked subagent.
+        for signal in [Signal::Working, Signal::Blocked] {
+            assert!(check(Some(&pane), Some(signal)).is_err());
+        }
+        pane.agent = "codex".to_owned();
+        assert!(check(Some(&pane), Some(Signal::Quiet)).is_err());
+        pane.agent = "claude".to_owned();
+        for state in [
+            ket_core::event::AgentState::Thinking,
+            ket_core::event::AgentState::AwaitingPermission,
+        ] {
+            pane.state = state;
+            assert!(check(Some(&pane), Some(Signal::Quiet)).is_err());
+        }
+        pane.state = ket_core::event::AgentState::Idle;
+        pane.session = None;
+        assert!(check(Some(&pane), Some(Signal::Quiet)).is_err());
+    }
 
     #[test]
     fn finds_the_cli_in_app_and_development_layouts() {

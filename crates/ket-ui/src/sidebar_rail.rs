@@ -298,8 +298,7 @@ impl Shell {
                 MenuItem::new(SidebarAction::FoldProjects, "Collapse all")
                     .icon(Icon::ChevronsDownUp)
             } else {
-                MenuItem::new(SidebarAction::FoldProjects, "Expand all")
-                    .icon(Icon::ChevronsUpDown)
+                MenuItem::new(SidebarAction::FoldProjects, "Expand all").icon(Icon::ChevronsUpDown)
             };
             entries.push(MenuEntry::Separator);
             entries.push(MenuEntry::Item(item));

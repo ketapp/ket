@@ -33,7 +33,7 @@ ket-remote = { path = "crates/ket-remote" }
 
 # The good transport for agents: structured tool calls and diffs as *data*,
 # instead of regex over ANSI escapes.
-agent-client-protocol = "2.1"
+agent-client-protocol = { version = "3.6", features = ["process"] }
 # The grid. A terminal emulator is a state machine over escape sequences, and
 # writing one is a multi-year project that alacritty has already finished. It
 # owns the parse and the scrollback; ket owns the pty, the pacing, and the

@@ -2,17 +2,18 @@
 
 // What the home screen shows in place of its worktrees while the phone is
 // reaching for its desktop: the ping, and what is happening. Once it has
-// tried for a while without an answer, the ping stops and the screen says
-// what to check and offers to try again or pair again.
+// tried for a while without an answer, the ping stops and the screen names
+// the Mac it cannot reach, says in one sentence what to check, shows the
+// address it is trying, and offers to try again or pair again.
 
 import { router } from 'expo-router';
-import { StyleSheet, Text, View } from 'react-native';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 import type { HostConnection } from '../lib/connection';
 import { font, size, t } from '../lib/theme';
-import { checks, hostOf, sentence, STUCK_MS, useWaited } from './ConnectionHelp';
+import { hostOf, STUCK_MS, useWaited } from './ConnectionHelp';
 import { Ping } from './Ping';
-import { Button, Card } from './ui';
+import { Button } from './ui';
 
 export function Connecting({ conn }: { conn: HostConnection }) {
   const waited = useWaited(conn);
@@ -30,24 +31,30 @@ export function Connecting({ conn }: { conn: HostConnection }) {
     );
   }
 
+  const address = conn.addressForDisplay();
   return (
     <View style={styles.stuck} accessibilityLiveRegion="polite">
       <Ping stuck />
       <View style={styles.words}>
-        <Text style={styles.title}>No answer yet</Text>
-        <Text style={styles.meta}>
-          {Math.round(waited / 1000)}s · attempt {Math.max(conn.attempts, 1)} · still trying
+        <Text style={styles.title}>{`Can’t reach ${conn.host.name}`}</Text>
+        <Text style={styles.meta}>attempt {Math.max(conn.attempts, 1)}</Text>
+        <Text style={styles.sentence}>
+          Phone and Mac on the same Wi‑Fi or Tailscale, ket running on the Mac, and the Mac awake with its lid open.
         </Text>
-        {conn.error ? <Text style={styles.error}>{sentence(conn.error)}</Text> : null}
       </View>
-      <Card>
-        {checks(conn).map((check, index) => (
-          <View key={index} style={[styles.check, index > 0 && styles.checkRuled]}>
-            <View style={styles.dot} />
-            <Text style={styles.checkText}>{check}</Text>
-          </View>
-        ))}
-      </Card>
+      <View style={styles.address}>
+        <Text style={styles.addressText} numberOfLines={1}>
+          {address ? hostOf(address) : 'No saved address'}
+        </Text>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Change the saved address"
+          hitSlop={8}
+          onPress={() => router.push(`/devices/${conn.host.id}`)}
+        >
+          <Text style={styles.change}>Change</Text>
+        </Pressable>
+      </View>
       <View style={styles.actions}>
         <Button kind="brand" title="Retry now" onPress={() => conn.retry()} style={styles.action} />
         <Button title="Pair again" onPress={() => router.push('/pair')} style={styles.action} />
@@ -58,15 +65,25 @@ export function Connecting({ conn }: { conn: HostConnection }) {
 
 const styles = StyleSheet.create({
   centred: { flex: 1, justifyContent: 'center', gap: 26, paddingBottom: 24 },
-  stuck: { gap: 14, paddingTop: 6 },
-  words: { alignItems: 'center', gap: 6 },
-  title: { fontFamily: font.proseSemibold, fontSize: 20, color: t.text },
+  // Wider than the page's gutter: a few lines of centred words and two
+  // buttons read better with room at the sides than run to the card edge.
+  stuck: { gap: 18, paddingTop: 6, paddingHorizontal: 14 },
+  words: { alignItems: 'center', gap: 8, paddingHorizontal: 22 },
+  title: { fontFamily: font.proseSemibold, fontSize: 19, color: t.text, textAlign: 'center' },
   meta: { fontFamily: font.chrome, fontSize: 12, color: t.dim },
-  error: { fontFamily: font.chrome, fontSize: 12, lineHeight: 18, color: t.text, textAlign: 'center', paddingHorizontal: 12 },
-  check: { flexDirection: 'row', gap: 10, alignItems: 'flex-start', paddingVertical: 9, paddingHorizontal: 12 },
-  checkRuled: { borderTopWidth: 1, borderTopColor: t.rule },
-  dot: { width: 6, height: 6, borderRadius: 3, backgroundColor: t.quotaWarm, marginTop: 7 },
-  checkText: { flex: 1, fontFamily: font.prose, fontSize: size.detail, lineHeight: 19, color: t.dim },
+  sentence: { marginTop: 6, fontFamily: font.prose, fontSize: 13, lineHeight: 19, color: t.dim, textAlign: 'center' },
+  address: {
+    height: 32,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
+    paddingHorizontal: 12,
+    borderRadius: size.radius,
+    backgroundColor: t.sunken,
+  },
+  addressText: { flexShrink: 1, fontFamily: font.chrome, fontSize: size.detail, color: t.text },
+  change: { fontFamily: font.proseMedium, fontSize: size.detail, color: t.dim },
   actions: { flexDirection: 'row', gap: 8 },
   // One height for the pair: a brand button is taller than a secondary one
   // on its own, and side by side the two must match.

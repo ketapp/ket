@@ -41,6 +41,34 @@ fn measure_separates_build_output_by_glob() {
 }
 
 #[test]
+fn the_default_patterns_find_build_output_under_a_nested_package() {
+    // A checkout with a package under `mobile/app` keeps its `node_modules`
+    // there; a Rust workspace may build into `crates/x/target`. Both are
+    // build output out of the box, and a clear names each of them.
+    let sandbox = Sandbox::new("storage-measure-nested-package");
+    let root = sandbox.path("worktree");
+    write(
+        &root
+            .join("mobile")
+            .join("app")
+            .join("node_modules")
+            .join("f"),
+        700,
+    );
+    write(&root.join("crates").join("x").join("target").join("f"), 300);
+    write(&root.join("src").join("build").join("gen.rs"), 20);
+
+    let dirs = ket_core::config::StorageConfig::default().build_dirs;
+    let footprint = measure(&root, &dirs);
+    assert_eq!(footprint.build, 1000);
+    assert_eq!(footprint.kept(), 20, "a nested `build` is left as source");
+
+    let plan = plan_clear(&root, &dirs);
+    let paths: Vec<&str> = plan.iter().map(|item| item.path.as_str()).collect();
+    assert_eq!(paths, ["mobile/app/node_modules", "crates/x/target"]);
+}
+
+#[test]
 fn measure_does_not_descend_into_a_matched_directory() {
     // A `target/` inside a `target/` is already counted once the outer one
     // is measured whole.

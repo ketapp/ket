@@ -786,8 +786,20 @@ impl Shell {
             .min(self.finder.matches.len().saturating_sub(1));
     }
 
-    /// Opens the highlighted file and closes the finder.
+    /// Opens the highlighted file and closes the finder — or, for a `:N`
+    /// query, jumps the editor or diff in front to that line instead.
+    ///
+    /// A `:N` never opens a file: the matches under it are for a filename
+    /// that happens to contain the digits, and nobody who typed `:40` meant
+    /// one of those. With nothing in front to jump, the finder just closes.
     fn open_selected_match(&mut self, cx: &mut Context<Self>) {
+        let query = self.searches.finder.read(cx).text();
+        if let Some(line) = line_query(&query) {
+            let _ =
+                self.jump_active_editor_to_line(line) || self.jump_active_diff_to_line(line, cx);
+            self.close_finder(cx);
+            return;
+        }
         let Some(found) = self.finder.matches.get(self.finder.selected) else {
             return;
         };
@@ -1473,6 +1485,16 @@ impl Shell {
     }
 }
 
+/// A one-based editor line written as `:N` in the file finder.
+fn line_query(query: &str) -> Option<u32> {
+    let digits = query.strip_prefix(':')?;
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let line = digits.parse::<u32>().ok()?;
+    (line > 0).then_some(line)
+}
+
 /// Flattens the cached listings into the rows the tree draws.
 ///
 /// A free function rather than a method so it can be tested without a window:
@@ -1633,6 +1655,26 @@ mod tests {
         let paths = ["src/main.rs".to_owned()];
         let ranked = rank("main", std::path::Path::new("/w"), &paths);
         assert_eq!(ranked[0].path, PathBuf::from("/w/src/main.rs"));
+    }
+
+    #[test]
+    fn a_colon_and_digits_is_a_line_to_jump_to() {
+        // What Cmd-P's field holds when Enter should jump rather than open.
+        assert_eq!(line_query(":122"), Some(122));
+        // And nothing else is: a file search without a colon, a bare colon
+        // with no number, and `:0`, which one-based lines do not have.
+        assert_eq!(line_query("main.rs"), None);
+        assert_eq!(line_query(":"), None);
+        assert_eq!(line_query(":0"), None);
+    }
+
+    #[test]
+    fn a_line_query_is_only_digits() {
+        // `parse` alone would take `:+7` — a query nobody meant as a jump.
+        assert_eq!(line_query(":+7"), None);
+        assert_eq!(line_query(":7:2"), None);
+        // Past u32 there is no line to jump to, so it stays a file search.
+        assert_eq!(line_query(":99999999999"), None);
     }
 
     #[test]

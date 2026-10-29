@@ -54,6 +54,12 @@
       ],
       "expo-secure-store",
       [
+        "expo-notifications",
+        {
+          "color": "#7ee08a"
+        }
+      ],
+      [
         "expo-local-authentication",
         {
           "faceIDPermission": "ket uses Face ID to unlock the app, so only you can reach your desktops' terminals from this phone."

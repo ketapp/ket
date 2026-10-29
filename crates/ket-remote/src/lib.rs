@@ -43,7 +43,7 @@ pub use session::{MAX_MESSAGE, Session};
 /// This build's protocol version. See the header of `remote.proto`.
 pub const MAJOR: u32 = 1;
 /// See [`MAJOR`].
-pub const MINOR: u32 = 20;
+pub const MINOR: u32 = 26;
 
 /// The Noise pattern a phone pairs with: the pairing secret is mixed in last.
 const PAIR: &str = "Noise_IKpsk2_25519_ChaChaPoly_BLAKE2s";

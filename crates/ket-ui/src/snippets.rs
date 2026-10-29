@@ -10,15 +10,15 @@
 //! made by hand shows up without a restart.
 
 use gpui::{
-    AnyElement, Context, Entity, FontWeight, KeyDownEvent, Pixels, SharedString, Window, div,
-    prelude::*, px,
+    AnyElement, BoxShadow, Context, CursorStyle, DragMoveEvent, Entity, FontWeight, KeyDownEvent,
+    MouseButton, Pixels, Point, Render, SharedString, Window, div, point, prelude::*, px,
 };
 use ket_core::snippets::{Snippet, Snippets};
 use ket_core::theme::Theme;
 
 use crate::Shell;
 use crate::input::{Style, TextInput, text_field};
-use crate::paint::paint;
+use crate::paint::{paint, shadow};
 use crate::preferences::{Entry, Section};
 use crate::ui::button::button;
 use crate::ui::chip::{caption, tag, tinted_tag};
@@ -27,7 +27,7 @@ use crate::ui::menu::{MenuEntry, MenuItem, OpenMenu};
 use crate::ui::row::sized_row;
 use crate::ui::textarea::textarea;
 use crate::ui::toast::Tone;
-use crate::ui::{RADIUS_LG, TITLE};
+use crate::ui::{LABEL, RADIUS_LG, RADIUS_SM, TITLE};
 
 /// Wide enough for a name and a line of its body under it.
 pub(crate) const SNIPPET_MENU_WIDTH: Pixels = px(320.0);
@@ -52,6 +52,21 @@ const LIST_WIDTH: Pixels = px(280.0);
 
 /// A list row: a name over a first line.
 const LIST_ROW_H: Pixels = px(52.0);
+
+/// The gap between two rows in the list, which is what the line drawn in
+/// the gap a dragged row would land in is centred on.
+const LIST_GAP: Pixels = px(1.0);
+
+/// How far the drop line reaches past a row's text to the row's own edge.
+///
+/// An absolute inset is measured from the padding edge, and a line that
+/// stopped at the text would read as underlining it rather than as marking
+/// the space beside it.
+const LINE_BLEED: Pixels = px(14.0);
+
+/// How wide the thing under the pointer is while a row is dragged: the
+/// list's width less its padding, so it is as wide as the row it came from.
+const GHOST_W: Pixels = px(268.0);
 
 /// The least the list and editor shrink to together, so a short settings
 /// window still leaves the body box room to write in.
@@ -195,6 +210,59 @@ pub(crate) enum SnippetSlot {
     New,
 }
 
+/// A snippet picked up to be dropped elsewhere in the list.
+///
+/// Carries the row's place in the saved list — the position the drop needs,
+/// the snippet itself being read out of the pane again on the drop — and its
+/// name, which is all the thing under the cursor has to say while it moves.
+#[derive(Clone)]
+struct SnippetDrag {
+    /// The row's index into the pane's saved list.
+    index: usize,
+    /// The snippet's name, drawn under the pointer.
+    name: SharedString,
+    /// The theme. The thing under the pointer is its own view, with no
+    /// access to the shell's.
+    theme: Theme,
+    /// Where in the row the pointer went down: gpui draws the view with its
+    /// top-left there, so it starts where the row is.
+    grab: Point<Pixels>,
+}
+
+impl Render for SnippetDrag {
+    /// The snippet's name, which is all the thing moving has to say: the
+    /// row itself stays where it was until the drop lands.
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let t = self.theme;
+        div()
+            .flex()
+            .items_center()
+            .w(GHOST_W)
+            .px(px(12.0))
+            .py(px(9.0))
+            .rounded(RADIUS_SM)
+            .bg(paint(t.elevated))
+            .border_1()
+            .border_color(paint(t.border))
+            .shadow(vec![BoxShadow {
+                color: shadow(0.5, &t),
+                offset: point(px(0.0), px(4.0)),
+                blur_radius: px(12.0),
+                spread_radius: px(0.0),
+            }])
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(LABEL)
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(paint(t.text.primary))
+                    .child(self.name.clone()),
+            )
+    }
+}
+
 /// The Snippets pane while settings are open.
 #[derive(Default)]
 pub(crate) struct SnippetsPane {
@@ -221,6 +289,9 @@ pub(crate) struct SnippetsPane {
     body_active: bool,
     /// Whether Delete is asking to be sure.
     confirming_delete: bool,
+    /// Where a dragged row would land, while one is: the gap it was last
+    /// dragged over, counted from the top of the list.
+    drop: Option<usize>,
     /// Why the shown snippet would not save.
     error: Option<String>,
 }
@@ -428,12 +499,116 @@ impl Shell {
         }
     }
 
+    /// Moves the saved snippet `from` into the gap `before` it was dropped
+    /// in, and saves the list in the order that leaves.
+    ///
+    /// `before` counts gaps from the top of the list: 0 is above the first
+    /// snippet, `saved.len()` below the last.
+    ///
+    /// The list is rearranged here rather than re-read from disk, so the row
+    /// lands under the cursor on the frame the mouse came up; the file is
+    /// written afterwards, and a file that refuses leaves the pane showing
+    /// an order the next open undoes, with the reason beside Save — the
+    /// honest outcome, and the same bargain the sidebar's rows are moved
+    /// under.
+    fn move_snippet(&mut self, from: usize, before: usize, cx: &mut Context<Self>) {
+        let Some(pane) = self.snippets_pane() else {
+            return;
+        };
+        if !pane.writable {
+            return;
+        }
+        // The shown snippet is held by index, which a move around it changes;
+        // its name is what it is re-found by. A snippet being written has no
+        // place in the list to follow, and keeps the editor.
+        let watch = match pane.selected {
+            Some(SnippetSlot::Existing(at)) => Some(at),
+            _ => None,
+        };
+        let Some((items, watched)) = Self::snippet_order(&pane.saved, from, before, watch) else {
+            return;
+        };
+        pane.saved = items;
+        if watch.is_some() {
+            pane.selected = watched.map(SnippetSlot::Existing);
+        }
+        let file = Snippets {
+            items: pane.saved.clone(),
+        };
+        match file.save() {
+            Ok(()) => pane.error = None,
+            Err(error) => pane.error = Some(error.to_string()),
+        }
+        cx.notify();
+    }
+
+    /// The list `saved` becomes when the snippet at `from` is moved into the
+    /// gap `before`, and the snippet `watch` — the one the editor is showing
+    /// — in the list that leaves.
+    ///
+    /// Answers `None` for a move that would land where the row already is,
+    /// which is the two gaps either side of it, and for one that names a
+    /// place outside the list.
+    ///
+    /// Pure on purpose: the drag, the arrows and the test all agree on where
+    /// a move lands, and the pane's bookkeeping and the file it writes sit
+    /// apart from the arithmetic.
+    fn snippet_order(
+        saved: &[Snippet],
+        from: usize,
+        before: usize,
+        watch: Option<usize>,
+    ) -> Option<(Vec<Snippet>, Option<usize>)> {
+        if from >= saved.len() || before > saved.len() {
+            return None;
+        }
+        let to = Self::landing(from, before)?;
+        // The watched snippet is re-found by name rather than by arithmetic:
+        // a name is the one thing about a snippet a move leaves alone, and
+        // the same answer covers a snippet that moved and one that was merely
+        // pushed aside.
+        let watched = watch
+            .and_then(|at| saved.get(at))
+            .map(|snippet| snippet.name.clone());
+        let mut items = saved.to_vec();
+        let moved = items.remove(from);
+        items.insert(to, moved);
+        let watched =
+            watched.and_then(|name| items.iter().position(|snippet| snippet.name == name));
+        Some((items, watched))
+    }
+
+    /// ⌥↑ and ⌥↓: moves the shown snippet one place up or down the list,
+    /// the keyboard's answer to dragging a row. A snippet being written has
+    /// no place in the list to move to.
+    fn nudge_snippet(&mut self, down: bool, cx: &mut Context<Self>) {
+        let selected = self
+            .preferences
+            .as_ref()
+            .and_then(|view| view.snippets.selected);
+        let Some(SnippetSlot::Existing(index)) = selected else {
+            return;
+        };
+        let before = match down {
+            // Up is the gap above the row above. At the top, the row is
+            // already in the only gap there is.
+            false if index == 0 => return,
+            false => index - 1,
+            // Down is the gap below the next row. At the bottom that is past
+            // the end of the list, which [`Shell::move_snippet`] refuses.
+            true => index + 2,
+        };
+        self.move_snippet(index, before, cx);
+    }
+
     /// Keys for the Snippets pane, ahead of the rest of settings. Returns
     /// whether it took the key.
     ///
     /// The body box takes everything while it has the keyboard, Enter
     /// included — it is a paragraph, not a field — except ⌘↵, which saves,
     /// Tab, which goes to the name, and Escape, which lets go of it.
+    /// Beyond the boxes, ⌥ with an arrow moves the shown snippet up or down
+    /// the list.
     pub(crate) fn snippets_key(
         &mut self,
         event: &KeyDownEvent,
@@ -492,6 +667,14 @@ impl Shell {
                 }
                 _ => {}
             }
+        }
+
+        // ⌥ with an arrow moves the shown snippet one place among the
+        // others, from wherever its text is not being edited — the same
+        // reorder the list takes by dragging a row.
+        if key.modifiers.alt && matches!(key.key.as_str(), "up" | "down") {
+            self.nudge_snippet(key.key == "down", cx);
+            return true;
         }
         false
     }
@@ -659,12 +842,13 @@ impl Shell {
         let mut rows = Vec::new();
         if pane.selected == Some(SnippetSlot::New) {
             let (name, body) = live(SnippetSlot::New, "", "");
-            rows.push(self.snippet_row(SnippetSlot::New, &name, &body, t, cx));
+            rows.push(self.snippet_row(SnippetSlot::New, &name, &body, false, t, cx));
         }
+        let last = pane.saved.len().saturating_sub(1);
         for (index, snippet) in pane.saved.iter().enumerate() {
             let slot = SnippetSlot::Existing(index);
             let (name, body) = live(slot, &snippet.name, &snippet.body);
-            rows.push(self.snippet_row(slot, &name, &body, t, cx));
+            rows.push(self.snippet_row(slot, &name, &body, index == last, t, cx));
         }
         let list = div()
             .id("snippet-list")
@@ -673,10 +857,51 @@ impl Shell {
             .flex_none()
             .w(LIST_WIDTH)
             .p(px(6.0))
-            .gap(px(1.0))
+            .gap(LIST_GAP)
             .border_r_1()
             .border_color(paint(t.rule))
             .overflow_y_scroll()
+            // Every row's `on_drag_move` runs on every move — gpui filters
+            // these by drag type, not by hitbox — so the gap is cleared here
+            // and then claimed by whichever row the pointer is actually in.
+            // The capture phase runs back to front, so this parent is asked
+            // before its children, which is the whole reason it works.
+            .on_drag_move::<SnippetDrag>(cx.listener(|this, _, _, cx| {
+                if let Some(pane) = this.snippets_pane()
+                    && pane.drop.take().is_some()
+                {
+                    cx.notify();
+                }
+            }))
+            // And the drop lands here rather than on the row it was released
+            // over, because the gap is already worked out: a drop anywhere in
+            // the list goes wherever the line is showing. Put on the rows
+            // instead, the space *between* two of them belonged to neither —
+            // the line would be drawn in a gap that could not be dropped into,
+            // which is the sort of near-miss that reads as the drag not
+            // having worked.
+            .on_drop::<SnippetDrag>(cx.listener(|this, drag: &SnippetDrag, _, cx| {
+                let before = this.snippets_pane().and_then(|pane| pane.drop.take());
+                if let Some(before) = before {
+                    this.move_snippet(drag.index, before, cx);
+                }
+                cx.notify();
+            }))
+            // A drag let go of somewhere else in the window drops nowhere and
+            // tells nobody, so the gap it was last over is forgotten here.
+            // Without this it survives the drag that set it, and the next
+            // thing dragged anywhere finds the list drawing a line for a move
+            // that ended some time ago.
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    if let Some(pane) = this.snippets_pane()
+                        && pane.drop.take().is_some()
+                    {
+                        cx.notify();
+                    }
+                }),
+            )
             .children(rows);
 
         let words = pane
@@ -702,12 +927,14 @@ impl Shell {
     }
 
     /// One snippet in the list: its name over its first line, marked while
-    /// it is the one in the editor.
+    /// it is the one in the editor, and — once saved — draggable to a new
+    /// place among the others.
     fn snippet_row(
         &self,
         slot: SnippetSlot,
         name: &str,
         body: &str,
+        last: bool,
         t: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -728,7 +955,22 @@ impl Shell {
             (true, true) => "Not saved yet".to_owned(),
             (_, _) => first,
         };
-        sized_row(("snippet-row", id), selected, LIST_ROW_H, t)
+        // The gap a dragged row would land in, drawn above this row — and
+        // below it as well when it is the last, which is the one gap no
+        // row's top edge can stand for. Only while a drag is going: a gap
+        // that outlived its drag would be a line drawn for a move that
+        // ended some time ago.
+        let drop = cx
+            .has_active_drag()
+            .then(|| {
+                self.preferences
+                    .as_ref()
+                    .and_then(|view| view.snippets.drop)
+            })
+            .flatten();
+        let line_above = !new && drop == Some(id);
+        let line_below = !new && last && drop == Some(id + 1);
+        let row = sized_row(("snippet-row", id), selected, LIST_ROW_H, t)
             .relative()
             .flex_col()
             .items_start()
@@ -759,7 +1001,7 @@ impl Shell {
                             .min_w_0()
                             .truncate()
                             .font_weight(FontWeight::MEDIUM)
-                            .child(name),
+                            .child(name.clone()),
                     )
                     .child(match new {
                         true => tinted_tag("New", paint(t.accent)).into_any_element(),
@@ -776,11 +1018,75 @@ impl Shell {
                     .truncate()
                     .when(new, |el| el.text_color(faint(t))),
             )
+            .when(line_above, |el| {
+                el.child(crate::tree::insertion_line(false, LIST_GAP, LINE_BLEED, t))
+            })
+            .when(line_below, |el| {
+                el.child(crate::tree::insertion_line(true, LIST_GAP, LINE_BLEED, t))
+            })
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.select_snippet(slot, true, window, cx);
                 cx.notify();
-            }))
-            .into_any_element()
+            }));
+        // A saved row can be picked up. `on_drag` starts only once the
+        // pointer moves with the button down, so a row that is clicked is
+        // still a row that opens in the editor; the one being written is
+        // not saved, so it has no place in the list to be dropped.
+        match new {
+            true => row.into_any_element(),
+            false => row
+                .cursor(CursorStyle::OpenHand)
+                .on_drag(
+                    SnippetDrag {
+                        index: id,
+                        name: name.into(),
+                        theme: *t,
+                        // Filled in by the listener below, which is where
+                        // gpui says how far into the row the pointer was.
+                        grab: point(px(0.0), px(0.0)),
+                    },
+                    |drag, grab, _, cx| {
+                        let mut drag = drag.clone();
+                        drag.grab = grab;
+                        cx.new(|_| drag)
+                    },
+                )
+                .on_drag_move::<SnippetDrag>(cx.listener(
+                    move |this, event: &DragMoveEvent<SnippetDrag>, _, cx| {
+                        // Which half of this row the pointer is in says which
+                        // of the two gaps beside it a drop lands in. Only
+                        // when the pointer is in the row: every row's
+                        // listener runs on every move, gpui not filtering
+                        // these by hitbox, so the rows the pointer is not
+                        // over have to keep their peace for the one under it
+                        // to say where the drop goes.
+                        let pointer = event.event.position;
+                        let bounds = event.bounds;
+                        // Half the gap to the next row each side, so the
+                        // space between two rows belongs to one of them:
+                        // without it the single pixel between two rows is
+                        // nobody's, and the line the pointer was following
+                        // blinks out every time it crosses one.
+                        let slack = LIST_GAP / 2.0;
+                        let inside = pointer.x >= bounds.left()
+                            && pointer.x <= bounds.right()
+                            && pointer.y >= bounds.top() - slack
+                            && pointer.y <= bounds.bottom() + slack;
+                        if !inside {
+                            return;
+                        }
+                        let below = pointer.y > bounds.center().y;
+                        let target = id + usize::from(below);
+                        if let Some(pane) = this.snippets_pane()
+                            && pane.drop != Some(target)
+                        {
+                            pane.drop = Some(target);
+                            cx.notify();
+                        }
+                    },
+                ))
+                .into_any_element(),
+        }
     }
 
     /// The editor beside the list: the shown snippet's name and text, and
@@ -936,5 +1242,66 @@ fn lines(body: &str) -> String {
     match body.lines().count().max(1) {
         1 => "1 line".to_owned(),
         n => format!("{n} lines"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Shell, Snippet};
+
+    fn saved(names: &[&str]) -> Vec<Snippet> {
+        names
+            .iter()
+            .map(|name| Snippet {
+                name: (*name).to_owned(),
+                body: String::new(),
+            })
+            .collect()
+    }
+
+    fn named(items: &[Snippet]) -> Vec<&str> {
+        items.iter().map(|snippet| snippet.name.as_str()).collect()
+    }
+
+    #[test]
+    fn a_drop_lands_where_the_line_was_drawn() {
+        // The gap below the last of three, for the middle one.
+        let (items, _) = Shell::snippet_order(&saved(&["a", "b", "c"]), 1, 3, None).unwrap();
+        assert_eq!(named(&items), ["a", "c", "b"]);
+        // The gap above the first, for the last one.
+        let (items, _) = Shell::snippet_order(&saved(&["a", "b", "c"]), 2, 0, None).unwrap();
+        assert_eq!(named(&items), ["c", "a", "b"]);
+    }
+
+    #[test]
+    fn the_two_gaps_either_side_of_a_row_are_no_moves() {
+        for before in [1, 2] {
+            assert!(Shell::snippet_order(&saved(&["a", "b", "c"]), 1, before, None).is_none());
+        }
+    }
+
+    #[test]
+    fn a_move_named_outside_the_list_is_refused() {
+        let two = saved(&["a", "b"]);
+        assert!(Shell::snippet_order(&two, 2, 0, None).is_none());
+        assert!(Shell::snippet_order(&two, 0, 3, None).is_none());
+    }
+
+    #[test]
+    fn the_shown_snippet_keeps_the_editor_when_rows_move_around_it() {
+        // b is shown; d is dragged in above it, pushing b down a place.
+        let (items, watched) =
+            Shell::snippet_order(&saved(&["a", "b", "c", "d"]), 3, 1, Some(1)).unwrap();
+        assert_eq!(named(&items), ["a", "d", "b", "c"]);
+        assert_eq!(watched, Some(2));
+    }
+
+    #[test]
+    fn the_shown_snippet_follows_its_own_row() {
+        // b is shown, and b itself is dragged to the end.
+        let (items, watched) =
+            Shell::snippet_order(&saved(&["a", "b", "c"]), 1, 3, Some(1)).unwrap();
+        assert_eq!(named(&items), ["a", "c", "b"]);
+        assert_eq!(watched, Some(2));
     }
 }

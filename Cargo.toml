@@ -99,10 +99,21 @@ snow = "0.10"
 # The relay's WebSockets, and the host's side of them (Epic 5b.3).
 tokio-tungstenite = "0.30"
 # `ket-feedback`'s HTTP: one JSON endpoint and a health check, over HTTP/1.
-# Already in the tree through tonic; only the server half is turned on.
-hyper = { version = "1.11", features = ["http1", "server"] }
-hyper-util = { version = "0.1.20", features = ["tokio"] }
+# Already in the tree through tonic. The client half is the network
+# inspector's (`ket_core::network`): the host passes agents' requests on to
+# their providers, over HTTP/1 with a pooled connection.
+hyper = { version = "1.11", features = ["http1", "server", "client"] }
+hyper-util = { version = "0.1.20", features = ["tokio", "client-legacy", "http1"] }
 http-body-util = "0.1.5"
+# The network inspector's TLS to the providers. Already in the tree through
+# gpui's HTTP client, with these features: ring and the operating system's
+# root certificates, as `lettre` below, and for the same licence reasons.
+hyper-rustls = { version = "0.27.9", default-features = false, features = [
+    "http1",
+    "native-tokio",
+    "ring",
+    "tls12",
+] }
 # `ket-feedback`'s mail. SMTP because every mail host speaks it, so the
 # service is tied to no provider. rustls with ring and the operating
 # system's root certificates (rustls-native-certs), all three already in

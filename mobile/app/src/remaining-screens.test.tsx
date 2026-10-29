@@ -45,6 +45,14 @@ jest.mock('./lib/version', () => ({ versionLabel: 'test' }));
 const host = (fields: object = {}) =>
   ({
     host: { id: 'host', name: 'Studio Mac', relay: 'ws://studio', hostPublic: '', pairedAt: 0 },
+    status: 'connected',
+    activeAddress: 'ws://studio',
+    upSince: 0,
+    downSince: null,
+    attempts: 0,
+    hostMinor: 24,
+    failures: {},
+    retry: jest.fn(),
     devices: jest.fn(async () => []),
     revoke: jest.fn(async () => {}),
     diff: jest.fn(async () => ({ text: '', error: '', truncated: false })),
@@ -72,7 +80,9 @@ describe('Devices', () => {
     mockHost = conn;
     const view = await render(<Devices />);
     await waitFor(() => expect(view.getByText('iPad')).toBeTruthy());
-    expect(view.getByText('Unnamed phone (this one)')).toBeTruthy();
+    expect(view.getByText('Unnamed phone')).toBeTruthy();
+    expect(view.getByText('this phone')).toBeTruthy();
+    expect(view.getByText('In use')).toBeTruthy();
     await fireEvent.press(view.getByText('iPad'));
     await waitFor(() => expect(conn.revoke).toHaveBeenCalledWith('other'));
     await fireEvent.press(view.getByText('Forget this desktop'));
@@ -80,6 +90,25 @@ describe('Devices', () => {
     expect(conn.revoke).toHaveBeenCalledWith('self');
     expect(mockDropConnection).toHaveBeenCalledWith('host');
     expect(mockForgetHost).toHaveBeenCalledWith('host');
+    await view.unmount();
+  });
+
+  test('says what each address said while the desktop is unreachable', async () => {
+    mockParams = { host: 'host' };
+    const conn = host({
+      status: 'offline',
+      activeAddress: null,
+      attempts: 3,
+      failures: { 'ws://studio': 'the relay at ws://studio did not answer' },
+    });
+    mockHost = conn;
+    const view = await render(<Devices />);
+    expect(view.getByText('Can’t reach it')).toBeTruthy();
+    expect(view.getByText('No answer')).toBeTruthy();
+    expect(view.getByText('The desktop lists them once it can be reached.')).toBeTruthy();
+    expect(conn.devices).not.toHaveBeenCalled();
+    await fireEvent.press(view.getByText('Try again'));
+    expect(conn.retry).toHaveBeenCalled();
     await view.unmount();
   });
 

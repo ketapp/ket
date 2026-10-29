@@ -2,7 +2,14 @@
 // it, the colour its detail line takes, and a phrase when the agent said
 // nothing.
 
-import { Activity, type HostSnapshot, type ProjectSummary, type TerminalSummary, type WorktreeSummary } from '@ket/remote';
+import {
+  Activity,
+  type AsleepTerminal,
+  type HostSnapshot,
+  type ProjectSummary,
+  type TerminalSummary,
+  type WorktreeSummary,
+} from '@ket/remote';
 
 import { PROJECT_COLORS, agentLabel, t } from './theme';
 
@@ -67,6 +74,12 @@ export function detailColor(activity: Activity): string {
   }
 }
 
+/** A worktree whose agent tab the desktop put to sleep: no terminal, the
+ * session kept. Faint, like a row that is only starting. */
+export const ASLEEP = { word: 'asleep', color: t.faint };
+/** One the phone asked the desktop to wake, until its terminal is there. */
+export const WAKING = { word: 'waking', color: t.faint };
+
 /** What the row says: the agent's own words, else the state itself. */
 export function detail(worktree: WorktreeSummary): string {
   if (worktree.agentState) return sentence(worktree.agentState);
@@ -82,7 +95,7 @@ export function detail(worktree: WorktreeSummary): string {
     case Activity.RUNNING:
       return 'Running';
     default:
-      return worktree.terminals.some((x) => !x.closed) ? 'Ready' : 'Nothing running';
+      return worktree.terminals.some((x) => !x.closed) ? 'Ready' : worktree.asleep.length > 0 ? 'Asleep' : 'Nothing running';
   }
 }
 
@@ -109,16 +122,30 @@ export function everyWorktree(snapshot: HostSnapshot | null): Located[] {
  * reports, else the agent in one of its terminals — an agent that has not
  * said anything yet still runs in one. Empty for a worktree of shells. */
 export function agentOf(worktree: WorktreeSummary): string {
-  return worktree.agent || agentTerminal(worktree)?.agent || '';
+  return worktree.agent || agentTerminal(worktree)?.agent || worktree.asleep[0]?.agent || '';
 }
 
-/** The terminal running a worktree's reporting agent, if there is one. */
+/** The asleep tab a worktree's row wakes: the one of its reporting agent,
+ * else the first. */
+export function asleepTab(worktree: WorktreeSummary): AsleepTerminal | undefined {
+  const agent = worktree.agent.toLowerCase();
+  return worktree.asleep.find((x) => agent !== '' && x.agent.toLowerCase() === agent) ?? worktree.asleep[0];
+}
+
+/** What an asleep tab is called, as `terminalName` names a terminal. */
+export function asleepName(tab: AsleepTerminal): string {
+  const title = tab.title.replace(LEADING_GLYPHS, '').trim();
+  return title || (tab.agent ? agentLabel(tab.agent) : 'Terminal');
+}
+
+/** The terminal running a worktree's reporting agent, if there is one. A
+ * tab in Claude's agent view runs `claude` too, but what the worktree reports
+ * comes from another: it is the last choice, never the first. */
 export function agentTerminal(worktree: WorktreeSummary) {
   const agent = worktree.agent.toLowerCase();
-  return (
-    worktree.terminals.find((x) => !x.closed && agent !== '' && x.agent.toLowerCase() === agent) ??
-    worktree.terminals.find((x) => !x.closed && x.agent !== '')
-  );
+  const open = worktree.terminals.filter((x) => !x.closed && x.agent !== '');
+  const ranked = [...open.filter((x) => !x.agentView), ...open.filter((x) => x.agentView)];
+  return ranked.find((x) => agent !== '' && x.agent.toLowerCase() === agent) ?? ranked[0];
 }
 
 /** The glyphs an agent leads its title with, and the space after them:
@@ -132,6 +159,8 @@ const LEADING_GLYPHS = /^\s*(?:[\u2000-\u2bff\ufe0f\u200d]|[\ud83c-\ud83e][\udc0
  * mark already stands there and a spinner's frames would make the label
  * flicker. */
 export function terminalName(terminal: TerminalSummary): string {
+  // Claude's agent view titles itself after whichever session it last had up.
+  if (terminal.agentView) return 'Agent view';
   const title = terminal.agent ? terminal.title.replace(LEADING_GLYPHS, '') : terminal.title;
   return title.trim() || (terminal.agent ? agentLabel(terminal.agent) : 'Terminal');
 }

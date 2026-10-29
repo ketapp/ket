@@ -903,7 +903,7 @@ impl LocalTerminal {
     /// evidence is that the terminal's foreground process group is no longer
     /// the shell. See [`crate::activity`].
     pub fn foreground(&self) -> Option<Foreground> {
-        let leader = lock(&self.master).process_group_leader()?;
+        let leader = self.foreground_group()?;
 
         // The shell ket spawned is its own group leader, so this is the pty
         // saying "nothing else is running in here".
@@ -921,6 +921,12 @@ impl LocalTerminal {
         let name = command_name(leader)?;
         *cached = Some((leader, name.clone()));
         Some(Foreground::Running(name))
+    }
+
+    /// The process group in the terminal's foreground, by its leader's pid;
+    /// `None` when the pty cannot answer. See [`Self::foreground`].
+    pub fn foreground_group(&self) -> Option<i32> {
+        lock(&self.master).process_group_leader()
     }
 
     /// cleanup belongs, and a pane that will not close is the failure this

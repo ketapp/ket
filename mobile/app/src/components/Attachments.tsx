@@ -4,18 +4,19 @@
 
 import { useEffect } from 'react';
 import { Image, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
-import Animated, { Easing, useAnimatedStyle, useSharedValue, withRepeat, withTiming } from 'react-native-reanimated';
+import Animated, { Easing, FadeInDown, useAnimatedStyle, useSharedValue, withRepeat, withTiming } from 'react-native-reanimated';
 import Svg, { Circle } from 'react-native-svg';
 
 import { type Attachment, bytesLabel } from '../lib/attach';
 import { font, size, t, tint } from '../lib/theme';
+import { Stagger } from './Composer';
 import { Camera, Clipboard, Close, FileGlyph, Info, Picture } from './icons';
 import { Row } from './ui';
 
 export type Source = 'photos' | 'camera' | 'files' | 'paste';
 
-/** The + menu: where a photo or a file comes from. In place of the `/` menu,
- * over the composer. A desktop too old to take files says so instead. */
+/** The + menu: where a photo or a file comes from, in a float over the chat
+ * in place of the `/` menu. A desktop too old to take files says so instead. */
 export function AttachMenu({
   older,
   pasteable,
@@ -44,31 +45,39 @@ export function AttachMenu({
   }
   return (
     <ScrollView style={styles.menu} contentContainerStyle={styles.menuInner} keyboardShouldPersistTaps="handled">
-      <Row
-        mark={<Picture size={17} color={t.text} weight={2} />}
-        title="Photos"
-        detail="Screenshots and pictures on this iPhone"
-        onPress={() => onPick('photos')}
-      />
-      <Row
-        mark={<Camera size={17} color={t.text} weight={2} />}
-        title="Camera"
-        detail="Take a photo, of a whiteboard or a screen"
-        onPress={() => onPick('camera')}
-      />
-      <Row
-        mark={<FileGlyph size={17} color={t.text} weight={2} />}
-        title="Files"
-        detail="From Files, iCloud Drive or another app"
-        onPress={() => onPick('files')}
-      />
-      {pasteable ? (
+      <Stagger index={0}>
         <Row
-          mark={<Clipboard size={17} color={t.text} weight={2} />}
-          title="Paste image"
-          detail="The image you copied"
-          onPress={() => onPick('paste')}
+          mark={<Picture size={17} color={t.text} weight={2} />}
+          title="Photos"
+          detail="Screenshots and pictures on this iPhone"
+          onPress={() => onPick('photos')}
         />
+      </Stagger>
+      <Stagger index={1}>
+        <Row
+          mark={<Camera size={17} color={t.text} weight={2} />}
+          title="Camera"
+          detail="Take a photo, of a whiteboard or a screen"
+          onPress={() => onPick('camera')}
+        />
+      </Stagger>
+      <Stagger index={2}>
+        <Row
+          mark={<FileGlyph size={17} color={t.text} weight={2} />}
+          title="Files"
+          detail="From Files, iCloud Drive or another app"
+          onPress={() => onPick('files')}
+        />
+      </Stagger>
+      {pasteable ? (
+        <Stagger index={3}>
+          <Row
+            mark={<Clipboard size={17} color={t.text} weight={2} />}
+            title="Paste image"
+            detail="The image you copied"
+            onPress={() => onPick('paste')}
+          />
+        </Stagger>
       ) : null}
     </ScrollView>
   );
@@ -86,7 +95,8 @@ export function Tray({ files, onRemove }: { files: Attachment[]; onRemove: (key:
       contentContainerStyle={styles.trayInner}
     >
       {files.map((file) => (
-        <View key={file.key} style={file.image ? styles.thumbBox : styles.tileBox}>
+        // Dropped in from just above, as it is picked.
+        <Animated.View key={file.key} entering={FadeInDown.duration(260)} style={file.image ? styles.thumbBox : styles.tileBox}>
           {file.image ? (
             <Image accessibilityLabel={file.name} source={{ uri: file.uri }} style={styles.thumb} />
           ) : (
@@ -109,7 +119,7 @@ export function Tray({ files, onRemove }: { files: Attachment[]; onRemove: (key:
           >
             <Close size={10} color={t.text} weight={3.2} />
           </Pressable>
-        </View>
+        </Animated.View>
       ))}
     </ScrollView>
   );
@@ -198,7 +208,8 @@ function Spinner() {
 }
 
 const styles = StyleSheet.create({
-  menu: { flexGrow: 0, maxHeight: 248, borderTopWidth: 1, borderTopColor: t.rule, backgroundColor: t.backdrop },
+  // In a float, which draws the card — see components/Composer.tsx.
+  menu: { flexGrow: 0, maxHeight: 248 },
   menuInner: { padding: 6, gap: 2 },
   // A row of the menu's, as `Row` lays one out, with room for its sentence.
   older: { flexDirection: 'row', alignItems: 'center', gap: 11, minHeight: size.row, margin: 6, paddingVertical: 9, paddingLeft: 14, paddingRight: 12 },

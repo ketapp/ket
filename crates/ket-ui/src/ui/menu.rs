@@ -31,10 +31,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    AnchoredPositionMode, Animation, AnimationExt, AnyElement, BoxShadow, Context, Corner,
-    ElementId, Image, ImageSource, KeyDownEvent, Keystroke, MouseButton, Pixels, Point, Rgba,
-    ScrollHandle, SharedString, Stateful, Styled, anchored, deferred, div, ease_out_quint, img,
-    point, prelude::*, px,
+    AnchoredPositionMode, Animation, AnimationExt, AnyElement, BoxShadow, ClickEvent, Context,
+    Corner, ElementId, Image, ImageSource, KeyDownEvent, Keystroke, MouseButton, Pixels, Point,
+    Rgba, ScrollHandle, SharedString, Stateful, Styled, anchored, deferred, div, ease_out_quint,
+    img, point, prelude::*, px,
 };
 use ket_core::keybinding::Chord;
 use ket_core::theme::Theme;
@@ -485,6 +485,15 @@ impl<T: Clone + 'static> OpenMenu<T> {
         self
     }
 
+    /// The first item whose action `is`, to change after the menu opened —
+    /// a row that reads differently while a modifier is held, say.
+    pub(crate) fn item_mut(&mut self, is: impl Fn(&T) -> bool) -> Option<&mut MenuItem<T>> {
+        self.entries.iter_mut().find_map(|entry| match entry {
+            MenuEntry::Item(item) if is(&item.action) => Some(item),
+            _ => None,
+        })
+    }
+
     /// Whether this menu was opened by `origin` — the opener's name for
     /// itself, matched as a plain string because the menu is generic over
     /// its action and cannot know what an opener's identity looks like.
@@ -750,6 +759,13 @@ impl<T: Clone + 'static> OpenMenu<T> {
         let sections = self.titled_sections();
         let mut rows = Vec::new();
         let mut index = 0usize;
+        // The icon column holds labels to one x when some rows have a glyph;
+        // a menu with none has nothing to align to, so its labels start at
+        // the row's own padding.
+        let any_glyph = sections
+            .iter()
+            .flat_map(|section| &section.items)
+            .any(|item| item.image.is_some() || item.icon.is_some());
 
         for (section_index, section) in sections.iter().enumerate() {
             if section_index > 0 {
@@ -924,20 +940,24 @@ impl<T: Clone + 'static> OpenMenu<T> {
                         // chrome and dismisses the menu before the row's
                         // `on_click` gets a mouse-up to pair it with.
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .child(if has_glyph {
-                            icon_well(tint, lit, t)
-                                .when(enabled && tint.is_none(), |el| {
-                                    el.group_hover(row_group.clone(), |style| lift_well(style, t))
-                                })
-                                .child(glyph)
-                        } else {
-                            div()
-                                .flex()
-                                .flex_none()
-                                .items_center()
-                                .justify_center()
-                                .w(ICON_COLUMN)
-                                .child(glyph)
+                        .when(any_glyph, |el| {
+                            el.child(if has_glyph {
+                                icon_well(tint, lit, t)
+                                    .when(enabled && tint.is_none(), |el| {
+                                        el.group_hover(row_group.clone(), |style| {
+                                            lift_well(style, t)
+                                        })
+                                    })
+                                    .child(glyph)
+                            } else {
+                                div()
+                                    .flex()
+                                    .flex_none()
+                                    .items_center()
+                                    .justify_center()
+                                    .w(ICON_COLUMN)
+                                    .child(glyph)
+                            })
                         })
                         .child(label)
                         .child(div().flex_grow())
@@ -970,7 +990,12 @@ impl<T: Clone + 'static> OpenMenu<T> {
                         // handler that returns early: a row that cannot be
                         // picked should not swallow the click either.
                         .when(enabled, |el| {
-                            el.on_click(cx.listener(move |this, _, _, cx| {
+                            el.on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+                                // The click is the truth about shift: the
+                                // panel occludes the shell, so nothing
+                                // beneath it saw the press. An opener that
+                                // acts on a shift-click reads this.
+                                this.shift_held = event.modifiers().shift;
                                 on_run(this, &action, cx);
                                 cx.stop_propagation();
                                 cx.notify();
@@ -1254,6 +1279,26 @@ mod tests {
                 ),
             ],
         )
+    }
+
+    #[test]
+    fn a_row_can_be_found_by_its_action_and_changed_in_place() {
+        let mut menu = sample();
+        // Past the separator, and by action rather than title: the title is
+        // the thing an opener changes.
+        let terminal = menu
+            .item_mut(|action| *action == "terminal")
+            .expect("the terminal row is in the menu");
+        assert_eq!(terminal.title.as_ref(), "New Terminal");
+        terminal.title = "New Terminal, here".into();
+        let titles: Vec<String> = menu
+            .sections()
+            .iter()
+            .flatten()
+            .map(|item| item.title.to_string())
+            .collect();
+        assert_eq!(titles, ["New File…", "Open Folder", "New Terminal, here"]);
+        assert!(menu.item_mut(|action| *action == "nothing").is_none());
     }
 
     fn key_down(key: &str, key_char: Option<&str>, modifiers: Modifiers) -> KeyDownEvent {

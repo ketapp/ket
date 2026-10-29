@@ -10,13 +10,13 @@ import { useFocusEffect } from 'expo-router';
 import { useCallback, useState } from 'react';
 import { ScrollView, StyleSheet, Text, View } from 'react-native';
 
-import { AgentMark } from '../components/icons';
-import { Card, Meter, Prose, Screen, TAB_BAR_ROOM, TabBar } from '../components/ui';
-import { everyWorktree } from '../lib/activity';
-import { useHosts } from '../lib/hosts';
-import { getDesktop } from '../lib/store';
-import { font, size, t } from '../lib/theme';
-import { metadata, pressure, resetsIn, sessions, useNow, usedOf } from '../lib/usage';
+import { AgentMark } from '../../components/icons';
+import { Card, Meter, Prose, Screen, TAB_BAR_ROOM, TabBar } from '../../components/ui';
+import { everyWorktree } from '../../lib/activity';
+import { useHosts } from '../../lib/hosts';
+import { getDesktop } from '../../lib/store';
+import { font, size, t } from '../../lib/theme';
+import { metadata, pressure, resetsIn, sessions, useNow, usedOf } from '../../lib/usage';
 
 export default function Usage() {
   const conns = useHosts();

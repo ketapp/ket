@@ -20,9 +20,17 @@ use super::field::placeholder;
 use crate::fonts::Prose;
 use crate::paint::paint;
 
-/// How far the draft stands in from the well's top and left edges.
+/// How far the draft stands in from the well's top and left edges unless
+/// the caller says otherwise: a prompt alone in its dialog, with room
+/// around it.
 const PAD_TOP: Pixels = px(12.0);
 const PAD_LEFT: Pixels = px(8.0);
+
+/// The insets a textarea in a form takes, so its first line starts where a
+/// field's text does: a field's text sits about 11 px below its edge at
+/// [`super::FIELD_TEXT`], and about 10 px in — the composer's own gutter
+/// already puts the caret 12 px in, so no more is added on the left.
+pub(crate) const FORM_INSET: (Pixels, Pixels) = (px(8.0), px(0.0));
 
 /// The composer's own gutter before its first character, so a placeholder
 /// sits exactly where typed words will start.
@@ -39,6 +47,7 @@ pub(crate) struct TextArea {
     id: ElementId,
     body: AnyElement,
     height: Pixels,
+    inset: (Pixels, Pixels),
     active: bool,
     placeholder: Option<(SharedString, Pixels)>,
     footer: Option<AnyElement>,
@@ -51,6 +60,7 @@ pub(crate) fn textarea(id: impl Into<ElementId>, body: AnyElement, height: Pixel
         id: id.into(),
         body,
         height,
+        inset: (PAD_TOP, PAD_LEFT),
         active: false,
         placeholder: None,
         footer: None,
@@ -59,6 +69,14 @@ pub(crate) fn textarea(id: impl Into<ElementId>, body: AnyElement, height: Pixel
 }
 
 impl TextArea {
+    /// How far the draft stands in from the well's top and left edges, as
+    /// `(top, left)`. The placeholder moves with it. [`FORM_INSET`] lines
+    /// the draft up with the fields around it.
+    pub(crate) fn inset(mut self, inset: (Pixels, Pixels)) -> Self {
+        self.inset = inset;
+        self
+    }
+
     /// Whether the draft has the keyboard: the edge takes the focus ring.
     pub(crate) fn active(mut self, active: bool) -> Self {
         self.active = active;
@@ -90,6 +108,7 @@ impl TextArea {
     }
 
     pub(crate) fn render(self, t: &Theme) -> Stateful<Div> {
+        let (pad_top, pad_left) = self.inset;
         let aside_w = self
             .aside
             .as_ref()
@@ -113,8 +132,8 @@ impl TextArea {
                     .flex()
                     .flex_1()
                     .min_h_0()
-                    .pt(PAD_TOP)
-                    .pl(PAD_LEFT)
+                    .pt(pad_top)
+                    .pl(pad_left)
                     .children(self.aside.map(|(column, width)| {
                         div()
                             .flex_none()
@@ -141,8 +160,8 @@ impl TextArea {
             .children(self.placeholder.map(|(text, size)| {
                 div()
                     .absolute()
-                    .top(PAD_TOP)
-                    .left(PAD_LEFT + aside_w + COMPOSER_GUTTER)
+                    .top(pad_top)
+                    .left(pad_left + aside_w + COMPOSER_GUTTER)
                     .prose()
                     .text_size(size)
                     .line_height(relative(1.55))

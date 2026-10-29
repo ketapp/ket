@@ -241,6 +241,73 @@ pub fn discover_root(path: &Path) -> Result<PathBuf> {
     Ok(PathBuf::from(trimmed))
 }
 
+/// Turns what a person typed into a name git will accept for a branch.
+///
+/// Spaces become dashes, so `new worktree bug` is the branch
+/// `new-worktree-bug` rather than a refusal quoting `check-ref-format`.
+/// Everything else git forbids — control characters, `~ ^ : ? * [ \\`,
+/// `..`, `@{`, a component starting with a dot or ending in `.lock`, empty
+/// or doubled slashes, a leading dash — is dropped or folded away too. The result is empty when nothing usable was typed; a caller treats
+/// that like a blank name.
+pub fn branch_name_from(typed: &str) -> String {
+    let mut out = String::with_capacity(typed.len());
+    for ch in typed.chars() {
+        let keep = match ch {
+            '~' | '^' | ':' | '?' | '*' | '[' | '\\' => false,
+            c if c.is_control() || c.is_whitespace() => false,
+            _ => true,
+        };
+        if keep {
+            out.push(ch);
+        } else if !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    // Sequences git reads as syntax rather than as a name. Each may reappear
+    // once a neighbour is removed, so loop until nothing changes.
+    loop {
+        let folded = out
+            .replace("..", ".")
+            .replace("--", "-")
+            .replace("@{", "@-")
+            .replace("//", "/");
+        if folded == out {
+            break;
+        }
+        out = folded;
+    }
+    let out = out
+        .split('/')
+        .map(|component| {
+            let mut c = component.trim_matches('-');
+            while let Some(rest) = c.strip_prefix('.') {
+                c = rest.trim_start_matches('-');
+            }
+            while let Some(rest) = c.strip_suffix(".lock").or_else(|| c.strip_suffix('.')) {
+                c = rest.trim_end_matches('-');
+            }
+            c
+        })
+        .filter(|component| !component.is_empty())
+        .collect::<Vec<_>>()
+        .join("/");
+    if out == "@" { String::new() } else { out }
+}
+
+/// Makes `path` a new repository whose first branch will be `branch`.
+///
+/// `git init`, then `HEAD` pointed at `branch` — rather than `init -b`, which
+/// git before 2.28 does not know. The repository has no commits until
+/// [`Git::first_commit`]; until then the branch does not exist either.
+pub fn init(path: &Path, branch: &str) -> Result<()> {
+    run_in(path, &["init"])?;
+    run_in(
+        path,
+        &["symbolic-ref", "HEAD", &format!("refs/heads/{branch}")],
+    )?;
+    Ok(())
+}
+
 /// Operations against one repository.
 #[derive(Debug, Clone)]
 pub struct Git {
@@ -261,6 +328,32 @@ impl Git {
     /// Resolves a revision to a full object id.
     pub fn rev_parse(&self, rev: &str) -> Result<String> {
         Ok(run_in(&self.root, &["rev-parse", rev])?.trim().to_owned())
+    }
+
+    /// Whether the repository has a commit at all — a new one's `HEAD`
+    /// names a branch that does not exist yet.
+    pub fn has_commits(&self) -> bool {
+        self.rev_parse("HEAD").is_ok()
+    }
+
+    /// Commits everything in the working tree as the repository's first
+    /// commit, on the branch `HEAD` names: what is there, ignored files
+    /// aside, or an empty commit when nothing is. Fails with git's own
+    /// message when git does not know who is committing.
+    pub fn first_commit(&self) -> Result<()> {
+        run_in(&self.root, &["add", "-A"])?;
+        run_in(
+            &self.root,
+            &["commit", "--allow-empty", "-m", "Initial commit"],
+        )?;
+        Ok(())
+    }
+
+    /// Creates local branch `name` at `from`, leaving what is checked out
+    /// alone.
+    pub fn create_branch(&self, name: &str, from: &str) -> Result<()> {
+        run_in(&self.root, &["branch", name, from])?;
+        Ok(())
     }
 
     /// Whether a local branch exists.
@@ -1266,6 +1359,30 @@ fn parse_worktree_porcelain(text: &str) -> Vec<GitWorktree> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_typed_name_becomes_a_branch_git_accepts() {
+        use super::branch_name_from;
+        assert_eq!(branch_name_from("new worktree bug"), "new-worktree-bug");
+        assert_eq!(branch_name_from("  fix  the   thing "), "fix-the-thing");
+        assert_eq!(branch_name_from("feature/login"), "feature/login");
+        assert_eq!(branch_name_from("Feature/Login Page"), "Feature/Login-Page");
+        assert_eq!(branch_name_from("a..b"), "a.b");
+        assert_eq!(branch_name_from("a...b"), "a.b");
+        assert_eq!(branch_name_from("a - b"), "a-b");
+        assert_eq!(branch_name_from("what?*[~^:"), "what");
+        assert_eq!(branch_name_from(".hidden/.lock"), "hidden/lock");
+        assert_eq!(branch_name_from(".lock"), "lock");
+        assert_eq!(branch_name_from("..."), "");
+        assert_eq!(branch_name_from("x.lock"), "x");
+        assert_eq!(branch_name_from("x.lock.lock."), "x");
+        assert_eq!(branch_name_from("a//b/"), "a/b");
+        assert_eq!(branch_name_from("-lead"), "lead");
+        assert_eq!(branch_name_from("ref@{1}"), "ref@-1}");
+        assert_eq!(branch_name_from("@"), "");
+        assert_eq!(branch_name_from("   "), "");
+        assert_eq!(branch_name_from("tab\there"), "tab-here");
+    }
+
     use super::*;
 
     const SAMPLE: &str = "\

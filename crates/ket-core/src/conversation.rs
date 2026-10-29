@@ -36,6 +36,9 @@ const FIRST_TURNS: usize = 200;
 /// Longest text one turn carries; the rest is cut with an ellipsis.
 const TURN_TEXT_MAX: usize = 8_000;
 
+/// What the chat says where Claude Code backgrounded the session.
+pub const BACKGROUNDED: &str = "Claude Code backgrounded this session.";
+
 /// Who a turn is from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TurnKind {
@@ -229,7 +232,7 @@ impl Transcript {
 
 /// Whether `session` looks like an OpenCode session id — `ses_` and letters
 /// and digits. Checked before it goes into a statement.
-fn opencode_id(session: &str) -> bool {
+pub(crate) fn opencode_id(session: &str) -> bool {
     session.len() > 4
         && session.starts_with("ses_")
         && session
@@ -247,7 +250,135 @@ const OPENCODE_FIRST_MESSAGES: usize = 400;
 /// capping how far back it could start, so this is that cap.
 const INCREMENTAL_OPENCODE_ROWS: u64 = 2_000;
 
-/// Reads OpenCode session `session` from cursor `after`.
+/// Reads OpenCode session `session` from cursor `after`: from OpenCode 2's
+/// `session_message`, or OpenCode 1's `message` and `part` in a database
+/// that has not been moved on yet. See [`read_opencode_2`] and
+/// [`read_opencode_1`].
+fn read_opencode(database: &Path, session: &str, after: u64) -> Result<Read_> {
+    match read_opencode_2(database, session, after) {
+        Err(KetError::Agent { why, .. }) if why.contains("no such table: session_message") => {
+            read_opencode_1(database, session, after)
+        }
+        read => read,
+    }
+}
+
+/// The lowest cursor an OpenCode 1 read hands out — a creation time in
+/// milliseconds, times 1000 — and far above any OpenCode 2 `seq`. A phone
+/// still holding one after OpenCode moved its database on starts over.
+const OPENCODE_1_CURSORS: u64 = 1 << 40;
+
+/// Reads OpenCode 2 session `session` from cursor `after`.
+///
+/// Through the `sqlite3` binary, one read-only statement naming columns of
+/// `session_message` only — the way [`crate::sessions::OpencodeSessions`]
+/// reads the same database, which also holds OpenCode's credentials.
+///
+/// Each row is one message: `user`, `assistant` with its text and tool calls
+/// in `content`, or OpenCode's own bookkeeping (`idle`, `synthetic`,
+/// `compaction`), which says nothing here. The cursor is the next message's
+/// `seq`, which only ever grows within a session. As with OpenCode 1, the
+/// read stops at an assistant message still streaming when it is the last.
+fn read_opencode_2(database: &Path, session: &str, after: u64) -> Result<Read_> {
+    let fresh = after == 0 || after >= OPENCODE_1_CURSORS;
+    let from = match fresh {
+        true => format!(
+            "COALESCE((SELECT seq FROM session_message WHERE session_id = '{session}' \
+             ORDER BY seq DESC LIMIT 1 OFFSET {}), 0)",
+            OPENCODE_FIRST_MESSAGES - 1
+        ),
+        false => after.to_string(),
+    };
+    let output = std::process::Command::new("sqlite3")
+        .arg("-readonly")
+        .arg("-json")
+        .arg(database)
+        .arg(format!(
+            "SELECT seq, type, data FROM session_message \
+             WHERE session_id = '{session}' AND seq >= {from} ORDER BY seq {};",
+            if fresh {
+                String::new()
+            } else {
+                format!("LIMIT {INCREMENTAL_OPENCODE_ROWS}")
+            }
+        ))
+        .output()
+        .map_err(|e| KetError::io(database, e))?;
+    if !output.status.success() {
+        return Err(KetError::Agent {
+            agent: "opencode".to_owned(),
+            why: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        });
+    }
+    // No rows prints nothing at all rather than `[]`.
+    let rows: Vec<serde_json::Value> = match output.stdout.iter().all(u8::is_ascii_whitespace) {
+        true => Vec::new(),
+        false => serde_json::from_slice(&output.stdout).map_err(|e| KetError::Agent {
+            agent: "opencode".to_owned(),
+            why: e.to_string(),
+        })?,
+    };
+
+    let mut next = if fresh { 0 } else { after };
+    let mut turns = Vec::new();
+    let count = rows.len();
+    for (index, row) in rows.iter().enumerate() {
+        let Some(seq) = row.get("seq").and_then(serde_json::Value::as_u64) else {
+            continue;
+        };
+        let kind = row.get("type").and_then(|t| t.as_str()).unwrap_or_default();
+        let data = row
+            .get("data")
+            .and_then(|d| d.as_str())
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok())
+            .unwrap_or_default();
+        let finished = kind != "assistant"
+            || data
+                .get("time")
+                .and_then(|t| t.get("completed"))
+                .is_some_and(|c| !c.is_null());
+        if index + 1 == count && !finished {
+            break;
+        }
+        match kind {
+            "user" => {
+                if let Some(text) = data.get("text").and_then(|t| t.as_str()) {
+                    push_text(&mut turns, TurnKind::User, text);
+                }
+            }
+            "assistant" => {
+                for part in data
+                    .get("content")
+                    .and_then(|c| c.as_array())
+                    .into_iter()
+                    .flatten()
+                {
+                    match part.get("type").and_then(|t| t.as_str()) {
+                        Some("text") => {
+                            if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
+                                push_text(&mut turns, TurnKind::Assistant, text);
+                            }
+                        }
+                        Some("tool") => push_opencode_tool(
+                            part.get("name").and_then(|t| t.as_str()).unwrap_or("Tool"),
+                            part.get("state").and_then(|s| s.get("input")),
+                            &mut turns,
+                        ),
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+        next = seq + 1;
+    }
+    if fresh && turns.len() > FIRST_TURNS {
+        turns.drain(..turns.len() - FIRST_TURNS);
+    }
+    Ok(Read_ { turns, next, fresh })
+}
+
+/// Reads OpenCode 1 session `session` from cursor `after`.
 ///
 /// Through the `sqlite3` binary, one read-only statement naming columns of
 /// `message` and `part` only — the way [`crate::sessions::OpencodeSessions`]
@@ -263,7 +394,7 @@ const INCREMENTAL_OPENCODE_ROWS: u64 = 2_000;
 /// its words are written — so a turn is never sent half-said and then again.
 /// A message with any after it is finished whatever it says: OpenCode works
 /// one step at a time, and a step it abandoned may never be marked complete.
-fn read_opencode(database: &Path, session: &str, after: u64) -> Result<Read_> {
+fn read_opencode_1(database: &Path, session: &str, after: u64) -> Result<Read_> {
     let fresh = after == 0;
     let (since, skip) = (after / 1000, after % 1000);
     let from = match fresh {
@@ -507,6 +638,12 @@ fn turns_of(record: &serde_json::Value, turns: &mut Vec<Turn>) {
         Some("user") => TurnKind::User,
         Some("assistant") => TurnKind::Assistant,
         Some("attachment") => return absorbed(record, turns),
+        // Claude Code backgrounded the session: the rest of its turn, and
+        // everything after, is written under a new session id.
+        Some("continued-in") => {
+            push_text(turns, TurnKind::Assistant, BACKGROUNDED);
+            return;
+        }
         // What a local command printed, and sometimes the command itself,
         // filed as the harness's own note: read as the person's, where
         // `push_text` keeps only those two.
@@ -829,21 +966,11 @@ fn opencode_turns_of(
                     push_text(turns, kind, text);
                 }
             }
-            Some("tool") if kind == TurnKind::Assistant => {
-                let name = part.get("tool").and_then(|t| t.as_str()).unwrap_or("Tool");
-                let input = part.get("state").and_then(|s| s.get("input"));
-                let (name, input) = opencode_tool(name, input);
-                if let Some(said) = spoken(name, input.as_ref()) {
-                    push_text(turns, TurnKind::Assistant, &said);
-                } else {
-                    turns.push(Turn {
-                        kind: TurnKind::Tool,
-                        text: tool_line(name, input.as_ref()),
-                        tool: name.to_owned(),
-                        images: 0,
-                    });
-                }
-            }
+            Some("tool") if kind == TurnKind::Assistant => push_opencode_tool(
+                part.get("tool").and_then(|t| t.as_str()).unwrap_or("Tool"),
+                part.get("state").and_then(|s| s.get("input")),
+                turns,
+            ),
             Some("subtask") => {
                 let input = serde_json::json!({ "description": part.get("description") });
                 turns.push(Turn {
@@ -858,6 +985,22 @@ fn opencode_turns_of(
     }
 }
 
+/// OpenCode tool call `name` with `input`: what it said, for a tool that
+/// speaks, or its one line.
+fn push_opencode_tool(name: &str, input: Option<&serde_json::Value>, turns: &mut Vec<Turn>) {
+    let (name, input) = opencode_tool(name, input);
+    if let Some(said) = spoken(name, input.as_ref()) {
+        push_text(turns, TurnKind::Assistant, &said);
+    } else {
+        turns.push(Turn {
+            kind: TurnKind::Tool,
+            text: tool_line(name, input.as_ref()),
+            tool: name.to_owned(),
+            images: 0,
+        });
+    }
+}
+
 /// An OpenCode tool by Claude's name, with its input keyed the way
 /// [`tool_line`] and [`spoken`] read Claude's. The plugin ket installs in
 /// OpenCode maps the same names for its hook reports — see `OPENCODE_PLUGIN`
@@ -867,7 +1010,8 @@ fn opencode_tool<'a>(
     input: Option<&serde_json::Value>,
 ) -> (&'a str, Option<serde_json::Value>) {
     let claude = match name {
-        "bash" => "Bash",
+        // OpenCode 2 calls it `shell`; a subagent, `subagent`.
+        "bash" | "shell" => "Bash",
         "read" => "Read",
         "edit" | "multiedit" | "patch" => "Edit",
         "write" => "Write",
@@ -876,15 +1020,22 @@ fn opencode_tool<'a>(
         "list" => "LS",
         "webfetch" => "WebFetch",
         "websearch" => "WebSearch",
-        "task" => "Task",
+        "task" | "subagent" => "Task",
+        "skill" => "Skill",
         "todowrite" => "TodoWrite",
         "question" => "AskUserQuestion",
         other => other,
     };
     let mut input = input.cloned();
+    // A file's path: `filePath` in OpenCode 1, `path` in OpenCode 2 — where
+    // Grep's `path` is a folder to search, as Claude's is.
+    let file = matches!(claude, "Read" | "Edit" | "Write");
     if let Some(object) = input.as_mut().and_then(|i| i.as_object_mut())
         && !object.contains_key("file_path")
-        && let Some(path) = object.get("filePath").cloned()
+        && let Some(path) = object
+            .get("filePath")
+            .or_else(|| object.get("path").filter(|_| file))
+            .cloned()
     {
         object.insert("file_path".to_owned(), path);
     }
@@ -1027,7 +1178,7 @@ fn slash_command(text: &str) -> Option<String> {
 }
 
 /// What sits between `<tag>` and `</tag>` in `text`.
-fn tagged<'a>(text: &'a str, tag: &str) -> Option<&'a str> {
+pub(crate) fn tagged<'a>(text: &'a str, tag: &str) -> Option<&'a str> {
     let open = format!("<{tag}>");
     let close = format!("</{tag}>");
     let start = text.find(&open)? + open.len();
@@ -1126,6 +1277,113 @@ fn tool_line(name: &str, input: Option<&serde_json::Value>) -> String {
     said.unwrap_or_else(|| name.to_owned())
 }
 
+/// What a Claude session last did, read off the end of its transcript —
+/// see [`claude_last_step`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LastStep {
+    /// The newest tool call, as the chat names one: `$ npm test`, `Edited
+    /// TabBar.tsx`.
+    pub doing: String,
+    /// The same call as a request waiting on a person: `Wants to run npm
+    /// test`, `Has a question`.
+    pub asking: String,
+    /// Whether its result has come back.
+    pub answered: bool,
+}
+
+/// How much of a transcript's end [`claude_last_step`] reads.
+const LAST_STEP_BYTES: u64 = 256 * 1024;
+
+/// The newest tool call at the end of Claude transcript `path`, and whether
+/// its result has come back — what a list says a session is doing, or
+/// waiting for. A subagent's calls are its own, not the session's, and are
+/// passed over. `None` when the end holds no call.
+pub fn claude_last_step(path: &Path) -> Option<LastStep> {
+    let mut file = std::fs::File::open(path).ok()?;
+    let length = file.metadata().ok()?.len();
+    let start = length.saturating_sub(LAST_STEP_BYTES);
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).ok()?;
+    let mut last: Option<(String, String, Option<serde_json::Value>)> = None;
+    let mut answered = false;
+    for line in bytes.split(|&b| b == b'\n') {
+        let Ok(record) = serde_json::from_slice::<serde_json::Value>(line) else {
+            continue;
+        };
+        if record
+            .get("isSidechain")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+        {
+            continue;
+        }
+        let kind = record.get("type").and_then(|t| t.as_str());
+        let Some(content) = record
+            .get("message")
+            .and_then(|m| m.get("content"))
+            .and_then(|c| c.as_array())
+        else {
+            continue;
+        };
+        for part in content {
+            match (kind, part.get("type").and_then(|t| t.as_str())) {
+                (Some("assistant"), Some("tool_use")) => {
+                    let id = part.get("id").and_then(|i| i.as_str()).unwrap_or_default();
+                    let name = part.get("name").and_then(|n| n.as_str()).unwrap_or("Tool");
+                    last = Some((id.to_owned(), name.to_owned(), part.get("input").cloned()));
+                    answered = false;
+                }
+                (Some("user"), Some("tool_result")) => {
+                    let id = part.get("tool_use_id").and_then(|i| i.as_str());
+                    if last
+                        .as_ref()
+                        .is_some_and(|(asked, _, _)| Some(asked.as_str()) == id)
+                    {
+                        answered = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let (_, name, input) = last?;
+    let field = |key: &str| {
+        input
+            .as_ref()
+            .and_then(|i| i.get(key))
+            .and_then(|v| v.as_str())
+            .map(|s| s.lines().next().unwrap_or(s).trim().to_owned())
+            .filter(|s| !s.is_empty())
+    };
+    let leaf =
+        |key: &str| field(key).map(|path| path.rsplit('/').next().unwrap_or(&path).to_owned());
+    let asking = match name.as_str() {
+        "AskUserQuestion" => "Has a question".to_owned(),
+        "ExitPlanMode" => "Has a plan ready".to_owned(),
+        "Bash" => field("command").map_or_else(
+            || "Wants to run a command".to_owned(),
+            |c| format!("Wants to run {c}"),
+        ),
+        "Edit" | "MultiEdit" | "Write" | "NotebookEdit" => leaf("file_path")
+            .or_else(|| leaf("notebook_path"))
+            .map_or_else(
+                || "Wants to edit a file".to_owned(),
+                |f| format!("Wants to edit {f}"),
+            ),
+        "WebFetch" => field("url").map_or_else(
+            || "Wants to fetch a page".to_owned(),
+            |u| format!("Wants to fetch {u}"),
+        ),
+        other => format!("Wants to use {other}"),
+    };
+    Some(LastStep {
+        doing: tool_line(&name, input.as_ref()),
+        asking,
+        answered,
+    })
+}
+
 /// What a tool says to the person, when the tool *is* the message: the
 /// questions it asks with their options, or the plan it wants approved. The
 /// agent stops on these and waits, so a one-line summary left the phone
@@ -1183,5 +1441,222 @@ mod local_agent_tests {
         assert!(Transcript::readable("opencode:ollama/qwen3-coder:30b"));
         assert!(Transcript::readable("opencode"));
         assert!(!Transcript::readable("ollama:qwen3:0.6b"));
+    }
+}
+
+#[cfg(test)]
+mod last_step_tests {
+    use super::*;
+
+    fn transcript(name: &str, records: &[serde_json::Value]) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("ket-last-step-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("session.jsonl");
+        let text: String = records.iter().map(|r| format!("{r}\n")).collect();
+        std::fs::write(&path, text).unwrap();
+        path
+    }
+
+    fn call(id: &str, name: &str, input: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({"type":"assistant","message":{"content":[
+            {"type":"tool_use","id":id,"name":name,"input":input}]}})
+    }
+
+    fn result(id: &str) -> serde_json::Value {
+        serde_json::json!({"type":"user","message":{"content":[
+            {"type":"tool_result","tool_use_id":id,"content":"done"}]}})
+    }
+
+    #[test]
+    fn the_last_step_is_the_newest_call_and_whether_it_was_answered() {
+        use std::io::Write;
+
+        let path = transcript(
+            "bash",
+            &[
+                call(
+                    "t1",
+                    "Read",
+                    serde_json::json!({"file_path":"/a/b/main.rs"}),
+                ),
+                result("t1"),
+                call(
+                    "t2",
+                    "Bash",
+                    serde_json::json!({"command":"npm test\n# second line"}),
+                ),
+            ],
+        );
+        let step = claude_last_step(&path).unwrap();
+        assert_eq!(step.doing, "$ npm test");
+        assert_eq!(step.asking, "Wants to run npm test");
+        assert!(!step.answered);
+        // Its result comes back: answered, the same step.
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        writeln!(file, "{}", result("t2")).unwrap();
+        let step = claude_last_step(&path).unwrap();
+        assert_eq!(step.doing, "$ npm test");
+        assert!(step.answered);
+    }
+
+    #[test]
+    fn a_question_and_an_edit_are_said_as_what_they_want() {
+        let path = transcript(
+            "ask",
+            &[call(
+                "t1",
+                "AskUserQuestion",
+                serde_json::json!({"questions":[]}),
+            )],
+        );
+        assert_eq!(claude_last_step(&path).unwrap().asking, "Has a question");
+        let path = transcript(
+            "edit",
+            &[call(
+                "t2",
+                "Edit",
+                serde_json::json!({"file_path":"/src/ui/TabBar.tsx"}),
+            )],
+        );
+        let step = claude_last_step(&path).unwrap();
+        assert_eq!(step.doing, "Edited TabBar.tsx");
+        assert_eq!(step.asking, "Wants to edit TabBar.tsx");
+        let path = transcript("plan", &[call("t3", "ExitPlanMode", serde_json::json!({}))]);
+        assert_eq!(claude_last_step(&path).unwrap().asking, "Has a plan ready");
+        let path = transcript(
+            "other",
+            &[call("t4", "WebSearch", serde_json::json!({"query":"x"}))],
+        );
+        assert_eq!(
+            claude_last_step(&path).unwrap().asking,
+            "Wants to use WebSearch"
+        );
+    }
+
+    #[test]
+    fn a_subagents_calls_are_not_the_sessions_and_a_transcript_without_calls_has_no_step() {
+        let mut side = call("s1", "Bash", serde_json::json!({"command":"rm -rf build"}));
+        side["isSidechain"] = serde_json::json!(true);
+        let path = transcript(
+            "side",
+            &[
+                call("t1", "Grep", serde_json::json!({"pattern":"TODO"})),
+                side,
+            ],
+        );
+        assert_eq!(claude_last_step(&path).unwrap().doing, "Searched for TODO");
+        let path = transcript(
+            "none",
+            &[serde_json::json!({"type":"user","message":{"content":"hello"}})],
+        );
+        assert_eq!(claude_last_step(&path), None);
+        assert_eq!(claude_last_step(Path::new("/nonexistent/x.jsonl")), None);
+    }
+}
+
+#[cfg(test)]
+mod opencode_tests {
+    use super::*;
+
+    #[test]
+    fn opencode_2s_tools_read_as_claudes() {
+        let (name, input) = opencode_tool("shell", Some(&serde_json::json!({"command": "ls"})));
+        assert_eq!(name, "Bash");
+        assert_eq!(input.unwrap()["command"], "ls");
+        assert_eq!(opencode_tool("subagent", None).0, "Task");
+        assert_eq!(opencode_tool("skill", None).0, "Skill");
+        let (name, input) = opencode_tool("read", Some(&serde_json::json!({"path": "/a/b.rs"})));
+        assert_eq!(name, "Read");
+        assert_eq!(input.unwrap()["file_path"], "/a/b.rs");
+        // Grep's path is a folder to search, as Claude's is: not a file.
+        let (_, input) = opencode_tool(
+            "grep",
+            Some(&serde_json::json!({"pattern": "x", "path": "/a"})),
+        );
+        assert!(input.unwrap().get("file_path").is_none());
+        // OpenCode 1's own key still works.
+        let (_, input) = opencode_tool("edit", Some(&serde_json::json!({"filePath": "/c.rs"})));
+        assert_eq!(input.unwrap()["file_path"], "/c.rs");
+    }
+
+    /// A throwaway OpenCode 2 database holding one session's messages, each
+    /// `(seq, type, data)`.
+    fn database(name: &str, rows: &[(u64, &str, serde_json::Value)]) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("ket-opencode-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("opencode.db");
+        let _ = std::fs::remove_file(&path);
+        let mut sql = String::from(
+            "CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, \
+             type TEXT NOT NULL, seq INTEGER NOT NULL, time_created INTEGER NOT NULL, \
+             time_updated INTEGER NOT NULL, data TEXT NOT NULL);",
+        );
+        for (seq, kind, data) in rows {
+            let data = data.to_string().replace('\'', "''");
+            sql.push_str(&format!(
+                "INSERT INTO session_message VALUES ('m{seq}', 'ses_one', '{kind}', {seq}, {seq}, {seq}, '{data}');"
+            ));
+        }
+        let status = std::process::Command::new("sqlite3")
+            .arg(&path)
+            .arg(sql)
+            .status()
+            .expect("sqlite3");
+        assert!(status.success());
+        path
+    }
+
+    #[test]
+    fn an_opencode_2_session_is_read_by_seq_and_waits_for_a_step_still_streaming() {
+        let db = database(
+            "read",
+            &[
+                (
+                    1,
+                    "user",
+                    serde_json::json!({"time": {"created": 1}, "text": "hello"}),
+                ),
+                (
+                    2,
+                    "assistant",
+                    serde_json::json!({"time": {"created": 2, "completed": 2}, "content": [
+                        {"type": "reasoning", "text": "hmm"},
+                        {"type": "tool", "name": "shell", "state": {"input": {"command": "ls"}}},
+                        {"type": "text", "text": "done"}
+                    ]}),
+                ),
+                (
+                    3,
+                    "idle",
+                    serde_json::json!({"time": {"created": 3}, "outcome": "succeeded"}),
+                ),
+                (
+                    4,
+                    "assistant",
+                    serde_json::json!({"time": {"created": 4}, "content": [{"type": "text", "text": "still going"}]}),
+                ),
+            ],
+        );
+        let read = read_opencode(&db, "ses_one", 0).unwrap();
+        assert!(read.fresh);
+        let said: Vec<(TurnKind, String)> = read
+            .turns
+            .iter()
+            .map(|turn| (turn.kind, turn.text.clone()))
+            .collect();
+        assert_eq!(said[0], (TurnKind::User, "hello".to_owned()));
+        assert_eq!(said[1].0, TurnKind::Tool);
+        assert!(said[1].1.contains("ls"), "{}", said[1].1);
+        assert_eq!(said[2], (TurnKind::Assistant, "done".to_owned()));
+        assert_eq!(said.len(), 3, "the step still streaming waits");
+        assert_eq!(read.next, 4, "read again from the unfinished step");
+        // Nothing new: the unfinished step still holds the cursor.
+        let again = read_opencode(&db, "ses_one", read.next).unwrap();
+        assert!(!again.fresh);
+        assert!(again.turns.is_empty());
+        assert_eq!(again.next, 4);
     }
 }

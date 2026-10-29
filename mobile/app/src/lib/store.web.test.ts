@@ -44,8 +44,8 @@ describe('web storage', () => {
     expect(await store.getDesktop()).toBe(host.id);
     await store.saveCollapsed(host.id, ['project']);
     expect(await store.getCollapsed(host.id)).toEqual(['project']);
-    await store.saveFit(true);
-    expect(await store.getFit()).toBe(true);
+    await store.saveNotify({ on: true, waiting: true, finished: false, checks: true });
+    expect(await store.getNotify()).toEqual({ on: true, waiting: true, finished: false, checks: true });
 
     const lock: store.LockConfig = { salt: 's', hash: 'h', afterMs: 1, failures: 0, waitUntil: 0 };
     await store.saveLock(lock);
@@ -65,7 +65,7 @@ describe('web storage', () => {
     expect(await store.getLastWork('missing')).toBeNull();
     expect(await store.getDesktop()).toBeNull();
     expect(await store.getCollapsed('missing')).toEqual([]);
-    expect(await store.getFit()).toBe(false);
+    expect(await store.getNotify()).toEqual(store.DEFAULT_NOTIFY);
     expect(await store.getLock()).toBeNull();
   });
 });

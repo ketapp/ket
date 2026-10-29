@@ -584,10 +584,6 @@ fn extras(snapshot: &ProviderSnapshot, now_ms: u64, t: &Theme) -> Option<AnyElem
     if snapshot.spend.is_empty() && snapshot.limited_at_ms.is_none() {
         return None;
     }
-    let unpriced = snapshot
-        .spend
-        .iter()
-        .any(|spend| spend.sessions > 0 && spend.cost_usd.is_none());
     Some(
         div()
             .flex()
@@ -606,9 +602,6 @@ fn extras(snapshot: &ProviderSnapshot, now_ms: u64, t: &Theme) -> Option<AnyElem
                     ))
             }))
             .children(snapshot.spend.iter().map(|spend| spend_row(spend, t)))
-            .when(unpriced, |extras| {
-                extras.child(note("— : cost is left off subscription traffic", t))
-            })
             .into_any_element(),
     )
 }

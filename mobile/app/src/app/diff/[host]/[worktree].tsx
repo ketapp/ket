@@ -301,7 +301,7 @@ export default function DiffScreen() {
                 <Prose style={styles.message} color={t.dim}>
                   The rest is too long to show here; see it on your Mac.
                 </Prose>
-              ) : null
+              ) : undefined
             }
           />
         )}

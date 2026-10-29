@@ -45,12 +45,14 @@ use private::Control;
 const APPLE_DEVELOPER_TEAM: &str = "59GAB85EFG";
 /// The SimulatorKit builds ket's private Swift calls are known to match,
 /// each with the Xcode that ships it. Every symbol `private` loads, with the
-/// same mangling, is in both (checked 09-29). A new Xcode is a new row, once
-/// it has been checked the same way.
-const SUPPORTED_SIMULATOR_KITS: &[(&str, &str)] = &[("1005.2", "27.0"), ("955.7", "26.6")];
+/// same mangling, is in each (checked 09-29; 27.1 on 10-28). A new Xcode is a
+/// new row, once it has been checked the same way.
+const SUPPORTED_SIMULATOR_KITS: &[(&str, &str)] =
+    &[("1005.3", "27.1"), ("1005.2", "27.0"), ("955.7", "26.6")];
 /// CoreSimulator is installed once per Mac — by the newest Xcode — not per
-/// Xcode, so it has a list of its own.
-const SUPPORTED_CORE_SIMULATORS: &[&str] = &["1171.7"];
+/// Xcode, so it has a list of its own. Every class and selector `private`
+/// uses is in each (1174.9.2 checked 10-28).
+const SUPPORTED_CORE_SIMULATORS: &[&str] = &["1174.9.2", "1171.7"];
 /// Where SimulatorKit sits inside an Xcode's Contents: Xcode 27 moved it to
 /// SharedFrameworks; Xcode 26 keeps it in the developer directory.
 const SIMULATOR_KITS: &[&str] = &[
@@ -870,8 +872,8 @@ fn discover() -> Result<Discovery, Problem> {
                 format!(
                     "SimulatorKit {kit}, CoreSimulator {core}; ket supports SimulatorKit {} \
                      with CoreSimulator {}",
-                    kits.join(" or "),
-                    SUPPORTED_CORE_SIMULATORS.join(" or "),
+                    either(&kits),
+                    either(SUPPORTED_CORE_SIMULATORS),
                 ),
             ));
         }
@@ -1077,13 +1079,21 @@ fn installed_xcode() -> Option<PathBuf> {
     found.pop()
 }
 
-/// "Xcode 27.0 or 26.6", from the table.
+/// "Xcode 27.1, 27.0 or 26.6", from the table.
 fn supported_xcodes() -> String {
     let versions: Vec<_> = SUPPORTED_SIMULATOR_KITS
         .iter()
         .map(|(_, xcode)| *xcode)
         .collect();
-    format!("Xcode {}", versions.join(" or "))
+    format!("Xcode {}", either(&versions))
+}
+
+/// "a, b or c".
+fn either(items: &[&str]) -> String {
+    match items.split_last() {
+        Some((last, rest)) if !rest.is_empty() => format!("{} or {last}", rest.join(", ")),
+        _ => items.join(""),
+    }
 }
 
 fn unsupported_xcode(developer_dir: &Path, detail: String) -> Problem {

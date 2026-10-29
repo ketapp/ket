@@ -186,6 +186,7 @@ impl Shell {
         if let Some(dialog) = self.quick_prompt.as_mut() {
             dialog.attachments.push(shot);
             dialog.source = Some(kind);
+            dialog.snippet_menu = None;
             dialog.error = None;
         }
     }
@@ -277,7 +278,7 @@ impl Shell {
         if self
             .quick_prompt
             .as_mut()
-            .is_none_or(|dialog| dialog.snippet_menu.take().is_some())
+            .is_none_or(|dialog| dialog.source.is_some() || dialog.snippet_menu.take().is_some())
         {
             return;
         }
@@ -1091,7 +1092,7 @@ impl Shell {
             .child(word("in"))
             .child(target_row)
             .child(div().mx(px(4.0)).child(divider()))
-            .child(snippet_row)
+            .when(dialog.source.is_none(), |footer| footer.child(snippet_row))
             .child(mic)
             .child(div().flex_grow())
             .child(send);
@@ -1147,7 +1148,9 @@ impl Shell {
                         .is_some()
                         .then(|| key("⌘S", "another screenshot")),
                 )
-                .child(key("⌘/", "snippets"))
+                .when(dialog.source.is_none(), |hints| {
+                    hints.child(key("⌘/", "snippets"))
+                })
                 .child(key("esc", "close"))
         };
 

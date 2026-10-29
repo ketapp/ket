@@ -141,6 +141,9 @@ pub(crate) struct DiffState {
     /// The lines picked, as the row a pick started on and the row it runs
     /// to: either way round.
     picked: Option<(usize, usize)>,
+    /// A line the finder asked to jump to before the diff had been read, or
+    /// before its rows were in the list: taken the first frame it can be.
+    pending_line: Option<u32>,
 }
 
 impl Default for DiffState {
@@ -159,6 +162,7 @@ impl Default for DiffState {
             reveal_draft: 0,
             cursor: None,
             picked: None,
+            pending_line: None,
         }
     }
 }
@@ -424,7 +428,12 @@ impl Shell {
                         state.read = Some(read);
                         state.error = None;
                     }
-                    Err(error) => state.error = Some(error.to_string().into()),
+                    Err(error) => {
+                        state.error = Some(error.to_string().into());
+                        // Nothing to land on, and a jump that landed on a
+                        // later tick's successful read would be a surprise.
+                        state.pending_line = None;
+                    }
                 }
                 cx.notify();
             });
@@ -752,6 +761,29 @@ impl Shell {
             });
         }
         cx.notify();
+    }
+
+    /// Scrolls the diff in front to line `line` of the file as it is now, for
+    /// `:N` in the file finder. Says whether a diff was in front to scroll.
+    ///
+    /// A diff draws only its hunks, so the line asked for is often not on it
+    /// at all; then the list lands on the first drawn line after it, or the
+    /// last line when it is past them all — the nearest change either way.
+    /// F7 picks up from the hunk landed in.
+    ///
+    /// A diff just opened may still be reading when Return is pressed; the
+    /// line is kept and the list goes there the first frame it has the rows.
+    pub(crate) fn jump_active_diff_to_line(&mut self, line: u32, cx: &mut Context<Self>) -> bool {
+        let Some(key) = self.active_diff() else {
+            return false;
+        };
+        let Some(state) = self.diffs.get_mut(&key) else {
+            return false;
+        };
+        state.pending_line = Some(line);
+        jump_to_pending_line(state);
+        cx.notify();
+        true
     }
 
     /// `trigger` with a tooltip saying `label`, shown while the pointer is
@@ -1111,8 +1143,40 @@ impl Shell {
                 state.reveal_draft = 3;
             }
         }
-        reveal_draft(state)
+        let jumped = jump_to_pending_line(state);
+        reveal_draft(state) || jumped
     }
+}
+
+/// Scrolls `state` to the line it was asked to jump to, once it has a diff
+/// and the row is in its list. Says whether it scrolled. The ask is kept
+/// while either is still to come and dropped once met, or when the diff
+/// has no lines to land on.
+fn jump_to_pending_line(state: &mut DiffState) -> bool {
+    let Some(line) = state.pending_line else {
+        return false;
+    };
+    let Some(read) = &state.read else {
+        return false;
+    };
+    let Some(row) = row_for_line(&read.rows, line) else {
+        state.pending_line = None;
+        return false;
+    };
+    let Some(item_ix) = state
+        .items
+        .iter()
+        .position(|item| *item == DiffItem::Row(row))
+    else {
+        return false;
+    };
+    state.pending_line = None;
+    state.cursor = read.hunks.iter().rposition(|&hunk| hunk < row);
+    state.list.scroll_to(ListOffset {
+        item_ix,
+        offset_in_item: px(0.0),
+    });
+    true
 }
 
 /// Puts `items` in place of `state`'s, splicing only what differs between
@@ -1561,5 +1625,158 @@ fn diff_row(
                         .child(StyledText::new(text.clone()).with_highlights(highlights)),
                 )
         }
+    }
+}
+
+/// The row to land on for line `line`, numbered as the file is now: the row
+/// with that number, else the first drawn after it, else the last drawn. A
+/// diff of a deleted file has no "now", so it counts by the old side instead.
+fn row_for_line(rows: &[DiffRow], line: u32) -> Option<usize> {
+    let numbered = |row: &DiffRow, new_side: bool| match row {
+        DiffRow::Line { new, old, .. } => {
+            if new_side {
+                *new
+            } else {
+                *old
+            }
+        }
+        DiffRow::Hunk(_) => None,
+    };
+    let new_side = rows.iter().any(|row| numbered(row, true).is_some());
+    let mut last = None;
+    for (ix, row) in rows.iter().enumerate() {
+        let Some(number) = numbered(row, new_side) else {
+            continue;
+        };
+        if number >= line {
+            return Some(ix);
+        }
+        last = Some(ix);
+    }
+    last
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn line(old: Option<u32>, new: Option<u32>) -> DiffRow {
+        let kind = match (old, new) {
+            (Some(_), Some(_)) => LineKind::Context,
+            (None, _) => LineKind::Added,
+            (_, None) => LineKind::Removed,
+        };
+        DiffRow::Line {
+            kind,
+            old,
+            new,
+            text: SharedString::default(),
+            spans: Vec::new(),
+        }
+    }
+
+    /// Two hunks: lines 3–5 (a line added as 5) and 40–42 (41 removed).
+    fn rows() -> Vec<DiffRow> {
+        vec![
+            DiffRow::Hunk("@@ -3,2 +3,3 @@".into()),
+            line(Some(3), Some(3)),
+            line(Some(4), Some(4)),
+            line(None, Some(5)),
+            DiffRow::Hunk("@@ -40,3 +41,2 @@".into()),
+            line(Some(40), Some(41)),
+            line(Some(41), None),
+            line(Some(42), Some(42)),
+        ]
+    }
+
+    #[test]
+    fn a_drawn_line_is_landed_on_by_its_new_number() {
+        // The new side is what the editor numbers by, so `:41` is row 5 —
+        // old 40 — not the removed line that was 41 before.
+        assert_eq!(row_for_line(&rows(), 41), Some(5));
+        assert_eq!(row_for_line(&rows(), 5), Some(3));
+    }
+
+    #[test]
+    fn a_line_between_hunks_lands_on_the_next_one() {
+        // 20 is not drawn: the nearest change after it is the second hunk's
+        // first line, not its header, so the header is not what you read.
+        assert_eq!(row_for_line(&rows(), 20), Some(5));
+        assert_eq!(row_for_line(&rows(), 1), Some(1));
+    }
+
+    #[test]
+    fn a_line_past_every_hunk_lands_on_the_last_drawn() {
+        assert_eq!(row_for_line(&rows(), 900), Some(7));
+        assert_eq!(row_for_line(&[], 1), None);
+        assert_eq!(row_for_line(&[DiffRow::Hunk("@@".into())], 1), None);
+    }
+
+    #[test]
+    fn a_jump_asked_for_before_the_read_waits_for_it() {
+        // Return on `:41` while the diff is still being read: nothing to
+        // land on yet, so the ask is kept, and met once the rows are in
+        // the list — where it also puts F7 in the hunk it landed in.
+        let mut state = DiffState {
+            pending_line: Some(41),
+            ..DiffState::default()
+        };
+        assert!(!jump_to_pending_line(&mut state));
+        assert_eq!(state.pending_line, Some(41));
+
+        let rows = rows();
+        state.read = Some(DiffRead {
+            kind: Some(ChangeKind::Modified),
+            binary: false,
+            truncated: false,
+            added: 1,
+            removed: 1,
+            hunks: vec![0, 4],
+            rows: Arc::new(rows.clone()),
+        });
+        assert!(
+            !jump_to_pending_line(&mut state),
+            "the rows are not listed yet"
+        );
+        assert_eq!(state.pending_line, Some(41));
+
+        state.items = (0..rows.len()).map(DiffItem::Row).collect();
+        state.list.splice(0..0, rows.len());
+        assert!(jump_to_pending_line(&mut state));
+        assert_eq!(state.pending_line, None);
+        assert_eq!(state.cursor, Some(1));
+        assert_eq!(state.list.logical_scroll_top().item_ix, 5);
+    }
+
+    #[test]
+    fn a_jump_with_nothing_to_land_on_is_dropped() {
+        let mut state = DiffState {
+            pending_line: Some(7),
+            ..DiffState::default()
+        };
+        state.read = Some(DiffRead {
+            kind: None,
+            binary: false,
+            truncated: false,
+            added: 0,
+            removed: 0,
+            hunks: Vec::new(),
+            rows: Arc::new(Vec::new()),
+        });
+        assert!(!jump_to_pending_line(&mut state));
+        assert_eq!(state.pending_line, None);
+    }
+
+    #[test]
+    fn a_deleted_file_counts_by_the_old_side() {
+        // Every line of a deleted file is removed, so nothing has a new
+        // number: the old numbers are the only ones there are.
+        let rows = vec![
+            DiffRow::Hunk("@@ -1,3 +0,0 @@".into()),
+            line(Some(1), None),
+            line(Some(2), None),
+            line(Some(3), None),
+        ];
+        assert_eq!(row_for_line(&rows, 2), Some(2));
     }
 }

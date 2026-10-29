@@ -92,6 +92,15 @@ static DELETES: Mutex<Fixes> = Mutex::new(Fixes {
     finished: VecDeque::new(),
 });
 
+/// Wakes of asleep tabs, kept the same way as [`DELETES`]: a phone whose
+/// connection dropped while the window was waking asks again under the same
+/// key, and is told the terminal rather than waking a second time.
+static WAKES: Mutex<Fixes> = Mutex::new(Fixes {
+    asks: BTreeMap::new(),
+    going: BTreeSet::new(),
+    finished: VecDeque::new(),
+});
+
 /// A device, and the idempotency key it asked under.
 type FixAsk = (Vec<u8>, String);
 
@@ -224,6 +233,11 @@ pub(super) fn handle(
             | Payload::AddressComments(_)
             | Payload::PinWorktree(_)
             | Payload::DeleteWorktree(_)
+            | Payload::OpenAgentSession(_)
+            | Payload::StartSession(_)
+            | Payload::WakeTerminal(_)
+            | Payload::SetMode(_)
+            | Payload::SetModel(_)
     );
     let key = request.idempotency_key.as_str();
     if mutation {
@@ -288,6 +302,7 @@ pub(super) fn handle(
             | Payload::ReopenPullRequest(_)
             | Payload::AddressComments(_)
             | Payload::DeleteWorktree(_)
+            | Payload::WakeTerminal(_)
     );
     if mutation && succeeded && kept_here {
         lock(&phone.phones.devices)
@@ -310,6 +325,8 @@ fn expensive_cost(payload: &Payload) -> Option<u32> {
         Payload::GetConversation(_) => Some(1),
         // Typed into an agent, as a message is: cheap here, but not free.
         Payload::SendReview(_) => Some(1),
+        // Keys pressed through agent view's screens, then a message.
+        Payload::OpenAgentSession(_) => Some(2),
         // `git status` in the worktree and the backlog read from disk.
         Payload::GetPullRequestDraft(_) => Some(3),
         // Each reads the failed jobs' logs from GitHub on the desktop.
@@ -327,6 +344,12 @@ fn expensive_cost(payload: &Payload) -> Option<u32> {
         | Payload::AddressComments(_) => Some(10),
         // A delete walks the checkout and asks git twice.
         Payload::DeleteWorktree(_) => Some(10),
+        // Resumes an agent on the desktop.
+        Payload::WakeTerminal(_) => Some(5),
+        // Keys pressed into an agent, each waited on.
+        Payload::SetMode(_) => Some(2),
+        // Commands typed into an agent, each confirmed.
+        Payload::SetModel(_) => Some(2),
         // One write to ket's store.
         Payload::PinWorktree(_) => Some(1),
         _ => None,
@@ -356,6 +379,10 @@ fn payload_name(payload: &Payload) -> &'static str {
         Payload::AddressComments(_) => "address_comments",
         Payload::PinWorktree(_) => "pin_worktree",
         Payload::DeleteWorktree(_) => "delete_worktree",
+        Payload::WakeTerminal(_) => "wake_terminal",
+        Payload::SetMode(_) => "set_mode",
+        Payload::SetModel(_) => "set_model",
+        Payload::OpenAgentSession(_) => "open_agent_session",
         _ => "other",
     }
 }
@@ -392,6 +419,10 @@ fn apply(
         // worktree's agent, which a controller may type itself.
         Payload::Input(_)
         | Payload::SendFiles(_)
+        | Payload::OpenAgentSession(_)
+        | Payload::WakeTerminal(_)
+        | Payload::SetMode(_)
+        | Payload::SetModel(_)
         | Payload::Resize(_)
         | Payload::Lease(_)
         | Payload::Signal(_)
@@ -1231,6 +1262,7 @@ fn apply(
                 }
             }
         }
+        Payload::WakeTerminal(wake) => wake_from_phone(host, phone, request, feed, id, wake),
         Payload::DeleteWorktree(delete) => {
             delete_from_phone(host, phone, request, feed, id, delete)
         }
@@ -1249,10 +1281,211 @@ fn apply(
                 Payload::Snippets(proto::SnippetList { snippets }),
             ))
         }
-        Payload::GetConversation(ask) => Some(envelope(
-            id,
-            Payload::Conversation(conversation(host, ask.terminal_id, ask.after)),
-        )),
+        Payload::GetConversation(ask) => {
+            let listed = (!ask.session.is_empty())
+                .then(|| {
+                    agent_view_session(host, &phone.phones.places(), ask.terminal_id, &ask.session)
+                })
+                .flatten();
+            Some(envelope(
+                id,
+                Payload::Conversation(conversation(
+                    host,
+                    &phone.phones.places(),
+                    ask.terminal_id,
+                    ask.after,
+                    &ask.session,
+                    listed.is_some(),
+                )),
+            ))
+        }
+        // A message for one of the sessions a terminal's agent view holds:
+        // that session opened there first, by the keys a person would press,
+        // then the message typed — all in the terminal's typing turn, since
+        // each step waits for agent view to draw. See `crate::agent_view`.
+        // The agent put in a mode: its own key, pressed on the terminal's
+        // typing turn until it reports the mode — see `crate::agent_mode`.
+        Payload::SetMode(set) => {
+            if !host.controls(set.terminal_id, holder) {
+                return no_control();
+            }
+            let Some(terminal) = host.find(set.terminal_id) else {
+                return Some(error(id, proto::ErrorCode::NotFound, "no such terminal"));
+            };
+            let Some(key) = host.key(set.terminal_id) else {
+                return Some(error(
+                    id,
+                    proto::ErrorCode::NotFound,
+                    "that terminal has closed",
+                ));
+            };
+            let agent = key.split('|').nth(1).unwrap_or_default().to_owned();
+            let session = host
+                .agent_status()
+                .panes
+                .iter()
+                .find(|pane| pane.pane == key)
+                .and_then(|pane| pane.session.clone())
+                .or_else(|| host.bound_session(&key));
+            let feed = feed.clone();
+            let job = Typed::Mode {
+                agent,
+                session,
+                target: set.mode.clone(),
+                done: Box::new(move |outcome| {
+                    let reply = match outcome {
+                        Ok(()) => ack(id),
+                        Err(why) => Some(error(id, proto::ErrorCode::Unspecified, &why)),
+                    };
+                    if let Some(reply) = reply {
+                        let _ = feed.send(Event::Send(Box::new(reply)));
+                    }
+                }),
+            };
+            match phone.phones.typing.files(set.terminal_id, terminal, job) {
+                Ok(_) => None,
+                Err(_) => Some(error(
+                    id,
+                    proto::ErrorCode::Unspecified,
+                    "the Mac is too busy to switch that right now",
+                )),
+            }
+        }
+        // The agent switched to another model or effort: its own commands,
+        // typed on the terminal's typing turn and each confirmed on screen —
+        // see `crate::agent_model`. Only while it is idle: a command typed
+        // mid-turn waits behind the turn, or lands in a prompt.
+        Payload::SetModel(set) => {
+            if !host.controls(set.terminal_id, holder) {
+                return no_control();
+            }
+            let Some(terminal) = host.find(set.terminal_id) else {
+                return Some(error(id, proto::ErrorCode::NotFound, "no such terminal"));
+            };
+            let Some(key) = host.key(set.terminal_id) else {
+                return Some(error(
+                    id,
+                    proto::ErrorCode::NotFound,
+                    "that terminal has closed",
+                ));
+            };
+            let agent = key.split('|').nth(1).unwrap_or_default().to_owned();
+            let status = host.agent_status();
+            let pane = status.panes.iter().find(|pane| pane.pane == key);
+            if pane.is_some_and(|pane| pane.state != crate::event::AgentState::Idle) {
+                return Some(error(
+                    id,
+                    proto::ErrorCode::Unspecified,
+                    &format!(
+                        "{} is busy — change it once this turn is done",
+                        crate::agents::harness(&agent)
+                    ),
+                ));
+            }
+            let session = pane
+                .and_then(|pane| pane.session.clone())
+                .or_else(|| host.bound_session(&key));
+            let feed = feed.clone();
+            let job = Typed::Model {
+                agent,
+                session,
+                model: set.model.clone(),
+                effort: set.effort.clone(),
+                done: Box::new(move |outcome| {
+                    let reply = match outcome {
+                        Ok(()) => ack(id),
+                        Err(why) => Some(error(id, proto::ErrorCode::Unspecified, &why)),
+                    };
+                    if let Some(reply) = reply {
+                        let _ = feed.send(Event::Send(Box::new(reply)));
+                    }
+                }),
+            };
+            match phone.phones.typing.files(set.terminal_id, terminal, job) {
+                Ok(_) => None,
+                Err(_) => Some(error(
+                    id,
+                    proto::ErrorCode::Unspecified,
+                    "the Mac is too busy to switch that right now",
+                )),
+            }
+        }
+        Payload::OpenAgentSession(open) => {
+            if !host.controls(open.terminal_id, holder) {
+                return no_control();
+            }
+            let Some(terminal) = host.find(open.terminal_id) else {
+                return Some(error(id, proto::ErrorCode::NotFound, "no such terminal"));
+            };
+            // Sent by the session's id, never through agent view's screen:
+            // `claude --bg` for a new one, `claude attach` for one it lists.
+            let Some(cwd) = agent_view_cwd(host, &phone.phones.places(), open.terminal_id) else {
+                return Some(error(
+                    id,
+                    proto::ErrorCode::NotFound,
+                    "that terminal isn't in a checkout ket knows",
+                ));
+            };
+            let session = if open.session.is_empty() {
+                if open.text.trim().is_empty() {
+                    return Some(error(
+                        id,
+                        proto::ErrorCode::Unspecified,
+                        "say what the new session is to do",
+                    ));
+                }
+                None
+            } else {
+                let Some((found, _)) = agent_view_session(
+                    host,
+                    &phone.phones.places(),
+                    open.terminal_id,
+                    &open.session,
+                ) else {
+                    return Some(error(
+                        id,
+                        proto::ErrorCode::NotFound,
+                        "agent view doesn't list that session",
+                    ));
+                };
+                if found.state == crate::agent_view::SessionState::NeedsYou {
+                    return Some(error(
+                        id,
+                        proto::ErrorCode::Unspecified,
+                        "it's waiting on an answer in agent view on your Mac — answer it there first",
+                    ));
+                }
+                Some(found)
+            };
+            // A new session runs under the account agent view does.
+            let config_dir = terminal
+                .foreground_group()
+                .and_then(crate::agent_view::config_dir_of);
+            let feed = feed.clone();
+            let job = Typed::AgentView {
+                session,
+                cwd,
+                config_dir,
+                text: open.text.clone(),
+                done: Box::new(move |opened| {
+                    let reply = match opened {
+                        Ok(()) => ack(id),
+                        Err(why) => Some(error(id, proto::ErrorCode::Unspecified, &why.reason())),
+                    };
+                    if let Some(reply) = reply {
+                        let _ = feed.send(Event::Send(Box::new(reply)));
+                    }
+                }),
+            };
+            match phone.phones.typing.files(open.terminal_id, terminal, job) {
+                Ok(_) => None,
+                Err(_) => Some(error(
+                    id,
+                    proto::ErrorCode::Unspecified,
+                    "the Mac is too busy to type that right now",
+                )),
+            }
+        }
         Payload::Answer(answer) => {
             let choice = proto::answer::Choice::try_from(answer.choice).ok()?;
             // The very prompt the phone showed, checked and answered in one
@@ -1293,18 +1526,25 @@ fn phone_project(phone: &Phone<'_>, id: &str) -> Option<crate::id::ProjectId> {
         .then(|| crate::id::ProjectId::from(id))
 }
 
-/// The choices ket knows how to pass to each interactive agent. Aliases are
-/// preferred where an agent maintains one, so a model release need not make
-/// the phone's saved choice stale.
-fn launch_choices(agent: &str) -> (&'static [&'static str], &'static [&'static str]) {
+/// The choices ket knows how to pass to each interactive agent: Claude's and
+/// Codex's are what the desktop's dialog and the chat's model sheet offer,
+/// so the three never disagree.
+fn launch_choices(agent: &str) -> (Vec<String>, Vec<String>) {
+    let ids = |choices: Vec<crate::agent_model::Choice>| {
+        choices.into_iter().map(|choice| choice.id).collect()
+    };
     match agent {
-        "claude" => (&["sonnet", "opus", "haiku"], &["low", "medium", "high"]),
-        "codex" => (
-            &["gpt-6.1-sol", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna"],
-            &["low", "medium", "high", "xhigh"],
+        "claude" | "codex" => crate::agent_model::settings(agent, None).map_or_else(
+            || (Vec::new(), Vec::new()),
+            |settings| (ids(settings.models), ids(settings.efforts)),
         ),
-        "grok" => (&["grok-4.6"], &["low", "medium", "high", "xhigh"]),
-        _ => (&[], &[]),
+        "grok" => (
+            vec!["grok-4.6".to_owned()],
+            ["low", "medium", "high", "xhigh"]
+                .map(str::to_owned)
+                .to_vec(),
+        ),
+        _ => (Vec::new(), Vec::new()),
     }
 }
 
@@ -1332,8 +1572,8 @@ fn start_options(host: &Host, phone: &Phone<'_>, project: &str) -> proto::StartO
             let (models, efforts) = launch_choices(&agent);
             proto::AgentStartOptions {
                 agent,
-                models: models.iter().map(|value| (*value).to_owned()).collect(),
-                efforts: efforts.iter().map(|value| (*value).to_owned()).collect(),
+                models,
+                efforts,
             }
         })
         .collect();
@@ -1615,6 +1855,84 @@ fn address_comments_from_phone(
 /// Hands a phone's delete to a window — see [`Host::delete_work`] — off
 /// this thread, since a delete takes seconds; the answer goes to whoever is
 /// waiting for it then: see [`DELETES`].
+/// Wakes an asleep tab for a phone — see `crate::host::server::Host::wake`
+/// — answering with the terminal it becomes. A tab whose key is already a
+/// running terminal is answered at once: a retry after the wake went
+/// through, or a tab the desktop woke itself.
+fn wake_from_phone(
+    host: &Arc<Host>,
+    phone: &Phone<'_>,
+    request: &proto::Envelope,
+    feed: &mpsc::Sender<Event>,
+    id: u64,
+    wake: &proto::WakeTerminal,
+) -> Option<proto::Envelope> {
+    let ask: FixAsk = (phone.device.clone(), request.idempotency_key.clone());
+    if lock(&WAKES).again(&ask, id, feed) {
+        return None;
+    }
+    // Only a terminal still running: one that exited before its sleep
+    // reached the host has the key too, and is nothing to be woken into.
+    if let Some((terminal_id, _, _)) = host.listing().into_iter().find(|(_, key, terminal)| {
+        key.as_deref() == Some(wake.key.as_str()) && !terminal.is_closed()
+    }) {
+        return Some(envelope(
+            id,
+            Payload::TerminalWoken(proto::TerminalWoken { terminal_id }),
+        ));
+    }
+    if !host
+        .asleep_tabs()
+        .iter()
+        .any(|(_, tab)| tab.key == wake.key && tab.worktree == wake.worktree_id)
+    {
+        return Some(error(
+            id,
+            proto::ErrorCode::NotFound,
+            "that tab isn't asleep on this desktop",
+        ));
+    }
+    {
+        let mut wakes = lock(&WAKES);
+        if wakes.again(&ask, id, feed) {
+            return None;
+        }
+        if !wakes.start(ask.clone(), &wake.key, id, feed) {
+            return Some(error(
+                id,
+                proto::ErrorCode::Unspecified,
+                "ket is already waking this tab",
+            ));
+        }
+    }
+    let key = wake.key.clone();
+    let host = Arc::clone(host);
+    let waking = ask.clone();
+    let spawned = std::thread::Builder::new()
+        .name("ket-host-wake".into())
+        .spawn(move || {
+            let answer = match host.wake(&key) {
+                Ok(terminal_id) => Payload::TerminalWoken(proto::TerminalWoken { terminal_id }),
+                Err(message) => Payload::Error(proto::Error {
+                    code: proto::ErrorCode::Unspecified as i32,
+                    message,
+                }),
+            };
+            lock(&WAKES).finish(waking, &key, answer);
+        });
+    match spawned {
+        Ok(_) => None,
+        Err(why) => {
+            lock(&WAKES).forget(&ask, &wake.key);
+            Some(error(
+                id,
+                proto::ErrorCode::Unspecified,
+                &format!("the Mac couldn't start waking the tab: {why}"),
+            ))
+        }
+    }
+}
+
 fn delete_from_phone(
     host: &Arc<Host>,
     phone: &Phone<'_>,
@@ -2040,6 +2358,26 @@ pub(super) fn decision(
     respond: &proto::Respond,
 ) -> Option<Decision> {
     match asked.prompt.as_ref()? {
+        // Codex's form takes one option's number per question, and nothing
+        // typed: words go in through its notes, which keys cannot reach
+        // safely.
+        Prompt::Ask { questions } if asked.tool == crate::agent_hooks::CODEX_ASK_TOOL => {
+            if respond.picks.len() != questions.len() {
+                return None;
+            }
+            questions
+                .iter()
+                .zip(&respond.picks)
+                .map(|(question, pick)| {
+                    let [at] = pick.choices.as_slice() else {
+                        return None;
+                    };
+                    let at = *at as usize;
+                    (pick.other.trim().is_empty() && at < question.options.len()).then_some(at)
+                })
+                .collect::<Option<Vec<_>>>()
+                .map(Decision::Picks)
+        }
         Prompt::Ask { questions } => {
             if respond.picks.len() != questions.len() {
                 return None;
@@ -2138,10 +2476,66 @@ fn file_change(file: crate::review::FileChange) -> proto::FileChange {
     }
 }
 
+/// The checkout the agent view terminal `terminal_id` lists sessions for.
+fn agent_view_cwd(host: &Host, places: &Places, terminal_id: u64) -> Option<std::path::PathBuf> {
+    let key = host.key(terminal_id)?;
+    let worktree = key.split('|').next()?;
+    Some(places.get(worktree)?.path.clone())
+}
+
+/// Background session `session`, if the agent view terminal `terminal_id`
+/// shows lists it for its worktree's checkout, with the names of the others
+/// it lists.
+fn agent_view_session(
+    host: &Host,
+    places: &Places,
+    terminal_id: u64,
+    session: &str,
+) -> Option<(crate::agent_view::BackgroundSession, Vec<String>)> {
+    let key = host.key(terminal_id)?;
+    let worktree = key.split('|').next()?;
+    let place = places.get(worktree)?;
+    let (wanted, others): (Vec<_>, Vec<_>) = crate::agent_view::sessions(&place.path)
+        .into_iter()
+        .partition(|listed| listed.session == session);
+    let wanted = wanted.into_iter().next()?;
+    Some((wanted, others.into_iter().map(|other| other.name).collect()))
+}
+
+/// The background session Claude has terminal `terminal_id` attached to,
+/// and its transcript — see [`crate::agent_view::attached_name`]. Its own
+/// process is the daemon's and reports nothing to the terminal, whose own
+/// session is one nothing was ever said in.
+fn attached_session(
+    host: &Host,
+    places: &Places,
+    terminal_id: u64,
+    key: &str,
+) -> Option<(String, crate::conversation::Transcript)> {
+    let terminal = host.find(terminal_id)?;
+    let rows = terminal.with_term(|term| crate::screen::bottom_rows(term, usize::MAX));
+    let name = crate::agent_view::attached_name(&rows)?;
+    let place = places.get(key.split('|').next()?)?;
+    let session = crate::agent_view::named(&place.path, &name)?.session;
+    let transcript = crate::conversation::Transcript::locate("claude", &session)?;
+    Some((session, transcript))
+}
+
 /// What the agent in terminal `terminal_id` has said since cursor `after` of
 /// its session — see `crate::conversation`: the session its hooks named for
-/// the terminal's pane, for each agent ket can read.
-fn conversation(host: &Host, terminal_id: u64, after: u64) -> proto::Conversation {
+/// the terminal's pane, for each agent ket can read. `wanted`, when set, is
+/// one of the background sessions its agent view lists instead, and
+/// `listed` whether it does. A Claude terminal whose own session has nothing
+/// to read, attached to one of those sessions, reads that one — see
+/// [`attached_session`].
+fn conversation(
+    host: &Host,
+    places: &Places,
+    terminal_id: u64,
+    after: u64,
+    wanted: &str,
+    listed: bool,
+) -> proto::Conversation {
     let unsupported = |reason: String| proto::Conversation {
         terminal_id,
         supported: false,
@@ -2151,21 +2545,101 @@ fn conversation(host: &Host, terminal_id: u64, after: u64) -> proto::Conversatio
     let Some(key) = host.key(terminal_id) else {
         return unsupported("that terminal has closed".to_owned());
     };
+    // One of the sessions the terminal's agent view holds, which report
+    // nothing to the terminal: read by Claude's own id, once it is one the
+    // terminal lists, so a phone cannot name any transcript on the Mac.
+    if !wanted.is_empty() {
+        if !listed {
+            return unsupported("agent view doesn't list that session".to_owned());
+        }
+        let Some(transcript) = crate::conversation::Transcript::locate("claude", wanted) else {
+            return unsupported("the session's transcript isn't there yet".to_owned());
+        };
+        return read_conversation(terminal_id, wanted.to_owned(), &transcript, after);
+    }
     let status = host.agent_status();
-    let Some(pane) = status.panes.iter().find(|pane| pane.pane == key) else {
-        return unsupported("no agent has reported from this terminal yet".to_owned());
+    // The agent's own report of which session it is; failing one, the
+    // session ket resumed in this terminal when it opened it. OpenCode says
+    // nothing on resuming until a message is typed, and a session read from
+    // its transcript needs no report.
+    let (agent, session) = match status.panes.iter().find(|pane| pane.pane == key) {
+        Some(pane) => (pane.agent.clone(), pane.session.clone()),
+        None => {
+            let agent = key.split('|').nth(1).unwrap_or_default().to_owned();
+            let bound = host.bound_session(&key);
+            // A Claude terminal attached to a background session may never
+            // report at all: read below by the session it shows.
+            if agent.is_empty() || (bound.is_none() && crate::agents::harness(&agent) != "claude") {
+                return unsupported("no agent has reported from this terminal yet".to_owned());
+            }
+            (agent, bound)
+        }
     };
-    if !crate::conversation::Transcript::readable(&pane.agent) {
+    let reported = session.is_some();
+    if !crate::conversation::Transcript::readable(&agent) {
         return unsupported(format!(
-            "{}'s sessions can't be read as a conversation yet",
-            pane.agent
+            "{agent}'s sessions can't be read as a conversation yet"
         ));
     }
-    let Some(session) = pane.session.clone() else {
-        return unsupported("the agent hasn't said which session this is yet".to_owned());
+    let found = session
+        .and_then(|session| {
+            crate::conversation::Transcript::locate(&agent, &session).map(|found| (session, found))
+        })
+        .or_else(|| {
+            (crate::agents::harness(&agent) == "claude")
+                .then(|| attached_session(host, places, terminal_id, &key))
+                .flatten()
+        });
+    let mut last = LAST_READ
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (session, transcript) = match found {
+        Some((session, transcript)) => {
+            last.insert(key.clone(), (agent, session.clone(), transcript.clone()));
+            (session, transcript)
+        }
+        // A session with nothing to read — not written yet, or one of the
+        // agent's own side threads reporting through the same hooks, as
+        // Codex's do, or an attached session's name hidden for a moment by
+        // a dialog — leaves the chat on the session last read here, rather
+        // than putting an error in the middle of it.
+        None => match last.get(&key) {
+            Some((read_agent, session, transcript)) if *read_agent == agent => {
+                (session.clone(), transcript.clone())
+            }
+            _ if !reported => {
+                return unsupported("no agent has reported from this terminal yet".to_owned());
+            }
+            _ => return unsupported("the session's transcript isn't there yet".to_owned()),
+        },
     };
-    let Some(transcript) = crate::conversation::Transcript::locate(&pane.agent, &session) else {
-        return unsupported("the session's transcript isn't there yet".to_owned());
+    drop(last);
+    read_conversation(terminal_id, session, &transcript, after)
+}
+
+/// The agent, session and transcript a pane's conversation was last read
+/// from.
+type LastRead = (String, String, crate::conversation::Transcript);
+
+/// For each pane, where its conversation was last read from — see
+/// [`conversation`].
+static LAST_READ: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, LastRead>>,
+> = std::sync::LazyLock::new(Default::default);
+
+/// What `transcript` has said since cursor `after`, for terminal
+/// `terminal_id`'s phone.
+fn read_conversation(
+    terminal_id: u64,
+    session: String,
+    transcript: &crate::conversation::Transcript,
+    after: u64,
+) -> proto::Conversation {
+    let unsupported = |reason: String| proto::Conversation {
+        terminal_id,
+        supported: false,
+        reason,
+        ..Default::default()
     };
     // Only Claude records a queue: another agent's message typed mid-turn
     // shows once it is taken in.

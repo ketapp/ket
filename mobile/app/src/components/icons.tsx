@@ -8,12 +8,13 @@ import { AGENT_COLORS, agentHarness, t } from '../lib/theme';
 
 type IconProps = { size?: number; color?: string; weight?: number };
 
-/** ket's mark: the bar and chevron from the app icon. */
-export function BrandMark({ size = 18 }: { size?: number }) {
+/** ket's mark: the bar and chevron from the app icon. `color` stands in for
+ * the brand green where the mark also reports a state. */
+export function BrandMark({ size = 18, color = t.brand }: { size?: number; color?: string }) {
   return (
     <Svg width={size * 0.88} height={size} viewBox="290 260 445 505">
-      <Rect x={302} y={272} width={100} height={480} fill={t.brand} />
-      <Polygon points="438,272 545,272 722,512 545,752 438,752 540,512" fill={t.brand} />
+      <Rect x={302} y={272} width={100} height={480} fill={color} />
+      <Polygon points="438,272 545,272 722,512 545,752 438,752 540,512" fill={color} />
     </Svg>
   );
 }
@@ -74,6 +75,14 @@ function Stroke({ size = 18, color = t.dim, weight = 1.8, children }: IconProps 
   );
 }
 
+/** Start: a sparkle, for setting an agent going. */
+export const Sparkle = (p: IconProps) => (
+  <Stroke {...p}>
+    <Path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z" />
+    <Path d="M19 17l.7 1.8 1.8.7-1.8.7L19 22l-.7-1.8-1.8-.7 1.8-.7z" />
+  </Stroke>
+);
+
 export const Plus = (p: IconProps) => (
   <Stroke {...p}>
     <Path d="M12 5v14M5 12h14" />
@@ -107,6 +116,68 @@ export const Desktop = (p: IconProps) => (
   </Stroke>
 );
 
+export const Pause = (p: IconProps) => (
+  <Stroke {...p}>
+    <Path d="M8 5v14M16 5v14" />
+  </Stroke>
+);
+
+export const Pencil = (p: IconProps) => (
+  <Stroke {...p}>
+    <Path d="M4 20l4-1 10-10-3-3L5 16z" />
+  </Stroke>
+);
+
+export const Shield = (p: IconProps) => (
+  <Stroke {...p}>
+    <Path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z" />
+  </Stroke>
+);
+
+export const Bolt = (p: IconProps) => (
+  <Stroke {...p}>
+    <Path d="M13 3L5 13h6l-1 8 8-10h-6z" />
+  </Stroke>
+);
+
+/** The local network: Wi-Fi arcs. */
+export const Wifi = (p: IconProps) => (
+  <Stroke {...p}>
+    <Path d="M2.5 9.5a14 14 0 0 1 19 0M6 13a9 9 0 0 1 12 0M9.5 16.5a4 4 0 0 1 5 0" />
+    <Circle cx={12} cy={19.5} r={0.6} fill="currentColor" />
+  </Stroke>
+);
+
+/** Reached from anywhere: a globe. */
+export const Globe = (p: IconProps) => (
+  <Stroke {...p}>
+    <Circle cx={12} cy={12} r={9} />
+    <Path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18" />
+  </Stroke>
+);
+
+/** An address someone typed in: two links of a chain. */
+export const Link = (p: IconProps) => (
+  <Stroke {...p}>
+    <Path d="M10 13.5a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1.5 1.5" />
+    <Path d="M14 10.5a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1.5-1.5" />
+  </Stroke>
+);
+
+export const Phone = (p: IconProps) => (
+  <Stroke {...p}>
+    <Rect x={7} y={2.5} width={10} height={19} rx={2.5} />
+    <Path d="M11 18.5h2" />
+  </Stroke>
+);
+
+export const Tablet = (p: IconProps) => (
+  <Stroke {...p}>
+    <Rect x={4.5} y={3} width={15} height={18} rx={2.5} />
+    <Path d="M11 18h2" />
+  </Stroke>
+);
+
 export const Sliders = (p: IconProps) => (
   <Stroke {...p}>
     <Path d="M4 7.5h8.5M17.5 7.5H20M4 16.5h2.5M11.5 16.5H20" />
@@ -126,6 +197,29 @@ export const TerminalGlyph = (p: IconProps) => (
   <Stroke {...p}>
     <Path d="m5 17 5-5-5-5" />
     <Path d="M12 19h7" />
+  </Stroke>
+);
+
+/** The worktree's changes: a plus over a minus, the two sides of a diff. */
+/** More: what a screen offers beyond what is drawn on it, in its bar. */
+export const More = (p: IconProps) => (
+  <Stroke {...p} weight={2.6}>
+    <Path d="M5 12h.01M12 12h.01M19 12h.01" />
+  </Stroke>
+);
+
+export const Changes = (p: IconProps) => (
+  <Stroke {...p}>
+    <Path d="M12 3v14M5 10h14M5 21h14" />
+  </Stroke>
+);
+
+/** A terminal to open: the prompt inside a window, so it has a body beside
+ * a bordered control where the bare prompt looks thin. */
+export const TerminalWindow = (p: IconProps) => (
+  <Stroke {...p}>
+    <Rect x={3} y={4} width={18} height={16} rx={2.5} />
+    <Path d="m7 10 3 3-3 3M13 16h4" />
   </Stroke>
 );
 

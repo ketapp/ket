@@ -7,7 +7,15 @@
 // files from + and words from the mic; when the agent is asking to be allowed
 // something, the answer is right here. The terminal itself is one tap away.
 
-import { Activity, Answer_Choice, type Question, type Turn, Turn_Kind } from '@ket/remote';
+import {
+  Activity,
+  type AgentView,
+  Answer_Choice,
+  BackgroundSession_State,
+  type Question,
+  type Turn,
+  Turn_Kind,
+} from '@ket/remote';
 import * as Clipboard from 'expo-clipboard';
 import { router, useFocusEffect, useLocalSearchParams, useNavigation } from 'expo-router';
 import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react';
@@ -17,24 +25,35 @@ import {
   Platform,
   Pressable,
   ScrollView,
+  type StyleProp,
   StyleSheet,
   Text,
   TextInput,
+  type TextInputInstance,
+  type TextStyle,
   View,
+  type ViewInstance,
   type ViewStyle,
 } from 'react-native';
-import { KeyboardChatScrollView, KeyboardStickyView } from 'react-native-keyboard-controller';
+import { KeyboardChatScrollView } from 'react-native-keyboard-controller';
 import Animated, { useAnimatedStyle, useSharedValue, withTiming } from 'react-native-reanimated';
-import Svg, { Circle, Defs, LinearGradient, Path, Rect, Stop as GradientStop } from 'react-native-svg';
+import Svg, { Defs, LinearGradient, Rect, Stop as GradientStop } from 'react-native-svg';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { AttachMenu, FileChip, ImagesChip, SentFiles, type Source, Tray } from '../../../components/Attachments';
+import { AgentViewList, backgroundState, terminalAt } from '../../../components/AgentView';
+import { Outgoing, StatusMark, Working } from '../../../components/ChatRows';
 import { CommandMenu } from '../../../components/Commands';
+import { ComposerMenu, PlusButton, SendButton, plusMenu, slashMenu } from '../../../components/Composer';
+import { FloatMenu, type Place, placeOf } from '../../../components/FloatMenu';
+import { KeyboardLift } from '../../../components/KeyboardLift';
+import { ModelSheet } from '../../../components/ModelSheet';
 import { KeyCommands } from '../../../components/KeyCommands';
 import { MicButton } from '../../../components/Mic';
 import { RiskBadge } from '../../../components/Risk';
-import { AgentMark, Bookmark, Branch, Check, Chevron, ChevronDown, Close, Plus, Send, Stop, TerminalGlyph } from '../../../components/icons';
-import { Bar, Button, Choice, Dot, IconButton, Prose, Screen, field } from '../../../components/ui';
+import { Dim, Tucked, type Tuckable, useTuck } from '../../../components/Tuck';
+import { AgentMark, Bolt, Bookmark, Changes, Check, Chevron, ChevronDown, Close, Pause, Pencil, Shield, Sliders, TerminalWindow } from '../../../components/icons';
+import { Bar, Button, Choice, Dot, IconCluster, Prose, Screen, field } from '../../../components/ui';
 import { detail, everyWorktree, stateOf } from '../../../lib/activity';
 import {
   type Attachment,
@@ -49,12 +68,13 @@ import {
   splitFiles,
 } from '../../../lib/attach';
 import { type Command, commandsFor, matching } from '../../../lib/commands';
-import type { PromptAnswer } from '../../../lib/connection';
+import { DesktopBusy, type PromptAnswer } from '../../../lib/connection';
 import { useHost } from '../../../lib/hosts';
+import type { Seed } from '../../../lib/starting';
 import { useDictation } from '../../../lib/dictation';
 import { confirmIdentity } from '../../../lib/lock';
 import { Refused } from '../../../lib/refused';
-import { agentLabel, font, size, t, tint } from '../../../lib/theme';
+import { agentLabel, blend, font, size, t, tint } from '../../../lib/theme';
 import { canDictate } from '../../../lib/voice';
 
 /** How often the conversation is asked for while it is on screen: more
@@ -68,6 +88,13 @@ const ENTER_AFTER_MS = 80;
 /** How long a sent message may go unseen — not in the conversation, not
  * waiting in the agent's queue — before it is shown as not delivered. */
 const UNSEEN_MS = 15_000;
+
+/** What the desktop says of a conversation while the agent is still opening
+ * in its tab — see `conversation` in ket-core's phones/requests.rs. Said
+ * while the task a chat was started on is on its way, they are that
+ * message's sending; any other reason — the terminal closed, a transcript it
+ * can't read — is news, and shown. */
+const STILL_OPENING = ['no agent has reported from this terminal yet', "the session's transcript isn't there yet"];
 
 /** How long after sending the composer turns away what iOS puts back:
  * Send tapped mid-autocorrect, the correction lands after the clearing. */
@@ -90,6 +117,16 @@ type Pending = {
  * the paths the desktop listed under them, and how many images it carried. */
 type Said = { words: string; images: number };
 
+/** A card over the conversation's foot while something waits on you: a
+ * background session's question, answered in agent view on the Mac; a
+ * question or a plan; or a permission, with the answer just given here. */
+type WaitingCard = Tuckable &
+  (
+    | { kind: 'background' }
+    | { kind: 'ask' | 'plan'; question: Question }
+    | { kind: 'permission'; question: Question; chosen?: Answer_Choice }
+  );
+
 /** The photos and files messages from here carried, by host, terminal and
  * message, while the app runs: the conversation read back has only their
  * count, so a message shows its pictures for as long as the phone has them. */
@@ -100,6 +137,11 @@ const carriedKey = (where: string, said: Said) => `${where}\n${said.images}\n${s
  * takes to come and go. */
 const EDGE_H = 28;
 const EDGE_MS = 180;
+
+/** Whether a card waiting on you floats over the conversation's foot, which
+ * scrolls clear of it. Not on the web, whose scroll view has no content
+ * inset to keep clear with: there the card sits in line over the composer. */
+const FLOATS = Platform.OS !== 'web';
 
 /** One-tap replies every session has. Chips over the composer while the
  * draft is empty, after `/` and the desktop's snippets. */
@@ -115,17 +157,75 @@ const kept = new Map<string, { turns: Turn[]; cursor: bigint; session: string }>
  * never says one ended, is not left blank. Longer than the stack's slide. */
 const SETTLE_BOUND_MS = 600;
 
+/** Each agent view session's name, by chat, for its title while agent view
+ * isn't listing it — a cold start, or the listing being read again. */
+const sessionNames = new Map<string, string>();
+
+/** A terminal's chat — or, while the terminal shows Claude Code's agent
+ * view, the background sessions it holds, each of which opens as a chat of
+ * its own at `agent-session/[host]/[terminal]/[session]`. See AgentViewList.
+ *
+ * The list, once agent view is seen in the terminal, stays the list: agent
+ * view is read off the Mac's screen, and a session open in it can look like
+ * no agent view at all, which put a chat with no session under one opened
+ * from the list. The chat gives way to the list when agent view appears —
+ * someone opened it on the Mac, or it was still drawing when the chat was
+ * opened — unless `?chat=1` asked for the chat itself. */
 export default function Session() {
-  const { host: hostId, terminal } = useLocalSearchParams<{ host: string; terminal: string }>();
+  const { host: hostId, terminal, chat } = useLocalSearchParams<{ host: string; terminal: string; chat?: string }>();
+  const conn = useHost(hostId);
+  const snapshot = conn?.snapshot ?? null;
+  const at = terminalAt(snapshot, BigInt(terminal));
+  const [mode, setMode] = useState<'list' | 'chat' | undefined>(chat ? 'chat' : undefined);
+  const [last, setLast] = useState<AgentView | undefined>(undefined);
+  const showing = at?.agentView;
+  // Set while rendering, as React has state follow what it is drawn from.
+  if (showing && showing !== last) setLast(showing);
+  if (mode === undefined && snapshot) setMode(showing ? 'list' : 'chat');
+  if (mode === 'chat' && showing && !chat) setMode('list');
+  if (mode === undefined && !snapshot) {
+    return (
+      <Screen>
+        <Bar back title="Session" />
+      </Screen>
+    );
+  }
+  const view = showing ?? last;
+  if (mode === 'chat' || (mode === undefined && !showing) || !view || at?.closed) return <Chat />;
+  return (
+    <AgentViewList
+      hostId={hostId}
+      terminal={terminal}
+      view={view}
+      reading={!view.listed && (conn?.hostMinor ?? 0) >= 22}
+      left={!showing}
+    />
+  );
+}
+
+/** The chat for a terminal's agent, or — with a `session` param — for one of
+ * the background sessions its agent view holds.
+ *
+ * Or, `started`, the chat for work this phone just asked for, drawn in place
+ * by the screen that stood in for it while the desktop made the worktree —
+ * see app/starting. Starting a task moves you once, to that screen; when the
+ * agent's tab opens the chat becomes this terminal's where it is, the task on
+ * its way from the first frame and the draft typed there in its field. */
+export function Chat({ started }: { started?: { host: string; terminal: string; seed?: Seed } } = {}) {
+  const params = useLocalSearchParams<{ host: string; terminal: string; session?: string }>();
+  const hostId = started?.host ?? params.host;
+  const terminal = started?.terminal ?? params.terminal;
+  const background = started ? '' : (params.session ?? '');
   const terminalId = BigInt(terminal);
   const conn = useHost(hostId);
   const insets = useSafeAreaInsets();
   // The stack renders this screen before it slides it in, and painting a
   // kept conversation — every turn, unvirtualised — on that first frame held
   // the tap for as long as the paint took. So the turns wait for the
-  // transition to end; the header and composer come up at once.
+  // transition to end; the header and composer come up at once. Drawn in
+  // place, nothing slides in: painted at once.
   const navigation = useNavigation<{ addListener(type: 'transitionEnd', listener: () => void): () => void }>();
-  const [settled, setSettled] = useState(false);
+  const [settled, setSettled] = useState(started !== undefined);
   useEffect(() => {
     if (settled) return;
     let done = false;
@@ -141,24 +241,28 @@ export default function Session() {
       clearTimeout(bound);
     };
   }, [navigation, settled]);
-  const keptKey = `${hostId}:${terminal}`;
+  const keptKey = background ? `${hostId}:${terminal}:${background}` : `${hostId}:${terminal}`;
   const [turns, setTurns] = useState<Turn[]>(() => kept.get(keptKey)?.turns ?? []);
+  // The task a new worktree was started on from this phone: see `started`.
+  const seed = started?.seed;
   // Sent from here and not in the conversation yet: shown at once, as
   // sending, then as queued while the agent's queue holds it.
-  const [pending, setPending] = useState<Pending[]>([]);
+  const [pending, setPending] = useState<Pending[]>(() =>
+    seed ? [{ key: 0, text: seed.text, at: Date.now(), behind: false, files: [] }] : [],
+  );
   const [queued, setQueued] = useState<string[]>([]);
   const [now, setNow] = useState(() => Date.now());
-  const sentCount = useRef(0);
+  const sentCount = useRef(seed ? 1 : 0);
   const [unreadable, setUnreadable] = useState('');
   // Whether the desktop has answered once, and why it has not when asking
   // keeps failing: an empty conversation, one still loading and one the
   // desktop is refusing looked the same — blank.
   const [loaded, setLoaded] = useState(() => kept.has(keptKey));
   const [failing, setFailing] = useState('');
-  const [message, setMessage] = useState('');
+  const [message, setMessage] = useState(seed?.draft ?? '');
   // The draft as it is this moment, for what reads it after a wait: Send
   // after the mic's last words, which arrive between renders.
-  const draft = useRef('');
+  const draft = useRef(seed?.draft ?? '');
   const write = (text: string) => {
     draft.current = text;
     setMessage(text);
@@ -176,9 +280,30 @@ export default function Session() {
   // Where the cursor was in the draft, which is where dictation writes.
   const selection = useRef({ start: 0, end: 0 });
   const [answering, setAnswering] = useState(false);
+  // The permission just answered, by its id, and how: its card goes on the
+  // tap, the button tapped wearing its mark, and stays gone until the
+  // desktop's next snapshot takes the question away. Back only if the
+  // desktop would not take the answer, with its reason.
+  const [answered, setAnswered] = useState<{ id: bigint; choice: Answer_Choice } | null>(null);
   // A Stop just pressed: the agent has the interrupt, and a second press
   // before it has stopped would reach whatever comes after.
   const [stopping, setStopping] = useState(false);
+  // Sends so far: each one launches the arrow on the Send button.
+  const [launches, setLaunches] = useState(0);
+  // The agent's mode, from the pill in the bar: its menu, and the mode
+  // being switched to while the desktop presses for it.
+  const [modeMenu, setModeMenu] = useState<Place | null>(null);
+  const [switching, setSwitching] = useState('');
+  // How the last pick went, said in the sheet that made it: the chat's own
+  // note is under the sheet while it is up.
+  const [said, setSaid] = useState<{ text: string; failed: boolean } | null>(null);
+  // Picks the desktop has made, each with what the snapshot said when it was
+  // picked: shown in its place until the snapshot moves off that — to the
+  // pick, a second or so later — rather than flicking back in between.
+  const [landed, setLanded] = useState<Landed | null>(null);
+  // The session sheet — mode, model and effort — for an agent with models (1.26).
+  const [sheet, setSheet] = useState(false);
+  const modePill = useRef<ViewInstance>(null);
   const [snippets, setSnippets] = useState<{ name: string; body: string }[]>([]);
   const cursor = useRef(kept.get(keptKey)?.cursor ?? 0n);
   const session = useRef(kept.get(keptKey)?.session ?? '');
@@ -190,7 +315,7 @@ export default function Session() {
   }, [keptKey, turns]);
   const held = useRef(false);
   const scroll = useRef<Animated.ScrollView>(null);
-  const input = useRef<TextInput>(null);
+  const input = useRef<TextInputInstance>(null);
   // Just cleared by Send, for a moment — see `SETTLE_MS`.
   const settling = useRef(false);
   // Whether the view is at the newest turn, so new ones scroll it along —
@@ -205,10 +330,21 @@ export default function Session() {
     .map((l) => ({ ...l, terminal: l.worktree.terminals.find((x) => x.id === terminalId) }))
     .find((l) => l.terminal);
   const worktree = located?.worktree;
-  const state = worktree ? stateOf(worktree.activity) : undefined;
+  // One of the terminal's agent view sessions: its own state, not the tab's.
+  const backgroundSession = background
+    ? located?.terminal?.agentView?.sessions.find((s) => s.session === background)
+    : undefined;
+  if (backgroundSession) sessionNames.set(keptKey, backgroundSession.name);
+  const state = background
+    ? backgroundState(backgroundSession?.state)
+    : worktree
+      ? stateOf(worktree.activity)
+      : undefined;
   // Working, as the desktop's sidebar sees it: the agent thinks for a while
   // before anything reaches its transcript, and this says so meanwhile.
-  const working = worktree?.activity === Activity.WORKING || worktree?.activity === Activity.RUNNING;
+  const working = background
+    ? backgroundSession?.state === BackgroundSession_State.WORKING
+    : worktree?.activity === Activity.WORKING || worktree?.activity === Activity.RUNNING;
   const busy = useRef(false);
   const isBusy = working || pending.length > 0 || queued.length > 0;
   useEffect(() => {
@@ -217,14 +353,35 @@ export default function Session() {
   // This terminal's own prompt. Several agents can run in one worktree, and
   // `question` is only the newest of their prompts; since 1.13 the desktop
   // sends every one, so the chat for this terminal shows its own.
+  // A background session's prompts reach the desktop through agent view,
+  // not this terminal's hooks: they are answered in the terminal.
   const question =
-    worktree?.activity === Activity.BLOCKED
+    !background && worktree?.activity === Activity.BLOCKED
       ? ([...worktree.questions, worktree.question].find((q) => q?.terminalId === terminalId) ?? undefined)
       : undefined;
   // A question or a plan rather than a permission: its own card, answerable
   // or not, in place of the permission's.
   const prompt = question ? promptKind(question.tool) : undefined;
+  // A background session asking something: answered in agent view on the
+  // Mac, where a message from here would land in its prompt.
+  const waiting = !!background && backgroundSession?.state === BackgroundSession_State.NEEDS_YOU;
   const asking = !!question && (question.answerable || prompt !== undefined);
+  // The card over the conversation's foot while one of those waits on you.
+  const card = ((): WaitingCard | undefined => {
+    if (waiting) return { key: 'background', kind: 'background' };
+    if (!question) return undefined;
+    const key = `q${question.id}`;
+    if (prompt) return { key, kind: prompt, question };
+    if (!question.answerable) return undefined;
+    const chosen = answered?.id === question.id ? answered.choice : undefined;
+    return { key, kind: 'permission', question, chosen, marked: chosen !== undefined };
+  })();
+  // The height it takes there, which the conversation scrolls clear of.
+  const room = useSharedValue(0);
+  const tuck = useTuck(card, room);
+  // No chips while a question is asked, nor while its card tucks away: they
+  // would come in under it and move it mid-slide.
+  const quiet = asking || (tuck.card !== undefined && tuck.card.kind !== 'background');
 
   // Asked for now and every little while; each answer carries on from the
   // last. A new session in the same terminal starts the list over.
@@ -248,13 +405,16 @@ export default function Session() {
         if (asking) return;
         asking = true;
         try {
-          const reply = await conn.conversation(terminalId, cursor.current);
+          const reply = await conn.conversation(terminalId, cursor.current, background);
           if (stopped) return;
           failures = 0;
           setLoaded(true);
           setFailing('');
           if (!reply.supported) {
-            setUnreadable(reply.reason);
+            // A chat already on screen stays as it is: one read the desktop
+            // couldn't make is not news, and said mid-chat it read as
+            // though the conversation were gone.
+            if (session.current === '') setUnreadable(reply.reason);
             return;
           }
           setUnreadable('');
@@ -289,6 +449,9 @@ export default function Session() {
         } catch (e) {
           // Offline for a moment, or the desktop busy: the next tick asks
           // again, and a run of failures says why rather than staying blank.
+          // A desktop turning a read away for a moment isn't failing: the
+          // next tick is soon enough, and saying so would only alarm.
+          if (e instanceof DesktopBusy) return;
           failures += 1;
           if (!stopped && failures >= 3) setFailing(e instanceof Error ? e.message : String(e));
         } finally {
@@ -327,7 +490,7 @@ export default function Session() {
         offChange();
         appState.remove();
       };
-    }, [conn, terminalId, tooOld, keptKey]),
+    }, [conn, terminalId, tooOld, keptKey, background]),
   );
 
   // The desktop's saved snippets, once, as more chips over the composer.
@@ -365,14 +528,18 @@ export default function Session() {
   // is taken again on the same press — asking for a second press made every
   // first message after using the Mac look lost. Once: a second refusal is
   // the desktop typing right now, and says so. `act` is `false` when the
-  // phone turns out not to have control.
-  const controlled = async (act: () => Promise<boolean>, failed: (why: string) => string): Promise<boolean> => {
+  // phone turns out not to have control. Why not goes to `say`.
+  const controlled = async (
+    act: () => Promise<boolean>,
+    failed: (why: string) => string,
+    say: (text: string) => void = setNote,
+  ): Promise<boolean> => {
     if (!conn) return false;
     for (let attempt = 0; attempt < 2; attempt += 1) {
       if (!held.current) {
         held.current = await conn.takeControl(terminalId).catch(() => false);
         if (!held.current) {
-          setNote('Another device is typing in this terminal.');
+          say('Another device is typing in this terminal.');
           return false;
         }
       }
@@ -380,14 +547,30 @@ export default function Session() {
         if (await act()) return true;
         held.current = false;
       } catch (e) {
-        setNote(failed(e instanceof Error ? e.message : String(e)));
+        say(failed(e instanceof Error ? e.message : String(e)));
         return false;
       }
     }
-    setNote('Your desktop took control back.');
+    say('Your desktop took control back.');
     return false;
   };
   const type = (text: string) => controlled(() => conn?.type(terminalId, text) ?? Promise.resolve(false), (why) => `Not sent: ${why}`);
+  // A message for an agent view session: the desktop opens that session in
+  // agent view first, then types it, so it never lands in whichever session
+  // agent view had up. Empty text only opens it.
+  // Reading one drives nothing on the Mac: only a message does, and the
+  // terminal is let go once it is in, so the desktop and other phones keep it.
+  const toBackground = async (text: string) => {
+    const sent = await controlled(
+      () => conn?.openAgentSession(terminalId, background, text) ?? Promise.resolve(false),
+      (why) => `Not sent: ${why}`,
+    );
+    if (conn && held.current) {
+      conn.releaseControl(terminalId);
+      held.current = false;
+    }
+    return sent;
+  };
 
 
   // The text, then Enter on its own, as the terminal screen sends it: sent
@@ -396,9 +579,14 @@ export default function Session() {
   // dictating closes the mic and waits for its last words first.
   const send = async (said?: string) => {
     if (said === undefined) await dictation.finish();
+    if (waiting) {
+      setNote('It’s waiting on an answer in agent view on your Mac. Answer it there first.');
+      return;
+    }
     const text = (said ?? draft.current).trim();
-    const attached = said === undefined ? files : [];
+    const attached = said === undefined && !background ? files : [];
     if (!text && attached.length === 0) return;
+    setLaunches((n) => n + 1);
     if (said === undefined) {
       write('');
       input.current?.clear();
@@ -414,8 +602,9 @@ export default function Session() {
     const key = ++sentCount.current;
     setPending((before) => [...before, { key, text, at: Date.now(), behind: working, files: attached }]);
     atEnd.current = true;
-    const sent =
-      attached.length > 0
+    const sent = background
+      ? await toBackground(text)
+      : attached.length > 0
         ? await controlled(
             () => conn?.sendFiles(terminalId, text, attached) ?? Promise.resolve(false),
             (why) => `Not sent: ${why}. Everything is back in the field; send again when it’s connected.`,
@@ -429,7 +618,7 @@ export default function Session() {
       }
       return;
     }
-    if (attached.length === 0) {
+    if (attached.length === 0 && !background) {
       await new Promise((resolve) => setTimeout(resolve, ENTER_AFTER_MS));
       await type('\r');
     }
@@ -499,10 +688,13 @@ export default function Session() {
     if (!conn || !question) return;
     // "Always" outlives this prompt: with the app lock on, it is you first.
     if (choice === Answer_Choice.ALLOW_ALWAYS && !(await confirmIdentity(`Always allow ${question.tool}`))) return;
-    setAnswering(true);
+    // Gone on the tap: a second tap on a card still up was a second key.
+    setAnswered({ id: question.id, choice });
     const why = await conn.answer(question, choice).catch((e: unknown) => (e instanceof Error ? e.message : String(e)));
-    setAnswering(false);
-    if (why) setNote(why);
+    if (why) {
+      setAnswered(null);
+      setNote(why);
+    }
   };
 
   // A question's answers or a plan's verdict, handed to the agent by the
@@ -530,9 +722,165 @@ export default function Session() {
   const rest = Math.max(insets.bottom - 18, 6);
   const lift = rest - 6;
   const openTerminal = () => router.push(`/terminal/${hostId}/${terminal}`);
+  // A card waiting on you, as `tuck` has it: the one asked, or the last one
+  // as it tucks away.
+  const drawCard = (c: WaitingCard) => {
+    if (c.kind === 'background') {
+      return (
+        <View style={styles.ask}>
+          <Text style={styles.askTitle} numberOfLines={1}>
+            Waiting on you
+          </Text>
+          <Text style={styles.askLead} numberOfLines={3}>
+            It’s asking something in agent view on your Mac. Answer it there; a message from here would land in its
+            prompt.
+          </Text>
+          <Button kind="primary" title="Answer in the terminal" onPress={openTerminal} />
+        </View>
+      );
+    }
+    if (c.kind !== 'permission') {
+      return (
+        <Asking key={c.key} question={c.question} kind={c.kind} busy={answering} onRespond={respond} onTerminal={openTerminal} />
+      );
+    }
+    // Answered: the button tapped wears its mark, the rest are out of reach.
+    const done = c.chosen !== undefined;
+    const markOf = (choice: Answer_Choice, color: string) =>
+      c.chosen !== choice ? undefined : choice === Answer_Choice.DENY ? (
+        <Close size={20} color={color} weight={2.4} />
+      ) : (
+        <Check size={20} color={color} weight={2.4} />
+      );
+    return (
+      <View style={styles.ask}>
+        <Dim on={done} style={styles.askBody}>
+          <Text style={styles.askTitle} numberOfLines={1}>
+            Wants to use {c.question.tool}
+          </Text>
+          <RiskBadge risk={c.question.risk} />
+          {c.question.subject ? (
+            <Text style={styles.askSubject} numberOfLines={4}>
+              {c.question.tool === 'Bash' ? '$ ' : ''}
+              {c.question.subject}
+            </Text>
+          ) : null}
+        </Dim>
+        <View style={styles.askButtons}>
+          <Button
+            kind="primary"
+            title="Allow once"
+            mark={markOf(Answer_Choice.ALLOW_ONCE, t.onAccent)}
+            disabled={done}
+            onPress={() => void answer(Answer_Choice.ALLOW_ONCE)}
+            style={styles.grow}
+          />
+          {c.question.always ? (
+            <Button
+              title="Always"
+              mark={markOf(Answer_Choice.ALLOW_ALWAYS, t.text)}
+              disabled={done}
+              onPress={() => void answer(Answer_Choice.ALLOW_ALWAYS)}
+              style={styles.grow}
+            />
+          ) : null}
+          <Button
+            kind="danger"
+            title="Deny"
+            mark={markOf(Answer_Choice.DENY, t.failed)}
+            disabled={done}
+            onPress={() => void answer(Answer_Choice.DENY)}
+            style={styles.grow}
+          />
+        </View>
+      </View>
+    );
+  };
+  // The agent's modes, as the desktop can tell them (1.24): Claude's
+  // permission mode, OpenCode's agent, Codex's collaboration mode. Picking
+  // one has the desktop press the agent's own key until it reports it —
+  // a message asking it to implement cannot change its mode.
+  const reported = background ? undefined : located?.terminal?.modes;
+  // Its model and reasoning effort (1.26), Claude's and Codex's: read off
+  // its transcript, changed by its own commands on the desktop.
+  const told = background ? undefined : located?.terminal?.settings;
+  // Each with a pick just made standing in until the snapshot moves. Retired
+  // the moment it does — to the pick, or past it from the Mac — so it never
+  // stands in again over a later change.
+  const reporting: Record<keyof Landed, string | undefined> = {
+    mode: reported?.current,
+    model: told?.model,
+    effort: told?.effort,
+  };
+  const picks = Object.entries(landed ?? {}) as [keyof Landed, { to: string; from: string }][];
+  const standing = picks.filter(([what, pick]) => pick.from === reporting[what]);
+  if (landed && standing.length < picks.length) {
+    setLanded(standing.length > 0 ? Object.fromEntries(standing) : null);
+  }
+  const shown = (what: keyof Landed, value: string) => {
+    const pick = landed?.[what];
+    return pick && pick.from === value ? pick.to : value;
+  };
+  const modes = reported && landed?.mode ? { ...reported, current: shown('mode', reported.current) } : reported;
+  const settings =
+    told && (landed?.model || landed?.effort)
+      ? { ...told, model: shown('model', told.model), effort: shown('effort', told.effort) }
+      : told;
+  // A desktop that never reports it — a session with no transcript yet —
+  // has what it says shown again soon after.
+  useEffect(() => {
+    if (!landed) return;
+    const timer = setTimeout(() => setLanded(null), 5000);
+    return () => clearTimeout(timer);
+  }, [landed]);
+  const currentMode = modes?.choices.find((choice) => choice.id === modes.current);
+  const modelLabel = settings?.models.find((choice) => choice.id === settings.model)?.label;
+  const effortLabel = settings?.efforts.find((choice) => choice.id === settings.effort)?.label;
+  const pillLabel = switching
+    ? `${switching}…`
+    : modelLabel
+      ? effortLabel
+        ? `${modelLabel} · ${effortLabel}`
+        : modelLabel
+      : (currentMode?.label ?? 'Mode');
+  // A pick from the sheet or the mode menu: `act` has the desktop make it,
+  // and `made` is what then stands in until the snapshot reports it.
+  const pickWith = async (label: string, act: () => Promise<boolean>, made: Landed) => {
+    if (switching || busy.current || conn?.status !== 'connected') return;
+    setSwitching(label);
+    setNote('');
+    setSaid(null);
+    try {
+      const switched = await controlled(act, (why) => `Not switched: ${why}`, (text) => {
+        setNote(text);
+        setSaid({ text, failed: true });
+      });
+      if (switched) {
+        setLanded((before) => ({ ...before, ...made }));
+        setNote(`Switched to ${label}.`);
+        setSaid({ text: `Switched to ${label}.`, failed: false });
+      }
+    } finally {
+      setSwitching('');
+    }
+  };
+  const pickModel = (model: string, effort: string, label: string) =>
+    pickWith(
+      label,
+      () => conn?.setModel(terminalId, model, effort) ?? Promise.resolve(false),
+      model ? { model: { to: model, from: told?.model ?? '' } } : { effort: { to: effort, from: told?.effort ?? '' } },
+    );
+  const pickMode = async (choice: { id: string; label: string }) => {
+    setModeMenu(null);
+    await pickWith(
+      choice.label,
+      () => conn?.setMode(terminalId, choice.id) ?? Promise.resolve(false),
+      { mode: { to: choice.id, from: reported?.current ?? '' } },
+    );
+  };
 
   // Something to send: words, or photos and files on their own.
-  const ready = message.trim() !== '' || files.length > 0;
+  const ready = !waiting && (message.trim() !== '' || files.length > 0);
   // A desktop from before 1.12 takes words and nothing else.
   const canAttach = conn === null || conn.hostMinor >= 12;
 
@@ -570,6 +918,11 @@ export default function Session() {
   const unsent = pending.filter((p) => !(p.text && queued.some((q) => carries(splitFiles(q).words, p.text))));
   // Nothing kept paints at once; a kept conversation waits for the slide.
   const painted = settled || turns.length === 0;
+  // The task this chat was started on, not in the conversation yet: its
+  // message, sending, is the whole chat until it is. The conversation still
+  // loading, or the agent not yet reading — see STILL_OPENING — is that
+  // message on its way, not news to put above it.
+  const opening = seed !== undefined && pending.some((p) => p.key === 0);
   const statusOf = (p: Pending) => (now - p.at > UNSEEN_MS && !working ? 'unseen' : 'sending');
   const outgoing = (p: Pending) => (
     <Outgoing
@@ -591,7 +944,7 @@ export default function Session() {
       <View style={styles.fill}>
         <Bar
           back
-          title={worktree?.name ?? 'Session'}
+          title={background ? (backgroundSession?.name ?? sessionNames.get(keptKey) ?? 'Session') : (worktree?.name ?? 'Session')}
           lead={
             state ? (
               <View style={styles.state}>
@@ -602,17 +955,49 @@ export default function Session() {
           }
           right={
             <View style={styles.barActions}>
-              {worktree ? (
-                <IconButton
-                  label="The worktree"
-                  onPress={() => router.push(`/worktree/${hostId}/${encodeURIComponent(worktree.id)}`)}
-                >
-                  <Branch size={18} color={t.text} />
-                </IconButton>
+              {modes || settings ? (
+                <View ref={modePill} collapsable={false}>
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel={
+                      settings
+                        ? `${[currentMode?.label, modelLabel, effortLabel].filter(Boolean).join(', ') || 'Session settings'}. Change them`
+                        : currentMode
+                          ? `Mode: ${currentMode.label}. Change it`
+                          : 'Mode. Change it'
+                    }
+                    disabled={conn?.status !== 'connected' || switching !== '' || (!settings && isBusy)}
+                    onPress={() => {
+                      if (settings) {
+                        setSaid(null);
+                        setSheet(true);
+                      } else placeOf(modePill.current, setModeMenu);
+                    }}
+                    style={({ pressed }) => [styles.modePill, pressed && { backgroundColor: t.selection }]}
+                  >
+                    <ModeGlyph id={switching ? '' : (modes?.current ?? '')} />
+                    <Text style={[styles.modePillText, settings && { maxWidth: 150 }]} numberOfLines={1}>
+                      {pillLabel}
+                    </Text>
+                  </Pressable>
+                </View>
               ) : null}
-              <IconButton label="Open the terminal" onPress={openTerminal}>
-                <TerminalGlyph size={19} color={t.text} />
-              </IconButton>
+              {/* Where you can go from here, in one frame; the pill stands
+                  alone because it changes the session rather than leaving it. */}
+              <IconCluster
+                actions={[
+                  ...(worktree
+                    ? [
+                        {
+                          label: 'The worktree',
+                          onPress: () => router.push(`/worktree/${hostId}/${encodeURIComponent(worktree.id)}`),
+                          icon: <Changes size={18} color={t.text} />,
+                        },
+                      ]
+                    : []),
+                  { label: 'Open the terminal', onPress: openTerminal, icon: <TerminalWindow size={18} color={t.text} /> },
+                ]}
+              />
             </View>
           }
         />
@@ -622,46 +1007,57 @@ export default function Session() {
           // is in view; someone scrolled up to read is left there.
           keyboardLiftBehavior="whenAtEnd"
           offset={lift}
+          // A card waiting on you floats over the conversation's foot: the
+          // conversation scrolls clear of it, and follows it down as it goes.
+          extraContentPadding={FLOATS ? room : undefined}
           style={styles.fill}
           contentContainerStyle={styles.page}
           keyboardShouldPersistTaps="handled"
           onScroll={(e) => {
             const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent;
-            const end = contentOffset.y + layoutMeasurement.height >= contentSize.height - 48;
+            // What is under a card waiting on you is not in view.
+            const hidden = FLOATS ? room.get() : 0;
+            const end = contentOffset.y + layoutMeasurement.height - hidden >= contentSize.height - 48;
             atEnd.current = end;
             if (end === away) setAway(!end);
             if (end && fresh) setFresh(false);
           }}
           scrollEventThrottle={100}
+          // Shrunk by what grows under it — a taller draft, a note — while
+          // the newest turn was in view: kept in view. A card waiting on you
+          // floats over it instead (see FLOATS), kept clear by `room`.
+          onLayout={() => {
+            if (atEnd.current) scroll.current?.scrollToEnd({ animated: false });
+          }}
           onContentSizeChange={() => {
             if (atEnd.current) scroll.current?.scrollToEnd({ animated: false });
           }}
         >
           {!painted ? null : tooOld ? (
             <View style={styles.empty}>
-              <Prose>
-                ket on {conn?.host.name ?? 'your Mac'} is older than this app. Update it — rebuild ket and start a new
-                host — to read sessions here.
-              </Prose>
+              <Status
+                text={`ket on ${conn?.host.name ?? 'your Mac'} is older than this app. Update it — rebuild ket and start a new host — to read sessions here.`}
+                onCopy={copy}
+              />
               <Button title="Open the terminal" onPress={openTerminal} />
             </View>
-          ) : unreadable && turns.length === 0 ? (
+          ) : unreadable && turns.length === 0 && !(opening && STILL_OPENING.includes(unreadable)) ? (
             <View style={styles.empty}>
-              <Prose>{sentence(unreadable)}</Prose>
+              <Status text={sentence(unreadable)} onCopy={copy} />
               <Button title="Open the terminal" onPress={openTerminal} />
             </View>
           ) : turns.length === 0 && failing ? (
             <View style={styles.empty}>
-              <Prose>{`The desktop isn’t sending the conversation: ${failing}. Still trying.`}</Prose>
+              <Status text={`The desktop isn’t sending the conversation: ${failing}. Still trying.`} onCopy={copy} />
               <Button title="Open the terminal" onPress={openTerminal} />
             </View>
-          ) : turns.length === 0 && !loaded ? (
+          ) : turns.length === 0 && !loaded && !opening ? (
             <View style={styles.empty}>
               <Prose>Loading the conversation…</Prose>
             </View>
           ) : turns.length === 0 && unsent.length === 0 && !working ? (
             <View style={styles.empty}>
-              <Prose>Nothing in this session yet. What you and the agent say shows here.</Prose>
+              <Status text="Nothing in this session yet. What you and the agent say shows here." onCopy={copy} />
               <Button title="Open the terminal" onPress={openTerminal} />
             </View>
           ) : null}
@@ -683,64 +1079,39 @@ export default function Session() {
               indicator: the desktop says the agent is working a moment
               before its transcript has the message that set it off. */}
           {unsent.filter((p) => !p.behind).map(outgoing)}
-          {working || sending ? <Working agent={agent} what={working && worktree ? detail(worktree) : ''} /> : null}
+          {working || sending ? <Working agent={agent} what={working && worktree && !background ? detail(worktree) : ''} /> : null}
           {queued.map((text, index) => (
             <Outgoing key={`q${index}`} text={text} status="queued" onCopy={copy} />
           ))}
           {unsent.filter((p) => p.behind).map(outgoing)}
         </KeyboardChatScrollView>
 
-        <KeyboardStickyView offset={{ closed: 0, opened: lift }}>
-        <FadingEdge shown={away} />
-        {away ? (
-          // Floats over the conversation's foot, riding with the composer.
-          <View pointerEvents="box-none" style={styles.jumpDock}>
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel={fresh ? 'Jump to the newest — new messages' : 'Jump to the newest'}
-              onPress={() => {
-                atEnd.current = true;
-                setAway(false);
-                setFresh(false);
-                scroll.current?.scrollToEnd({ animated: true });
-              }}
-              style={({ pressed }) => [styles.jump, pressed && { backgroundColor: t.selection }]}
-            >
-              <ChevronDown size={18} color={t.text} weight={2.2} />
-              {fresh ? <View style={styles.jumpDot} /> : null}
-            </Pressable>
-          </View>
-        ) : null}
-        {question && prompt ? (
-          <Asking
-            key={String(question.id)}
-            question={question}
-            kind={prompt}
-            busy={answering}
-            onRespond={respond}
-            onTerminal={openTerminal}
-          />
-        ) : question?.answerable ? (
-          <View style={styles.ask}>
-            <Text style={styles.askTitle} numberOfLines={1}>
-              Wants to use {question.tool}
-            </Text>
-            <RiskBadge risk={question.risk} />
-            {question.subject ? (
-              <Text style={styles.askSubject} numberOfLines={4}>
-                {question.tool === 'Bash' ? '$ ' : ''}
-                {question.subject}
-              </Text>
-            ) : null}
-            <View style={styles.askButtons}>
-              <Button kind="primary" title="Allow once" disabled={answering} onPress={() => void answer(Answer_Choice.ALLOW_ONCE)} style={styles.grow} />
-              {question.always ? (
-                <Button title="Always" disabled={answering} onPress={() => void answer(Answer_Choice.ALLOW_ALWAYS)} style={styles.grow} />
-              ) : null}
-              <Button kind="danger" title="Deny" disabled={answering} onPress={() => void answer(Answer_Choice.DENY)} style={styles.grow} />
+        <KeyboardLift offset={{ closed: 0, opened: lift }}>
+        {/* Over the conversation's foot, riding with the composer: a card
+            waiting on you, and above it the fade and the jump button. */}
+        <View pointerEvents="box-none" style={styles.foot}>
+          <FadingEdge shown={away} />
+          {away ? (
+            <View pointerEvents="box-none" style={styles.jumpDock}>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={fresh ? 'Jump to the newest — new messages' : 'Jump to the newest'}
+                onPress={() => {
+                  atEnd.current = true;
+                  setAway(false);
+                  setFresh(false);
+                  scroll.current?.scrollToEnd({ animated: true });
+                }}
+                style={({ pressed }) => [styles.jump, pressed && { backgroundColor: t.selection }]}
+              >
+                <ChevronDown size={18} color={t.text} weight={2.2} />
+                {fresh ? <View style={styles.jumpDot} /> : null}
+              </Pressable>
             </View>
-          </View>
-        ) : null}
+          ) : null}
+
+          {tuck.card ? <Tucked tuck={tuck}>{drawCard(tuck.card)}</Tucked> : null}
+        </View>
 
         {hearing ? (
           <View accessibilityLiveRegion="polite" style={styles.hearing}>
@@ -756,26 +1127,16 @@ export default function Session() {
           </View>
         ) : note ? (
           <View style={styles.noteBox}>
-            <Prose style={styles.noteText} color={t.dim}>
-              {note}
-            </Prose>
+            <Status text={note} onCopy={copy} style={styles.noteText} color={t.dim} />
             {toSettings ? (
               <Button title="Open Settings" onPress={() => void Linking.openSettings()} style={styles.settings} />
             ) : null}
           </View>
         ) : null}
-        {attaching ? (
-          <AttachMenu
-            older={canAttach ? undefined : (conn?.host.name ?? 'your Mac')}
-            pasteable={pasteable}
-            onPick={(source) => void attach(source)}
-          />
-        ) : menu.length > 0 ? (
-          <CommandMenu commands={menu} onPick={(command) => void pick(command)} />
-        ) : null}
         {/* Chips send at once, so not while photos wait to go with the next
-            message, while the mic is writing one, or under the + menu. */}
-        {!tooOld && !asking && !message && files.length === 0 && !hearing && !attaching ? (
+            message, or while the mic is writing one. Under a menu they
+            stay where they are: the menu floats over them. */}
+        {!tooOld && !quiet && !message && files.length === 0 && !hearing ? (
           <ScrollView
             horizontal
             showsHorizontalScrollIndicator={false}
@@ -830,17 +1191,19 @@ export default function Session() {
           </ScrollView>
         ) : null}
         <KeyCommands title="Send" onSend={() => void send()} style={[styles.composer, { paddingBottom: rest }]}>
-          {!tooOld ? (
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel={attaching ? 'Close the attach menu' : 'Attach a photo or file'}
-              accessibilityState={{ expanded: attaching }}
-              onPress={openAttach}
-              style={({ pressed }) => [styles.plus, (attaching || pressed) && { backgroundColor: t.selection }]}
-            >
-              {attaching ? <Close size={20} color={t.text} weight={2.2} /> : <Plus size={20} color={t.text} weight={2.2} />}
-            </Pressable>
-          ) : null}
+          {/* The + and / menus: floats hung from the composer's top edge,
+              over the chat and the chips, which stay put under them. */}
+          <ComposerMenu open={attaching} style={plusMenu}>
+            <AttachMenu
+              older={canAttach ? undefined : (conn?.host.name ?? 'your Mac')}
+              pasteable={pasteable}
+              onPick={(source) => void attach(source)}
+            />
+          </ComposerMenu>
+          <ComposerMenu open={!attaching && menu.length > 0} style={slashMenu(!tooOld && !background)}>
+            <CommandMenu commands={menu} onPick={(command) => void pick(command)} />
+          </ComposerMenu>
+          {!tooOld && !background ? <PlusButton open={attaching} onPress={openAttach} /> : null}
           <View style={[styles.field, files.length > 0 && styles.fieldTray, hearing && styles.fieldHearing]}>
             {files.length > 0 ? (
               <Tray files={files} onRemove={(key) => setFiles((before) => before.filter((file) => file.key !== key))} />
@@ -876,33 +1239,86 @@ export default function Session() {
                 /> : null}
             </View>
           </View>
-          {working && !ready ? (
-            // Working, with nothing to send: the button stops the turn.
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel="Stop"
-              disabled={stopping}
-              onPress={stop}
-              style={({ pressed }) => [styles.send, styles.sendStop, (pressed || stopping) && { opacity: 0.6 }]}
-            >
-              <Stop size={18} color={t.text} />
-            </Pressable>
-          ) : (
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel="Send"
-              disabled={!ready}
-              onPress={() => void send()}
-              style={[styles.send, ready ? styles.sendReady : null]}
-            >
-              <Send size={18} color={ready ? t.onBrand : t.faint} weight={2.3} />
-            </Pressable>
-          )}
+          {/* Working, with nothing to send: the same button stops the turn. */}
+          <SendButton
+            ready={ready}
+            stop={working && !ready}
+            stopping={stopping}
+            launches={launches}
+            onPress={
+              working && !ready
+                ? background
+                  ? () => setNote('A background session stops in agent view on your Mac. Open the terminal to stop it.')
+                  : stop
+                : () => void send()
+            }
+          />
         </KeyCommands>
-        </KeyboardStickyView>
+        </KeyboardLift>
+        {settings ? (
+          <ModelSheet
+            open={sheet}
+            onClose={() => setSheet(false)}
+            agent={agent ? agentLabel(agent) : 'Agent'}
+            modes={modes}
+            settings={settings}
+            pending={switching}
+            said={said}
+            busy={isBusy}
+            onMode={(choice) => void pickMode(choice)}
+            onModel={(choice) => void pickModel(choice.id, '', choice.label)}
+            onEffort={(choice) => void pickModel('', choice.id, choice.label)}
+          />
+        ) : null}
+        <FloatMenu
+          open={modeMenu !== null}
+          anchor={modeMenu}
+          onClose={() => setModeMenu(null)}
+          label={`${agent ? agentLabel(agent) : 'Agent'} mode`}
+          sections={
+            modes
+              ? [
+                  {
+                    title: `${agent ? agentLabel(agent) : 'Agent'} mode`,
+                    items: modes.choices.map((choice) => ({
+                      key: choice.id,
+                      label: choice.label,
+                      detail: choice.detail || undefined,
+                      icon: choice.id === modes.current ? <Check size={16} color={t.brand} weight={2.4} /> : undefined,
+                      onPress: () => void pickMode(choice),
+                    })),
+                  },
+                ]
+              : []
+          }
+        />
       </View>
     </Screen>
   );
+}
+
+/** Picks the desktop has made and its snapshot hasn't reported yet: each
+ * the value picked, and what the snapshot said when it was picked. */
+type Landed = Partial<Record<'mode' | 'model' | 'effort', { to: string; from: string }>>;
+
+/** The glyph a mode's pill leads with: pause for planning, a pencil for
+ * edits going in, a shield for asking first, a bolt for going unasked. */
+function ModeGlyph({ id }: { id: string }) {
+  switch (id) {
+    case 'plan':
+      return <Pause size={15} color={t.attention} weight={2.6} />;
+    case 'acceptEdits':
+    case 'build':
+      return <Pencil size={15} color={t.running} weight={2.2} />;
+    case 'auto':
+    case 'bypassPermissions':
+    case 'dontAsk':
+      return <Bolt size={15} color={t.brand} weight={2.2} />;
+    case 'default':
+      return <Shield size={15} color={t.dim} weight={2.2} />;
+    default:
+      return <Sliders size={15} color={t.dim} weight={2.2} />;
+  }
 }
 
 /** The conversation's foot, faded into the desk while there is more below
@@ -943,7 +1359,10 @@ function join(before: Turn[], more: Turn[]): Turn[] {
 /** Which card a prompt takes, when it is not a permission. */
 function promptKind(tool: string): 'ask' | 'plan' | undefined {
   if (tool === 'AskUserQuestion') return 'ask';
-  // A dialog the desktop read off the agent's screen, with its options.
+  // Codex's own question form.
+  if (tool === 'request_user_input') return 'ask';
+  // A dialog the desktop read off the agent's screen, with its options —
+  // Codex's "Implement this plan?" among them.
   if (tool === 'Dialog') return 'ask';
   if (tool === 'ExitPlanMode') return 'plan';
   return undefined;
@@ -976,6 +1395,8 @@ function Asking({
   const send = async (reply: PromptAnswer) => {
     if (await onRespond(reply)) setSent(true);
   };
+  // Sent: the button that sent it wears a tick until the card goes.
+  const sentMark = sent ? <Check size={20} color={t.onAccent} weight={2.4} /> : undefined;
 
   if (!question.answerable || (kind === 'ask' && question.asks.length === 0)) {
     return (
@@ -996,14 +1417,14 @@ function Asking({
   if (kind === 'plan') {
     return (
       <View style={styles.ask}>
-        <Text style={styles.askTitle}>Ready to code?</Text>
-        {question.subject ? (
-          <Text style={styles.askLead} numberOfLines={2}>
-            {question.subject}
-          </Text>
-        ) : null}
-        {refining ? (
-          <>
+        <Dim on={sent} style={styles.askBody}>
+          <Text style={styles.askTitle}>Ready to code?</Text>
+          {question.subject ? (
+            <Text style={styles.askLead} numberOfLines={2}>
+              {question.subject}
+            </Text>
+          ) : null}
+          {refining ? (
             <TextInput
               value={feedback}
               onChangeText={setFeedback}
@@ -1014,20 +1435,30 @@ function Asking({
               editable={idle}
               style={[field, styles.askInput]}
             />
-            <View style={styles.askButtons}>
-              <Button
-                kind="primary"
-                title="Send"
-                disabled={!idle || !feedback.trim()}
-                onPress={() => void send({ approve: false, feedback: feedback.trim() })}
-                style={styles.grow}
-              />
-              <Button kind="ghost" title="Cancel" disabled={!idle} onPress={() => setRefining(false)} style={styles.grow} />
-            </View>
-          </>
+          ) : null}
+        </Dim>
+        {refining ? (
+          <View style={styles.askButtons}>
+            <Button
+              kind="primary"
+              title="Send"
+              mark={sentMark}
+              disabled={!idle || !feedback.trim()}
+              onPress={() => void send({ approve: false, feedback: feedback.trim() })}
+              style={styles.grow}
+            />
+            <Button kind="ghost" title="Cancel" disabled={!idle} onPress={() => setRefining(false)} style={styles.grow} />
+          </View>
         ) : (
           <View style={styles.askButtons}>
-            <Button kind="primary" title="Approve" disabled={!idle} onPress={() => void send({ approve: true })} style={styles.grow} />
+            <Button
+              kind="primary"
+              title="Approve"
+              mark={sentMark}
+              disabled={!idle}
+              onPress={() => void send({ approve: true })}
+              style={styles.grow}
+            />
             <Button title="Keep planning" disabled={!idle} onPress={() => setRefining(true)} style={styles.grow} />
           </View>
         )}
@@ -1049,44 +1480,48 @@ function Asking({
   };
   return (
     <View style={styles.ask}>
-      <ScrollView style={styles.askScroll} contentContainerStyle={styles.askQuestions} keyboardShouldPersistTaps="handled">
-        {question.asks.map((asked, i) => (
-          <View key={i} style={styles.asked}>
-            {asked.header ? <Text style={styles.askHeader}>{asked.header}</Text> : null}
-            <Text style={styles.askTitle}>{asked.question}</Text>
-            {asked.multiSelect ? <Text style={styles.askLead}>Pick any</Text> : null}
-            <View>
-              {asked.choices.map((choice, j) => (
-                <Choice
-                  key={j}
-                  many={asked.multiSelect}
-                  on={picks[i].includes(j)}
-                  label={choice.label}
-                  description={choice.description}
-                  disabled={!idle}
-                  onPress={() => choose(i, j, asked.multiSelect)}
+      <Dim on={sent}>
+        <ScrollView style={styles.askScroll} contentContainerStyle={styles.askQuestions} keyboardShouldPersistTaps="handled">
+          {question.asks.map((asked, i) => (
+            <View key={i} style={styles.asked}>
+              {asked.header ? <Text style={styles.askHeader}>{asked.header}</Text> : null}
+              <Text style={styles.askTitle}>{asked.question}</Text>
+              {asked.multiSelect ? <Text style={styles.askLead}>Pick any</Text> : null}
+              <View>
+                {asked.choices.map((choice, j) => (
+                  <Choice
+                    key={j}
+                    many={asked.multiSelect}
+                    on={picks[i].includes(j)}
+                    label={choice.label}
+                    description={choice.description}
+                    disabled={!idle}
+                    onPress={() => choose(i, j, asked.multiSelect)}
+                  />
+                ))}
+              </View>
+              {question.tool === 'Dialog' || question.tool === 'request_user_input' ? null : (
+                // A dialog read off the agent's screen, or Codex's form, takes
+                // one of its own options and nothing else: the desktop types
+                // the option's number.
+                <TextInput
+                  value={others[i]}
+                  onChangeText={(text) => write(i, text)}
+                  placeholder="Or write your own"
+                  placeholderTextColor={t.faint}
+                  editable={idle}
+                  style={field}
                 />
-              ))}
+              )}
             </View>
-            {question.tool === 'Dialog' ? null : (
-              // A dialog read off the agent's screen takes one of its own
-              // options and nothing else.
-              <TextInput
-                value={others[i]}
-                onChangeText={(text) => write(i, text)}
-                placeholder="Or write your own"
-                placeholderTextColor={t.faint}
-                editable={idle}
-                style={field}
-              />
-            )}
-          </View>
-        ))}
-      </ScrollView>
+          ))}
+        </ScrollView>
+      </Dim>
       <View style={styles.askButtons}>
         <Button
           kind="primary"
           title={question.asks.length > 1 ? 'Send answers' : 'Send answer'}
+          mark={sentMark}
           disabled={!idle || !answered}
           onPress={() =>
             void send({ picks: question.asks.map((_, i) => ({ choices: picks[i], other: others[i].trim() })) })
@@ -1094,30 +1529,6 @@ function Asking({
           style={styles.grow}
         />
         <Button kind="ghost" title="In the terminal" onPress={onTerminal} />
-      </View>
-    </View>
-  );
-}
-
-/** The agent at work: its mark, a pulse, and what it is doing — "Thinking",
- * "Running cargo test" — until its next words reach the conversation. */
-function Working({ agent, what }: { agent: string; what: string }) {
-  const [phase, setPhase] = useState(0);
-  useEffect(() => {
-    const timer = setInterval(() => setPhase((n) => (n + 1) % 3), 450);
-    return () => clearInterval(timer);
-  }, []);
-  return (
-    <View style={styles.agent} accessibilityLabel={what || 'Waiting for the agent'}>
-      {agent ? <AgentMark agent={agent} size={14} /> : null}
-      <View style={styles.working}>
-        {[0, 1, 2].map((at) => (
-          <View key={at} style={[styles.workingDot, at === phase && { backgroundColor: t.running }]} />
-        ))}
-        {/* Always laid out, so the words arriving do not change its height. */}
-        <Text style={styles.workingText} numberOfLines={1}>
-          {what || ' '}
-        </Text>
       </View>
     </View>
   );
@@ -1146,115 +1557,30 @@ function carries(said: string, sent: string): boolean {
   return whole.slice(0, 200) === mine.slice(0, 200) || whole.endsWith(mine);
 }
 
-/** A message of yours the agent has not taken in yet. Sending, until the
- * conversation or the agent's queue shows it; queued, while the agent works
- * and holds it; unseen, when neither has after a while and the agent is not
- * working — typed into a prompt, perhaps — and a tap clears it. Codex keeps
- * no queue in its rollout, so a message sent mid-turn stays sending until
- * the turn ends and Codex takes it in.
- *
- * The state is a mark beside the bubble — see [`StatusMark`] — never a line
- * of words under it, which came and went as the message was taken in and
- * made the chat jump. The bubble is the one the delivered message will be,
- * faded while sending, so arriving changes nothing but the mark — and held,
- * it copies, as the delivered one does. */
-function Outgoing({
+/** A line about the chat rather than in it — why it is empty, what went
+ * wrong — which copies when held, as a message does, so it can be sent on. */
+function Status({
   text,
-  files = [],
-  status,
   onCopy,
-  onDismiss,
+  style,
+  color,
 }: {
   text: string;
-  /** Photos and files sent with it, drawn above its words. */
-  files?: Attachment[];
-  status: 'sending' | 'queued' | 'unseen';
   onCopy: (text: string) => void;
-  onDismiss?: () => void;
+  style?: StyleProp<TextStyle>;
+  color?: string;
 }) {
-  const said =
-    status === 'queued'
-      ? 'Queued, read when the agent finishes this step'
-      : status === 'unseen'
-        ? 'Not in the conversation, check the terminal'
-        : 'Sending';
-  const sending = status === 'sending';
-  const words = <Text style={[styles.youText, sending && styles.youSendingText]}>{text}</Text>;
-  const what = text || (files.length === 1 ? files[0].name : `${files.length} files`);
   return (
     <Pressable
-      onPress={status === 'unseen' ? onDismiss : undefined}
+      accessibilityHint="Hold to copy"
       delayLongPress={350}
       onLongPress={() => onCopy(text)}
-      accessibilityLabel={`${what}. ${said}.`}
-      accessibilityHint={status === 'unseen' ? 'Tap to clear, hold to copy' : 'Hold to copy'}
-      style={({ pressed }) => [
-        files.length > 0 ? styles.yours : [styles.you, sending && styles.youSending],
-        pressed && styles.held,
-      ]}
+      style={({ pressed }) => (pressed ? styles.held : null)}
     >
-      {files.length > 0 ? (
-        <>
-          <SentFiles files={files} sending={sending} />
-          {text ? (
-            <View style={[styles.bubble, sending && styles.youSending]}>
-              <StatusMark status={status} />
-              {words}
-            </View>
-          ) : (
-            <StatusMark status={status} />
-          )}
-        </>
-      ) : (
-        <>
-          <StatusMark status={status} />
-          {words}
-        </>
-      )}
+      <Prose style={style} color={color}>
+        {text}
+      </Prose>
     </Pressable>
-  );
-}
-
-/**
- * Where a message of yours stands, as a mark in the gutter to the left of its
- * bubble: a dashed ring while it is sent, an amber clock while the agent holds
- * it, a red ! when it never arrived, a faint tick once it is in.
- *
- * Centred on the bubble's first line, however many lines the message runs to,
- * and drawn outside the bubble's box: it never shifts the text, never changes
- * where a long message wraps, and changing from one mark to the next — or the
- * tick moving on to the next message — moves nothing else. Shape as well as
- * colour tells the four apart.
- */
-function StatusMark({ status }: { status: 'sending' | 'queued' | 'unseen' | 'delivered' }) {
-  return (
-    <View pointerEvents="none" style={styles.statusMark}>
-      <Svg width={14} height={14} viewBox="0 0 14 14">
-        {status === 'sending' ? (
-          <Circle cx={7} cy={7} r={5.25} fill="none" stroke={t.faint} strokeWidth={1.5} strokeDasharray="3 2.5" />
-        ) : status === 'queued' ? (
-          <>
-            <Circle cx={7} cy={7} r={5.25} fill="none" stroke={t.quotaWarm} strokeWidth={1.5} />
-            <Path d="M7 4.2V7l2 1.3" fill="none" stroke={t.quotaWarm} strokeWidth={1.5} strokeLinecap="round" />
-          </>
-        ) : status === 'unseen' ? (
-          <>
-            <Circle cx={7} cy={7} r={6} fill={t.failed} />
-            <Path d="M7 3.8v3.8" stroke={t.backdrop} strokeWidth={1.6} strokeLinecap="round" />
-            <Circle cx={7} cy={9.9} r={0.95} fill={t.backdrop} />
-          </>
-        ) : (
-          <Path
-            d="M3.5 7.3 5.9 9.6 10.5 4.6"
-            fill="none"
-            stroke={t.faint}
-            strokeWidth={1.6}
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          />
-        )}
-      </Svg>
-    </View>
   );
 }
 
@@ -1395,7 +1721,11 @@ function TurnView({
           onLongPress={() => onCopy(turn.text)}
           style={styles.agent}
         >
-          {agent ? <AgentMark agent={agent} size={14} /> : null}
+          {agent ? (
+            <View style={styles.agentMark}>
+              <AgentMark agent={agent} size={14} />
+            </View>
+          ) : null}
           <View style={styles.agentBody}>
             <Words text={turn.text} onCopy={onCopy} />
           </View>
@@ -1751,21 +2081,30 @@ const styles = StyleSheet.create({
   page: { paddingHorizontal: size.gutter + 4, paddingTop: 4, paddingBottom: 18, gap: 12 },
   state: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   stateText: { fontFamily: font.chrome, fontSize: size.caption },
-  barActions: { flexDirection: 'row', gap: 4 },
+  barActions: { flexDirection: 'row', gap: 6, alignItems: 'center' },
+  modePill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    height: 34,
+    paddingLeft: 10,
+    paddingRight: 12,
+    borderRadius: 17,
+    borderWidth: 1,
+    borderColor: t.border,
+    backgroundColor: t.sunken,
+  },
+  modePillText: { fontFamily: font.prose, fontSize: 13.5, fontWeight: '500', color: t.text, maxWidth: 104 },
   empty: { gap: 12, paddingVertical: 24, alignItems: 'flex-start' },
   you: { ...bubble, alignSelf: 'flex-end', maxWidth: '86%' },
   // A message of yours with photos or files: them, then its bubble.
   yours: { alignSelf: 'flex-end', maxWidth: '86%', alignItems: 'flex-end', gap: 4 },
   bubble,
-  // Faded while sending — the fill and the words, not the mark beside them —
-  // at the delivered bubble's size and corners.
-  youSending: { backgroundColor: tint(t.selection, 0.7) },
-  youSendingText: { opacity: 0.7 },
-  // In the gutter left of the bubble, centred on the first line: the bubble's
-  // top padding, then half of a 20pt line less half the 14pt mark.
-  statusMark: { position: 'absolute', left: -20, top: 12 },
   youText: { fontFamily: font.prose, fontSize: size.body, lineHeight: 20, color: t.text },
   agent: { flexDirection: 'row', gap: 10, alignItems: 'flex-start' },
+  // Centred on the first line of the words beside it — the body's 1pt top
+  // padding plus a 21pt line — however many lines they run to.
+  agentMark: { height: 22, paddingTop: 1, justifyContent: 'center' },
   agentBody: { flex: 1, minWidth: 0, gap: 8, paddingTop: 1 },
   agentText: { fontFamily: font.prose, fontSize: size.body, lineHeight: 21, color: t.text },
   link: { color: t.attention, textDecorationLine: 'underline' },
@@ -1814,9 +2153,6 @@ const styles = StyleSheet.create({
   tableText: { fontFamily: font.prose, fontSize: size.label, lineHeight: 18, color: t.text },
   codeBlockInner: { padding: 10 },
   codeText: { fontFamily: font.code, fontSize: 12.5, lineHeight: 18, color: t.text },
-  working: { flex: 1, minWidth: 0, flexDirection: 'row', alignItems: 'center', gap: 5, paddingTop: 1 },
-  workingDot: { width: 5, height: 5, borderRadius: 3, backgroundColor: t.faint },
-  workingText: { flex: 1, minWidth: 0, marginLeft: 4, fontFamily: font.chrome, fontSize: size.detail, color: t.dim },
   tool: { flexDirection: 'row', alignItems: 'flex-start', gap: 8, paddingLeft: 24 },
   toolMark: { width: 5, height: 5, borderRadius: 3, marginTop: 6, backgroundColor: t.faint },
   toolText: { flex: 1, minWidth: 0, fontFamily: font.chrome, fontSize: size.detail, color: t.dim },
@@ -1831,9 +2167,11 @@ const styles = StyleSheet.create({
     padding: 12,
     gap: 8,
     borderRadius: size.radiusCard,
-    backgroundColor: tint(t.attention, 0.1),
+    // Solid: it rides over the conversation with the keyboard, and the
+    // conversation must not read through it.
+    backgroundColor: blend(t.backdrop, t.attention, 0.1),
     borderWidth: 1,
-    borderColor: tint(t.attention, 0.35),
+    borderColor: blend(t.backdrop, t.attention, 0.35),
   },
   askTitle: { fontFamily: font.proseSemibold, fontSize: size.body, color: t.text },
   askSubject: { fontFamily: font.code, fontSize: 12.5, lineHeight: 18, color: t.text },
@@ -1844,6 +2182,7 @@ const styles = StyleSheet.create({
   asked: { gap: 6 },
   askInput: { height: undefined, minHeight: size.control, maxHeight: 120, paddingTop: 11, paddingBottom: 11, lineHeight: 20 },
   askButtons: { flexDirection: 'row', gap: 8 },
+  askBody: { gap: 8 },
   grow: { flex: 1 },
   noteBox: { paddingHorizontal: size.gutter + 4, paddingBottom: 8, gap: 8, alignItems: 'flex-start' },
   noteText: { fontSize: size.label, lineHeight: 19 },
@@ -1878,14 +2217,6 @@ const styles = StyleSheet.create({
     gap: 8,
     paddingHorizontal: size.gutter,
   },
-  plus: {
-    width: size.control,
-    height: size.control,
-    borderRadius: size.control / 2,
-    backgroundColor: t.sunken,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
   field: { flex: 1, minWidth: 0, minHeight: size.control, borderRadius: size.control / 2, backgroundColor: t.sunken },
   // With photos in it: a well, the tray over the words.
   fieldTray: { borderRadius: 20 },
@@ -1910,19 +2241,10 @@ const styles = StyleSheet.create({
   // With no mic beside it, the words keep clear of the field's round end.
   inputAlone: { paddingRight: 16 },
   inputUnderTray: { paddingTop: 9 },
-  send: {
-    width: size.control,
-    height: size.control,
-    borderRadius: size.control / 2,
-    backgroundColor: t.selection,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  // Ready to send: ket's own green, the one thing on the bar that is.
-  sendReady: { backgroundColor: t.brand },
-  // Working: the same place stops it.
-  sendStop: { backgroundColor: t.selection },
   edge: { position: 'absolute', top: -EDGE_H, left: 0, right: 0, height: EDGE_H },
+  // Hung from the composer's top edge, as tall as the card in it: what
+  // floats over the conversation's foot hangs from its top.
+  foot: FLOATS ? { position: 'absolute', left: 0, right: 0, bottom: '100%' } : {},
   jumpDock: { position: 'absolute', top: -54, right: size.gutter + 4 },
   jump: {
     width: 40,
@@ -1933,10 +2255,6 @@ const styles = StyleSheet.create({
     borderColor: t.border,
     alignItems: 'center',
     justifyContent: 'center',
-    shadowColor: '#000',
-    shadowOpacity: 0.4,
-    shadowRadius: 10,
-    shadowOffset: { width: 0, height: 4 },
   },
   jumpDot: {
     position: 'absolute',

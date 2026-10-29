@@ -2477,6 +2477,7 @@ impl Shell {
     /// to answer one repaint.
     pub(crate) fn refresh_activity(&mut self, cx: &mut Context<Self>) {
         self.sync_status_worktrees();
+        self.sync_asleep_tabs();
         // Work a phone asked this window to start, handed over by the host,
         // and backlog notes a phone wrote through it.
         self.take_phone_work(cx);
@@ -2692,7 +2693,7 @@ impl Shell {
     /// drop below where the row came from lands one place earlier than the gap
     /// the line was drawn in. Answers `None` when the move is a no-op — the
     /// two gaps either side of a row both put it back where it was.
-    fn landing(from: usize, before: usize) -> Option<usize> {
+    pub(crate) fn landing(from: usize, before: usize) -> Option<usize> {
         let to = if before > from { before - 1 } else { before };
         (to != from).then_some(to)
     }
@@ -2985,8 +2986,9 @@ impl Shell {
         };
 
         let open = self.search.open;
-        // Search, then the ⋯ menu holding Quick prompt and Add project, then
-        // the fold to the rail — the header's own fold, turned on its side.
+        // Search, then the ⋯ menu holding Quick prompt, Add project and
+        // Collapse all, then the fold to the rail — the header's own fold,
+        // turned on its side.
         let actions = div()
             .flex()
             .flex_none()

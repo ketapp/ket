@@ -9,7 +9,7 @@
 //   node test/protocol.ts
 
 import { readFileSync } from 'node:fs';
-import { firstOpen } from '../src/client.ts';
+import { DialError, firstOpen } from '../src/client.ts';
 
 import { Initiator, type Keypair, type Transport, generateKeypair, keypairFrom } from '../src/noise.ts';
 import { OFFER_PREFIX, parseOffer, toBase64Url, validRelayUrl } from '../src/offer.ts';
@@ -345,6 +345,19 @@ check('address validation rejects a non-WebSocket URL', !validRelayUrl('https://
   await new Promise<void>((resolve) => setImmediate(resolve));
   check('parallel dial keeps the first open link', winner.address === 'ws://fast' && closedFast === 0);
   check('parallel dial closes a later link', signals.get('ws://slow')?.aborted === true && closedSlow === 1);
+}
+
+{
+  const failed = await firstOpen(['ws://a', 'ws://b'], (address) =>
+    Promise.reject<{ close(): void }>(new Error(`${address} said no`)),
+  ).then(
+    () => null,
+    (error: unknown) => error,
+  );
+  check(
+    'a dial no address answers says what each one said',
+    failed instanceof DialError && failed.failures['ws://a'] === 'ws://a said no' && failed.failures['ws://b'] === 'ws://b said no',
+  );
 }
 
 console.log(`${passed} passed, ${failures} failed`);

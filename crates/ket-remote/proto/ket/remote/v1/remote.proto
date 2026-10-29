@@ -66,6 +66,30 @@
 // PinWorktree, and DeleteWorktree, answered with WorktreeDeleted — the
 // worktree menu's Pin and Delete. Neither touches a repository's own
 // checkout.
+//
+// 1.21 adds Claude Code's agent view: a terminal showing it lists the
+// background sessions it holds (`TerminalSummary.agent_view`), a phone reads
+// one of them (`GetConversation.session`), and OpenAgentSession opens one in
+// the agent view and types a message to it.
+//
+// 1.22 adds `AgentView.listed`, so an agent view whose sessions the desktop
+// is still reading is not shown as having none.
+//
+// 1.23 adds a worktree's asleep tabs (`WorktreeSummary.asleep`): agent tabs
+// the desktop stopped while keeping their sessions. WakeTerminal starts one
+// again, answered with TerminalWoken naming the terminal it now is.
+//
+// 1.24 adds an agent's modes (`TerminalSummary.modes`): Claude's permission
+// mode, OpenCode's agent, Codex's collaboration mode, with the one it is in.
+// SetMode asks the desktop to put the agent in one, answered with Ack once
+// the agent reports it.
+
+// 1.25 adds what an agent view session is doing and when it last did
+// anything (`BackgroundSession.doing`, `active_at_ms`), and starting a new
+// one: OpenAgentSession with no session.
+
+// 1.26 adds the model and reasoning effort a terminal's agent runs with
+// (`TerminalSummary.settings`), and changing them: SetModel.
 
 syntax = "proto3";
 
@@ -177,6 +201,18 @@ message Envelope {
     PinWorktree pin_worktree = 121;
     DeleteWorktree delete_worktree = 122;
     WorktreeDeleted worktree_deleted = 123;
+
+    // Since 1.21.
+    OpenAgentSession open_agent_session = 124;
+
+    // Since 1.23.
+    WakeTerminal wake_terminal = 125;
+    TerminalWoken terminal_woken = 126;
+
+    // Since 1.24.
+    SetMode set_mode = 127;
+    // Since 1.26.
+    SetModel set_model = 128;
   }
 }
 
@@ -394,6 +430,9 @@ message WorktreeSummary {
   // Since 1.20. Pinned in the desktop's sidebar, which lists pinned
   // worktrees first; the snapshot's order already has them there.
   bool pinned = 17;
+  // Since 1.23. Agent tabs the desktop put to sleep: their processes are
+  // stopped and their sessions kept, so each has no terminal until woken.
+  repeated AsleepTerminal asleep = 18;
 }
 
 // Since 1.11. A pull request open from a worktree's branch.
@@ -550,6 +589,37 @@ enum Activity {
   ACTIVITY_FAILED = 5;
 }
 
+// An agent tab the desktop put to sleep — see `WorktreeSummary.asleep`.
+message AsleepTerminal {
+  // The tab's key on the desktop: what WakeTerminal names.
+  string key = 1;
+  // The tab's title.
+  string title = 2;
+  // The agent it ran.
+  string agent = 3;
+  // When it was put to sleep, in milliseconds since the epoch; 0 for a tab
+  // a restart of ket's host stopped, which the desktop restarts on its next
+  // open and has no record of beyond that.
+  uint64 since_ms = 4;
+  // How much memory stopping it freed, as the desktop measured it; 0 when
+  // it did not.
+  uint64 freed_bytes = 5;
+}
+
+// Since 1.23. Wakes an asleep tab: the desktop starts its agent again in
+// the same session. Answered with TerminalWoken once the terminal exists,
+// or an error saying why the desktop would not wake it.
+message WakeTerminal {
+  string worktree_id = 1;
+  // `AsleepTerminal.key`.
+  string key = 2;
+}
+
+// Since 1.23. The terminal an asleep tab is now, once woken.
+message TerminalWoken {
+  uint64 terminal_id = 1;
+}
+
 message TerminalSummary {
   // The host's id for the terminal, stable while the host runs.
   uint64 id = 1;
@@ -557,6 +627,102 @@ message TerminalSummary {
   // The agent it runs, or empty for a shell.
   string agent = 3;
   bool closed = 4;
+  // Since 1.21. Set while the terminal shows Claude Code's agent view, with
+  // the background sessions it lists for this checkout.
+  AgentView agent_view = 5;
+  // Since 1.24. The modes the terminal's agent offers, and the one it is
+  // in; unset for an agent with none, or a shell.
+  AgentModes modes = 6;
+  // Since 1.26. The model and effort the agent runs with, and what it can
+  // be switched to; unset for an agent the desktop can't switch, or a shell.
+  AgentSettings settings = 7;
+}
+
+// Since 1.24. An agent's modes — Claude's permission modes, OpenCode's
+// agents, Codex's collaboration modes — as the desktop can tell them.
+message AgentModes {
+  // The id of the mode the agent is in; empty when the desktop can't tell.
+  string current = 1;
+  // What can be picked, in the agent's own order.
+  repeated AgentMode choices = 2;
+}
+
+message AgentMode {
+  // What SetMode names.
+  string id = 1;
+  string label = 2;
+  // A few words on what the mode does, or empty.
+  string detail = 3;
+}
+
+// Since 1.24. Puts a terminal's agent in mode `mode`, one of its
+// `AgentModes.choices`: the desktop presses the agent's own shortcut until
+// the agent reports that mode. Answered with Ack, or an error saying why
+// not.
+message SetMode {
+  uint64 terminal_id = 1;
+  string mode = 2;
+}
+
+// Since 1.26. What a terminal's agent runs with: Claude's and Codex's model
+// and reasoning effort, read off their transcripts.
+message AgentSettings {
+  // The model's id, one of `models`; empty while the agent hasn't said.
+  string model = 1;
+  // The effort's id, one of `efforts`; empty while unknown.
+  string effort = 2;
+  repeated AgentChoice models = 3;
+  repeated AgentChoice efforts = 4;
+  // Whether a change also becomes the agent's default for new sessions, as
+  // Claude's does. Codex's is for the session only.
+  bool saves_default = 5;
+}
+
+message AgentChoice {
+  // What SetModel names.
+  string id = 1;
+  string label = 2;
+}
+
+// Since 1.26. Switches a terminal's agent to `model` and `effort`, either
+// empty to leave it: the desktop types the agent's own commands and waits
+// for it to confirm each. Only while the agent is idle. Answered with Ack,
+// or an error saying why not.
+message SetModel {
+  uint64 terminal_id = 1;
+  string model = 2;
+  string effort = 3;
+}
+
+// Claude Code's agent view (`claude agents`): one terminal holding many
+// background sessions, each its own conversation.
+message AgentView {
+  // Waiting on you first, then working, then done; newest first in each.
+  repeated BackgroundSession sessions = 1;
+  // Since 1.22. Whether the desktop has read agent view's sessions yet:
+  // until it has, `sessions` is empty for want of an answer, not of sessions.
+  bool listed = 2;
+}
+
+message BackgroundSession {
+  // Claude's session id: what GetConversation and OpenAgentSession take.
+  string session = 1;
+  // The name agent view shows for it.
+  string name = 2;
+  enum State {
+    STATE_UNSPECIFIED = 0;
+    DONE = 1;
+    WORKING = 2;
+    // Waiting on a permission or a question.
+    NEEDS_YOU = 3;
+  }
+  State state = 3;
+  int64 started_at_ms = 4;
+  // Since 1.25. When it last did anything: its transcript's last write.
+  int64 active_at_ms = 5;
+  // Since 1.25. What it is doing or waiting for, in a few words — "Wants to
+  // run npm test", "Edited TabBar.tsx" — and empty once it is done.
+  string doing = 6;
 }
 
 // Start sending a terminal: a checkpoint, then chunks.
@@ -723,6 +889,9 @@ message GetConversation {
   uint64 terminal_id = 1;
   // 0 for a first read, which returns the recent end of the session.
   uint64 after = 2;
+  // Since 1.21. One of the terminal's agent view sessions, by Claude's
+  // session id, instead of the terminal's own.
+  string session = 3;
 }
 
 message Conversation {
@@ -1130,6 +1299,20 @@ message CommentsHandedOver {
   // No agent was running, and the one ket on the desktop is starting has
   // not taken the message yet.
   bool starting = 1;
+}
+
+// Since 1.21. Open background session `session` in the agent view terminal
+// `terminal_id` shows — the keys a person presses there — then type `text`
+// and Enter to it, if there is any. Needs the terminal's control, as typing
+// does. Answered with Ack once it is typed, or an Error saying why not: the
+// terminal isn't showing agent view, a message is half typed there, or the
+// session can't be told apart from another by its name.
+message OpenAgentSession {
+  uint64 terminal_id = 1;
+  // Since 1.25, empty starts a new session with `text`, as typing it into
+  // agent view's list does.
+  string session = 2;
+  string text = 3;
 }
 
 // Since 1.20. Pin or unpin a worktree, as the desktop's worktree menu does:

@@ -13,7 +13,7 @@ const KEY = 'ket.phone.key';
 const HOSTS = 'ket.hosts';
 const hostEntry = (id: string) => `ket.host.${id}`;
 const DESKTOP = 'ket.desktop';
-const FIT = 'ket.fit';
+const NOTIFY = 'ket.notify';
 const LOCK = 'ket.lock';
 const collapsedEntry = (host: string) => `ket.collapsed.${host}`;
 const lastWorkEntry = (host: string) => `ket.lastwork.${host}`;
@@ -41,7 +41,7 @@ async function upgrade(): Promise<void> {
     KEY,
     HOSTS,
     DESKTOP,
-    FIT,
+    NOTIFY,
     LOCK,
     ...ids.flatMap((id) => [hostEntry(id), collapsedEntry(id), lastWorkEntry(id)]),
     ...THEME_KEYS,
@@ -173,13 +173,28 @@ export async function getLastWork(host: string): Promise<LastWork | null> {
   return stored ? (JSON.parse(stored) as LastWork) : null;
 }
 
-/** Whether a terminal is fitted to the phone while the phone has control. */
-export async function saveFit(on: boolean): Promise<void> {
-  await set(FIT, on ? '1' : '0');
+/** Which notices the phone posts — see lib/notices.ts. */
+export interface NotifyConfig {
+  /** The switch over all of them. */
+  on: boolean;
+  /** An agent has stopped on a prompt. */
+  waiting: boolean;
+  /** An agent's task finished, or failed. */
+  finished: boolean;
+  /** A check failed on a worktree's pull request. */
+  checks: boolean;
 }
 
-export async function getFit(): Promise<boolean> {
-  return (await get(FIT)) === '1';
+/** Off until it is turned on: that is when the phone asks to show them. */
+export const DEFAULT_NOTIFY: NotifyConfig = { on: false, waiting: true, finished: true, checks: true };
+
+export async function getNotify(): Promise<NotifyConfig> {
+  const stored = await get(NOTIFY);
+  return stored ? { ...DEFAULT_NOTIFY, ...(JSON.parse(stored) as Partial<NotifyConfig>) } : DEFAULT_NOTIFY;
+}
+
+export async function saveNotify(config: NotifyConfig): Promise<void> {
+  await set(NOTIFY, JSON.stringify(config));
 }
 
 /** The app lock — see lib/lock.ts. The PIN is kept only as a salted hash. */

@@ -1,28 +1,27 @@
 'use no memo'; // Reads a live HostConnection — see lib/hosts.ts.
 
-// Settings: the desktops this phone is paired with, and pairing another.
+// Settings: the desktops this phone is paired with, and pairing another;
+// which notices the phone shows; the app lock; and About.
 
 import { router } from 'expo-router';
 import { Activity } from '@ket/remote';
 import { useEffect, useState } from 'react';
 import { Linking, ScrollView, StyleSheet, Text, View } from 'react-native';
 
-import { BrandMark, Desktop, External } from '../components/icons';
-import { Button, Card, Heading, Prose, Row, Screen, Segmented, TAB_BAR_ROOM, TabBar, Tag, Toggle } from '../components/ui';
-import { everyWorktree } from '../lib/activity';
-import { statusLine, useHosts } from '../lib/hosts';
-import { LOCK_AFTER, biometry, confirmIdentity, setLockAfter, turnOff, useLock } from '../lib/lock';
-import { getFit, saveFit } from '../lib/store';
-import { font, size, t } from '../lib/theme';
-import { build, version } from '../lib/version';
+import { BrandMark, Desktop, External } from '../../components/icons';
+import { Button, Card, Heading, Prose, Row, Screen, Segmented, TAB_BAR_ROOM, TabBar, Tag, Toggle } from '../../components/ui';
+import { everyWorktree } from '../../lib/activity';
+import { statusLine, useHosts } from '../../lib/hosts';
+import { LOCK_AFTER, biometry, confirmIdentity, setLockAfter, turnOff, useLock } from '../../lib/lock';
+import { type Kind, available as noticesAvailable, choose, openPhoneSettings, turnOff as quiet, turnOn as notify, useNotices } from '../../lib/notices';
+import { font, size, t } from '../../lib/theme';
+import { build, version } from '../../lib/version';
 
 export default function Settings() {
   const conns = useHosts() ?? [];
-  const [fit, setFit] = useState(false);
   const lock = useLock();
   const [kind, setKind] = useState<string | null>(null);
   useEffect(() => {
-    void getFit().then(setFit);
     void biometry().then(setKind);
   }, []);
   // On: a PIN is chosen first, which is what turns it on. Off, or a new PIN:
@@ -37,9 +36,10 @@ export default function Settings() {
   const changePin = async () => {
     if (await confirmIdentity('Change your PIN')) router.push('/pin');
   };
-  const changeFit = (on: boolean) => {
-    setFit(on);
-    void saveFit(on);
+  const notices = useNotices();
+  const changeNotify = async (on: boolean) => {
+    if (on) await notify();
+    else await quiet();
   };
   const waiting = conns.reduce(
     (n, c) => n + everyWorktree(c.snapshot).filter((l) => l.worktree.activity === Activity.BLOCKED).length,
@@ -70,19 +70,44 @@ export default function Settings() {
             <Button kind="primary" title="Pair a desktop" onPress={() => router.push('/pair')} />
           </View>
         </Card>
-        <Card style={styles.card}>
-          <Heading>Terminal</Heading>
-          <View style={styles.setting}>
-            <View style={styles.settingText}>
-              <Text style={styles.settingName}>Fit terminal to phone</Text>
-              <Prose style={styles.settingDetail}>
-                While a terminal is open here, it takes your phone&apos;s size, so text wraps to the screen at a size you can
-                read. The desktop gets its own size back when you leave the terminal.
-              </Prose>
+        {noticesAvailable ? (
+          <Card style={styles.card}>
+            <Heading>Notifications</Heading>
+            <View style={styles.setting}>
+              <View style={styles.settingText}>
+                <Text style={styles.settingName}>Notify me</Text>
+                <Prose style={styles.settingDetail}>
+                  A banner while ket is not in front, and a badge counting the prompts waiting on you. Nothing is sent
+                  anywhere: the phone posts them itself from what the desktop tells it.
+                </Prose>
+              </View>
+              <Toggle on={notices.config.on} onChange={(on) => void changeNotify(on)} label="Notify me" />
             </View>
-            <Toggle on={fit} onChange={changeFit} label="Fit terminal to phone" />
-          </View>
-        </Card>
+            {notices.config.on && notices.refused ? (
+              <>
+                <Prose style={styles.note} color={t.attention}>
+                  Notifications are turned off for ket in this phone&apos;s Settings, so none can be shown.
+                </Prose>
+                <Row small chevron title="Open this phone's Settings" onPress={openPhoneSettings} />
+              </>
+            ) : null}
+            {notices.config.on
+              ? NOTICES.map((notice) => (
+                  <View key={notice.kind} style={styles.setting}>
+                    <View style={styles.settingText}>
+                      <Text style={styles.settingName}>{notice.name}</Text>
+                      <Prose style={styles.settingDetail}>{notice.detail}</Prose>
+                    </View>
+                    <Toggle
+                      on={notices.config[notice.kind]}
+                      onChange={(on) => void choose(notice.kind, on)}
+                      label={notice.name}
+                    />
+                  </View>
+                ))
+              : null}
+          </Card>
+        ) : null}
         <Card style={styles.card}>
           <Heading>Security</Heading>
           <View style={styles.setting}>
@@ -148,6 +173,13 @@ export default function Settings() {
     </Screen>
   );
 }
+
+/** The notices, each with its switch, in the order they are asked for. */
+const NOTICES: { kind: Kind; name: string; detail: string }[] = [
+  { kind: 'waiting', name: 'An agent is waiting on you', detail: 'It stopped on a permission prompt or a question.' },
+  { kind: 'finished', name: 'A task finishes', detail: 'The agent is done, or failed, with its last words.' },
+  { kind: 'checks', name: 'Checks fail', detail: 'A check on a worktree\'s pull request has failed.' },
+];
 
 /** ket's website, opened in the browser from About. */
 const WEBSITE = 'https://ketapp.dev';

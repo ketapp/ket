@@ -1,7 +1,7 @@
 // ⌘Return (Ctrl+Return off a Mac) in a browser: see KeyCommands.tsx.
 
 import { type ReactNode, useEffect, useEffectEvent, useRef } from 'react';
-import { View, type StyleProp, type ViewStyle } from 'react-native';
+import { View, type StyleProp, type ViewInstance, type ViewStyle } from 'react-native';
 
 interface Props {
   onSend(): void;
@@ -11,7 +11,7 @@ interface Props {
 }
 
 export function KeyCommands({ onSend, style, children }: Props) {
-  const box = useRef<View>(null);
+  const box = useRef<ViewInstance>(null);
   const send = useEffectEvent(onSend);
   useEffect(() => {
     // A View is a DOM element in a browser.

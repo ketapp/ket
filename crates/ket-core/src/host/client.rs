@@ -81,9 +81,17 @@ pub(crate) static PHONE_REVIEWS: Mutex<Vec<super::PhoneReview>> = Mutex::new(Vec
 /// Worktrees phones asked this window to delete — see
 /// [`super::take_phone_delete`].
 pub(crate) static PHONE_DELETES: Mutex<Vec<super::PhoneDelete>> = Mutex::new(Vec::new());
+/// Asleep tabs phones asked this window to wake, each with the host's
+/// request number — see [`super::take_phone_wake`].
+pub(crate) static PHONE_WAKES: Mutex<Vec<(u64, String)>> = Mutex::new(Vec::new());
 /// Whether the host has said the store's worktrees changed since the window
 /// last looked — see [`super::take_worktrees_changed`].
 pub(crate) static WORKTREES_CHANGED: AtomicBool = AtomicBool::new(false);
+/// Whether a phone has asked this window for anything since the window last
+/// looked — work to start, a merge, a delete, a wake — see
+/// [`super::take_phone_asked`]. The queues above hold what; this says to
+/// look at them now rather than on the next tick.
+pub(crate) static PHONE_ASKED: AtomicBool = AtomicBool::new(false);
 /// The serial the next [`Connection`] gets. See [`AGENT_STATUS`].
 static NEXT_SERIAL: AtomicU64 = AtomicU64::new(1);
 /// This window's worktrees, as last published — sent again on every new
@@ -101,6 +109,9 @@ pub(crate) static THEME: Mutex<Option<crate::theme::Theme>> = Mutex::new(None);
 /// `None` until the first, so that finding none is still sent.
 pub(crate) static PULL_REQUESTS: Mutex<Option<Vec<(String, crate::github::PullRequestStatus)>>> =
     Mutex::new(None);
+/// The tabs this window has put to sleep, as last published — like
+/// [`PULL_REQUESTS`], `None` until the first, so that none is still sent.
+pub(crate) static ASLEEP: Mutex<Option<Vec<wire::AsleepTab>>> = Mutex::new(None);
 
 /// The connection to the host, if there is one now. Never starts a host:
 /// for telling it something that only matters if it is running.
@@ -199,6 +210,9 @@ fn establish() -> Result<Arc<Connection>> {
         // pull requests since closed.
         if let Some(pull_requests) = lock(&PULL_REQUESTS).clone() {
             let _ = conn.request(&Request::PullRequests { pull_requests });
+        }
+        if let Some(tabs) = lock(&ASLEEP).clone() {
+            let _ = conn.request(&Request::Asleep { tabs });
         }
         return Ok(conn);
     }
@@ -655,24 +669,33 @@ fn route(conn: &Arc<Connection>, reply: Reply) {
             effort,
             worktree,
             shell,
-        } => lock(&PHONE_WORK).push(super::PhoneWork {
-            project,
-            prompt,
-            agent,
-            note,
-            from,
-            base,
-            model,
-            effort,
-            worktree,
-            shell,
-        }),
-        Reply::MergeWork { worktree } => lock(&PHONE_MERGES).push(worktree),
+        } => {
+            lock(&PHONE_WORK).push(super::PhoneWork {
+                project,
+                prompt,
+                agent,
+                note,
+                from,
+                base,
+                model,
+                effort,
+                worktree,
+                shell,
+            });
+            PHONE_ASKED.store(true, Ordering::Release);
+        }
+        Reply::MergeWork { worktree } => {
+            lock(&PHONE_MERGES).push(worktree);
+            PHONE_ASKED.store(true, Ordering::Release);
+        }
         Reply::FixChecks {
             req,
             worktree,
             prompt,
-        } => lock(&PHONE_FIX_CHECKS).push((req, worktree, prompt)),
+        } => {
+            lock(&PHONE_FIX_CHECKS).push((req, worktree, prompt));
+            PHONE_ASKED.store(true, Ordering::Release);
+        }
         Reply::SendReview {
             req,
             worktree,
@@ -690,12 +713,22 @@ fn route(conn: &Arc<Connection>, reply: Reply) {
             req,
             worktree,
             force,
-        } => lock(&PHONE_DELETES).push(super::PhoneDelete {
-            req,
-            worktree,
-            force,
-        }),
-        Reply::WorktreesChanged => WORKTREES_CHANGED.store(true, Ordering::Release),
+        } => {
+            lock(&PHONE_DELETES).push(super::PhoneDelete {
+                req,
+                worktree,
+                force,
+            });
+            PHONE_ASKED.store(true, Ordering::Release);
+        }
+        Reply::Wake { req, key } => {
+            lock(&PHONE_WAKES).push((req, key));
+            PHONE_ASKED.store(true, Ordering::Release);
+        }
+        Reply::WorktreesChanged => {
+            WORKTREES_CHANGED.store(true, Ordering::Release);
+            PHONE_ASKED.store(true, Ordering::Release);
+        }
         Reply::Welcome { .. }
         | Reply::PairingCode { .. }
         | Reply::Devices { .. }
@@ -850,6 +883,40 @@ mod tests {
             other => panic!("expected json, got {other:?}"),
         }
         assert!(conn.alive());
+    }
+
+    #[test]
+    fn a_phones_work_is_queued_and_flagged_for_the_window_to_look_now() {
+        let (a, _b) = UnixStream::pair().expect("a socket pair");
+        let conn = Connection::start(a).expect("a connection");
+        PHONE_ASKED.store(false, Ordering::Release);
+        assert!(!super::super::take_phone_asked());
+
+        route(
+            &conn,
+            Reply::StartWork {
+                project: "proj".to_owned(),
+                prompt: "Fix the login".to_owned(),
+                agent: None,
+                note: None,
+                from: wire::WorkSource::Phone,
+                base: None,
+                model: None,
+                effort: None,
+                worktree: None,
+                shell: false,
+            },
+        );
+        assert!(super::super::take_phone_asked());
+        // Taken: the next look finds nothing new until a phone asks again.
+        assert!(!super::super::take_phone_asked());
+        let work = super::super::take_phone_work();
+        assert_eq!(work.len(), 1);
+        assert_eq!(work[0].prompt, "Fix the login");
+
+        route(&conn, Reply::WorktreesChanged);
+        assert!(super::super::take_phone_asked());
+        assert!(super::super::take_worktrees_changed());
     }
 
     #[test]

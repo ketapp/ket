@@ -14,6 +14,11 @@
 //! turns the dialog into the question it should have been — the reason is
 //! shown, and the button becomes **Delete anyway**. Nothing is destroyed
 //! without the reader seeing what they are destroying.
+//!
+//! **Shift-click skips the asking**, not the safety: while shift is held the
+//! row reads **Delete, don't ask**, and picking it deletes at once, unforced,
+//! the way Settings → General's confirmation-off does. Work that would be
+//! lost still stops it and brings the dialog up to say what.
 
 use gpui::{
     AnyElement, Bounds, ClipboardItem, Context, Entity, KeyDownEvent, MouseButton, PathBuilder,
@@ -41,7 +46,16 @@ use crate::ui::tooltip::{Side, tooltip};
 use crate::ui::{CARD_PAD, LABEL, RADIUS_MD, RADIUS_SM};
 
 /// The menu's width.
-const MENU_WIDTH: Pixels = px(220.0);
+const MENU_WIDTH: Pixels = px(240.0);
+
+/// Room for Git action labels and their status subtitles.
+const GIT_MENU_WIDTH: Pixels = px(280.0);
+
+/// The Git submenu's name, distinct from its parent.
+const GIT_ORIGIN: &str = "worktree-git";
+
+/// Keep a submenu open while the pointer crosses a neighbouring row.
+const SUBMENU_GRACE: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// How the menu names itself, so an opener can tell whose menu is up.
 const ORIGIN: &str = "worktree-context";
@@ -59,6 +73,39 @@ const LEVEL_MENU_WIDTH: Pixels = px(470.0);
 /// The snippet picker's own name, for the same reason as [`LEVEL_ORIGIN`].
 const SNIPPET_ORIGIN: &str = "worktree-snippets";
 
+/// The Delete row's title, and what it reads while shift is held: the pick
+/// then skips the dialog, and the row says so before it is clicked. Short
+/// enough to sit beside the row's chord hint at [`MENU_WIDTH`].
+const DELETE: &str = "Delete";
+const DELETE_WITHOUT_ASKING: &str = "Delete, don't ask";
+
+/// Whether a click on `action`'s row with shift held or not skips the delete
+/// dialog: only Delete, and only under shift. For a click alone — the row's
+/// chord holds shift too, but it is the app menu's own Delete Worktree
+/// command and goes its own way, through the dialog as it always has.
+fn skips_asking(action: WorktreeAction, shift_held: bool) -> bool {
+    action == WorktreeAction::Delete && shift_held
+}
+
+/// Retitles `menu`'s Delete row for shift held or not — see the module docs
+/// — and says whether that changed anything, so the window redraws only
+/// when it did. A menu without the row is left alone.
+fn retitle_delete(menu: &mut OpenMenu<WorktreeAction>, shift_held: bool) -> bool {
+    let title = if shift_held {
+        DELETE_WITHOUT_ASKING
+    } else {
+        DELETE
+    };
+    let Some(delete) = menu.item_mut(|action| *action == WorktreeAction::Delete) else {
+        return false;
+    };
+    if delete.title == title {
+        return false;
+    }
+    delete.title = title.into();
+    true
+}
+
 /// What picking a row in a worktree's context menu does.
 ///
 /// The menu hands one of these back without interpreting it — see
@@ -66,6 +113,8 @@ const SNIPPET_ORIGIN: &str = "worktree-snippets";
 /// silently doing nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WorktreeAction {
+    /// Open the worktree's Git actions.
+    Git,
     /// Change the worktree row's display name without renaming its branch.
     Rename,
     /// Put its path on the clipboard.
@@ -159,14 +208,15 @@ pub(crate) struct RemoveWorktreeConfirm {
 }
 
 impl RemoveWorktreeConfirm {
-    /// The dialog as it first opens: asking, nothing refused yet.
-    pub(crate) fn new(target: WorktreeTarget) -> Self {
+    /// The same, or — `ask` false — kept off screen while the delete runs,
+    /// to appear only if git refuses it.
+    pub(crate) fn asking(target: WorktreeTarget, ask: bool) -> Self {
         Self {
             target,
             refusal: None,
             pending: false,
             name_hovered: false,
-            quiet: false,
+            quiet: !ask,
         }
     }
 }
@@ -194,9 +244,8 @@ const HANDOFF: &str = "A local model has been working on a task in this worktree
 /// worktree ket created, and removing it would take the project with it. It
 /// stays visible so the menu has one shape rather than two.
 ///
-/// `pull_request` is the branch's GitHub pull request, which **Fix checks
-/// with agent** and the actions beside it enable from. `has_agent_tab` and
-/// `has_asleep_tab` choose Sleep or Wake.
+/// `has_agent_tab` and `has_asleep_tab` choose Sleep or Wake. Git operations
+/// live in the submenu built by [`git_menu`].
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn worktree_menu(
     at: Point<Pixels>,
@@ -205,12 +254,10 @@ pub(crate) fn worktree_menu(
     token_reduction: u8,
     build_bytes: Option<u64>,
     escalate_to: Option<SharedString>,
-    pull_request: Option<&PullRequestStatus>,
     has_agent_tab: bool,
     has_asleep_tab: bool,
     t: &Theme,
 ) -> OpenMenu<WorktreeAction> {
-    let failed_checks = pull_request.map_or(0, |open| open.failed().count());
     let clear_build = match build_bytes.filter(|bytes| *bytes > 0) {
         Some(bytes) => MenuItem::new(WorktreeAction::ClearBuildOutput, "Clear build output")
             .icon(Icon::Eraser)
@@ -220,7 +267,7 @@ pub(crate) fn worktree_menu(
             .disabled(),
     };
 
-    let delete = MenuItem::new(WorktreeAction::Delete, "Delete")
+    let delete = MenuItem::new(WorktreeAction::Delete, DELETE)
         .icon(Icon::Trash)
         .danger()
         .chord(Chord::parse("cmd+shift+backspace").expect("the shipped chord parses"));
@@ -229,7 +276,6 @@ pub(crate) fn worktree_menu(
 
     OpenMenu::new(
         ORIGIN.into(),
-        // No search row. A short curated list is read, not searched.
         None,
         MENU_WIDTH,
         vec![
@@ -254,6 +300,72 @@ pub(crate) fn worktree_menu(
             )
         }))
         .chain([
+            MenuEntry::Item(
+                MenuItem::new(WorktreeAction::Git, "Git")
+                    .icon(Icon::GitBranch)
+                    .submenu(),
+            ),
+            // Named with its current level rather than just "Economy":
+            // this is the only place a worktree's level can be read after it
+            // was created, and a reader opening the menu to change it wants to
+            // know what it is now first.
+            MenuEntry::Item({
+                let economy = MenuItem::new(WorktreeAction::TokenReduction, "Economy")
+                    .subtitle(
+                        ket_core::worktree::token_reduction(token_reduction)
+                            .name()
+                            .to_owned(),
+                    )
+                    .tinted_icon(
+                        Icon::Sliders,
+                        crate::worktree_dialog::token_reduction_tint(token_reduction, t),
+                    )
+                    .submenu();
+                if primary { economy.disabled() } else { economy }
+            }),
+            MenuEntry::Item(rename),
+            // Disabled on the primary checkout: it has no record of its own to
+            // carry the flag, and it is already the first row of its project.
+            MenuEntry::Item({
+                let pin = if pinned {
+                    MenuItem::new(WorktreeAction::Pin, "Unpin").icon(Icon::PinOff)
+                } else {
+                    MenuItem::new(WorktreeAction::Pin, "Pin").icon(Icon::Pin)
+                };
+                if primary { pin.disabled() } else { pin }
+            }),
+            MenuEntry::Item(MenuItem::new(WorktreeAction::CopyPath, "Copy Path").icon(Icon::Copy)),
+            MenuEntry::Separator,
+            MenuEntry::Item(if has_asleep_tab {
+                MenuItem::new(WorktreeAction::Wake, "Wake").icon(Icon::Moon)
+            } else if has_agent_tab {
+                MenuItem::new(WorktreeAction::Sleep, "Sleep").icon(Icon::Moon)
+            } else {
+                MenuItem::new(WorktreeAction::Sleep, "Sleep")
+                    .icon(Icon::Moon)
+                    .disabled()
+            }),
+            MenuEntry::Item(if primary { delete.disabled() } else { delete }),
+        ])
+        .collect(),
+    )
+    .with_header("Worktree")
+    .at(at)
+}
+
+/// Git operations for the selected worktree, with the same availability rules
+/// as the commands in the app menu.
+fn git_menu(
+    at: Point<Pixels>,
+    primary: bool,
+    pull_request: Option<&PullRequestStatus>,
+) -> OpenMenu<WorktreeAction> {
+    let failed_checks = pull_request.map_or(0, |open| open.failed().count());
+    OpenMenu::new(
+        GIT_ORIGIN.into(),
+        None,
+        GIT_MENU_WIDTH,
+        vec![
             // Disabled on the primary checkout: it is the base a pull
             // request asks to merge into, so it cannot also be the head.
             MenuEntry::Item({
@@ -347,52 +459,76 @@ pub(crate) fn worktree_menu(
                     _ => reopen.disabled(),
                 }
             }),
-            // Named with its current level rather than just "Economy":
-            // this is the only place a worktree's level can be read after it
-            // was created, and a reader opening the menu to change it wants to
-            // know what it is now first.
-            MenuEntry::Item({
-                let economy = MenuItem::new(WorktreeAction::TokenReduction, "Economy")
-                    .subtitle(
-                        ket_core::worktree::token_reduction(token_reduction)
-                            .name()
-                            .to_owned(),
-                    )
-                    .tinted_icon(
-                        Icon::Sliders,
-                        crate::worktree_dialog::token_reduction_tint(token_reduction, t),
-                    )
-                    .submenu();
-                if primary { economy.disabled() } else { economy }
-            }),
-            MenuEntry::Item(rename),
-            // Disabled on the primary checkout: it has no record of its own to
-            // carry the flag, and it is already the first row of its project.
-            MenuEntry::Item({
-                let pin = if pinned {
-                    MenuItem::new(WorktreeAction::Pin, "Unpin").icon(Icon::PinOff)
-                } else {
-                    MenuItem::new(WorktreeAction::Pin, "Pin").icon(Icon::Pin)
-                };
-                if primary { pin.disabled() } else { pin }
-            }),
-            MenuEntry::Item(MenuItem::new(WorktreeAction::CopyPath, "Copy Path").icon(Icon::Copy)),
-            MenuEntry::Separator,
-            MenuEntry::Item(if has_asleep_tab {
-                MenuItem::new(WorktreeAction::Wake, "Wake").icon(Icon::Moon)
-            } else if has_agent_tab {
-                MenuItem::new(WorktreeAction::Sleep, "Sleep").icon(Icon::Moon)
-            } else {
-                MenuItem::new(WorktreeAction::Sleep, "Sleep")
-                    .icon(Icon::Moon)
-                    .disabled()
-            }),
-            MenuEntry::Item(if primary { delete.disabled() } else { delete }),
-        ])
-        .collect(),
+        ],
     )
-    .with_header("Workspace")
+    .with_header("Git")
     .at(at)
+}
+
+/// A worktree context menu and the Git branch that belongs to it. Keeping
+/// them together makes every existing dismissal close both panels.
+pub(crate) struct WorktreeMenu {
+    menu: OpenMenu<WorktreeAction>,
+    git: Option<OpenMenu<WorktreeAction>>,
+    at: Point<Pixels>,
+    primary: bool,
+    pull_request: Option<PullRequestStatus>,
+    git_held: bool,
+}
+
+impl WorktreeMenu {
+    fn new(
+        menu: OpenMenu<WorktreeAction>,
+        at: Point<Pixels>,
+        primary: bool,
+        pull_request: Option<&PullRequestStatus>,
+    ) -> Self {
+        Self {
+            menu,
+            git: None,
+            at,
+            primary,
+            pull_request: pull_request.cloned(),
+            git_held: false,
+        }
+    }
+
+    fn open_git(&mut self) {
+        if self.git.is_none() {
+            let row = self
+                .menu
+                .sections()
+                .iter()
+                .flatten()
+                .position(|item| item.action == WorktreeAction::Git)
+                .unwrap_or(0);
+            let at = point(
+                self.at.x + MENU_WIDTH - px(4.0),
+                self.at.y + self.menu.row_top(row),
+            );
+            self.git = Some(git_menu(at, self.primary, self.pull_request.as_ref()));
+        }
+        self.git_held = true;
+    }
+
+    fn key(&mut self, event: &KeyDownEvent) -> MenuKey<WorktreeAction> {
+        if let Some(git) = self.git.as_mut() {
+            if matches!(event.keystroke.key.as_str(), "left" | "escape") {
+                self.git = None;
+                return MenuKey::Consumed;
+            }
+            return git.key(event);
+        }
+        if event.keystroke.key == "right" {
+            let mut enter = event.clone();
+            enter.keystroke.key = "enter".into();
+            if let MenuKey::Run(WorktreeAction::Git) = self.menu.key(&enter) {
+                self.open_git();
+            }
+            return MenuKey::Consumed;
+        }
+        self.menu.key(event)
+    }
 }
 
 impl Shell {
@@ -611,22 +747,46 @@ impl Shell {
                 .is_some_and(|handle| handle.agent.is_some())
         });
         let has_asleep_tab = ids.iter().any(|id| self.asleep_terminals.contains_key(id));
-        self.worktree_menu = Some(worktree_menu(
+        let menu = worktree_menu(
             at,
             node.primary,
             node.pinned,
             node.token_reduction,
             build_bytes,
             escalate_to,
-            pull_request,
             has_agent_tab,
             has_asleep_tab,
             &self.theme,
-        ));
+        );
+        self.worktree_menu = Some(WorktreeMenu::new(menu, at, node.primary, pull_request));
+        // Shift may already be down as the menu opens.
+        self.worktree_menu_modifiers_changed_quietly();
+    }
+
+    /// Retitles the open menu's Delete row for the modifiers now held — see
+    /// the module docs — and redraws when that changed anything.
+    pub(crate) fn worktree_menu_modifiers_changed(&mut self, cx: &mut Context<Self>) {
+        if self.worktree_menu_modifiers_changed_quietly() {
+            cx.notify();
+        }
+    }
+
+    fn worktree_menu_modifiers_changed_quietly(&mut self) -> bool {
+        let shift_held = self.shift_held;
+        self.worktree_menu
+            .as_mut()
+            .is_some_and(|open| retitle_delete(&mut open.menu, shift_held))
     }
 
     /// Runs one pick.
     pub(crate) fn run_worktree_action(&mut self, action: WorktreeAction, cx: &mut Context<Self>) {
+        if action == WorktreeAction::Git {
+            if let Some(open) = self.worktree_menu.as_mut() {
+                open.open_git();
+            }
+            cx.notify();
+            return;
+        }
         self.worktree_menu = None;
 
         let Some(target) = self.worktree_target.clone() else {
@@ -634,6 +794,7 @@ impl Shell {
         };
 
         match action {
+            WorktreeAction::Git => {}
             WorktreeAction::Rename => self.begin_worktree_rename(target, cx),
             WorktreeAction::TokenReduction => {
                 self.popup = None;
@@ -819,22 +980,75 @@ impl Shell {
     /// The menu panel, or nothing when it is closed.
     pub(crate) fn worktree_menu_view(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let menu = self.worktree_menu.as_ref()?;
-        Some(menu.view(
+        let parent = menu.menu.view_with_hover(
             &self.theme,
             cx,
-            |shell, action, cx| shell.run_worktree_action(*action, cx),
+            |shell, action, cx| {
+                if skips_asking(*action, shell.shift_held) {
+                    shell.worktree_menu = None;
+                    shell.popup = None;
+                    if let Some(target) = shell.worktree_target.clone() {
+                        shell.remove_worktree_without_asking(target, cx);
+                    }
+                } else {
+                    shell.run_worktree_action(*action, cx);
+                }
+            },
             |shell, cx| {
                 shell.worktree_menu = None;
                 cx.notify();
             },
-        ))
+            |shell, action, cx| shell.hover_worktree_row(*action, cx),
+        );
+        let git = menu.git.as_ref().map(|git| {
+            git.view_with_hover(
+                &self.theme,
+                cx,
+                |shell, action, cx| shell.run_worktree_action(*action, cx),
+                |shell, cx| {
+                    shell.worktree_menu = None;
+                    cx.notify();
+                },
+                |shell, _, _| {
+                    if let Some(open) = shell.worktree_menu.as_mut() {
+                        open.git_held = true;
+                    }
+                },
+            )
+        });
+        Some(div().child(parent).children(git).into_any_element())
+    }
+
+    /// Open Git on hover, allowing a diagonal crossing into its panel.
+    fn hover_worktree_row(&mut self, action: WorktreeAction, cx: &mut Context<Self>) {
+        let Some(open) = self.worktree_menu.as_mut() else {
+            return;
+        };
+        if action == WorktreeAction::Git {
+            open.open_git();
+            cx.notify();
+        } else if open.git.is_some() {
+            open.git_held = false;
+            cx.spawn(async move |this: WeakEntity<Shell>, cx| {
+                cx.background_executor().timer(SUBMENU_GRACE).await;
+                let _ = this.update(cx, |shell, cx| {
+                    if let Some(open) = shell.worktree_menu.as_mut()
+                        && open.git.is_some()
+                        && !open.git_held
+                    {
+                        open.git = None;
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
+        }
     }
 
     /// Opens the level picker for `target`, over where its menu was.
     ///
-    /// A second menu rather than a submenu of the first: `MenuItem::submenu`
-    /// is a chevron and nothing more today, and a picker that opens in the
-    /// same place the reader just clicked reads the same way a submenu would.
+    /// This picker replaces the parent menu so its longer descriptions have
+    /// room, while Git actions stay beside the parent as a submenu.
     fn open_token_reduction_menu(&mut self, target: &WorktreeTarget) {
         self.token_reduction_menu = Some(
             OpenMenu::new(
@@ -1041,6 +1255,27 @@ impl Shell {
         target: WorktreeTarget,
         cx: &mut Context<Self>,
     ) {
+        let ask = ket_core::config::Config::load().map_or(true, |c| c.general.confirm_delete);
+        self.remove_worktree_asking(target, ask, cx);
+    }
+
+    /// Deletes `target` without the dialog, whatever Settings says: a
+    /// shift-click on the menu's Delete row. Unforced, so work that would be
+    /// lost still stops it and asks — see the module docs.
+    pub(crate) fn remove_worktree_without_asking(
+        &mut self,
+        target: WorktreeTarget,
+        cx: &mut Context<Self>,
+    ) {
+        self.remove_worktree_asking(target, false, cx);
+    }
+
+    fn remove_worktree_asking(
+        &mut self,
+        target: WorktreeTarget,
+        ask: bool,
+        cx: &mut Context<Self>,
+    ) {
         // One at a time: a quiet delete is still running behind no dialog,
         // and its answer would land on this one's.
         if let Some(running) = self
@@ -1052,10 +1287,7 @@ impl Shell {
             self.toast_detail(Tone::Info, "Still deleting", branch, cx);
             return;
         }
-        let ask = ket_core::config::Config::load().map_or(true, |c| c.general.confirm_delete);
-        let mut confirm = RemoveWorktreeConfirm::new(target);
-        confirm.quiet = !ask;
-        self.confirm_remove_worktree = Some(confirm);
+        self.confirm_remove_worktree = Some(RemoveWorktreeConfirm::asking(target, ask));
         if !ask {
             self.remove_worktree_confirmed(false, cx);
         }
@@ -1595,11 +1827,6 @@ mod tests {
 
     /// The menu under test, at the default token-reduction level.
     fn default_menu(primary: bool) -> OpenMenu<WorktreeAction> {
-        menu_with_failed_checks(primary, 0)
-    }
-
-    fn menu_with_failed_checks(primary: bool, failed: usize) -> OpenMenu<WorktreeAction> {
-        let pull_request = (failed > 0).then(|| status_with_failed(failed));
         worktree_menu(
             Point::default(),
             primary,
@@ -1607,11 +1834,15 @@ mod tests {
             ket_core::worktree::default_token_reduction(),
             None,
             None,
-            pull_request.as_ref(),
             false,
             false,
             &Theme::dark(),
         )
+    }
+
+    fn menu_with_failed_checks(primary: bool, failed: usize) -> OpenMenu<WorktreeAction> {
+        let pull_request = (failed > 0).then(|| status_with_failed(failed));
+        git_menu(Point::default(), primary, pull_request.as_ref())
     }
 
     fn status_with_failed(failed: usize) -> ket_core::github::PullRequestStatus {
@@ -1677,7 +1908,6 @@ mod tests {
             ket_core::worktree::default_token_reduction(),
             None,
             None,
-            None,
             true,
             false,
             &Theme::dark(),
@@ -1693,7 +1923,6 @@ mod tests {
             false,
             false,
             ket_core::worktree::default_token_reduction(),
-            None,
             None,
             None,
             false,
@@ -1712,7 +1941,7 @@ mod tests {
     fn pull_request_actions_wait_for_a_pull_request_that_allows_them() {
         use ket_core::github::{PullRequestState, Review};
 
-        let idle = default_menu(false);
+        let idle = git_menu(Point::default(), false, None);
         assert!(!item(&idle, "Merge pull request…").enabled);
         assert!(!item(&idle, "Update branch").enabled);
         assert!(!item(&idle, "Ready for review").enabled);
@@ -1721,18 +1950,7 @@ mod tests {
 
         let mut open = status_with_failed(0);
         open.draft = false;
-        let merge = worktree_menu(
-            Point::default(),
-            false,
-            false,
-            ket_core::worktree::default_token_reduction(),
-            None,
-            None,
-            Some(&open),
-            false,
-            false,
-            &Theme::dark(),
-        );
+        let merge = git_menu(Point::default(), false, Some(&open));
         let merge_item = item(&merge, "Merge pull request…");
         assert!(merge_item.enabled);
         assert_eq!(
@@ -1742,33 +1960,11 @@ mod tests {
         assert!(!item(&merge, "Ready for review").enabled);
 
         open.behind = true;
-        let update = worktree_menu(
-            Point::default(),
-            false,
-            false,
-            ket_core::worktree::default_token_reduction(),
-            None,
-            None,
-            Some(&open),
-            false,
-            false,
-            &Theme::dark(),
-        );
+        let update = git_menu(Point::default(), false, Some(&open));
         assert!(item(&update, "Update branch").enabled);
 
         open.draft = true;
-        let draft = worktree_menu(
-            Point::default(),
-            false,
-            false,
-            ket_core::worktree::default_token_reduction(),
-            None,
-            None,
-            Some(&open),
-            false,
-            false,
-            &Theme::dark(),
-        );
+        let draft = git_menu(Point::default(), false, Some(&open));
         assert!(!item(&draft, "Merge pull request…").enabled);
         assert!(item(&draft, "Ready for review").enabled);
 
@@ -1776,18 +1972,7 @@ mod tests {
         open.behind = false;
         open.review = Review::ChangesRequested;
         open.unresolved_comments = 2;
-        let comments = worktree_menu(
-            Point::default(),
-            false,
-            false,
-            ket_core::worktree::default_token_reduction(),
-            None,
-            None,
-            Some(&open),
-            false,
-            false,
-            &Theme::dark(),
-        );
+        let comments = git_menu(Point::default(), false, Some(&open));
         let comments_item = item(&comments, "Address comments with agent");
         assert!(comments_item.enabled);
         assert_eq!(
@@ -1798,18 +1983,7 @@ mod tests {
         open.state = PullRequestState::Closed;
         open.review = Review::None;
         open.unresolved_comments = 0;
-        let closed = worktree_menu(
-            Point::default(),
-            false,
-            false,
-            ket_core::worktree::default_token_reduction(),
-            None,
-            None,
-            Some(&open),
-            false,
-            false,
-            &Theme::dark(),
-        );
+        let closed = git_menu(Point::default(), false, Some(&open));
         assert!(item(&closed, "Reopen pull request").enabled);
         assert!(!item(&closed, "Merge pull request…").enabled);
     }
@@ -1849,6 +2023,147 @@ mod tests {
         );
     }
 
+    fn titles(menu: &OpenMenu<WorktreeAction>) -> Vec<String> {
+        menu.sections()
+            .iter()
+            .flatten()
+            .map(|item| item.title.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn shift_retitles_the_delete_row_and_letting_go_restores_it() {
+        let mut menu = default_menu(false);
+
+        assert!(retitle_delete(&mut menu, true));
+        assert!(titles(&menu).contains(&"Delete, don't ask".to_owned()));
+        assert!(!titles(&menu).contains(&"Delete".to_owned()));
+        // Shift still held on the next modifiers change: nothing to redraw.
+        assert!(!retitle_delete(&mut menu, true));
+
+        // Still the danger row with its chord, and still enabled: only the
+        // words changed, so it is picked and drawn as before.
+        let delete = menu
+            .item_mut(|action| *action == WorktreeAction::Delete)
+            .expect("Delete is in the menu");
+        assert!(delete.danger);
+        assert!(delete.enabled);
+        assert!(delete.chord.is_some());
+
+        assert!(retitle_delete(&mut menu, false));
+        assert!(titles(&menu).contains(&"Delete".to_owned()));
+        assert!(!retitle_delete(&mut menu, false));
+    }
+
+    #[test]
+    fn the_checkouts_delete_row_stays_disabled_whatever_shift_says() {
+        let mut menu = default_menu(true);
+        assert!(retitle_delete(&mut menu, true));
+        let delete = menu
+            .item_mut(|action| *action == WorktreeAction::Delete)
+            .expect("Delete is in the menu");
+        assert_eq!(delete.title.as_ref(), "Delete, don't ask");
+        assert!(!delete.enabled);
+    }
+
+    #[test]
+    fn only_a_shift_click_on_delete_skips_asking() {
+        assert!(skips_asking(WorktreeAction::Delete, true));
+        assert!(!skips_asking(WorktreeAction::Delete, false));
+        // Shift means nothing to the other rows.
+        assert!(!skips_asking(WorktreeAction::Rename, true));
+        assert!(!skips_asking(WorktreeAction::ClearBuildOutput, true));
+        assert!(!skips_asking(WorktreeAction::Pin, true));
+    }
+
+    #[test]
+    fn a_delete_told_not_to_ask_runs_behind_no_dialog() {
+        let target = WorktreeTarget {
+            id: WorktreeId::from("wt"),
+            branch: "fix-the-login".into(),
+            label: "fix-the-login".into(),
+            path: "/tmp/fix-the-login".into(),
+            token_reduction: ket_core::worktree::default_token_reduction(),
+            agent: None,
+            pinned: false,
+            at: Point::default(),
+        };
+
+        let quiet = RemoveWorktreeConfirm::asking(target.clone(), false);
+        assert!(quiet.quiet);
+        assert!(!quiet.pending);
+        assert!(quiet.refusal.is_none());
+
+        // The ordinary dialog asks before deleting.
+        let asked = RemoveWorktreeConfirm::asking(target, true);
+        assert!(!asked.quiet);
+        assert!(!asked.pending);
+    }
+
+    fn key(key: &str) -> KeyDownEvent {
+        KeyDownEvent {
+            keystroke: gpui::Keystroke {
+                key: key.into(),
+                key_char: None,
+                modifiers: gpui::Modifiers::default(),
+            },
+            is_held: false,
+        }
+    }
+
+    #[test]
+    fn git_actions_are_grouped_and_keep_the_primary_checkout_restriction() {
+        let parent = default_menu(false);
+        let git = git_menu(Point::default(), false, None);
+        let parent_actions: Vec<_> = parent
+            .sections()
+            .into_iter()
+            .flatten()
+            .map(|item| item.action)
+            .collect();
+        assert!(item(&parent, "Git").submenu);
+        assert_eq!(git.sections().into_iter().flatten().count(), 7);
+        assert!(
+            git.sections()
+                .into_iter()
+                .flatten()
+                .all(|item| !parent_actions.contains(&item.action))
+        );
+        assert!(item(&git, "Push and open pull request…").enabled);
+        assert!(
+            !item(
+                &git_menu(Point::default(), true, None),
+                "Push and open pull request…"
+            )
+            .enabled
+        );
+    }
+
+    #[test]
+    fn keyboard_opens_git_picks_an_action_and_returns_to_the_parent() {
+        let mut open = WorktreeMenu::new(default_menu(false), Point::default(), false, None);
+        // Clear build output, snippets, then Git.
+        open.key(&key("down"));
+        open.key(&key("down"));
+        assert!(matches!(open.key(&key("right")), MenuKey::Consumed));
+        assert!(open.git.is_some());
+        assert!(matches!(
+            open.key(&key("enter")),
+            MenuKey::Run(WorktreeAction::PullRequest)
+        ));
+        assert!(matches!(open.key(&key("left")), MenuKey::Consumed));
+        assert!(open.git.is_none());
+        // Selection remains on Git after returning to the parent.
+        assert!(matches!(
+            open.key(&key("enter")),
+            MenuKey::Run(WorktreeAction::Git)
+        ));
+        open.open_git();
+        assert!(matches!(open.key(&key("escape")), MenuKey::Consumed));
+        assert!(open.git.is_none());
+        assert!(matches!(open.key(&key("escape")), MenuKey::Close));
+    }
+
     #[test]
     fn the_rows_that_lead_somewhere_say_so() {
         let menu = default_menu(false);
@@ -1860,6 +2175,6 @@ mod tests {
             .map(|item| item.title.to_string())
             .collect();
 
-        assert_eq!(submenus, ["Send snippet", "Economy"]);
+        assert_eq!(submenus, ["Send snippet", "Git", "Economy"]);
     }
 }

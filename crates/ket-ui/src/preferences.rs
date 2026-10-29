@@ -99,6 +99,9 @@ pub(crate) enum Section {
     Snippets,
     /// What agents may run without asking.
     Permissions,
+    /// The MCP servers the selected worktree's agent CLIs are configured
+    /// with, and the calls ket has seen them make.
+    Mcp,
     /// Theme, fonts, density.
     Appearance,
     /// The tweak editor.
@@ -118,9 +121,10 @@ pub(crate) enum Section {
 impl Section {
     /// Every section, in the order the rail shows them: [`Section::GROUPS`]
     /// run together, which is the order the arrow keys walk.
-    pub(crate) const ALL: [Section; 12] = [
+    pub(crate) const ALL: [Section; 13] = [
         Section::Agents,
         Section::Permissions,
+        Section::Mcp,
         Section::Economy,
         Section::Snippets,
         Section::Merge,
@@ -142,6 +146,7 @@ impl Section {
             &[
                 Section::Agents,
                 Section::Permissions,
+                Section::Mcp,
                 Section::Economy,
                 Section::Snippets,
                 Section::Merge,
@@ -175,6 +180,7 @@ impl Section {
             Section::Economy => "Economy",
             Section::Snippets => "Snippets",
             Section::Permissions => "Permissions",
+            Section::Mcp => "MCP",
             Section::Keybindings => "Keybindings",
         }
     }
@@ -193,6 +199,7 @@ impl Section {
             Section::Economy => Icon::Gauge,
             Section::Snippets => Icon::MessageBookmark,
             Section::Permissions => Icon::ShieldCheck,
+            Section::Mcp => Icon::Code,
             Section::Keybindings => Icon::Command,
         }
     }
@@ -209,6 +216,10 @@ impl Section {
             Section::Permissions => {
                 "What agents may run without asking, what they must ask about, and what they \
                  may never do."
+            }
+            Section::Mcp => {
+                "The MCP servers the selected worktree\u{2019}s agent CLIs are configured with, \
+                 and the calls ket has seen them make."
             }
             Section::Merge => {
                 "What the sidebar\u{2019}s merge button commits, and what it leaves behind."
@@ -233,7 +244,7 @@ impl Section {
     fn frame(self) -> Frame {
         match self {
             Section::Economy | Section::Devices => Frame::Bare,
-            Section::Agents | Section::Snippets => Frame::Padded,
+            Section::Agents | Section::Snippets | Section::Mcp => Frame::Padded,
             Section::General
             | Section::Appearance
             | Section::Editor
@@ -254,6 +265,9 @@ impl Section {
             Section::Economy => t.diff.added,
             Section::Snippets => t.diff.modified,
             Section::Permissions => t.status.attention,
+            // The colour of a live connection, which is what the pane
+            // reports on.
+            Section::Mcp => t.status.running,
             Section::Merge => t.status.merging,
             Section::Appearance => t.terminal.ansi.magenta,
             Section::Editor => t.terminal.ansi.cyan,
@@ -2426,6 +2440,7 @@ impl Shell {
                             | Section::Economy
                             | Section::Snippets
                             | Section::Permissions
+                            | Section::Mcp
                             | Section::General
                             | Section::Appearance
                             | Section::Editor
@@ -2464,6 +2479,7 @@ impl Shell {
             Section::Appearance => self.appearance_settings(t, window, cx),
             Section::General => self.general_settings(t, cx),
             Section::Permissions => self.permission_settings(t, cx),
+            Section::Mcp => self.mcp_settings(t, cx),
             section => rows(section, t),
         }
     }
@@ -3268,7 +3284,6 @@ impl Shell {
             );
         }
         content.extend(self.opencode_go_settings(t, window, cx));
-        content.extend(self.mcp_settings(t, cx));
         content.push(Entry::layout(
             caption(
                 "Agent authentication stays with each CLI; ket never reads their credential files. OpenCode Go uses only the credentials entered in its card, or OPENCODE_API_KEY. Local models need no credentials at all.",
@@ -3324,24 +3339,25 @@ impl Shell {
         .detach();
     }
 
-    /// Current CLI configuration, ket's historical observations, and native help.
+    /// The MCP pane: the servers the selected worktree's agent CLIs are
+    /// configured with, the calls ket has seen them make, and the commands
+    /// that set the servers up.
+    ///
+    /// Nothing here is written by ket — the pane's own note under Set up and
+    /// troubleshoot says so — and the CLIs own this configuration, so the
+    /// pane saves nothing and reports what it reads.
+    ///
+    /// Scoped to the selected worktree, the sidebar's selection, because
+    /// that is where the CLIs read their servers from and where the calls
+    /// were made; with none selected the pane says so and offers nothing
+    /// rather than a wrong worktree's servers.
     fn mcp_settings(&self, t: &Theme, cx: &mut Context<Self>) -> Vec<Entry> {
         const CLAUDE_DOCS: &str = "https://code.claude.com/docs/en/mcp";
         const CODEX_DOCS: &str = "https://developers.openai.com/codex/mcp";
         let Some(view) = self.preferences.as_ref() else {
             return Vec::new();
         };
-        let mut rows = vec![
-            Entry::layout(div().h(px(22.0))),
-            Entry::setting(
-                "MCP servers selected worktree",
-                subsection(
-                    "MCP servers",
-                    "Configuration and observed use for the selected worktree.",
-                    t,
-                ),
-            ),
-        ];
+        let mut rows = Vec::new();
         let Some((id, name, _)) = self.mcp_worktree() else {
             rows.push(Entry::setting(
                 "MCP select a worktree",
@@ -3968,7 +3984,7 @@ impl Shell {
             ),
             setting(
                 "Confirm before deleting a worktree",
-                "Ask first, and say what would be lost. Off, work that would be lost still stops the delete and asks.",
+                "Ask first, and say what would be lost. Off, work that would be lost still stops the delete and asks. Shift-click Delete in a worktree's menu to skip asking once.",
                 switch("general-confirm-delete", confirm_delete, t)
                     .when(writable, |el| {
                         el.cursor_pointer()
@@ -5264,6 +5280,7 @@ fn rows(section: Section, t: &Theme) -> Vec<Entry> {
         | Section::Economy
         | Section::Snippets
         | Section::Permissions
+        | Section::Mcp
         | Section::General
         | Section::Appearance
         | Section::Editor

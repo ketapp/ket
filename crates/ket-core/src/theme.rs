@@ -836,12 +836,12 @@ impl Theme {
     /// This theme as seen by what is drawn straight on [`Theme::backdrop`] —
     /// the status bar, which has no card of its own.
     ///
-    /// Every shipped theme but one sets its ink against the cards, and the
-    /// desk under them is darker still, so the ink reads there too and this
-    /// returns the theme unchanged. A theme whose desk is *bright* — Acid's
-    /// lime — would leave pale ink on a pale ground, so there the ink turns
-    /// dark: the card colour for the words, and the card colour lifted a
-    /// third of the way towards the desk for the dim line.
+    /// Every shipped theme sets its ink against the cards, and the desk under
+    /// them is darker still, so the ink reads there too and this returns the
+    /// theme unchanged. A theme of the user's own whose desk is *bright*
+    /// would leave pale ink on a pale ground, so there the ink turns dark:
+    /// the card colour for the words, and the card colour lifted a third of
+    /// the way towards the desk for the dim line.
     pub fn on_backdrop(&self) -> Theme {
         if contrast_ratio(self.text.dim, self.backdrop) >= Prominence::Body.minimum_ratio() {
             return *self;

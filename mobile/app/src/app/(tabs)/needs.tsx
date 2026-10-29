@@ -8,11 +8,12 @@ import { Activity } from '@ket/remote';
 import { router } from 'expo-router';
 import { ScrollView, StyleSheet, View } from 'react-native';
 
-import { AgentMark } from '../components/icons';
-import { Card, Heading, Prose, Row, Screen, TAB_BAR_ROOM, TabBar } from '../components/ui';
-import { agentOf, detail, detailColor, everyWorktree, stateOf } from '../lib/activity';
-import { useHosts } from '../lib/hosts';
-import { size, t } from '../lib/theme';
+import { HORIZON, Horizon } from '../../components/Horizon';
+import { AgentMark } from '../../components/icons';
+import { Card, Heading, Prose, Row, Screen, TAB_BAR_ROOM, TabBar } from '../../components/ui';
+import { agentOf, detail, detailColor, everyWorktree, stateOf } from '../../lib/activity';
+import { useHosts } from '../../lib/hosts';
+import { size, t } from '../../lib/theme';
 
 export default function Needs() {
   const conns = useHosts() ?? [];
@@ -59,20 +60,27 @@ export default function Needs() {
       </Card>
     );
 
+  // Empty, the tab is the desktop's welcome picture: a planet rising from
+  // under the tab bar, the words in its sky.
+  const quiet = waiting.length === 0 && failed.length === 0;
   return (
     <Screen>
-      <ScrollView contentContainerStyle={styles.page}>
-        {section('Waiting on you', t.attention, waiting)}
-        {section('Failed', t.failed, failed)}
-        {waiting.length === 0 && failed.length === 0 ? (
-          <Card style={styles.card}>
-            <View style={styles.quiet}>
-              <Prose color={t.text}>Nothing needs you.</Prose>
-              <Prose>When an agent asks for permission or stops on a question, it shows up here.</Prose>
-            </View>
-          </Card>
-        ) : null}
-      </ScrollView>
+      {quiet ? (
+        <View style={styles.sky}>
+          <Horizon />
+          <View style={styles.words}>
+            <Prose color={t.text} style={styles.title}>
+              Nothing needs you.
+            </Prose>
+            <Prose style={styles.note}>When an agent asks for permission or stops on a question, it shows up here.</Prose>
+          </View>
+        </View>
+      ) : (
+        <ScrollView contentContainerStyle={styles.page}>
+          {section('Waiting on you', t.attention, waiting)}
+          {section('Failed', t.failed, failed)}
+        </ScrollView>
+      )}
       <TabBar active="needs" needs={waiting.length} />
     </Screen>
   );
@@ -83,5 +91,19 @@ const styles = StyleSheet.create({
   // the Worktrees tab's page does.
   page: { padding: size.gutter, paddingTop: 4, gap: size.gutter, paddingBottom: TAB_BAR_ROOM },
   card: { padding: 8, gap: 2 },
-  quiet: { padding: 8, gap: 4 },
+  sky: { flex: 1 },
+  // The words sit centred in the sky above the planet's top.
+  words: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    height: `${HORIZON * 100}%`,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 32,
+    gap: 6,
+  },
+  title: { fontSize: size.title, textAlign: 'center' },
+  note: { textAlign: 'center' },
 });

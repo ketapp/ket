@@ -1,5 +1,6 @@
 import {
   Activity,
+  type AsleepTerminal,
   type HostSnapshot,
   type ProjectSummary,
   type TerminalSummary,
@@ -10,6 +11,8 @@ import { describe, expect, jest, test } from '@jest/globals';
 import {
   agentOf,
   agentTerminal,
+  asleepName,
+  asleepTab,
   detail,
   detailColor,
   everyWorktree,
@@ -19,7 +22,7 @@ import {
   stateOf,
   terminalName,
 } from './activity';
-import { PROJECT_COLORS, t } from './theme';
+import { PROJECT_COLORS, agentLabel, t } from './theme';
 
 jest.mock('@ket/remote', () => ({
   Activity: { QUIET: 0, RUNNING: 1, WORKING: 2, MERGING: 3, BLOCKED: 4, FAILED: 5 },
@@ -28,10 +31,13 @@ jest.mock('@ket/remote', () => ({
 const terminal = (agent: string, closed = false): TerminalSummary =>
   ({ agent, closed }) as TerminalSummary;
 
-type WorktreeFields = Partial<Pick<WorktreeSummary, 'id' | 'agentState' | 'terminals' | 'agent'>>;
+type WorktreeFields = Partial<Pick<WorktreeSummary, 'id' | 'agentState' | 'terminals' | 'agent' | 'asleep'>>;
 
 const worktree = (activity: Activity, fields: WorktreeFields = {}): WorktreeSummary =>
-  ({ activity, agentState: '', agent: '', terminals: [], ...fields }) as WorktreeSummary;
+  ({ activity, agentState: '', agent: '', terminals: [], asleep: [], ...fields }) as WorktreeSummary;
+
+const asleep = (agent: string, title = '', key = agent): AsleepTerminal =>
+  ({ key, title, agent, sinceMs: 0n, freedBytes: 0n }) as AsleepTerminal;
 
 const filterCases: [Activity, ReturnType<typeof filterOf>][] = [
   [Activity.WORKING, 'running'],
@@ -138,5 +144,27 @@ describe('snapshot helpers', () => {
     expect(named('', '⠹ make')).toBe('⠹ make');
     expect(named('', '~/dev/ket')).toBe('~/dev/ket');
     expect(named('', '')).toBe('Terminal');
+  });
+});
+
+describe('asleep tabs', () => {
+  test('says a worktree is asleep when nothing runs but a tab sleeps', () => {
+    expect(detail(worktree(Activity.QUIET))).toBe('Nothing running');
+    expect(detail(worktree(Activity.QUIET, { asleep: [asleep('claude')] }))).toBe('Asleep');
+    expect(detail(worktree(Activity.QUIET, { asleep: [asleep('claude')], terminals: [terminal('claude')] }))).toBe('Ready');
+    expect(agentOf(worktree(Activity.QUIET, { asleep: [asleep('claude')] }))).toBe('claude');
+  });
+
+  test("wakes the reporting agent's tab first, else the first", () => {
+    const tabs = [asleep('codex', '', 'c'), asleep('claude', '', 'k')];
+    expect(asleepTab(worktree(Activity.QUIET, { agent: 'Claude', asleep: tabs }))?.key).toBe('k');
+    expect(asleepTab(worktree(Activity.QUIET, { asleep: tabs }))?.key).toBe('c');
+    expect(asleepTab(worktree(Activity.QUIET))).toBeUndefined();
+  });
+
+  test('names an asleep tab as a terminal is named', () => {
+    expect(asleepName(asleep('claude', '✳ Fixing the build'))).toBe('Fixing the build');
+    expect(asleepName(asleep('codex'))).toBe(agentLabel('codex'));
+    expect(asleepName(asleep('', ''))).toBe('Terminal');
   });
 });

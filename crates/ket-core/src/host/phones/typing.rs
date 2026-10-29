@@ -33,6 +33,35 @@ pub(super) enum Typed {
         files: Vec<PathBuf>,
         done: Box<dyn FnOnce(Result<()>) + Send>,
     },
+    /// A background session opened in the terminal's agent view, then a
+    /// message typed to it — see [`crate::agent_view::open_and_type`].
+    AgentView {
+        /// The session to send `text` to, or `None` to start a new one.
+        session: Option<crate::agent_view::BackgroundSession>,
+        /// The checkout agent view lists sessions for.
+        cwd: std::path::PathBuf,
+        /// The account a new session runs under — see
+        /// [`crate::agent_view::config_dir_of`].
+        config_dir: Option<std::path::PathBuf>,
+        text: String,
+        done: Box<dyn FnOnce(std::result::Result<(), crate::agent_view::Refused>) + Send>,
+    },
+    /// The terminal's agent put in a mode — see [`crate::agent_mode::set`].
+    Mode {
+        agent: String,
+        session: Option<String>,
+        target: String,
+        done: Box<dyn FnOnce(std::result::Result<(), String>) + Send>,
+    },
+    /// The agent switched to a model and effort by its own commands — see
+    /// `crate::agent_model`.
+    Model {
+        agent: String,
+        session: Option<String>,
+        model: String,
+        effort: String,
+        done: Box<dyn FnOnce(std::result::Result<(), String>) + Send>,
+    },
 }
 
 impl Typing {
@@ -48,8 +77,9 @@ impl Typing {
         }
     }
 
-    /// Hands a message with files to terminal `id` after whatever is waiting,
-    /// starting the terminal's worker if none is running.
+    /// Hands a message with files — or anything else that takes its time —
+    /// to terminal `id` after whatever is waiting, starting the terminal's
+    /// worker if none is running.
     pub(super) fn files(
         &self,
         id: u64,
@@ -93,6 +123,40 @@ impl Typing {
                     let _ = terminal.send_input(keys);
                 }
                 Typed::Files { text, files, done } => done(hand_over(terminal, &text, &files)),
+                Typed::AgentView {
+                    session,
+                    cwd,
+                    config_dir,
+                    text,
+                    done,
+                } => done(match &session {
+                    Some(session) => crate::agent_view::send(session, &cwd, &text),
+                    None => crate::agent_view::start(config_dir.as_deref(), &cwd, &text, None),
+                }),
+                Typed::Mode {
+                    agent,
+                    session,
+                    target,
+                    done,
+                } => done(crate::agent_mode::set(
+                    terminal,
+                    &agent,
+                    session.as_deref(),
+                    &target,
+                )),
+                Typed::Model {
+                    agent,
+                    session,
+                    model,
+                    effort,
+                    done,
+                } => done(crate::agent_model::set(
+                    terminal,
+                    &agent,
+                    session.as_deref(),
+                    &model,
+                    &effort,
+                )),
             }
         }
     }

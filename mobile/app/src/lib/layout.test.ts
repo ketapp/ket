@@ -26,6 +26,7 @@ describe('the wide layout', () => {
   test('finds the worktree a screen is about', () => {
     expect(worktreeAt('/session/host/9', 'host', snapshot)).toBe('a/b');
     expect(worktreeAt('/terminal/host/3', 'host', snapshot)).toBe('one');
+    expect(worktreeAt('/agent-session/host/9/abc-123', 'host', snapshot)).toBe('a/b');
     expect(worktreeAt('/worktree/host/a%2Fb', 'host', snapshot)).toBe('a/b');
     expect(worktreeAt('/diff/host/one', 'host', snapshot)).toBe('one');
     expect(worktreeAt('/session/host/42', 'host', snapshot)).toBeNull();

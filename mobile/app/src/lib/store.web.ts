@@ -7,16 +7,16 @@ import './polyfills';
 
 import { type Keypair, type PairedHost, fromBase64Url, generateKeypair, keypairFrom, toBase64Url } from '@ket/remote';
 
-import type { LastWork, LockConfig, SavedHost } from './store';
+import { DEFAULT_NOTIFY, type LastWork, type LockConfig, type NotifyConfig, type SavedHost } from './store';
 import { dialAddresses, normalizeHost } from './addresses';
 
-export type { LastWork, LockConfig, SavedHost } from './store';
+export { DEFAULT_NOTIFY, type LastWork, type LockConfig, type NotifyConfig, type SavedHost } from './store';
 
 const KEY = 'ket.phone.key';
 const HOSTS = 'ket.hosts';
 const hostEntry = (id: string) => `ket.host.${id}`;
 const DESKTOP = 'ket.desktop';
-const FIT = 'ket.fit';
+const NOTIFY = 'ket.notify';
 const LOCK = 'ket.lock';
 const collapsedEntry = (host: string) => `ket.collapsed.${host}`;
 const lastWorkEntry = (host: string) => `ket.lastwork.${host}`;
@@ -90,13 +90,13 @@ export async function getLastWork(host: string): Promise<LastWork | null> {
   return stored ? (JSON.parse(stored) as LastWork) : null;
 }
 
-/** Whether a terminal is fitted to the phone while the phone has control. */
-export async function saveFit(on: boolean): Promise<void> {
-  set(FIT, on ? '1' : '0');
+export async function getNotify(): Promise<NotifyConfig> {
+  const stored = get(NOTIFY);
+  return stored ? { ...DEFAULT_NOTIFY, ...(JSON.parse(stored) as Partial<NotifyConfig>) } : DEFAULT_NOTIFY;
 }
 
-export async function getFit(): Promise<boolean> {
-  return get(FIT) === '1';
+export async function saveNotify(config: NotifyConfig): Promise<void> {
+  set(NOTIFY, JSON.stringify(config));
 }
 
 export function toPaired(host: SavedHost): PairedHost {

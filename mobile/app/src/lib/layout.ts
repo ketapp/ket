@@ -51,7 +51,7 @@ export function worktreeAt(path: string, hostId: string, snapshot: HostSnapshot 
   const [, kind, host, id] = path.split('/');
   if (!snapshot || host !== hostId || id === undefined) return null;
   if (kind === 'worktree' || kind === 'diff') return decodeURIComponent(id);
-  if (kind !== 'session' && kind !== 'terminal') return null;
+  if (kind !== 'session' && kind !== 'agent-session' && kind !== 'terminal') return null;
   for (const project of snapshot.projects) {
     for (const worktree of project.worktrees) {
       if (worktree.terminals.some((terminal) => terminal.id.toString() === id)) return worktree.id;

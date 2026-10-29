@@ -124,6 +124,66 @@ fn codex_request_user_input_is_awaiting() {
     );
 }
 
+/// Codex's "Implement this plan?", as the host reads it off the screen.
+fn plan_dialog() -> ket_core::screen::Dialog {
+    ket_core::screen::Dialog {
+        title: "Implement this plan?".to_owned(),
+        question: String::new(),
+        options: vec![
+            "Yes, implement this plan".to_owned(),
+            "Yes, clear context and implement".to_owned(),
+            "No, stay in Plan mode".to_owned(),
+        ],
+        enter: false,
+    }
+}
+
+#[test]
+fn a_dialog_after_a_codex_turn_ends_waits_until_it_goes() {
+    let mut store = StatusStore::new(1);
+    let mut stop = report(HookEvent::Stop, "p1", "w1", "s1", 1);
+    stop.agent = "codex".to_owned();
+    store.report(&stop, known_any);
+    assert_eq!(store.get("p1").unwrap().state, AgentState::Idle);
+
+    assert!(store.screen_dialog("p1", Some(plan_dialog()), 2));
+    let pane = store.get("p1").unwrap();
+    assert_eq!(pane.state, AgentState::AwaitingPermission);
+    let question = pane.question.as_ref().expect("the dialog");
+    assert_eq!(question.tool, ket_core::screen::DIALOG_TOOL);
+    assert_ne!(question.id, 0);
+    // Read again on the next tick: nothing new.
+    assert!(!store.screen_dialog("p1", Some(plan_dialog()), 3));
+
+    // Dismissed at the desk: idle again, asking nothing.
+    assert!(store.screen_dialog("p1", None, 4));
+    let pane = store.get("p1").unwrap();
+    assert_eq!(pane.state, AgentState::Idle);
+    assert!(pane.question.is_none());
+
+    // Taken: the prompt Codex submits is the agent's own word.
+    assert!(store.screen_dialog("p1", Some(plan_dialog()), 5));
+    let mut go = report(HookEvent::UserPrompt, "p1", "w1", "s1", 6);
+    go.agent = "codex".to_owned();
+    store.report(&go, known_any);
+    let pane = store.get("p1").unwrap();
+    assert_eq!(pane.state, AgentState::Thinking);
+    assert!(pane.question.is_none());
+    // And its screen going quiet afterwards changes nothing.
+    assert!(!store.screen_dialog("p1", None, 7));
+    assert_eq!(store.get("p1").unwrap().state, AgentState::Thinking);
+}
+
+#[test]
+fn a_dialog_never_stands_in_for_a_codex_pane_at_work() {
+    let mut store = StatusStore::new(1);
+    let mut working = report(HookEvent::UserPrompt, "p1", "w1", "s1", 1);
+    working.agent = "codex".to_owned();
+    store.report(&working, known_any);
+    assert!(!store.screen_dialog("p1", Some(plan_dialog()), 2));
+    assert_eq!(store.get("p1").unwrap().state, AgentState::Thinking);
+}
+
 #[test]
 fn a_similar_tool_name_does_not_mark_codex_as_awaiting() {
     let mut store = StatusStore::new(1);
@@ -157,6 +217,51 @@ fn a_permission_request_is_awaiting_and_a_denial_returns_to_thinking() {
     let pane = store.get("p1").unwrap();
     assert_eq!(pane.state, AgentState::Thinking);
     assert!(pane.question.is_none());
+}
+
+#[test]
+fn a_phones_answer_moves_a_waiting_pane_on_and_is_remembered() {
+    let mut store = StatusStore::new(1);
+    let mut r = report(HookEvent::PermissionRequest, "p1", "w1", "s1", 0);
+    r.question = Some(Box::new(PermissionQuestion {
+        tool: "Bash".to_owned(),
+        subject: Some("cargo test".to_owned()),
+        id: 0,
+        prompt: None,
+    }));
+    store.report(&r, known_any);
+    let asked = store.get("p1").unwrap().question.clone().unwrap().id;
+
+    // Not waiting on that one: nothing moves.
+    assert!(!store.answered("p1", asked + 1, true, 1));
+    assert!(!store.answered("nowhere", asked, true, 1));
+    assert_eq!(
+        store.get("p1").unwrap().state,
+        AgentState::AwaitingPermission
+    );
+
+    // Allowed: the call is running, with the prompt's subject, until the
+    // agent's own report replaces it.
+    assert!(store.answered("p1", asked, true, 2));
+    let pane = store.get("p1").unwrap();
+    assert_eq!(pane.state, AgentState::ExecutingTool);
+    assert_eq!(pane.note.as_deref(), Some("cargo test"));
+    assert!(pane.question.is_none());
+    let remembered = pane.answered.clone().unwrap();
+    assert!(remembered.allowed);
+    assert_eq!(remembered.question.id, asked);
+    assert_eq!(remembered.at_ms, 2);
+    // Answered once: the same id is not answered again.
+    assert!(!store.answered("p1", asked, true, 3));
+
+    // Denied: the turn is over, as Escape would have it.
+    store.report(&r, known_any);
+    let asked = store.get("p1").unwrap().question.clone().unwrap().id;
+    assert!(store.answered("p1", asked, false, 4));
+    let pane = store.get("p1").unwrap();
+    assert_eq!(pane.state, AgentState::Idle);
+    assert!(pane.question.is_none());
+    assert!(!pane.answered.clone().unwrap().allowed);
 }
 
 #[test]

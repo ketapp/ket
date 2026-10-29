@@ -63,6 +63,10 @@ pub(crate) enum Icon {
     ChevronRight,
     /// The previous one of something: a diff's change above.
     ChevronUp,
+    /// Collapse every disclosure in a list: two chevrons closing.
+    ChevronsDownUp,
+    /// Expand every one: the chevrons parting.
+    ChevronsUpDown,
     /// A diff between two versions of a file.
     GitCompare,
     /// Add: a project, a worktree, a tab.
@@ -328,6 +332,8 @@ impl Icon {
             Icon::ChevronDown => "icons/chevron-down.svg",
             Icon::ChevronRight => "icons/chevron-right.svg",
             Icon::ChevronUp => "icons/chevron-up.svg",
+            Icon::ChevronsDownUp => "icons/chevrons-down-up.svg",
+            Icon::ChevronsUpDown => "icons/chevrons-up-down.svg",
             Icon::GitCompare => "icons/git-compare.svg",
             Icon::Plus => "icons/plus.svg",
             Icon::Close => "icons/close.svg",
@@ -463,7 +469,7 @@ pub(crate) fn sized_icon(which: Icon, size: Pixels, colour: Rgba) -> Svg {
 pub(crate) struct Assets;
 
 /// The bytes for every path [`Icon::asset`] can return.
-const FILES: [(&str, &[u8]); 109] = [
+const FILES: [(&str, &[u8]); 111] = [
     (
         "icons/chevron-down.svg",
         include_bytes!("../../assets/icons/chevron-down.svg"),
@@ -475,6 +481,14 @@ const FILES: [(&str, &[u8]); 109] = [
     (
         "icons/chevron-up.svg",
         include_bytes!("../../assets/icons/chevron-up.svg"),
+    ),
+    (
+        "icons/chevrons-down-up.svg",
+        include_bytes!("../../assets/icons/chevrons-down-up.svg"),
+    ),
+    (
+        "icons/chevrons-up-down.svg",
+        include_bytes!("../../assets/icons/chevrons-up-down.svg"),
     ),
     (
         "icons/git-compare.svg",
@@ -967,6 +981,8 @@ mod tests {
             Icon::ChevronDown,
             Icon::ChevronRight,
             Icon::ChevronUp,
+            Icon::ChevronsDownUp,
+            Icon::ChevronsUpDown,
             Icon::GitCompare,
             Icon::Plus,
             Icon::Close,

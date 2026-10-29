@@ -1480,7 +1480,39 @@ pub fn claude_config_dirs() -> Vec<PathBuf> {
     let projects = lines
         .iter()
         .map(|line| claude_config_dir_seen_by(line).unwrap_or_else(|| home().join(".claude")));
-    claude_dirs_in_order(claude_config_dir(), projects, &home())
+    let mut dirs = claude_dirs_in_order(claude_config_dir(), projects, &home());
+    // Then every other Claude state directory beside the home one. The
+    // probes above can come back empty — the host runs with no terminal and
+    // a shell that may not expand the alias naming the directory — and a
+    // Claude launched through that alias still writes under
+    // `~/.claude-personal`. Found by looking rather than asking, so a probe
+    // that fails costs a lookup its order, never its answer.
+    for dir in sibling_claude_dirs(&home()) {
+        if !dirs.contains(&dir) {
+            dirs.push(dir);
+        }
+    }
+    dirs
+}
+
+/// Every `.claude*` directory under `home` that holds Claude's `projects`
+/// folder — `~/.claude-personal`, `~/.claude-work` — in name order.
+fn sibling_claude_dirs(home: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(home) else {
+        return Vec::new();
+    };
+    let mut dirs: Vec<PathBuf> = entries
+        .filter_map(std::result::Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(".claude"))
+                && path.join("projects").is_dir()
+        })
+        .collect();
+    dirs.sort();
+    dirs
 }
 
 /// `configured` first, then each project's directory, then Claude's own
@@ -1517,7 +1549,7 @@ fn claude_config_dir_seen_by(line: &str) -> Option<PathBuf> {
 }
 
 /// The user's home directory, or the current directory if there is none.
-fn home() -> PathBuf {
+pub(crate) fn home() -> PathBuf {
     std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."))
@@ -1741,5 +1773,29 @@ mod tests {
                 PathBuf::from("/home/me/.claude"),
             ]
         );
+    }
+}
+
+#[cfg(test)]
+mod claude_dirs_tests {
+    use super::*;
+
+    #[test]
+    fn every_claude_state_directory_beside_the_home_one_is_searched() {
+        let home = std::env::temp_dir().join(format!("ket-claude-dirs-{}", std::process::id()));
+        for dir in [
+            ".claude/projects",
+            ".claude-personal/projects",
+            ".claude-work/other",
+            "other/projects",
+        ] {
+            std::fs::create_dir_all(home.join(dir)).unwrap();
+        }
+        let found = sibling_claude_dirs(&home);
+        assert_eq!(
+            found,
+            vec![home.join(".claude"), home.join(".claude-personal")]
+        );
+        let _ = std::fs::remove_dir_all(&home);
     }
 }

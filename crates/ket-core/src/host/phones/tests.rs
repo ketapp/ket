@@ -798,9 +798,44 @@ fn a_response_fits_only_what_was_asked() {
     let permission = PermissionQuestion {
         tool: "Bash".to_owned(),
         prompt: None,
-        ..asked
+        ..asked.clone()
     };
     assert_eq!(decision(&permission, &verdict(true, "")), None);
+
+    // Codex's form: one option per question, typed as its number, and no
+    // words of your own.
+    let codex = PermissionQuestion {
+        tool: crate::agent_hooks::CODEX_ASK_TOOL.to_owned(),
+        prompt: Some(Prompt::Ask {
+            questions: vec![
+                Asked {
+                    question: "Which crate?".to_owned(),
+                    header: String::new(),
+                    options: vec![option("ket-core"), option("ket-ui")],
+                    multi_select: false,
+                },
+                Asked {
+                    question: "Tests too?".to_owned(),
+                    header: String::new(),
+                    options: vec![option("Yes"), option("No")],
+                    multi_select: false,
+                },
+            ],
+        }),
+        ..asked.clone()
+    };
+    assert_eq!(
+        decision(&codex, &respond(vec![pick(&[1], ""), pick(&[0], "")])),
+        Some(Decision::Picks(vec![1, 0]))
+    );
+    for misfit in [
+        vec![pick(&[1], "")],
+        vec![pick(&[0, 1], ""), pick(&[0], "")],
+        vec![pick(&[], "ket-remote"), pick(&[0], "")],
+        vec![pick(&[2], ""), pick(&[0], "")],
+    ] {
+        assert_eq!(decision(&codex, &respond(misfit)), None);
+    }
 }
 
 // ---- what a paired phone asks for -----------------------------------------
@@ -1726,6 +1761,7 @@ fn answering_a_prompt_that_is_not_there_says_why() {
         Payload::GetConversation(proto::GetConversation {
             terminal_id: id,
             after: 0,
+            session: String::new(),
         }),
     )
     .payload

@@ -301,6 +301,9 @@ pub(crate) struct AsleepTerminal {
     pub(crate) since_ms: u64,
     pub(crate) freed_bytes: u64,
     wake_requested: bool,
+    /// The host's request number, when a phone asked for this wake and is
+    /// waiting to hear why it failed — see `Shell::wake_failed`.
+    wake_req: Option<u64>,
 }
 
 /// The cursor's blink, when the program asked for one.
@@ -373,8 +376,13 @@ fn resume_args(cwd: &std::path::Path, agent: &AgentSpec) -> Option<(String, Vec<
     // resuming one of those exits immediately. See `Sessions::open_args`.
     // Asked of the harness, whose store it is: a local agent's sessions are
     // OpenCode's.
+    // A background session — one agent view ran — opens by attaching to it,
+    // which is not picking up where this tab left off: a tab relaunched
+    // into one shows a conversation nobody had in it. Left out, so the tab
+    // starts afresh instead.
     sessions
         .open_args(ket_core::agents::harness(agent), cwd, &latest.id)
+        .filter(|args| args.first().map(String::as_str) != Some("attach"))
         .map(|args| (latest.id, args))
 }
 
@@ -494,6 +502,7 @@ impl Shell {
                         since_ms: saved.since_ms,
                         freed_bytes: saved.freed_bytes,
                         wake_requested: false,
+                        wake_req: None,
                     },
                 );
                 self.spaces.entry(id.clone()).or_default().open_tab_in(
@@ -556,6 +565,116 @@ impl Shell {
             self.open_session_tab_in(pane, agent, resume, true, Some(restore), None, cx);
         }
         self.persist_layout();
+        self.sync_asleep_tabs();
+    }
+
+    /// Tells the host which tabs are asleep, for phones to list and wake —
+    /// see `ket_core::host::publish_asleep`. The tabs asleep in this
+    /// window, and the agent tabs a saved layout still owes a worktree
+    /// nobody has opened since the restart: as good as asleep, with no tab
+    /// yet. Those put to sleep say since when and what that freed; one the
+    /// host restart stopped knows neither.
+    pub(crate) fn sync_asleep_tabs(&self) {
+        let mut tabs: Vec<ket_core::host::wire::AsleepTab> = self
+            .asleep_terminals
+            .iter()
+            .filter_map(|(terminal, asleep)| {
+                let key = self.terminal_keys.get(terminal)?.clone();
+                let worktree = self.worktree_of_terminal(*terminal)?;
+                let title = self
+                    .spaces
+                    .get(&worktree)
+                    .and_then(|space| space.tab_title(&TabKind::Terminal(*terminal)))
+                    .map(|title| title.to_string())
+                    .unwrap_or_else(|| asleep.agent.clone());
+                Some(ket_core::host::wire::AsleepTab {
+                    key,
+                    worktree: worktree.to_string(),
+                    agent: asleep.agent.clone(),
+                    title,
+                    since_ms: asleep.since_ms,
+                    freed_bytes: asleep.freed_bytes,
+                })
+            })
+            .collect();
+        for (worktree, owed) in &self.owed_restores {
+            for restore in owed {
+                let Some(agent) = restore.agent.clone().filter(|agent| !agent.is_empty()) else {
+                    continue;
+                };
+                let saved = restore.asleep.as_ref();
+                tabs.push(ket_core::host::wire::AsleepTab {
+                    key: restore.key.clone(),
+                    worktree: worktree.to_string(),
+                    title: restore.title.clone().unwrap_or_else(|| {
+                        if restore.agent_view {
+                            "Agent view".to_owned()
+                        } else {
+                            agent.clone()
+                        }
+                    }),
+                    agent,
+                    since_ms: saved.map_or(0, |saved| saved.since_ms),
+                    freed_bytes: saved.map_or(0, |saved| saved.freed_bytes),
+                });
+            }
+        }
+        tabs.sort_by(|a, b| a.key.cmp(&b.key));
+        ket_core::host::publish_asleep(tabs);
+    }
+
+    /// Wakes the asleep tab `key` for a phone — see
+    /// `ket_core::host::take_phone_wake`. A tab a saved layout still owes
+    /// its worktree is restored first, by opening that worktree, as a click
+    /// on it would. The host hears a wake that works from the terminal
+    /// opened under the key; only a refusal is answered, with the note the
+    /// tab shows.
+    pub(crate) fn wake_from_phone(&mut self, req: u64, key: String, cx: &mut Context<Self>) {
+        let by_key = |shell: &Self| {
+            shell
+                .terminal_keys
+                .iter()
+                .find(|(_, k)| **k == key)
+                .map(|(terminal, _)| *terminal)
+        };
+        let mut terminal = by_key(self);
+        if terminal.is_none() {
+            let owed = self
+                .owed_restores
+                .iter()
+                .find(|(_, owed)| owed.iter().any(|restore| restore.key == key))
+                .map(|(worktree, _)| worktree.clone());
+            if let Some(selection) = owed.and_then(|worktree| self.position_of(&worktree)) {
+                self.select(selection, cx);
+                terminal = by_key(self);
+            }
+        }
+        let Some(terminal) = terminal else {
+            ket_core::host::finish_phone_wake(req, "that tab isn't here any more".to_owned());
+            return;
+        };
+        if !self.asleep_terminals.contains_key(&terminal) {
+            // Awake already: the host has, or will have, its terminal.
+            return;
+        }
+        if let Some(asleep) = self.asleep_terminals.get_mut(&terminal) {
+            asleep.wake_req = Some(req);
+        }
+        self.wake_terminal(terminal, cx);
+    }
+
+    /// A wake that did not happen: the tab says why, and so does the phone
+    /// that asked for it, if one did.
+    fn wake_failed(&mut self, terminal: TerminalId, why: SharedString, cx: &mut Context<Self>) {
+        self.terminal_notes.insert(terminal, why.clone());
+        if let Some(req) = self
+            .asleep_terminals
+            .get_mut(&terminal)
+            .and_then(|asleep| asleep.wake_req.take())
+        {
+            ket_core::host::finish_phone_wake(req, why.to_string());
+        }
+        cx.notify();
     }
 
     /// Restart one stopped tab with the session ID it held before sleep.
@@ -604,9 +723,7 @@ impl Shell {
             .map(|node| node.path.clone())
             .or_else(|| worktree_path(&worktree))
         else {
-            self.terminal_notes
-                .insert(terminal, "Worktree directory is unavailable".into());
-            cx.notify();
+            self.wake_failed(terminal, "Worktree directory is unavailable".into(), cx);
             return;
         };
         let Some(agent) = self
@@ -614,11 +731,11 @@ impl Shell {
             .into_iter()
             .find(|agent| agent.name == asleep.agent)
         else {
-            self.terminal_notes.insert(
+            self.wake_failed(
                 terminal,
                 "This agent is unavailable; the tab remains asleep".into(),
+                cx,
             );
-            cx.notify();
             return;
         };
         let agent = self.project_agent_spec(&worktree, &agent);
@@ -688,11 +805,11 @@ impl Shell {
             let (agent, cwd, resume, settings, opencode_agents) = prepared;
             let Some(resume) = resume else {
                 let _ = this.update(cx, |shell, cx| {
-                    shell.terminal_notes.insert(
+                    shell.wake_failed(
                         terminal,
                         "That session is open elsewhere or cannot be resumed".into(),
+                        cx,
                     );
-                    cx.notify();
                 });
                 return;
             };
@@ -721,10 +838,11 @@ impl Shell {
                 .flatten();
             let Some(mut spec) = spec else {
                 let _ = this.update(cx, |shell, cx| {
-                    shell
-                        .terminal_notes
-                        .insert(terminal, "Economy prevents resuming this session".into());
-                    cx.notify();
+                    shell.wake_failed(
+                        terminal,
+                        "Economy prevents resuming this session".into(),
+                        cx,
+                    );
                 });
                 return;
             };
@@ -732,10 +850,11 @@ impl Shell {
                 && let Err(error) = opencode_permissions(&mut spec.env, agents)
             {
                 let _ = this.update(cx, |shell, cx| {
-                    shell
-                        .terminal_notes
-                        .insert(terminal, format!("Could not wake OpenCode: {error}").into());
-                    cx.notify();
+                    shell.wake_failed(
+                        terminal,
+                        format!("Could not wake OpenCode: {error}").into(),
+                        cx,
+                    );
                 });
                 return;
             }
@@ -829,10 +948,12 @@ impl Shell {
                 since_ms: ket_core::now_ms(),
                 freed_bytes,
                 wake_requested: false,
+                wake_req: None,
             },
         );
         self.terminal_notes.remove(&terminal);
         self.persist_layout();
+        self.sync_asleep_tabs();
         cx.notify();
         cx.spawn(async move |this: WeakEntity<Shell>, cx: &mut AsyncApp| {
             let stopped = cx
@@ -852,6 +973,7 @@ impl Shell {
                     {
                         shell.asleep_terminals.remove(&terminal);
                         shell.persist_layout();
+                        shell.sync_asleep_tabs();
                     }
                     shell.note = Some(match stopped {
                         Ok(StopOutcome::Controlled) => {
@@ -1044,6 +1166,11 @@ impl Shell {
         // The tab is named after its agent, if it has one, so a glance at the
         // strip says whose session this is.
         let pinned = restored.as_ref().is_some_and(|restore| restore.pinned);
+        // A tab that was showing Claude's agent view comes back as agent
+        // view, not as whichever session agent view last listed: that one
+        // is the newest in the worktree, and resuming it would attach to a
+        // background session instead.
+        let agent_view = restored.as_ref().is_some_and(|restore| restore.agent_view);
         let (restored_key, typed_title) =
             restored.map(|restore| (restore.key, restore.title)).unzip();
         let typed_title = typed_title.flatten();
@@ -1118,13 +1245,18 @@ impl Shell {
                     .ok()
                     .map(|workspace| workspace.config().agent.clone())
             });
-            let resume = resume_previous
-                .then(|| {
-                    scan_agent
-                        .as_ref()
-                        .and_then(|agent| resume_args(&scan_cwd, agent))
-                })
-                .flatten();
+            let resume = if agent_view {
+                // No session: the word that opens agent view, on the line.
+                Some((String::new(), vec!["agents".to_owned()]))
+            } else {
+                resume_previous
+                    .then(|| {
+                        scan_agent
+                            .as_ref()
+                            .and_then(|agent| resume_args(&scan_cwd, agent))
+                    })
+                    .flatten()
+            };
             // OpenCode's agents here, so ket's rules can go after each one's
             // own — see `opencode_permissions`.
             let opencode_agents = scan_agent
@@ -1334,11 +1466,15 @@ impl Shell {
                 .can_resume_with_economy(&session, level)
                 .then_some((session, args))
         });
-        let resumed_codex_session = agent
+        // The session being resumed, for the host to bind to the pane before
+        // the agent has reported a thing: a phone reads the session by it,
+        // and a Codex report that names the pane saved in the session still
+        // lands in this one. Every agent, not Codex alone: OpenCode says
+        // nothing on resuming until a message is typed to it.
+        let resumed_session = resume
             .as_ref()
-            .filter(|agent| agent.name.eq_ignore_ascii_case("codex"))
-            .and(resume.as_ref())
-            .map(|(session, _)| session.clone());
+            .map(|(session, _)| session.clone())
+            .filter(|session| !session.is_empty());
         let mut extra = resume.map(|(_, args)| args).unwrap_or_default();
         let mut economy_env = std::collections::BTreeMap::new();
         if let Some(agent) = agent.as_ref() {
@@ -1439,7 +1575,14 @@ impl Shell {
         spec.env.extend(self.hook_env(worktree, name, id));
         spec.env.extend(economy_env);
         expose_cli(&mut spec);
-        if let Some(session) = resumed_codex_session {
+        // The network inspector, while it is still being built: asked for
+        // by launching the window with `KET_NETWORK_INSPECTOR=1`. The host
+        // takes the word out and points the agent at its proxy.
+        if agent.is_some() && std::env::var_os("KET_NETWORK_INSPECTOR").is_some() {
+            spec.env
+                .insert(ket_core::network::LOG_ENV.to_owned(), "1".to_owned());
+        }
+        if let Some(session) = resumed_session {
             spec.env.insert(
                 ket_core::agent_hooks::RESUME_SESSION_ENV.to_owned(),
                 session,
@@ -1515,15 +1658,14 @@ impl Shell {
             Ok(term) => term,
             Err(e) => {
                 tracing::warn!(terminal = id.0, error = %e, "terminal refused to open");
-                self.terminal_notes
-                    .insert(id, format!("Could not open terminal: {e}").into());
-                cx.notify();
+                self.wake_failed(id, format!("Could not open terminal: {e}").into(), cx);
                 return;
             }
         };
         self.asleep_terminals.remove(&id);
         self.persist_layout();
         self.terminal_notes.remove(&id);
+        self.sync_asleep_tabs();
 
         let mut frames = term.frames();
         let term = Arc::new(term);
@@ -1745,6 +1887,7 @@ impl Shell {
         self.asleep_terminals.remove(&terminal);
         self.terminal_notes.remove(&terminal);
         self.terminal_keys.remove(&terminal);
+        self.sync_asleep_tabs();
         if let Some(handle) = self.terminals.remove(&terminal) {
             handle.term.kill();
         }

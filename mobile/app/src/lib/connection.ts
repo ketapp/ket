@@ -14,6 +14,7 @@ import {
   AnswerSchema,
   type Backlog,
   BacklogPriority,
+  DialError,
   EditBacklog_Action,
   EditBacklogSchema,
   GetBacklogSchema,
@@ -34,11 +35,15 @@ import {
   ReopenPullRequestSchema,
   PinWorktreeSchema,
   DeleteWorktreeSchema,
+  WakeTerminalSchema,
   type PullRequestDraft,
   type PullRequestOpened,
   type PullRequestMergeMethod,
   GetChangesSchema,
   GetConversationSchema,
+  OpenAgentSessionSchema,
+  SetModeSchema,
+  SetModelSchema,
   GetDiffSchema,
   GetSnippetsSchema,
   AttachmentSchema,
@@ -74,6 +79,7 @@ import {
 import { phoneKey, saveHost, type SavedHost, toPaired } from './store';
 import { addManualAddress, dialAddresses, removeManualAddress } from './addresses';
 import { versionLabel } from './version';
+import { worktreeOf } from './starting';
 
 export type Status = 'connecting' | 'connected' | 'offline';
 
@@ -115,6 +121,9 @@ const PULL_REQUEST_WAIT_MS = 180_000;
 /** How long a delete is waited for: the desktop gives its window two
  * minutes to walk the checkout and ask git, and this is a little longer. */
 const DELETE_WAIT_MS = 150_000;
+/** How long a wake waits: the desktop resumes the agent, which reads its
+ * session back first. The desktop gives up before this. */
+const WAKE_WAIT_MS = 60_000;
 
 /** How opening a pull request went: opened, or pushed to one already open —
  * or why not. */
@@ -157,21 +166,43 @@ export interface Starting {
   /** The agent asked for, or empty for the project's own. */
   agent: string;
   at: number;
-  /** The project's worktrees when it was asked for: the first that is not
-   * among them is the new one. */
+  /** The project's worktrees when it was asked for: the new one is not
+   * among them, and is on the branch the prompt names — see
+   * `worktreeOf` in lib/starting. */
   before: string[];
+  /** The base, model and effort picked for it, when any were: what asking
+   * again asks for. */
+  choices?: StartChoices;
 }
+
+/** A phone's picks for new work, each empty for the desktop's default. */
+export interface StartChoices {
+  base?: string;
+  model?: string;
+  effort?: string;
+}
+
+/** How many requests [`HostConnection.asked`] keeps. */
+const ASKED_KEPT = 20;
 
 /** How long a row stands in for new work before it is given up on — the
  * desktop said it would start it, but something stopped it on the way. */
-const STARTING_FOR_MS = 120_000;
+export const STARTING_FOR_MS = 120_000;
+
+/** The desktop turned a request away for now: it limits how fast a phone
+ * asks for costly things. Not a failure; asking again shortly is. */
+export class DesktopBusy extends Error {}
 
 export class HostConnection {
   readonly host: SavedHost;
   status: Status = 'connecting';
   snapshot: HostSnapshot | null = null;
-  /** See [`Starting`]. */
+  /** See [`Starting`]: new work asked for whose worktree is not listed yet. */
   starting: Starting[] = [];
+  /** Every request this connection made, oldest first, the last few: for the
+   * chat that follows one (see app/starting), which may open after the
+   * worktree is listed and the row for it is gone. */
+  asked: Starting[] = [];
   error: string | null = null;
   /** The desktop's protocol minor, from its welcome — what it can answer.
    * 7 reads sessions as conversations and takes new work. */
@@ -183,6 +214,11 @@ export class HostConnection {
   downSince: number | null = Date.now();
   /** Attempts since the last time it connected. */
   attempts = 0;
+  /** When the open session was welcomed; `null` between sessions. */
+  upSince: number | null = null;
+  /** What each saved address said the last time none of them answered,
+   * by address; empty while connected or after a failure past the dial. */
+  failures: Record<string, string> = {};
 
   private remote: Remote | null = null;
   private nextRequest = 10n;
@@ -273,11 +309,15 @@ export class HostConnection {
         await this.session();
         this.backoff = 1000;
       } catch (error) {
-        if (!this.redialing) this.error = error instanceof Error ? error.message : String(error);
+        if (!this.redialing) {
+          this.error = error instanceof Error ? error.message : String(error);
+          this.failures = error instanceof DialError ? error.failures : {};
+        }
       }
       this.redialing = false;
       this.remote = null;
       this.activeAddress = null;
+      this.upSince = null;
       this.clearLeases();
       for (const { reject } of this.pending.values()) reject(new Error(DROPPED));
       this.pending.clear();
@@ -343,7 +383,9 @@ export class HostConnection {
           epoch = message.payload.value.hostEpoch;
           this.status = 'connected';
           this.error = null;
+          this.failures = {};
           this.downSince = null;
+          this.upSince = Date.now();
           this.attempts = 0;
           this.notify();
           break;
@@ -527,6 +569,62 @@ export class HostConnection {
     throw new Error(reply.payload.value.message);
   }
 
+  /** Since 1.24: puts the agent in terminal `terminalId` in mode `mode`, one
+   * of its `modes.choices`. The desktop presses the agent's own key until
+   * it reports that mode, so this takes a moment. `false` when the phone
+   * turns out not to have control. */
+  async setMode(terminalId: bigint, mode: string): Promise<boolean> {
+    const reply = await this.request({ case: 'setMode', value: create(SetModeSchema, { terminalId, mode }) }, newKey(), FILES_ANSWER_MS);
+    if (reply.payload.case !== 'error') return true;
+    if (reply.payload.value.code === ErrorCode.NOT_CONTROLLER) {
+      const renew = this.leases.get(terminalId);
+      if (renew) clearInterval(renew);
+      this.leases.delete(terminalId);
+      return false;
+    }
+    throw new Error(reply.payload.value.message);
+  }
+
+  /** Since 1.26: switches the agent in terminal `terminalId` to `model` and
+   * `effort` — either empty to leave it — by its own commands, each waited
+   * on until it confirms. `false` when the phone turns out not to have
+   * control; a refusal throws with the desktop's reason. */
+  async setModel(terminalId: bigint, model: string, effort: string): Promise<boolean> {
+    const reply = await this.request(
+      { case: 'setModel', value: create(SetModelSchema, { terminalId, model, effort }) },
+      newKey(),
+      FILES_ANSWER_MS,
+    );
+    if (reply.payload.case !== 'error') return true;
+    if (reply.payload.value.code === ErrorCode.NOT_CONTROLLER) {
+      const renew = this.leases.get(terminalId);
+      if (renew) clearInterval(renew);
+      this.leases.delete(terminalId);
+      return false;
+    }
+    throw new Error(reply.payload.value.message);
+  }
+
+  /** Since 1.21: opens background session `session` in the agent view
+   * terminal `terminalId` shows, then types `text` and Enter to it, if any.
+   * `false` when the phone turns out not to have control. Agent view draws
+   * each step, so this takes a second or two. */
+  async openAgentSession(terminalId: bigint, session: string, text: string): Promise<boolean> {
+    const reply = await this.request(
+      { case: 'openAgentSession', value: create(OpenAgentSessionSchema, { terminalId, session, text }) },
+      newKey(),
+      FILES_ANSWER_MS,
+    );
+    if (reply.payload.case !== 'error') return true;
+    if (reply.payload.value.code === ErrorCode.NOT_CONTROLLER) {
+      const renew = this.leases.get(terminalId);
+      if (renew) clearInterval(renew);
+      this.leases.delete(terminalId);
+      return false;
+    }
+    throw new Error(reply.payload.value.message);
+  }
+
   /** The phones paired with this desktop, this one marked. */
   async devices(): Promise<PairedDevice[]> {
     const reply = await this.send({ case: 'listDevices', value: create(ListDevicesSchema, {}) });
@@ -537,7 +635,7 @@ export class HostConnection {
   /** New work in a project: ket on the desktop makes a worktree for it and
    * starts the project's agent on `prompt`. Resolves `null` once ket has it,
    * or the desktop's reason it could not — most often that ket isn't open. */
-  async startWork(projectId: string, prompt: string, agent = '', choices: { base?: string; model?: string; effort?: string } = {}): Promise<string | null> {
+  async startWork(projectId: string, prompt: string, agent = '', choices: StartChoices = {}): Promise<string | null> {
     const before =
       this.snapshot?.projects.find((p) => p.id === projectId)?.worktrees.map((w) => w.id) ?? [];
     const reply = await this.send(
@@ -545,7 +643,10 @@ export class HostConnection {
       true,
     );
     if (reply.payload.case === 'error') return reply.payload.value.message;
-    this.starting = [...this.starting, { project: projectId, prompt, agent, at: Date.now(), before }];
+    const picked = Object.values(choices).some((value) => value);
+    const work: Starting = { project: projectId, prompt, agent, at: Date.now(), before, ...(picked ? { choices } : {}) };
+    this.starting = [...this.starting, work];
+    this.asked = [...this.asked, work].slice(-ASKED_KEPT);
     setTimeout(() => {
       this.settleStarting();
       this.notify();
@@ -577,7 +678,7 @@ export class HostConnection {
     this.starting = this.starting.filter((work) => {
       if (now - work.at > STARTING_FOR_MS) return false;
       const project = this.snapshot?.projects.find((p) => p.id === work.project);
-      return !project?.worktrees.some((w) => !work.before.includes(w.id));
+      return worktreeOf(work, project) === undefined;
     });
   }
 
@@ -775,6 +876,54 @@ export class HostConnection {
     }
   }
 
+  /** Since 1.23: wakes an asleep tab on the desktop — `key` from the
+   * worktree's `asleep` — and resolves with the terminal it is now, or why
+   * the desktop would not wake it. Asked again from the next session under
+   * the same key if the connection drops meanwhile, so one tap wakes once. */
+  async wakeTerminal(worktreeId: string, key: string): Promise<{ terminalId: bigint } | { why: string }> {
+    const payload: Envelope['payload'] = {
+      case: 'wakeTerminal',
+      value: create(WakeTerminalSchema, { worktreeId, key }),
+    };
+    const idempotency = newKey();
+    const until = Date.now() + WAKE_WAIT_MS;
+    for (;;) {
+      let reply: Envelope;
+      try {
+        reply = await this.request(payload, idempotency, Math.max(until - Date.now(), 1));
+      } catch (error) {
+        const dropped = error instanceof Error && error.message === DROPPED;
+        if (dropped && (await this.reconnected(until))) continue;
+        throw error;
+      }
+      if (reply.payload.case === 'error') return { why: reply.payload.value.message };
+      if (reply.payload.case === 'terminalWoken') return { terminalId: reply.payload.value.terminalId };
+      return { why: 'the desktop did not say whether the tab woke' };
+    }
+  }
+
+  /** Resolves once a snapshot lists terminal `id`, or after `ms`: a woken
+   * tab's terminal is in the next snapshot, a second away at most, and a
+   * screen opened before then would say the terminal isn't there. */
+  awaitTerminal(id: bigint, ms = 3000): Promise<void> {
+    const listed = () =>
+      (this.snapshot?.projects ?? []).some((project) =>
+        project.worktrees.some((worktree) => worktree.terminals.some((terminal) => terminal.id === id)),
+      );
+    if (listed()) return Promise.resolve();
+    return new Promise((resolve) => {
+      const done = () => {
+        off();
+        clearTimeout(timer);
+        resolve();
+      };
+      const off = this.onChange(() => {
+        if (listed()) done();
+      });
+      const timer = setTimeout(done, ms);
+    });
+  }
+
   private async prAction(payload: Envelope['payload'], ok: Envelope['payload']['case']): Promise<string | null> {
     const key = newKey();
     const until = Date.now() + PULL_REQUEST_WAIT_MS;
@@ -897,12 +1046,15 @@ export class HostConnection {
 
   /** What the agent in a terminal has said since `after` — 0 for the recent
    * end of its session. Ask again with the reply's `next` for what is new. */
-  async conversation(terminalId: bigint, after: bigint): Promise<Conversation> {
+  async conversation(terminalId: bigint, after: bigint, session = ''): Promise<Conversation> {
     const reply = await this.send({
       case: 'getConversation',
-      value: create(GetConversationSchema, { terminalId, after }),
+      value: create(GetConversationSchema, { terminalId, after, session }),
     });
     if (reply.payload.case === 'conversation') return reply.payload.value;
+    if (reply.payload.case === 'error' && reply.payload.value.code === ErrorCode.BACKPRESSURE) {
+      throw new DesktopBusy(reply.payload.value.message);
+    }
     throw new Error(reply.payload.case === 'error' ? reply.payload.value.message : 'the desktop did not send the conversation');
   }
 

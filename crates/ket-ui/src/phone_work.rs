@@ -47,6 +47,9 @@ impl Shell {
         while let Some(delete) = ket_core::host::take_phone_delete() {
             self.delete_worktree_from_phone(delete, cx);
         }
+        while let Some((req, key)) = ket_core::host::take_phone_wake() {
+            self.wake_from_phone(req, key, cx);
+        }
         // A phone pinned a worktree: the store has it, the sidebar does not.
         if ket_core::host::take_worktrees_changed() {
             self.reload(cx);
@@ -241,9 +244,15 @@ impl Shell {
                     if let WorkOrigin::Backlog { note } = &work.origin {
                         shell.backlog_started(&work.project, note, &created, cx);
                     }
-                    if matches!(work.origin, WorkOrigin::Phone)
+                    if matches!(work.origin, WorkOrigin::Phone | WorkOrigin::Dialog)
                         && (agent.is_some() || work.model.is_some() || work.effort.is_some())
                     {
+                        // As the landing does: without it the sidebar shows
+                        // the new worktree with no size until the next sweep.
+                        // Reloaded first, since measuring looks the worktree
+                        // up among the rows and it is not among them yet.
+                        shell.reload(cx);
+                        shell.remeasure_worktree(created.id.clone(), cx);
                         shell.open_phone_session(
                             created.id,
                             agent,
@@ -268,7 +277,7 @@ impl Shell {
                         format!("Couldn't start the ket command's work in {name}: {error}"),
                         cx,
                     ),
-                    WorkOrigin::QuickPrompt => shell.toast(
+                    WorkOrigin::QuickPrompt | WorkOrigin::Dialog => shell.toast(
                         Tone::Error,
                         format!("Couldn't start a worktree in {name}: {error}"),
                         cx,
@@ -315,6 +324,20 @@ impl Shell {
         if !shell && !prompt.is_empty() {
             let terminal = crate::terminal::TerminalId(before);
             cx.spawn(async move |shell: WeakEntity<Shell>, cx| {
+                // The tab's terminal opens in the background, and a prompt
+                // submitted before it exists is dropped: wait for it, as
+                // landing does, and only then give the agent its start.
+                let mut waited = Duration::ZERO;
+                while waited < TERMINAL_OPEN {
+                    let open = shell
+                        .update(cx, |shell, _| shell.terminals.contains_key(&terminal))
+                        .unwrap_or(true);
+                    if open {
+                        break;
+                    }
+                    cx.background_executor().timer(LANDING_POLL).await;
+                    waited += LANDING_POLL;
+                }
                 cx.background_executor().timer(AGENT_START).await;
                 let _ = shell.update(cx, |shell, cx| shell.submit_or_queue(terminal, &prompt, cx));
             })
@@ -513,6 +536,8 @@ pub(crate) enum WorkOrigin {
     Cli,
     /// The quick prompt, sent to a new worktree.
     QuickPrompt,
+    /// The New worktree dialog, with a prompt typed into it.
+    Dialog,
     /// A backlog note, marked done once its worktree exists.
     Backlog {
         note: String,
@@ -529,14 +554,19 @@ pub(crate) fn asker(from: WorkSource) -> &'static str {
 
 /// A branch name from a prompt: its first few words, and a few characters
 /// that keep two alike from colliding — `fix-the-login-redirect-k3f9`.
+///
+/// The phone mirrors the stem (`branchStem` in the app's lib/starting.ts) to
+/// tell the worktree it asked for from any other that appears: change the
+/// rule here and there together.
 pub(crate) fn branch_for(prompt: &str, fallback: &str) -> String {
     branch_seeded(prompt, fallback, ket_core::now_ms())
 }
 
-/// [`branch_for`] with the trailing characters taken from `seed` rather than
-/// the clock, for a caller that shows the name before it makes it and has to
-/// get the same one both times.
-pub(crate) fn branch_seeded(prompt: &str, fallback: &str, seed: u64) -> String {
+/// The readable part of [`branch_for`]: the prompt's first five words,
+/// lowercased and dashed, cut to 40 characters. Empty when the prompt has
+/// no word in it. The desktop's New worktree dialog uses this alone as the
+/// branch, adding the tag only when a branch of that name already exists.
+pub(crate) fn branch_stem(prompt: &str) -> String {
     let words: Vec<String> = prompt
         .split(|c: char| !c.is_ascii_alphanumeric())
         .filter(|word| !word.is_empty())
@@ -545,8 +575,17 @@ pub(crate) fn branch_seeded(prompt: &str, fallback: &str, seed: u64) -> String {
         .collect();
     let mut stem = words.join("-");
     stem.truncate(40);
-    let stem = stem.trim_end_matches('-');
-    let stem = if stem.is_empty() { fallback } else { stem };
+    let cut = stem.trim_end_matches('-').len();
+    stem.truncate(cut);
+    stem
+}
+
+/// [`branch_for`] with the trailing characters taken from `seed` rather than
+/// the clock, for a caller that shows the name before it makes it and has to
+/// get the same one both times.
+pub(crate) fn branch_seeded(prompt: &str, fallback: &str, seed: u64) -> String {
+    let stem = branch_stem(prompt);
+    let stem = if stem.is_empty() { fallback } else { &stem };
     let tag: String = (0..4)
         .map(|at| {
             let digit = (seed / 36_u64.pow(at)) % 36;
@@ -559,6 +598,19 @@ pub(crate) fn branch_seeded(prompt: &str, fallback: &str, seed: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_stem_is_the_prompts_first_words_or_nothing() {
+        assert_eq!(
+            branch_stem("Fix the login redirect, please now"),
+            "fix-the-login-redirect-please"
+        );
+        assert_eq!(branch_stem("  ...  "), "");
+        assert_eq!(
+            branch_stem("Internationalisation internationalisation internationalisation x"),
+            "internationalisation-internationalisatio"
+        );
+    }
 
     #[test]
     fn a_branch_is_the_prompts_first_words_and_a_tag() {

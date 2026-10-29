@@ -67,6 +67,24 @@ const KIND_OUTPUT: u8 = 2;
 const KIND_CHECKPOINT: u8 = 3;
 const KIND_INPUT: u8 = 4;
 
+/// An agent tab a window has put to sleep — see [`Request::Asleep`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AsleepTab {
+    /// The tab's key, `worktree|agent|nonce`: what a wake names, and what
+    /// the woken terminal is opened under.
+    pub key: String,
+    /// The worktree's id.
+    pub worktree: String,
+    /// The agent it ran.
+    pub agent: String,
+    /// The tab's title.
+    pub title: String,
+    /// When it was put to sleep, in milliseconds since the epoch.
+    pub since_ms: u64,
+    /// How much memory stopping it freed, as the window measured it.
+    pub freed_bytes: u64,
+}
+
 /// A window asking the host for something.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -192,6 +210,25 @@ pub enum Request {
     PullRequests {
         /// Each worktree's id, and its pull request.
         pull_requests: Vec<(String, crate::github::PullRequestStatus)>,
+    },
+    /// The agent tabs this window has put to sleep — stopped, their sessions
+    /// kept — for the host to list to phones, which see no terminal for
+    /// them otherwise. Sent on connecting and whenever the set changes; the
+    /// host keeps each window's while it is connected, so it knows which
+    /// window to ask to wake one.
+    Asleep {
+        /// Every asleep tab, in no order.
+        tabs: Vec<AsleepTab>,
+    },
+    /// The result of waking a tab a phone asked to wake, when it could not
+    /// be woken: the host learns a wake that worked from the terminal the
+    /// window opens under the tab's key.
+    WakeResult {
+        /// The request named in [`Reply::Wake`].
+        req: u64,
+        /// Why the tab stays asleep, as the desktop's tab says it, or `None`
+        /// once the window has started waking it.
+        error: Option<String>,
     },
     /// The result of handing a phone's failed checks to an agent. The host
     /// waits for this before answering the phone.
@@ -476,6 +513,16 @@ pub enum Reply {
         worktree: String,
         /// Delete it even though work would be lost, as Delete anyway does.
         force: bool,
+    },
+    /// A phone asked for an asleep tab to be woken — see
+    /// [`Request::Asleep`]. Sent to the window that reported the tab. The
+    /// host answers the phone once a terminal is opened under the tab's key,
+    /// or when the window sends [`Request::WakeResult`] with why it won't be.
+    Wake {
+        /// Used to return a refusal.
+        req: u64,
+        /// The tab's key.
+        key: String,
     },
     /// Something other than this window changed the worktrees in ket's store
     /// — a phone pinned one — so the sidebar is to be read again. Sent to

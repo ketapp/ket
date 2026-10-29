@@ -111,8 +111,9 @@ use std::sync::Arc;
 
 use gpui::{
     App, Application, Bounds, Context, FocusHandle, Focusable, KeyBinding, KeyDownEvent,
-    MouseButton, Pixels, SharedString, TitlebarOptions, Window, WindowAppearance, WindowBounds,
-    WindowOptions, actions, deferred, div, point, prelude::*, px, relative, size,
+    ModifiersChangedEvent, MouseButton, MouseDownEvent, Pixels, SharedString, TitlebarOptions,
+    Window, WindowAppearance, WindowBounds, WindowOptions, actions, deferred, div, point,
+    prelude::*, px, relative, size,
 };
 
 use ket_core::activity::Tracker;
@@ -602,8 +603,12 @@ struct Shell {
     /// Its own field rather than a second use of `menu`: the two menus hand
     /// back different vocabularies, and one field would mean one enum that
     /// knew about both the tab strip and the sidebar.
-    pub(crate) worktree_menu:
-        Option<crate::ui::menu::OpenMenu<crate::worktree_menu::WorktreeAction>>,
+    pub(crate) worktree_menu: Option<crate::worktree_menu::WorktreeMenu>,
+    /// Whether shift is down, from the last modifiers change or press — the
+    /// menu's own rows included, see `crate::ui::menu`. Read when a row in
+    /// that menu is clicked: shift-clicking Delete skips the dialog. See
+    /// `crate::worktree_menu`.
+    pub(crate) shift_held: bool,
     /// The right-click menu of a folder in the file tree or a file in the Git
     /// view's change list, while it is open. See `crate::explorer`.
     pub(crate) path_menu: Option<crate::explorer::PathMenu>,
@@ -1228,14 +1233,22 @@ impl Shell {
         })
         .detach();
 
-        // Agent status, as it arrives — see `STATUS_WAKE` — and a phone's
-        // review, which the phone waits on.
+        // Agent status, as it arrives — see `STATUS_WAKE` — and what phones
+        // ask for: a review, which the phone waits on, and work to start,
+        // which the phone shows as starting from the moment it asked. Taken
+        // here rather than on the tick alone, which could be thirty seconds
+        // away with the window unfocused — as it is while its owner is on
+        // their phone.
         cx.spawn(async move |shell, cx| {
             loop {
                 cx.background_executor().timer(STATUS_WAKE).await;
                 if shell
                     .update(cx, |shell, cx| {
                         if shell.take_phone_reviews(cx) {
+                            cx.notify();
+                        }
+                        if ket_core::host::take_phone_asked() {
+                            shell.take_phone_work(cx);
                             cx.notify();
                         }
                         if shell.drain_hook_reports(false) {
@@ -1381,6 +1394,7 @@ impl Shell {
                     github: crate::github::GitHubState::default(),
                     quick_capture: None,
                     worktree_menu: None,
+                    shift_held: false,
                     path_menu: None,
                     token_reduction_menu: None,
                     worktree_snippet_menu: None,
@@ -1555,6 +1569,7 @@ impl Shell {
             github: crate::github::GitHubState::default(),
             quick_capture: None,
             worktree_menu: None,
+            shift_held: false,
             path_menu: None,
             token_reduction_menu: None,
             worktree_snippet_menu: None,
@@ -2214,30 +2229,42 @@ impl Render for Shell {
                 this.dispatch("shell.close_pane", cx);
                 cx.notify();
             }))
-            .on_action(cx.listener(|this, _: &EditUndo, _, cx| {
+            .on_action(cx.listener(|this, _: &EditUndo, window, cx| {
                 this.menu_dirty = true;
+                if this.new_worktree_edit(crate::editor::NativeEdit::Undo, window, cx) {
+                    return;
+                }
                 if !this.modal_open()
                     && !this.native_editor_edit(crate::editor::NativeEdit::Undo, cx)
                 {
                     this.browser_edit_history(false);
                 }
             }))
-            .on_action(cx.listener(|this, _: &EditRedo, _, cx| {
+            .on_action(cx.listener(|this, _: &EditRedo, window, cx| {
                 this.menu_dirty = true;
+                if this.new_worktree_edit(crate::editor::NativeEdit::Redo, window, cx) {
+                    return;
+                }
                 if !this.modal_open()
                     && !this.native_editor_edit(crate::editor::NativeEdit::Redo, cx)
                 {
                     this.browser_edit_history(true);
                 }
             }))
-            .on_action(cx.listener(|this, _: &EditCut, _, cx| {
+            .on_action(cx.listener(|this, _: &EditCut, window, cx| {
                 this.menu_dirty = true;
+                if this.new_worktree_edit(crate::editor::NativeEdit::Cut, window, cx) {
+                    return;
+                }
                 if !this.modal_open() {
                     this.native_editor_edit(crate::editor::NativeEdit::Cut, cx);
                 }
             }))
-            .on_action(cx.listener(|this, _: &EditCopy, _, cx| {
+            .on_action(cx.listener(|this, _: &EditCopy, window, cx| {
                 this.menu_dirty = true;
+                if this.new_worktree_edit(crate::editor::NativeEdit::Copy, window, cx) {
+                    return;
+                }
                 if !this.modal_open()
                     && !this.native_editor_edit(crate::editor::NativeEdit::Copy, cx)
                     && let Some(id) = this.active_terminal_id()
@@ -2245,8 +2272,11 @@ impl Render for Shell {
                     this.terminal_copy(id, cx);
                 }
             }))
-            .on_action(cx.listener(|this, _: &EditPaste, _, cx| {
+            .on_action(cx.listener(|this, _: &EditPaste, window, cx| {
                 this.menu_dirty = true;
+                if this.new_worktree_edit(crate::editor::NativeEdit::Paste, window, cx) {
+                    return;
+                }
                 if !this.modal_open()
                     && !this.native_editor_edit(crate::editor::NativeEdit::Paste, cx)
                     && let Some(id) = this.active_terminal_id()
@@ -2254,8 +2284,11 @@ impl Render for Shell {
                     this.terminal_paste(id, cx);
                 }
             }))
-            .on_action(cx.listener(|this, _: &EditSelectAll, _, cx| {
+            .on_action(cx.listener(|this, _: &EditSelectAll, window, cx| {
                 this.menu_dirty = true;
+                if this.new_worktree_edit(crate::editor::NativeEdit::SelectAll, window, cx) {
+                    return;
+                }
                 if !this.modal_open() {
                     this.native_editor_edit(crate::editor::NativeEdit::SelectAll, cx);
                 }
@@ -2700,6 +2733,23 @@ impl Render for Shell {
                     }
                 }),
             )
+            // Shift alone is no key-down: it arrives here, and the worktree
+            // menu's Delete row reads differently while it is held.
+            .on_modifiers_changed(cx.listener(|this, event: &ModifiersChangedEvent, _, cx| {
+                this.shift_held = event.modifiers.shift;
+                this.worktree_menu_modifiers_changed(cx);
+            }))
+            // Read again off every press that reaches the shell, ahead of
+            // whatever the press does: shift let go while another app was in
+            // front never arrives above, and the right-click that opens the
+            // menu carries the truth. The click that picks a row does not
+            // reach here, the panel occludes; the menu reads that one itself.
+            .capture_any_mouse_down(cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                if this.shift_held != event.modifiers.shift {
+                    this.shift_held = event.modifiers.shift;
+                    this.worktree_menu_modifiers_changed(cx);
+                }
+            }))
             .on_key_down(
                 cx.listener(|this, event: &KeyDownEvent, window: &mut Window, cx| {
                     let modifiers = event.keystroke.modifiers;

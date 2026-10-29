@@ -440,6 +440,9 @@ pub struct PermissionQuestion {
 /// Neither is answered with the permission menu's keys — its `1` means
 /// something else, and the menu moves with the session's mode — so these are
 /// answered through the hook itself: see [`Waiters`] and [`Decision`].
+/// Codex's questions ([`CODEX_ASK_TOOL`]) are the exception: its hook cannot
+/// answer, so its form is answered with its own keys — see
+/// [`Decision::Picks`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", tag = "kind")]
 pub enum Prompt {
@@ -486,7 +489,20 @@ pub struct Offered {
 }
 
 /// The tools whose prompts are a [`Prompt`] rather than a permission.
-pub const PROMPT_TOOLS: [&str; 2] = ["AskUserQuestion", "ExitPlanMode"];
+pub const PROMPT_TOOLS: [&str; 3] = ["AskUserQuestion", "ExitPlanMode", CODEX_ASK_TOOL];
+
+/// Codex's question tool, as its hooks name it: its `PreToolUse` is the form
+/// going up, its `PostToolUse` the answer.
+pub const CODEX_ASK_TOOL: &str = "request_user_input";
+
+/// Whether Codex's form asking `questions` can be answered by number: every
+/// question has options, and no more than one key's worth. A question
+/// answered in words is left to the terminal.
+pub fn codex_answerable(questions: &[Asked]) -> bool {
+    questions
+        .iter()
+        .all(|question| (1..=9).contains(&question.options.len()))
+}
 
 impl Prompt {
     /// The prompt a tool call raises, from its input — `None` for a tool that
@@ -532,6 +548,47 @@ impl Prompt {
                 (!questions.is_empty()).then_some(Self::Ask { questions })
             }
             "ExitPlanMode" => Some(Self::Plan),
+            // Codex's shape: an id, a header, the question, and options that
+            // can be missing for a question answered in words. One pick
+            // each; "None of the above" is an option of its own when
+            // `isOther` asks for it, as the form draws it. Every question is
+            // kept, options or not, so the answers line up with the form's.
+            CODEX_ASK_TOOL => {
+                let questions: Vec<Asked> = input?
+                    .get("questions")?
+                    .as_array()?
+                    .iter()
+                    .filter_map(|question| {
+                        let mut options: Vec<Offered> = question
+                            .get("options")
+                            .and_then(serde_json::Value::as_array)
+                            .into_iter()
+                            .flatten()
+                            .map(|option| Offered {
+                                label: text(option, "label"),
+                                description: text(option, "description"),
+                            })
+                            .collect();
+                        let other = question
+                            .get("isOther")
+                            .and_then(serde_json::Value::as_bool)
+                            .unwrap_or(false);
+                        if other && !options.is_empty() {
+                            options.push(Offered {
+                                label: "None of the above".to_owned(),
+                                description: String::new(),
+                            });
+                        }
+                        Some(Asked {
+                            question: question.get("question")?.as_str()?.trim().to_owned(),
+                            header: text(question, "header"),
+                            options,
+                            multi_select: false,
+                        })
+                    })
+                    .collect();
+                (!questions.is_empty()).then_some(Self::Ask { questions })
+            }
             _ => None,
         }
     }
@@ -1231,6 +1288,24 @@ const wire = (directory) => {
       return false;
     }
   };
+  // A prompt held open at the host until a phone answers it, or until it is
+  // answered here and ket lets go: what comes back is the decision, in
+  // Claude's own shape, or nothing. Not queued — it waits for a person.
+  const ask = async (payload) => {
+    const port = env.KET_HOOK_PORT;
+    if (!port || !token) return "";
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/hook/await`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: envelope(token, { hook_event_name: "PermissionRequest", cwd: directory, ...payload }),
+        signal: AbortSignal.timeout(3570 * 1000),
+      });
+      return response.ok ? await response.text() : "";
+    } catch {
+      return "";
+    }
+  };
   // In order, the host first, then the window; kept for later if neither.
   // A pane-bound launch's own token is already correct, so it goes first —
   // the discovery file never carries a pane-specific token and would only
@@ -1250,7 +1325,50 @@ const wire = (directory) => {
       } catch {}
     });
   };
-  return { report };
+  return { report, ask };
+};
+
+// The question tool's form as Claude's AskUserQuestion asks it, so the phone
+// draws the same card: one question per field, its options by label. A
+// field with nothing to pick from — free text, a browser step — can't be
+// answered from a card, so a form with one is left to the terminal.
+const questionsOf = (form) => {
+  const questions = [];
+  for (const field of form.fields || []) {
+    const question = field.title || field.key;
+    if (!question) return null;
+    if (field.type === "boolean") {
+      questions.push({ question, header: field.key || "", multiSelect: false,
+        options: [{ label: "Yes", description: "" }, { label: "No", description: "" }] });
+      continue;
+    }
+    const options = (field.options || [])
+      .map((o) => ({ label: String(o.label ?? o.value ?? ""), description: String(o.description || "") }))
+      .filter((o) => o.label);
+    if (options.length === 0) return null;
+    questions.push({ question, header: field.key || "", options, multiSelect: field.type === "multiselect" });
+  }
+  return questions.length > 0 ? questions : null;
+};
+
+// The phone's answers — each question's text to what was picked, a
+// multi-select's picks joined with ", " — back as the form's answer: each
+// field's key to its option's value, or the text itself where it is the
+// person's own.
+const answerOf = (form, answers) => {
+  const answer = {};
+  for (const field of form.fields || []) {
+    const said = answers[field.title || field.key];
+    if (typeof said !== "string") return null;
+    const valueOf = (label) => {
+      const option = (field.options || []).find((o) => String(o.label ?? o.value) === label);
+      return option ? option.value : label;
+    };
+    if (field.type === "boolean") answer[field.key] = said === "Yes";
+    else if (field.type === "multiselect") answer[field.key] = said.split(", ").map(valueOf);
+    else answer[field.key] = valueOf(said);
+  }
+  return answer;
 };
 
 export default {
@@ -1368,7 +1486,14 @@ export default {
   async setup(ctx) {
     const w = wire(ctx.location && ctx.location.directory);
     if (!w) return;
-    const { report } = w;
+    const { report, ask } = w;
+    // Where a form is answered: the SDK's session.form, wherever this
+    // version of OpenCode hangs it on the context.
+    const forms = () =>
+      (ctx.client && ctx.client.session && ctx.client.session.form) ||
+      (ctx.session && ctx.session.form) ||
+      ctx.form ||
+      null;
 
     // OpenCode 2's own tool names, which renamed the tools: `bash` became
     // `shell`, `task` became `subagent`. Claude's names, so a row reads the
@@ -1482,12 +1607,33 @@ export default {
             break;
           }
           // The question tool asks as a form. A form whose owner is not a
-          // session — `"global"`, an MCP elicitation — is nobody's pane.
+          // session — `"global"`, an MCP elicitation — is nobody's pane. One
+          // a card can answer goes to the host as Claude's question would,
+          // and is held there until a phone answers it: the answer comes
+          // back and replies to the form. Nothing back — answered here, or
+          // the wait ran out — leaves the form as it was.
           case "form.created": {
             const f = d.form || {};
-            if (own(f.sessionID) && f.sessionID !== "global") {
+            if (!own(f.sessionID) || f.sessionID === "global") break;
+            const questions = questionsOf(f);
+            if (!questions) {
               report("Notification", { session_id: f.sessionID, notification_type: "agent_needs_input" });
+              break;
             }
+            const asked = { session_id: f.sessionID, tool_name: "AskUserQuestion", tool_input: { questions } };
+            report("PermissionRequest", asked);
+            void (async () => {
+              let decided;
+              try { decided = JSON.parse(await ask(asked)); } catch { return; }
+              const output = decided && decided.hookSpecificOutput;
+              const decision = output && output.decision;
+              const answers = decision && decision.behavior === "allow" && decision.updatedInput && decision.updatedInput.answers;
+              if (!answers) return;
+              const answer = answerOf(f, answers);
+              const api = forms();
+              if (!answer || !api || typeof api.reply !== "function") return;
+              try { await api.reply({ sessionID: f.sessionID, formID: f.id, answer }); } catch {}
+            })();
             break;
           }
           case "form.replied":
@@ -2708,6 +2854,10 @@ pub enum Decision {
     /// Which of a screen-read dialog's options to press, counted from zero.
     /// Typed, never handed to a hook — see [`Prompt::Dialog`].
     Pick(usize),
+    /// One option for each of Codex's questions, in order, counted from
+    /// zero. Typed into its form, never handed to a hook — see
+    /// [`CODEX_ASK_TOOL`].
+    Picks(Vec<usize>),
 }
 
 impl Decision {
@@ -2750,7 +2900,7 @@ impl Decision {
                 serde_json::json!({ "behavior": "deny", "message": feedback, "interrupt": false })
             }
             // Keys, not a hook's answer.
-            Self::Pick(_) => return None,
+            Self::Pick(_) | Self::Picks(_) => return None,
         };
         serde_json::to_string(&serde_json::json!({
             "hookSpecificOutput": {
@@ -3106,9 +3256,14 @@ fn decode_envelope(
         .flatten(),
         question: match asked {
             Some(asked) => Some(Box::new(asked)),
-            None => (event == HookEvent::PermissionRequest)
-                .then(|| permission_question(payload).map(Box::new))
-                .flatten(),
+            // Codex's question asks no permission: its `PreToolUse` is the
+            // form on screen — see `StatusStore::report`.
+            None => (event == HookEvent::PermissionRequest
+                || (agent.eq_ignore_ascii_case("codex")
+                    && event == HookEvent::PreTool
+                    && text(payload.get("tool_name")).as_deref() == Some(CODEX_ASK_TOOL)))
+            .then(|| permission_question(payload).map(Box::new))
+            .flatten(),
         },
         agent,
         event,
@@ -3244,7 +3399,13 @@ fn awaited(mut stream: std::net::TcpStream, buffer: &[u8], auth: &HookAuth) -> O
     let parked = (|| {
         let (_, body) = split_request(buffer)?;
         let envelope: serde_json::Value = serde_json::from_slice(body).ok()?;
-        if envelope.get("agent").and_then(|a| a.as_str()) != Some("claude") {
+        // Claude's hook and OpenCode's plugin both wait here; the other
+        // agents answer their prompts with keys, not through a hook.
+        let agent = envelope.get("agent").and_then(|a| a.as_str())?;
+        if !matches!(
+            crate::agents::harness(agent).to_ascii_lowercase().as_str(),
+            "claude" | "opencode"
+        ) {
             return None;
         }
         let token = envelope.get("token")?.as_str()?;
@@ -3518,7 +3679,7 @@ fn permission_question(payload: &serde_json::Value) -> Option<PermissionQuestion
         "Grep" | "Glob" => field("pattern"),
         // What a row can say about a question or a plan in one line: the
         // first question, or the plan's title.
-        "AskUserQuestion" => input
+        "AskUserQuestion" | CODEX_ASK_TOOL => input
             .and_then(|i| i.get("questions"))
             .and_then(|q| q.get(0))
             .and_then(|q| q.get("question"))
@@ -3983,7 +4144,8 @@ mod tests {
             (TOKEN_ENV, "window"),
             (crate::permissions::ENV, rules.as_str()),
         ];
-        for tool in PROMPT_TOOLS {
+        // Claude's own; Codex's question tool never reaches a rule.
+        for tool in ["AskUserQuestion", "ExitPlanMode"] {
             let prompt =
                 COMMAND_ASKED.replace(r#""tool_name":"Bash""#, &format!(r#""tool_name":"{tool}""#));
             assert_eq!(run(SCRIPT, &[], &home, &claude, &prompt), "{}\n", "{tool}");

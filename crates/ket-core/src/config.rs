@@ -725,7 +725,18 @@ pub struct ProvisionConfig {
 /// command puts back. A list that tried to be exhaustive would eventually name
 /// something regenerable only in theory, and the one thing this list must not
 /// do is be wrong about that.
-const DEFAULT_BUILD_DIRS: &[&str] = &["target", "node_modules", "dist", "build", ".next"];
+///
+/// The three whose name means one thing wherever it appears — a checkout
+/// with a package under `mobile/app` keeps its `node_modules` there, not at
+/// the root — are matched at any depth. `dist` and `build` stay at the root:
+/// deeper down, a directory called `build` is as likely to be source.
+const DEFAULT_BUILD_DIRS: &[&str] = &["**/target", "**/node_modules", "dist", "build", "**/.next"];
+
+/// What [`DEFAULT_BUILD_DIRS`] was before the three were matched at any
+/// depth. A saved config spells the whole list out whether or not the user
+/// ever touched it, so this is how a list ket wrote itself is told from one
+/// the user chose — see [`StorageConfig::adopt_current_default`].
+const PREVIOUS_BUILD_DIRS: &[&str] = &["target", "node_modules", "dist", "build", ".next"];
 
 /// Which of a checkout's directories hold output a build can put back.
 ///
@@ -735,8 +746,9 @@ const DEFAULT_BUILD_DIRS: &[&str] = &["target", "node_modules", "dist", "build",
 /// [`ProvisionConfig::files`], and for a sharper reason: provisioning a wrong
 /// file copies something; clearing a wrong directory destroys it.
 ///
-/// Patterns are globs against a path relative to the worktree root, so
-/// `crates/*/target` reaches a Rust workspace's per-crate output. A matched
+/// Patterns are globs against a path relative to the worktree root: `target`
+/// is the root's alone, `crates/*/target` reaches a Rust workspace's
+/// per-crate output, and `**/target` finds one at any depth. A matched
 /// directory is never descended into.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -752,6 +764,21 @@ impl Default for StorageConfig {
                 .iter()
                 .map(|dir| (*dir).to_owned())
                 .collect(),
+        }
+    }
+}
+
+impl StorageConfig {
+    /// Moves a list ket wrote on to the list it ships now.
+    ///
+    /// [`Config::save`] writes every section out in full, so a config saved
+    /// under an earlier default carries that default spelled out as if the
+    /// user had chosen it. Only a list equal to the old default, entry for
+    /// entry, is replaced: one the user has edited, even by a single entry,
+    /// is theirs and stays.
+    fn adopt_current_default(&mut self) {
+        if self.build_dirs == PREVIOUS_BUILD_DIRS {
+            *self = Self::default();
         }
     }
 }
@@ -1626,12 +1653,13 @@ impl Config {
     /// an error — silently falling back to defaults because of a typo would be
     /// far more confusing than refusing to start.
     pub fn load_from(path: &Path) -> Result<Self> {
-        let config = match std::fs::read_to_string(path) {
+        let mut config = match std::fs::read_to_string(path) {
             Ok(text) => toml::from_str::<Self>(&text)
                 .map_err(|e| KetError::Config(format!("{}: {e}", path.display())))?,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::default(),
             Err(e) => return Err(KetError::io(path, e)),
         };
+        config.storage.adopt_current_default();
 
         config.validate()?;
         Ok(config)
@@ -1854,6 +1882,30 @@ mod tests {
         let text = toml::to_string(&Config::default()).unwrap();
         assert!(!text.contains("code_font ="), "{text}");
         assert!(!text.contains("ui_font ="), "{text}");
+    }
+
+    #[test]
+    fn a_build_dirs_list_ket_wrote_under_the_old_default_moves_to_the_new_one() {
+        let root = temp_root("stale-build-dirs");
+        let path = root.join("config.toml");
+
+        // Exactly what an earlier ket saved: its own default, spelled out.
+        let mut stale = Config::default();
+        stale.storage.build_dirs = PREVIOUS_BUILD_DIRS
+            .iter()
+            .map(|d| (*d).to_owned())
+            .collect();
+        stale.save_to(&path).unwrap();
+        let loaded = Config::load_from(&path).unwrap();
+        assert_eq!(loaded.storage, StorageConfig::default());
+
+        // One the user edited is theirs, however close to the old default.
+        let mut chosen = Config::default();
+        chosen.storage.build_dirs = vec!["target".to_owned(), "node_modules".to_owned()];
+        chosen.save_to(&path).unwrap();
+        let loaded = Config::load_from(&path).unwrap();
+        assert_eq!(loaded.storage, chosen.storage);
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]

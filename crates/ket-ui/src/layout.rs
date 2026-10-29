@@ -138,6 +138,11 @@ enum SavedTab {
         pinned: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         asleep: Option<AsleepSaved>,
+        /// Showing Claude Code's agent view when saved, so a restart opens
+        /// agent view again rather than resuming the newest session there —
+        /// one agent view ran in the background, which would attach to it.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        agent_view: bool,
     },
 }
 
@@ -165,6 +170,8 @@ pub(crate) struct SavedTerminal {
     pub(crate) title: Option<String>,
     pub(crate) pinned: bool,
     pub(crate) asleep: Option<AsleepSaved>,
+    /// See `SavedTab::Terminal::agent_view`.
+    pub(crate) agent_view: bool,
 }
 
 impl SavedTerminal {
@@ -175,6 +182,7 @@ impl SavedTerminal {
             title: self.title.clone(),
             pinned: self.pinned,
             asleep: self.asleep.clone(),
+            agent_view: self.agent_view,
         }
     }
 }
@@ -285,6 +293,7 @@ impl SavedPane {
                         title: None,
                         pinned: false,
                         asleep: None,
+                        agent_view: false,
                     });
                 }
                 Self::Leaf {
@@ -336,6 +345,7 @@ impl SavedPane {
                         title,
                         pinned,
                         asleep,
+                        agent_view,
                     } = tab
                     {
                         match key {
@@ -349,6 +359,7 @@ impl SavedPane {
                                     title: title.clone(),
                                     pinned: *pinned,
                                     asleep: asleep.clone(),
+                                    agent_view: *agent_view,
                                 })
                             }
                             _ => wants_shell = true,
@@ -456,6 +467,22 @@ impl SavedTab {
                             since_ms: asleep.since_ms,
                             freed_bytes: asleep.freed_bytes,
                         }),
+                    // Agent view, known by the title it gives its terminal
+                    // or, when it gave none, by what is on the screen: its
+                    // list, or a session opened from it.
+                    agent_view: shell.terminals.get(terminal).is_some_and(|handle| {
+                        handle
+                            .term
+                            .title()
+                            .is_some_and(|title| ket_core::agent_view::is_agent_view_title(&title))
+                            || handle.term.with_term(|term| {
+                                ket_core::agent_view::showing(&ket_core::screen::bottom_rows(
+                                    term,
+                                    usize::MAX,
+                                ))
+                                .is_some()
+                            })
+                    }),
                 })
             }
             // Browser sessions are deliberately private and process-local.
@@ -698,6 +725,7 @@ mod tests {
                         since_ms: 42,
                         freed_bytes: 100,
                     }),
+                    agent_view: false,
                 }],
                 active: 0,
             },
@@ -769,6 +797,7 @@ mod tests {
                                     title: None,
                                     pinned: false,
                                     asleep: None,
+                                    agent_view: false,
                                 }],
                                 active: 0,
                             },
@@ -849,6 +878,7 @@ mod tests {
                         title: None,
                         pinned: false,
                         asleep: None,
+                        agent_view: false,
                     },
                     SavedTab::Image {
                         path: "/repo/shot.png".to_owned(),

@@ -1,9 +1,14 @@
 'use no memo'; // Reads a live HostConnection — see lib/hosts.ts.
 
-// One worktree: its figures, what its agent is waiting on when it is
-// waiting, the pull request its branch is open as, the comments on its diff
-// waiting to go to the agent, and what a merge would bring — merged from
-// here, or pushed and opened as a pull request.
+// One worktree: what it has changed since its base, and how to land it —
+// merged from here, or pushed and opened as a pull request — docked at the
+// foot. Once a pull request is open, where it stands sits over the changes
+// and the foot hands its checks or comments to the agent. What the agent is
+// waiting on, when it is waiting, and the comments on its diff waiting to go
+// to the agent, each have their card above. Everything else the worktree
+// offers — its terminal, a new session, pinning, deleting, the rest of the
+// pull request's actions — waits in the bar's menu, as the desktop's
+// worktree menu has it.
 
 import {
   Activity,
@@ -13,16 +18,30 @@ import {
   FileChange_Status,
   type PullRequestMergeMethod,
   type PullRequestSummary,
+  PullRequestSummary_State,
 } from '@ket/remote';
 import { router, useIsFocused, useLocalSearchParams } from 'expo-router';
-import { useEffect, useState } from 'react';
-import { Alert, Linking, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { useEffect, useRef, useState } from 'react';
+import { Alert, Linking, Pressable, ScrollView, StyleSheet, Text, View, type ViewInstance } from 'react-native';
 
 import { ConnectionHelp } from '../../../components/ConnectionHelp';
+import { FloatMenu, type MenuItem, type MenuSection, type Place, placeOf } from '../../../components/FloatMenu';
 import { RiskBadge } from '../../../components/Risk';
-import { AgentMark, Close, TerminalGlyph } from '../../../components/icons';
-import { Banner, Bar, Button, Card, Dot, Figure, Heading, IconButton, Prose, Row, Screen, Value } from '../../../components/ui';
-import { agentTerminal, detail, everyWorktree, stateOf } from '../../../lib/activity';
+import { worktreeMenu } from '../../../components/WorktreeList';
+import {
+  AgentMark,
+  CheckCircle,
+  Close,
+  Comment,
+  External,
+  Merge,
+  More,
+  Plus,
+  PullRequestGlyph,
+  TerminalWindow,
+} from '../../../components/icons';
+import { Banner, Bar, Button, Card, Heading, IconButton, IconCluster, Prose, Row, Screen } from '../../../components/ui';
+import { ASLEEP, WAKING, agentTerminal, asleepName, detail, everyWorktree } from '../../../lib/activity';
 import { checkWord, checksInOrder, prLine } from '../../../lib/checks';
 import type { HostConnection } from '../../../lib/connection';
 import { useHost } from '../../../lib/hosts';
@@ -35,8 +54,16 @@ export default function Worktree() {
   const { host: hostId, worktree: raw } = useLocalSearchParams<{ host: string; worktree: string }>();
   const id = decodeURIComponent(raw);
   const conn = useHost(hostId);
-  const [answering, setAnswering] = useState(false);
+  // The permission just answered, by its id: its buttons go on the tap and
+  // stay gone until the desktop's next snapshot takes the question away.
+  // Back only if the desktop would not take the answer, with its reason.
+  const [answered, setAnswered] = useState<bigint | null>(null);
   const [refusal, setRefusal] = useState('');
+  // The asleep tab the desktop is waking for this phone, by its key.
+  const [waking, setWaking] = useState('');
+  // The bar's menu, hung under its button while it is open.
+  const [menu, setMenu] = useState<Place | null>(null);
+  const more = useRef<ViewInstance>(null);
   const found = everyWorktree(conn?.snapshot ?? null).find((l) => l.worktree.id === id);
 
   // What a merge would bring, asked for again whenever the figures move —
@@ -47,6 +74,8 @@ export default function Worktree() {
   const focused = useIsFocused();
   const [changes, setChanges] = useState<Changes | null>(null);
   const [merging, setMerging] = useState(false);
+  // Why the desktop would not merge from here, under the changes.
+  const [mergeWhy, setMergeWhy] = useState('');
   const figures = found
     ? `${found.worktree.filesChanged}:${found.worktree.linesAdded}:${found.worktree.linesRemoved}:${found.worktree.commitsAhead}`
     : '';
@@ -63,6 +92,10 @@ export default function Worktree() {
       stopped = true;
     };
   }, [conn, id, figures, focused]);
+
+  const pr = found?.worktree.pullRequest;
+  const agentTerm = found ? agentTerminal(found.worktree) : undefined;
+  const actions = usePullRequest(pr, conn, id, agentTerm?.id ?? null);
 
   if (!found) {
     return (
@@ -82,11 +115,26 @@ export default function Worktree() {
   }
 
   const { project, worktree } = found;
-  const agentTerm = agentTerminal(worktree);
   const open = (terminal: bigint) => router.push(`/terminal/${hostId}/${terminal.toString()}`);
+  // Wakes an asleep tab on the desktop and opens its chat once its terminal
+  // is there. The desktop says why when it won't.
+  const wake = async (key: string) => {
+    if (!conn || waking) return;
+    setWaking(key);
+    const woke = await conn
+      .wakeTerminal(id, key)
+      .catch((e: unknown) => ({ why: e instanceof Error ? e.message : String(e) }));
+    setWaking('');
+    if ('why' in woke) {
+      Alert.alert('Couldn’t wake the agent', woke.why);
+      return;
+    }
+    await conn.awaitTerminal(woke.terminalId);
+    router.push(`/session/${hostId}/${woke.terminalId.toString()}`);
+  };
+  const canWake = conn !== null && conn.hostMinor >= 23;
   const agentName = worktree.agent ? agentLabel(worktree.agent) : 'The agent';
   const live = worktree.terminals.filter((x) => !x.closed);
-  const state = stateOf(worktree.activity);
   const blocked = worktree.activity === Activity.BLOCKED;
   const failed = worktree.activity === Activity.FAILED;
   // The newest prompt; the list since 1.13, the single field from older desktops.
@@ -99,59 +147,177 @@ export default function Worktree() {
     if (!conn || !question) return;
     // "Always" outlives this prompt: with the app lock on, it is you first.
     if (choice === Answer_Choice.ALLOW_ALWAYS && !(await confirmIdentity(`Always allow ${question.tool}`))) return;
-    setAnswering(true);
+    // Gone on the tap: a second tap on buttons still up was a second key.
+    setAnswered(question.id);
     setRefusal('');
     const why = await conn.answer(question, choice).catch((e: unknown) => (e instanceof Error ? e.message : String(e)));
-    setAnswering(false);
-    if (why) setRefusal(why);
+    if (why) {
+      setAnswered(null);
+      setRefusal(why);
+    }
   };
+
+  const mergeHere = () =>
+    Alert.alert(
+      `Merge ${worktree.name} into ${changes?.base}?`,
+      'Uncommitted changes are committed first, as Merge does on your Mac.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Merge',
+          onPress: async () => {
+            if (!conn) return;
+            if (!(await confirmIdentity(`Merge ${worktree.name} into ${changes?.base}`))) return;
+            setMerging(true);
+            setMergeWhy('');
+            void conn
+              .merge(id)
+              .catch((e: unknown) => (e instanceof Error ? e.message : String(e)))
+              .then((why) => {
+                setMerging(false);
+                if (why) setMergeWhy(why);
+              });
+          },
+        },
+      ],
+    );
+
+  // The foot: with a pull request open, its first thing to do and GitHub;
+  // without one — or with one closed, whose branch can still land from
+  // here — merging from here and opening one. Nothing while there is nothing
+  // to land. The keys are what the menu leaves out, being here.
+  const base = changes?.base ?? '';
+  const files = changes?.files ?? [];
+  const landable = base !== '' && (files.length > 0 || worktree.commitsAhead > 0);
+  const inFoot: string[] = [];
+  let foot: React.ReactNode = null;
+  if (pr && conn && pr.state === PullRequestSummary_State.OPEN) {
+    const { can, busy, handOver, merge } = actions;
+    const working = busy !== null;
+    let lead: { key: string; title: string; icon: React.ReactNode; onPress: () => void } | null = null;
+    if (can.fix) {
+      lead = {
+        key: 'fix',
+        title: busy === 'checks' ? 'Reading the checks…' : 'Fix checks with agent',
+        icon: <CheckCircle size={16} color={t.onAccent} />,
+        onPress: () => void handOver('checks', () => conn.fixChecks(id)),
+      };
+    } else if (can.address) {
+      lead = {
+        key: 'address',
+        // Shorter than the menu says it, to share the foot with GitHub.
+        title: busy === 'comments' ? 'Reading the comments…' : 'Hand comments to agent',
+        icon: <Comment size={16} color={t.onAccent} />,
+        onPress: () => void handOver('comments', () => conn.addressComments(id)),
+      };
+    } else if (can.merge) {
+      lead = {
+        key: 'merge',
+        title: busy === 'merge' ? 'Merging…' : 'Merge pull request',
+        icon: <Merge size={16} color={t.onAccent} />,
+        onPress: merge,
+      };
+    }
+    if (lead) inFoot.push(lead.key);
+    foot = (
+      <View style={styles.foot}>
+        {lead ? (
+          <Button kind="primary" title={lead.title} icon={lead.icon} disabled={working} style={styles.grow} onPress={lead.onPress} />
+        ) : null}
+        <Button
+          title={lead ? 'GitHub' : 'Open on GitHub'}
+          icon={<External size={16} color={t.text} />}
+          style={lead ? undefined : styles.grow}
+          onPress={() => void Linking.openURL(pr.url)}
+        />
+      </View>
+    );
+  } else if (landable) {
+    // Pushed for review instead: the other way out, as the desktop's merge
+    // dialog offers it. Not before 1.16, which opens them, and not for a
+    // branch already open as one and closed: the menu offers reopening.
+    const opens = conn !== null && conn.hostMinor >= 16 && !pr;
+    if (opens) inFoot.push('open-pr');
+    foot = (
+      <View style={styles.foot}>
+        <Button
+          kind="primary"
+          title={merging ? 'Merging…' : `Merge into ${base}`}
+          icon={<Merge size={16} color={t.onAccent} />}
+          disabled={merging}
+          style={styles.grow}
+          onPress={mergeHere}
+        />
+        {opens ? (
+          <Button
+            title="Pull request…"
+            icon={<PullRequestGlyph size={16} color={t.text} />}
+            disabled={merging}
+            onPress={() => router.push(`/pull-request/${hostId}/${encodeURIComponent(id)}`)}
+          />
+        ) : null}
+      </View>
+    );
+  }
+
+  // The bar's menu: into the worktree's terminal or a new one first, then
+  // what holding its row on Worktrees offers, less what the foot already has.
+  const sections: MenuSection[] = [];
+  if (conn) {
+    const first: MenuItem[] = [];
+    const terminal = agentTerm ?? live[0];
+    if (terminal) {
+      first.push({
+        key: 'terminal',
+        label: 'Open the terminal',
+        icon: <TerminalWindow size={17} color={t.dim} />,
+        onPress: () => open(terminal.id),
+      });
+    }
+    if (conn.hostMinor >= 15) {
+      first.push({
+        key: 'new',
+        label: 'New session or shell',
+        icon: <Plus size={17} color={t.dim} />,
+        onPress: () => router.push(`/new/${hostId}?worktree=${encodeURIComponent(id)}`),
+      });
+    }
+    if (first.length > 0) sections.push({ items: first });
+    // Deleted from here: this screen has nothing left to show, so it goes
+    // back at once; a refusal is said in its alert wherever that lands.
+    const going = (_id: string, away: boolean) => {
+      if (away && router.canGoBack()) router.back();
+    };
+    for (const section of worktreeMenu(conn, worktree, (href) => router.push(href), going)) {
+      const items = section.items.filter((item) => !inFoot.includes(item.key));
+      if (items.length > 0) sections.push({ ...section, items });
+    }
+  }
+
+  // The lines are the listed files' own: the worktree's figures count only
+  // what is uncommitted, and the list is everything since the base.
+  const added = files.reduce((n, file) => n + file.added, 0);
+  const removed = files.reduce((n, file) => n + file.removed, 0);
+  const ahead = worktree.commitsAhead === 1 ? '1 commit' : `${worktree.commitsAhead} commits`;
+  const clean = changes !== null && files.length === 0 && worktree.commitsAhead === 0;
 
   return (
     <Screen>
-      <Bar back detail={project.name} title={worktree.name} />
+      <Bar
+        back
+        detail={project.name}
+        title={worktree.name}
+        right={
+          sections.length > 0 ? (
+            <View ref={more} collapsable={false}>
+              <IconCluster
+                actions={[{ label: 'More', icon: <More size={18} color={t.text} />, onPress: () => placeOf(more.current, setMenu) }]}
+              />
+            </View>
+          ) : null
+        }
+      />
       <ScrollView contentContainerStyle={styles.page}>
-        <Card style={styles.figures}>
-          <Figure label="Agent" style={styles.grow}>
-            {state ? <Dot size={7} color={state.color} /> : null}
-            <Value color={state?.color ?? t.dim}>{state?.word ?? 'quiet'}</Value>
-          </Figure>
-          <Figure label="Sessions" style={styles.grow}>
-            <Value>{live.length}</Value>
-          </Figure>
-          {worktree.branch ? (
-            <Figure label="Branch" style={styles.branch}>
-              <Text style={styles.branchText} numberOfLines={1}>
-                {worktree.branch}
-              </Text>
-            </Figure>
-          ) : null}
-        </Card>
-
-        <Card style={styles.figures}>
-          <Figure label="Changed" style={styles.grow}>
-            <Value color={worktree.filesChanged > 0 ? undefined : t.dim}>
-              {worktree.filesChanged > 0 ? `${worktree.filesChanged} ${worktree.filesChanged === 1 ? 'file' : 'files'}` : 'clean'}
-            </Value>
-          </Figure>
-          <Figure label="Lines" style={styles.grow}>
-            {worktree.linesAdded + worktree.linesRemoved > 0 ? (
-              <Text style={styles.lines}>
-                <Text style={{ color: t.added }}>+{worktree.linesAdded}</Text>{' '}
-                <Text style={{ color: t.removed }}>−{worktree.linesRemoved}</Text>
-              </Text>
-            ) : (
-              <Value color={t.dim}>—</Value>
-            )}
-          </Figure>
-          {worktree.base ? (
-            <Figure label={`Ahead of ${worktree.base}`} style={styles.branch}>
-              <Value color={worktree.commitsAhead > 0 ? undefined : t.dim}>
-                {worktree.commitsAhead === 1 ? '1 commit' : `${worktree.commitsAhead} commits`}
-              </Value>
-            </Figure>
-          ) : null}
-        </Card>
-
         {blocked || failed ? (
           <Banner tone={blocked ? t.attention : t.failed}>
             <View style={styles.askHead}>
@@ -186,29 +352,17 @@ export default function Worktree() {
               </>
             ) : question?.answerable ? (
               <>
-                <Button
-                  kind="primary"
-                  title="Allow once"
-                  disabled={answering}
-                  onPress={() => void answer(Answer_Choice.ALLOW_ONCE)}
-                />
-                <View style={styles.choices}>
-                  {question.always ? (
-                    <Button
-                      title="Always allow"
-                      disabled={answering}
-                      onPress={() => void answer(Answer_Choice.ALLOW_ALWAYS)}
-                      style={styles.grow}
-                    />
-                  ) : null}
-                  <Button
-                    kind="danger"
-                    title="Deny"
-                    disabled={answering}
-                    onPress={() => void answer(Answer_Choice.DENY)}
-                    style={styles.grow}
-                  />
-                </View>
+                {question.id !== answered ? (
+                  <>
+                    <Button kind="primary" title="Allow once" onPress={() => void answer(Answer_Choice.ALLOW_ONCE)} />
+                    <View style={styles.choices}>
+                      {question.always ? (
+                        <Button title="Always allow" onPress={() => void answer(Answer_Choice.ALLOW_ALWAYS)} style={styles.grow} />
+                      ) : null}
+                      <Button kind="danger" title="Deny" onPress={() => void answer(Answer_Choice.DENY)} style={styles.grow} />
+                    </View>
+                  </>
+                ) : null}
                 <Button kind="ghost" title="Open the terminal" onPress={() => open(question.terminalId)} />
               </>
             ) : question?.terminalId || agentTerm ? (
@@ -221,145 +375,104 @@ export default function Worktree() {
           </Banner>
         ) : null}
 
-        {agentTerm && !blocked && !failed ? (
-          <Button title="Terminal" icon={<TerminalGlyph size={16} color={t.text} />} onPress={() => open(agentTerm.id)} />
+        {worktree.asleep.length > 0 ? (
+          <Card>
+            <Heading count={worktree.asleep.length}>Asleep</Heading>
+            {worktree.asleep.map((tab) => (
+              <Row
+                key={tab.key}
+                mark={tab.agent ? <AgentMark agent={tab.agent} size={16} /> : null}
+                title={asleepName(tab)}
+                detail={
+                  waking === tab.key
+                    ? 'Waking on your Mac…'
+                    : tab.sinceMs > 0n
+                      ? `Asleep since ${new Date(Number(tab.sinceMs)).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })} · ${Math.round(Number(tab.freedBytes) / 1_048_576)} MB freed`
+                      : 'Stopped with ket’s host · tap to start it again'
+                }
+                state={waking === tab.key ? WAKING : ASLEEP}
+                chevron={canWake}
+                onPress={canWake ? () => void wake(tab.key) : undefined}
+              />
+            ))}
+          </Card>
         ) : null}
 
-        {conn && conn.hostMinor >= 15 ? (
-          <Button title="New session or shell" onPress={() =>
-            router.push(`/new/${hostId}?worktree=${encodeURIComponent(id)}`)
-          } />
-        ) : null}
-
-        {worktree.pullRequest && conn ? (
-          <PullRequest
-            pr={worktree.pullRequest}
-            conn={conn}
-            worktreeId={id}
-            agentTerminal={agentTerm?.id ?? null}
-          />
-        ) : null}
+        {pr ? <PullRequest pr={pr} said={actions.said} /> : null}
 
         {conn && conn.hostMinor >= 14 ? <Review conn={conn} hostId={hostId} worktreeId={id} /> : null}
 
-        {changes && (changes.files.length > 0 || changes.error) ? (
-          <Card style={styles.list}>
-            <Heading count={changes.files.length}>{changes.base ? `Changes since ${changes.base}` : 'Changes'}</Heading>
-            {changes.error ? <Prose style={styles.changesNote}>{changes.error}</Prose> : null}
-            {changes.files.map((file) => (
-              <Row
-                key={file.path}
-                small
-                title={file.path.split('/').pop() ?? file.path}
-                detail={file.path.includes('/') ? file.path.slice(0, file.path.lastIndexOf('/')) : undefined}
-                meta={
-                  <Text style={styles.fileLines}>
-                    {file.binary ? (
-                      <Text style={{ color: t.dim }}>binary</Text>
-                    ) : (
-                      <>
-                        <Text style={{ color: t.added }}>+{file.added}</Text>{' '}
-                        <Text style={{ color: t.removed }}>−{file.removed}</Text>
-                      </>
-                    )}
-                    {file.status === FileChange_Status.ADDED ? <Text style={{ color: t.dim }}> new</Text> : null}
-                    {file.status === FileChange_Status.DELETED ? <Text style={{ color: t.dim }}> gone</Text> : null}
-                  </Text>
-                }
-                chevron
-                onPress={() =>
-                  router.push(`/diff/${hostId}/${encodeURIComponent(id)}?path=${encodeURIComponent(file.path)}`)
-                }
-              />
-            ))}
-            {changes.base ? (
-              <View style={styles.actions}>
-                <Button
-                  kind="primary"
-                  title={merging ? 'Merging…' : `Merge into ${changes.base}`}
-                  disabled={merging}
-                  style={styles.grow}
-                  onPress={() =>
-                    Alert.alert(
-                      `Merge ${worktree.name} into ${changes.base}?`,
-                      'Uncommitted changes are committed first, as Merge does on your Mac.',
-                      [
-                        { text: 'Cancel', style: 'cancel' },
-                        {
-                          text: 'Merge',
-                          onPress: async () => {
-                            if (!conn) return;
-                            if (!(await confirmIdentity(`Merge ${worktree.name} into ${changes.base}`))) return;
-                            setMerging(true);
-                            void conn
-                              .merge(id)
-                              .catch((e: unknown) => (e instanceof Error ? e.message : String(e)))
-                              .then((why) => {
-                                setMerging(false);
-                                if (why) setRefusal(why);
-                              });
-                          },
-                        },
-                      ],
-                    )
-                  }
-                />
-                {/* Pushed for review instead: the other way out, as the
-                    desktop's merge dialog offers it. Once the branch is open
-                    as one, its card above is where it is. */}
-                {conn && conn.hostMinor >= 16 && !worktree.pullRequest ? (
-                  <Button
-                    title="Pull request…"
-                    disabled={merging}
-                    onPress={() => router.push(`/pull-request/${hostId}/${encodeURIComponent(id)}`)}
-                  />
-                ) : null}
-              </View>
-            ) : null}
-          </Card>
-        ) : null}
+        <Card style={styles.list}>
+          <Heading count={changes ? files.length : undefined}>
+            {worktree.base ? `Changes since ${worktree.base}` : 'Changes'}
+          </Heading>
+          {changes && !clean && worktree.base ? (
+            <Text style={styles.figures}>
+              <Text style={{ color: t.added }}>+{added}</Text>{' '}
+              <Text style={{ color: t.removed }}>−{removed}</Text>
+              {` · ${ahead} ahead of ${worktree.base}`}
+            </Text>
+          ) : null}
+          {changes?.error ? <Prose style={styles.changesNote}>{changes.error}</Prose> : null}
+          {mergeWhy ? (
+            <Prose color={t.failed} style={styles.changesNote}>
+              {mergeWhy}
+            </Prose>
+          ) : null}
+          {clean && files.length === 0 ? (
+            <Prose style={styles.changesNote}>{worktree.base ? `Nothing changed since ${worktree.base}.` : 'Nothing changed.'}</Prose>
+          ) : null}
+          {files.map((file) => (
+            <Row
+              key={file.path}
+              small
+              title={file.path.split('/').pop() ?? file.path}
+              detail={file.path.includes('/') ? file.path.slice(0, file.path.lastIndexOf('/')) : undefined}
+              meta={
+                <Text style={styles.fileLines}>
+                  {file.binary ? (
+                    <Text style={{ color: t.dim }}>binary</Text>
+                  ) : (
+                    <>
+                      <Text style={{ color: t.added }}>+{file.added}</Text>{' '}
+                      <Text style={{ color: t.removed }}>−{file.removed}</Text>
+                    </>
+                  )}
+                  {file.status === FileChange_Status.ADDED ? <Text style={{ color: t.dim }}> new</Text> : null}
+                  {file.status === FileChange_Status.DELETED ? <Text style={{ color: t.dim }}> gone</Text> : null}
+                </Text>
+              }
+              chevron
+              onPress={() =>
+                router.push(`/diff/${hostId}/${encodeURIComponent(id)}?path=${encodeURIComponent(file.path)}`)
+              }
+            />
+          ))}
+        </Card>
       </ScrollView>
+      {foot}
+      <FloatMenu
+        open={menu !== null}
+        onClose={() => setMenu(null)}
+        anchor={menu}
+        label={`${worktree.name} actions`}
+        sections={sections}
+      />
     </Screen>
   );
 }
 
-/** The pull request a worktree's branch is open as: where it stands, its
- * checks — what failed first, what passed folded away — and, when one
- * failed, the button that hands them to the agent. */
-function PullRequest({
-  pr,
-  conn,
-  worktreeId,
-  agentTerminal: terminal,
-}: {
-  pr: PullRequestSummary;
-  conn: HostConnection;
-  worktreeId: string;
-  agentTerminal: bigint | null;
-}) {
+/** A pull request's actions, as the foot offers them: what is being done,
+ * what the last one said, and the doing. Idle with no pull request. */
+function usePullRequest(pr: PullRequestSummary | undefined, conn: HostConnection | null, worktreeId: string, terminal: bigint | null) {
   const [busy, setBusy] = useState<string | null>(null);
   const [said, setSaid] = useState<{ text: string; failed: boolean } | null>(null);
-  const [everyCheck, setEveryCheck] = useState(false);
+  const can = pr && conn ? prActions(pr, conn.hostMinor) : { fix: false, address: false, merge: false, update: false, ready: false, reopen: false };
 
-  const {
-    fix: canFix,
-    address: canAddress,
-    merge: canMerge,
-    update: canUpdate,
-    ready: canReady,
-    reopen: canReopen,
-  } = prActions(pr, conn.hostMinor);
-  const line = prLine(pr);
-  const ordered = checksInOrder(pr);
-  const settled = (state: CheckSummary_State) => state !== CheckSummary_State.FAILED && state !== CheckSummary_State.PENDING;
-  const folded = everyCheck ? [] : ordered.filter((check) => settled(check.state));
-  const shown = everyCheck ? ordered : ordered.filter((check) => !settled(check.state));
-  const working = busy !== null;
-
-  const handOver = async (
-    kind: 'checks' | 'comments',
-    run: () => Promise<{ starting: boolean } | { why: string }>,
-  ) => {
+  // Handed to the agent: off to its conversation to watch it work, or word
+  // of where the handing stands when there is none to open.
+  const handOver = async (kind: 'checks' | 'comments', run: () => Promise<{ starting: boolean } | { why: string }>) => {
+    if (!conn) return;
     setBusy(kind);
     setSaid(null);
     const handed = await run().catch((e: unknown) => ({ why: e instanceof Error ? e.message : String(e) }));
@@ -391,13 +504,29 @@ function PullRequest({
     if (why) setSaid({ text: why, failed: true });
   };
 
-  const merge = () =>
+  const merge = () => {
+    if (!pr || !conn) return;
     askMerge(pr, (method: PullRequestMergeMethod) => {
       void (async () => {
         if (!(await confirmIdentity(`Merge #${pr.number.toString()}`))) return;
         await act('merge', () => conn.mergePullRequest(worktreeId, method));
       })();
     });
+  };
+
+  return { can, busy, said, handOver, act, merge };
+}
+
+/** The pull request a worktree's branch is open as: where it stands, its
+ * checks — what failed first, what passed folded away — and what its last
+ * action from the foot said. */
+function PullRequest({ pr, said }: { pr: PullRequestSummary; said: { text: string; failed: boolean } | null }) {
+  const [everyCheck, setEveryCheck] = useState(false);
+  const line = prLine(pr);
+  const ordered = checksInOrder(pr);
+  const settled = (state: CheckSummary_State) => state !== CheckSummary_State.FAILED && state !== CheckSummary_State.PENDING;
+  const folded = everyCheck ? [] : ordered.filter((check) => settled(check.state));
+  const shown = everyCheck ? ordered : ordered.filter((check) => !settled(check.state));
 
   return (
     <Card style={styles.list}>
@@ -428,68 +557,6 @@ function PullRequest({
           {said.text}
         </Prose>
       ) : null}
-      <View style={styles.actions}>
-        {canFix ? (
-          <Button
-            kind="primary"
-            title={busy === 'checks' ? 'Reading the checks…' : 'Fix checks with agent'}
-            disabled={working}
-            style={styles.grow}
-            onPress={() => void handOver('checks', () => conn.fixChecks(worktreeId))}
-          />
-        ) : null}
-        {canAddress ? (
-          <Button
-            kind={canFix ? 'ghost' : 'primary'}
-            title={busy === 'comments' ? 'Reading the comments…' : 'Address comments with agent'}
-            disabled={working}
-            style={styles.grow}
-            onPress={() => void handOver('comments', () => conn.addressComments(worktreeId))}
-          />
-        ) : null}
-        {canMerge ? (
-          <Button
-            kind={canFix || canAddress ? 'ghost' : 'primary'}
-            title={busy === 'merge' ? 'Merging…' : 'Merge'}
-            disabled={working}
-            style={styles.grow}
-            onPress={merge}
-          />
-        ) : null}
-        {canUpdate ? (
-          <Button
-            kind="ghost"
-            title={busy === 'update' ? 'Updating…' : 'Update branch'}
-            disabled={working}
-            style={styles.grow}
-            onPress={() => void act('update', () => conn.updatePullRequest(worktreeId))}
-          />
-        ) : null}
-        {canReady ? (
-          <Button
-            kind="ghost"
-            title={busy === 'ready' ? 'Marking ready…' : 'Ready for review'}
-            disabled={working}
-            style={styles.grow}
-            onPress={() => void act('ready', () => conn.readyPullRequest(worktreeId))}
-          />
-        ) : null}
-        {canReopen ? (
-          <Button
-            kind="ghost"
-            title={busy === 'reopen' ? 'Reopening…' : 'Reopen'}
-            disabled={working}
-            style={styles.grow}
-            onPress={() => void act('reopen', () => conn.reopenPullRequest(worktreeId))}
-          />
-        ) : null}
-        <Button
-          kind={canFix || canAddress || canMerge ? 'ghost' : undefined}
-          title="Open on GitHub"
-          style={styles.grow}
-          onPress={() => void Linking.openURL(pr.url)}
-        />
-      </View>
     </Card>
   );
 }
@@ -580,6 +647,8 @@ function asking(agent: string, tool: string): string {
     case 'WebSearch':
       return `${agent} wants to search the web`;
     case 'AskUserQuestion':
+    case 'request_user_input':
+    case 'Dialog':
       return `${agent} has a question`;
     case 'ExitPlanMode':
       return `${agent} has a plan ready`;
@@ -598,16 +667,16 @@ const styles = StyleSheet.create({
   page: { padding: size.gutter, paddingTop: 0, gap: size.gutter, paddingBottom: 32 },
   pad: { padding: 14 },
   grow: { flex: 1 },
-  figures: { flexDirection: 'row', gap: 14, padding: 14 },
-  branch: { flex: 1.6 },
-  branchText: { fontFamily: font.chromeMedium, fontSize: 13.5, color: t.text },
-  lines: { fontFamily: font.chromeMedium, fontSize: 13.5 },
   askHead: { flexDirection: 'row', alignItems: 'center', gap: 10 },
   askTitle: { fontFamily: font.proseSemibold, fontSize: size.body, color: t.text },
   well: { backgroundColor: t.sunken, borderRadius: size.radius, paddingHorizontal: 12, paddingVertical: 11 },
   wellText: { fontFamily: font.chrome, fontSize: 13, lineHeight: 20, color: t.text },
   list: { padding: 8, gap: 2 },
+  // Under the heading, on its left edge: the lines, and the commits ahead.
+  figures: { fontFamily: font.chrome, fontSize: size.detail, color: t.dim, paddingHorizontal: 6, paddingBottom: 6 },
   actions: { flexDirection: 'row', gap: 8, padding: 4, paddingTop: 8 },
+  // Docked under the list, clear of the home indicator.
+  foot: { flexDirection: 'row', gap: 8, paddingHorizontal: size.gutter, paddingTop: size.gutter, paddingBottom: 34 },
   choices: { flexDirection: 'row', gap: 8 },
   changesNote: { padding: 8 },
   // In from the edge a row's name starts at.

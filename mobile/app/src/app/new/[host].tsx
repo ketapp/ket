@@ -11,34 +11,18 @@
 
 import { router, useLocalSearchParams } from 'expo-router';
 import type { StartOptions } from '@ket/remote';
-import { type ReactNode, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import {
-  Dimensions,
-  Keyboard,
-  Platform,
-  Pressable,
-  ScrollView,
-  StyleSheet,
-  Text,
-  TextInput,
-  View,
-} from 'react-native';
-import Animated, {
-  Easing,
-  useAnimatedStyle,
-  useSharedValue,
-  withSpring,
-  withTiming,
-} from 'react-native-reanimated';
-import { KeyboardStickyView } from 'react-native-keyboard-controller';
+import { type ReactNode, useEffect, useRef, useState } from 'react';
+import { Keyboard, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import Animated, { type SharedValue, useAnimatedStyle } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { KeyCommands } from '../../components/KeyCommands';
-import { AgentMark, Check, ChevronDown, Close } from '../../components/icons';
+import { AgentMark, Check, ChevronDown } from '../../components/icons';
+import { SHEET_HEAD, SHEET_INSET, SheetPanel, type SheetMeasure } from '../../components/Sheet';
 import { Badge, Button, Prose } from '../../components/ui';
 import { projectColor } from '../../lib/activity';
 import { useHost } from '../../lib/hosts';
-import { READABLE_WIDTH } from '../../lib/layout';
+import { showBeside, useSplit } from '../../lib/layout';
 import { getLastWork, saveLastWork } from '../../lib/store';
 import { agentLabel, font, size, t } from '../../lib/theme';
 
@@ -48,6 +32,7 @@ type Which = 'project' | 'target' | 'agent' | 'base' | 'model' | 'effort' | 'kin
 /** Where a dropdown's field sits in the sheet, for its menu to open above. */
 interface Place {
   x: number;
+  y: number;
   width: number;
 }
 
@@ -55,6 +40,7 @@ export default function NewTask() {
   const { host: hostId, worktree: initialWorktree } = useLocalSearchParams<{ host: string; worktree?: string }>();
   const conn = useHost(hostId);
   const insets = useSafeAreaInsets();
+  const split = useSplit();
   // Projects the desktop lists, without "Elsewhere" — the terminals it could
   // not place, which are no project to start work in.
   const projects = (conn?.snapshot?.projects ?? []).filter((project) => project.id !== '');
@@ -73,34 +59,14 @@ export default function NewTask() {
   const [sending, setSending] = useState(false);
   const [error, setError] = useState('');
   const [open, setOpen] = useState<Which | null>(null);
-  const [typing, setTyping] = useState(() => Keyboard.isVisible());
-  // Where the menus open from: the fields, the row they sit in, the sheet.
+  // Where the menus open from: the fields, the grid they sit in, the sheet.
   const [places, setPlaces] = useState<Partial<Record<Which, Place>>>({});
   const [rowY, setRowY] = useState(0);
-  const [sheetH, setSheetH] = useState(0);
-  const [room, setRoom] = useState({ width: 0, height: 0 });
+  const [measure, setMeasure] = useState<SheetMeasure | null>(null);
+  // On its way down, and where to once it is — see `close`.
+  const [leaving, setLeaving] = useState<{ then?: string } | null>(null);
   // A pick made here wins over the one remembered, however late that loads.
   const touched = useRef(false);
-  // The sheet sticks to the keyboard, frame for frame, every time it moves —
-  // react-native-keyboard-controller, as the session screen does. Its foot
-  // keeps the home indicator's room throughout: the keyboard covers that
-  // room first, and the sheet only rises for the rest.
-  const foot = Math.max(insets.bottom, 12);
-  const tucked = foot - 12;
-  // Presented as iOS presents a sheet: the dimming fades in while the sheet
-  // springs up from below the screen, and both go back the way they came.
-  // Drawn here rather than by the stack, which only knows how to fade or
-  // slide the whole screen — dimming and all.
-  const dim = useSharedValue(0);
-  const drop = useSharedValue(Dimensions.get('window').height);
-  const entered = useRef(false);
-  const leaving = useRef(false);
-  const dimming = useAnimatedStyle(() => ({ opacity: dim.get() }));
-  const sliding = useAnimatedStyle(() => ({ transform: [{ translateY: drop.get() }] }));
-
-  useEffect(() => {
-    dim.set(withTiming(1, { duration: DIM_MS }));
-  }, [dim]);
 
   useEffect(() => {
     void getLastWork(hostId).then((last) => {
@@ -123,17 +89,6 @@ export default function NewTask() {
     return () => { active = false; };
   }, [conn, projectId]);
 
-  // From the commit, not after paint: the prompt focuses itself as it mounts,
-  // and the keyboard's first event must not arrive before anyone listens.
-  useLayoutEffect(() => {
-    const show = Keyboard.addListener(Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow', () => setTyping(true));
-    const hide = Keyboard.addListener(Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide', () => setTyping(false));
-    return () => {
-      show.remove();
-      hide.remove();
-    };
-  }, []);
-
   const agent = agents.includes(wanted) ? wanted : '';
   const choosesAgent = agents.length > 1;
   const advanced = (conn?.hostMinor ?? 0) >= 15;
@@ -144,23 +99,20 @@ export default function NewTask() {
   // A desktop from before 1.7 can't take new work.
   const tooOld = conn !== null && conn.status === 'connected' && conn.hostMinor < 7;
 
-  // Down and out first, then off the stack.
-  const close = () => {
-    if (leaving.current) return;
-    leaving.current = true;
-    Keyboard.dismiss();
-    dim.set(withTiming(0, { duration: LEAVE_MS }));
-    drop.set(withTiming(sheetH || Dimensions.get('window').height, { duration: LEAVE_MS, easing: Easing.in(Easing.cubic) }));
-    setTimeout(() => (router.canGoBack() ? router.back() : router.replace('/')), LEAVE_MS);
+  // Down and out first, then off the stack — or, for work just asked for,
+  // on to the chat that stands in for it while the desktop makes its
+  // worktree (see app/starting), in the sheet's place.
+  const close = (then?: string) => {
+    if (leaving) return;
+    setLeaving({ then });
   };
-
-  // Up from just below the screen, once the sheet knows how tall it is.
-  const arrive = (height: number) => {
-    setSheetH(height);
-    if (entered.current) return;
-    entered.current = true;
-    drop.set(height);
-    drop.set(withSpring(0, ARRIVE));
+  const gone = () => {
+    const then = leaving?.then;
+    if (then) {
+      if (split) showBeside(then);
+      else router.replace(then);
+    } else if (router.canGoBack()) router.back();
+    else router.replace('/');
   };
 
   // A menu needs the room the keyboard is using, so it goes first.
@@ -204,242 +156,206 @@ export default function NewTask() {
       return;
     }
     void saveLastWork(hostId, { project: project.id, agent });
-    close();
+    // New work: the connection holds a row for it from the moment the
+    // desktop takes it, and that row's chat is where it goes next.
+    const asked = existing ? undefined : conn.starting.at(-1);
+    close(asked ? `/starting/${hostId}/${asked.at}` : undefined);
   };
 
-  const placed = (which: Which) => (e: { nativeEvent: { layout: { x: number; width: number } } }) => {
-    const { x, width } = e.nativeEvent.layout;
-    setPlaces((was) => ({ ...was, [which]: { x, width } }));
+  const placed = (which: Which) => (e: { nativeEvent: { layout: { x: number; y: number; width: number } } }) => {
+    const { x, y, width } = e.nativeEvent.layout;
+    setPlaces((was) => ({ ...was, [which]: { x, y, width } }));
   };
 
-  // The menu opens upward from the field, as far as the room above it goes.
+  // The menu opens upward from the field's own top — the fields wrap two to
+  // a row — as far as the room above it goes.
   const place = open ? places[open] : undefined;
-  const menuBottom = sheetH - rowY + 8;
+  const room = measure?.room ?? { width: 0, height: 0 };
+  const menuBottom = (measure?.height ?? 0) - rowY - (place?.y ?? 0) + 8;
   const menuRoom = Math.max(160, room.height - menuBottom - insets.top - 12);
   const menuWidth = Math.max(place?.width ?? 0, 230);
   // Under its field, but never past the screen's right edge.
-  const menuLeft = Math.min(place?.x ?? 12, room.width - 12 - menuWidth);
+  const menuLeft = Math.min((place?.x ?? 0) + SHEET_INSET, room.width - 12 - menuWidth);
+
+  // What the open menu lists.
+  const menuItems = open ? (
+    <>
+      {open === 'project' ? (
+        <>
+          <Text style={styles.menuHeading}>Projects on {conn?.host.name ?? 'this desktop'}</Text>
+          {projects.map((p) => (
+            <Item
+              key={p.id}
+              on={p.id === project?.id}
+              lead={<Badge name={p.name} color={projectColor(p)} size={20} />}
+              label={p.name}
+              onPress={() => pickProject(p.id)}
+            />
+          ))}
+        </>
+      ) : open === 'agent' ? (
+        <>
+          {!existing ? <Item
+            on={agent === ''}
+            lead={<AgentMark agent="" size={16} />}
+            label="Default"
+            note={project ? `Whatever ket uses for ${project.name}` : 'Whatever ket uses for the project'}
+            onPress={() => pickAgent('')}
+          /> : null}
+          {agents.map((name) => (
+            <Item
+              key={name}
+              on={agent === name}
+              lead={<AgentMark agent={name} size={16} />}
+              label={agentLabel(name)}
+              onPress={() => pickAgent(name)}
+            />
+          ))}
+        </>
+      ) : open === 'target' ? (
+        <>
+          <Item on={!existing} lead={null} label="New worktree" onPress={() => { setTarget(''); setKind('agent'); setOpen(null); }} />
+          {project?.worktrees.map((worktree) => (
+            <Item key={worktree.id} on={worktree.id === target} lead={null} label={worktree.name}
+              onPress={() => { setTarget(worktree.id); setOpen(null); }} />
+          ))}
+        </>
+      ) : open === 'kind' ? (
+        <>
+          <Item on={kind === 'agent'} lead={null} label="Agent session" onPress={() => { setKind('agent'); setOpen(null); }} />
+          <Item on={kind === 'shell'} lead={null} label="Shell" onPress={() => { setKind('shell'); setModel(''); setEffort(''); setOpen(null); }} />
+        </>
+      ) : (
+        <>
+          {(open === 'base' ? [currentOptions?.defaultBase ?? ''] : ['']).map((value) => (
+            <Item key={`default-${open}`} on={(open === 'base' ? selectedBase : open === 'model' ? model : effort) === value}
+              lead={null} label={open === 'base' ? `Default (${value})` : 'Default'} onPress={() => {
+                if (open === 'base') setBase(''); else if (open === 'model') setModel(''); else setEffort('');
+                setOpen(null);
+              }} />
+          ))}
+          {(open === 'base' ? currentOptions?.localBranches ?? [] : open === 'model' ? agentOptions?.models ?? [] : agentOptions?.efforts ?? []).map((value) => (
+            <Item key={value} on={(open === 'base' ? selectedBase : open === 'model' ? model : effort) === value}
+              lead={null} label={value} onPress={() => {
+                if (open === 'base') setBase(value); else if (open === 'model') setModel(value); else setEffort(value);
+                setOpen(null);
+              }} />
+          ))}
+        </>
+      )}
+    </>
+  ) : null;
 
   return (
-    <View style={styles.fill}>
-      {/* With the keyboard up, a tap above the sheet only puts it away; the
-          next one closes. */}
-      <Animated.View style={[styles.scrim, dimming]}>
-        <Pressable
-          accessibilityLabel={typing ? 'Hide the keyboard' : 'Close New task'}
-          onPress={() => (typing ? Keyboard.dismiss() : close())}
-          style={styles.fill}
+    <SheetPanel
+      open={leaving === null}
+      onClose={() => close()}
+      onGone={gone}
+      title="New task"
+      detail={conn?.host.name}
+      onMeasure={setMeasure}
+      overlay={
+        open && place && measure ? (
+          <>
+            <Pressable accessibilityLabel="Close menu" onPress={() => setOpen(null)} style={StyleSheet.absoluteFill} />
+            <Menu rise={measure.rise} bottom={menuBottom} left={menuLeft} width={menuWidth} maxHeight={menuRoom}>
+              {menuItems}
+            </Menu>
+          </>
+        ) : null
+      }
+    >
+      <View style={styles.fields} onLayout={(e) => setRowY(e.nativeEvent.layout.y + SHEET_HEAD)}>
+        <Field
+          label="Project"
+          open={open === 'project'}
+          disabled={projects.length === 0}
+          onPress={() => toggle('project')}
+          onLayout={placed('project')}
+          lead={project ? <Badge name={project.name} color={projectColor(project)} size={18} /> : null}
+          value={project?.name ?? 'No projects'}
         />
-      </Animated.View>
-      <View style={styles.fill} pointerEvents="box-none">
-        <View style={styles.room} pointerEvents="box-none" onLayout={(e) => setRoom({ width: e.nativeEvent.layout.width, height: e.nativeEvent.layout.height })}>
-          <KeyboardStickyView offset={{ opened: tucked }}>
-            <Animated.View
-              style={[styles.sheet, {
-                paddingBottom: foot,
-                maxHeight: room.height ? (typing ? Math.max(300, room.height * 0.58) : room.height - insets.top - 8) : undefined,
-              }, sliding]}
-              onLayout={(e) => arrive(e.nativeEvent.layout.height)}
-            >
-              <View style={styles.grabber} />
-              <View style={styles.head}>
-                <View style={styles.headText}>
-                  <Text style={styles.title}>New task</Text>
-                  {conn ? (
-                    <Text style={styles.host} numberOfLines={1}>
-                      {conn.host.name}
-                    </Text>
-                  ) : null}
-                </View>
-                <Pressable accessibilityRole="button" accessibilityLabel="Close" onPress={close} hitSlop={8} style={styles.close}>
-                  <Close size={16} color={t.dim} weight={2} />
-                </Pressable>
-              </View>
-
-              <ScrollView style={styles.sheetContent} keyboardShouldPersistTaps="handled" bounces={false}>
-              <View style={styles.fields} onLayout={(e) => setRowY(e.nativeEvent.layout.y + 72)}>
-                <Field
-                  label="Project"
-                  open={open === 'project'}
-                  disabled={projects.length === 0}
-                  onPress={() => toggle('project')}
-                  onLayout={placed('project')}
-                  lead={project ? <Badge name={project.name} color={projectColor(project)} size={18} /> : null}
-                  value={project?.name ?? 'No projects'}
-                />
-                {advanced ? (
-                  <Field
-                    label="Worktree"
-                    open={open === 'target'}
-                    onPress={() => toggle('target')}
-                    onLayout={placed('target')}
-                    lead={null}
-                    value={existing?.name ?? 'New worktree'}
-                  />
-                ) : null}
-                {existing ? (
-                  <Field
-                    label="Open"
-                    open={open === 'kind'}
-                    onPress={() => toggle('kind')}
-                    onLayout={placed('kind')}
-                    lead={null}
-                    value={kind === 'shell' ? 'Shell' : 'Agent session'}
-                  />
-                ) : null}
-                {(choosesAgent || advanced) && kind === 'agent' ? (
-                  <Field
-                    label="Agent"
-                    open={open === 'agent'}
-                    onPress={() => toggle('agent')}
-                    onLayout={placed('agent')}
-                    lead={<AgentMark agent={agent} size={15} />}
-                    value={agent ? agentLabel(agent) : existing ? 'Choose agent' : 'Default'}
-                  />
-                ) : null}
-                {advanced && !existing && currentOptions && currentOptions.localBranches.length > 0 ? (
-                  <Field label="Base branch" open={open === 'base'} onPress={() => toggle('base')}
-                    onLayout={placed('base')} lead={null} value={selectedBase || 'Default'} />
-                ) : null}
-                {advanced && kind === 'agent' && agentOptions && agentOptions.models.length > 0 ? (
-                  <Field label="Model" open={open === 'model'} onPress={() => toggle('model')}
-                    onLayout={placed('model')} lead={null} value={model || 'Default'} />
-                ) : null}
-                {advanced && kind === 'agent' && agentOptions && agentOptions.efforts.length > 0 ? (
-                  <Field label="Effort" open={open === 'effort'} onPress={() => toggle('effort')}
-                    onLayout={placed('effort')} lead={null} value={effort || 'Default'} />
-                ) : null}
-              </View>
-
-              {kind === 'shell' ? null : <KeyCommands title="Start task" onSend={() => (sending || tooOld ? undefined : void start())}>
-                <TextInput
-                  value={prompt}
-                  onChangeText={setPrompt}
-                  onFocus={() => setOpen(null)}
-                  placeholder={existing ? 'Optional task for the new session' : 'What should the agent do?'}
-                  placeholderTextColor={t.faint}
-                  multiline
-                  autoFocus
-                  style={styles.prompt}
-                />
-              </KeyCommands>}
-
-              {projects.length === 0 ? (
-                <Prose style={styles.note}>No projects on this desktop yet.</Prose>
-              ) : null}
-              {tooOld ? (
-                <Prose style={styles.note} color={t.failed}>
-                  ket on {conn?.host.name ?? 'your Mac'} is older than this app. Update it — rebuild ket and start a new host —
-                  to start work from here.
-                </Prose>
-              ) : null}
-              {error ? (
-                <Prose style={styles.note} color={t.failed}>
-                  {error}
-                </Prose>
-              ) : null}
-
-              <View style={styles.actions}>
-                <Button
-                  kind="brand"
-                  title={sending ? 'Starting…' : existing ? kind === 'shell' ? 'Open shell' : 'Start session' : 'Start task'}
-                  disabled={sending || tooOld || !project || (!existing && !prompt.trim()) || (advanced && !currentOptions) || (existing && kind === 'agent' && !agent)}
-                  onPress={() => void start()}
-                />
-              </View>
-              </ScrollView>
-            </Animated.View>
-          </KeyboardStickyView>
-
-          {open && place ? (
-            <>
-              <Pressable accessibilityLabel="Close menu" onPress={() => setOpen(null)} style={StyleSheet.absoluteFill} />
-              <View
-                accessibilityRole="menu"
-                style={[styles.menu, { left: menuLeft, width: menuWidth, bottom: menuBottom, maxHeight: menuRoom }]}
-              >
-                <ScrollView bounces={false} keyboardShouldPersistTaps="handled">
-                  {open === 'project' ? (
-                    <>
-                      <Text style={styles.menuHeading}>Projects on {conn?.host.name ?? 'this desktop'}</Text>
-                      {projects.map((p) => (
-                        <Item
-                          key={p.id}
-                          on={p.id === project?.id}
-                          lead={<Badge name={p.name} color={projectColor(p)} size={20} />}
-                          label={p.name}
-                          onPress={() => pickProject(p.id)}
-                        />
-                      ))}
-                    </>
-                  ) : open === 'agent' ? (
-                    <>
-                      {!existing ? <Item
-                        on={agent === ''}
-                        lead={<AgentMark agent="" size={16} />}
-                        label="Default"
-                        note={project ? `Whatever ket uses for ${project.name}` : 'Whatever ket uses for the project'}
-                        onPress={() => pickAgent('')}
-                      /> : null}
-                      {agents.map((name) => (
-                        <Item
-                          key={name}
-                          on={agent === name}
-                          lead={<AgentMark agent={name} size={16} />}
-                          label={agentLabel(name)}
-                          onPress={() => pickAgent(name)}
-                        />
-                      ))}
-                    </>
-                  ) : open === 'target' ? (
-                    <>
-                      <Item on={!existing} lead={null} label="New worktree" onPress={() => { setTarget(''); setKind('agent'); setOpen(null); }} />
-                      {project?.worktrees.map((worktree) => (
-                        <Item key={worktree.id} on={worktree.id === target} lead={null} label={worktree.name}
-                          onPress={() => { setTarget(worktree.id); setOpen(null); }} />
-                      ))}
-                    </>
-                  ) : open === 'kind' ? (
-                    <>
-                      <Item on={kind === 'agent'} lead={null} label="Agent session" onPress={() => { setKind('agent'); setOpen(null); }} />
-                      <Item on={kind === 'shell'} lead={null} label="Shell" onPress={() => { setKind('shell'); setModel(''); setEffort(''); setOpen(null); }} />
-                    </>
-                  ) : (
-                    <>
-                      {(open === 'base' ? [currentOptions?.defaultBase ?? ''] : ['']).map((value) => (
-                        <Item key={`default-${open}`} on={(open === 'base' ? selectedBase : open === 'model' ? model : effort) === value}
-                          lead={null} label={open === 'base' ? `Default (${value})` : 'Default'} onPress={() => {
-                            if (open === 'base') setBase(''); else if (open === 'model') setModel(''); else setEffort('');
-                            setOpen(null);
-                          }} />
-                      ))}
-                      {(open === 'base' ? currentOptions?.localBranches ?? [] : open === 'model' ? agentOptions?.models ?? [] : agentOptions?.efforts ?? []).map((value) => (
-                        <Item key={value} on={(open === 'base' ? selectedBase : open === 'model' ? model : effort) === value}
-                          lead={null} label={value} onPress={() => {
-                            if (open === 'base') setBase(value); else if (open === 'model') setModel(value); else setEffort(value);
-                            setOpen(null);
-                          }} />
-                      ))}
-                    </>
-                  )}
-                </ScrollView>
-              </View>
-            </>
-          ) : null}
-        </View>
+        {advanced ? (
+          <Field
+            label="Worktree"
+            open={open === 'target'}
+            onPress={() => toggle('target')}
+            onLayout={placed('target')}
+            lead={null}
+            value={existing?.name ?? 'New worktree'}
+          />
+        ) : null}
+        {existing ? (
+          <Field
+            label="Open"
+            open={open === 'kind'}
+            onPress={() => toggle('kind')}
+            onLayout={placed('kind')}
+            lead={null}
+            value={kind === 'shell' ? 'Shell' : 'Agent session'}
+          />
+        ) : null}
+        {(choosesAgent || advanced) && kind === 'agent' ? (
+          <Field
+            label="Agent"
+            open={open === 'agent'}
+            onPress={() => toggle('agent')}
+            onLayout={placed('agent')}
+            lead={<AgentMark agent={agent} size={15} />}
+            value={agent ? agentLabel(agent) : existing ? 'Choose agent' : 'Default'}
+          />
+        ) : null}
+        {advanced && !existing && currentOptions && currentOptions.localBranches.length > 0 ? (
+          <Field label="Base branch" open={open === 'base'} onPress={() => toggle('base')}
+            onLayout={placed('base')} lead={null} value={selectedBase || 'Default'} />
+        ) : null}
+        {advanced && kind === 'agent' && agentOptions && agentOptions.models.length > 0 ? (
+          <Field label="Model" open={open === 'model'} onPress={() => toggle('model')}
+            onLayout={placed('model')} lead={null} value={model || 'Default'} />
+        ) : null}
+        {advanced && kind === 'agent' && agentOptions && agentOptions.efforts.length > 0 ? (
+          <Field label="Effort" open={open === 'effort'} onPress={() => toggle('effort')}
+            onLayout={placed('effort')} lead={null} value={effort || 'Default'} />
+        ) : null}
       </View>
-    </View>
+
+      {kind === 'shell' ? null : <KeyCommands title="Start task" onSend={() => (sending || tooOld ? undefined : void start())}>
+        <TextInput
+          value={prompt}
+          onChangeText={setPrompt}
+          onFocus={() => setOpen(null)}
+          placeholder={existing ? 'Optional task for the new session' : 'What should the agent do?'}
+          placeholderTextColor={t.faint}
+          multiline
+          autoFocus
+          style={styles.prompt}
+        />
+      </KeyCommands>}
+
+      {projects.length === 0 ? (
+        <Prose style={styles.note}>No projects on this desktop yet.</Prose>
+      ) : null}
+      {tooOld ? (
+        <Prose style={styles.note} color={t.failed}>
+          ket on {conn?.host.name ?? 'your Mac'} is older than this app. Update it — rebuild ket and start a new host —
+          to start work from here.
+        </Prose>
+      ) : null}
+      {error ? (
+        <Prose style={styles.note} color={t.failed}>
+          {error}
+        </Prose>
+      ) : null}
+
+      <Button
+        kind="brand"
+        title={sending ? 'Starting…' : existing ? kind === 'shell' ? 'Open shell' : 'Start session' : 'Start task'}
+        disabled={sending || tooOld || !project || (!existing && !prompt.trim()) || (advanced && !currentOptions) || (existing && kind === 'agent' && !agent)}
+        onPress={() => void start()}
+      />
+    </SheetPanel>
   );
 }
-
-/** The dimming's fade in. */
-const DIM_MS = 300;
-
-/** The sheet's way in: critically damped, as UIKit springs a sheet up. */
-const ARRIVE = { duration: 450, dampingRatio: 1 } as const;
-
-/** The way out, sheet and dimming together. */
-const LEAVE_MS = 260;
 
 /** A dropdown's field: its label over what is chosen, and a chevron. */
 function Field({
@@ -457,7 +373,7 @@ function Field({
   open: boolean;
   disabled?: boolean;
   onPress: () => void;
-  onLayout: (e: { nativeEvent: { layout: { x: number; width: number } } }) => void;
+  onLayout: (e: { nativeEvent: { layout: { x: number; y: number; width: number } } }) => void;
 }) {
   return (
     <Pressable
@@ -478,6 +394,37 @@ function Field({
         <ChevronDown size={15} color={t.dim} weight={2.2} />
       </View>
     </Pressable>
+  );
+}
+
+/** A dropdown's menu, its foot on its field as the sheet's body scrolls and
+ * the sheet comes down off the keyboard — which opening it puts away. */
+function Menu({
+  rise,
+  bottom,
+  left,
+  width,
+  maxHeight,
+  children,
+}: {
+  rise: SharedValue<number>;
+  /** Over the foot of the sheet's room, with the body where it lays out. */
+  bottom: number;
+  left: number;
+  width: number;
+  maxHeight: number;
+  children: ReactNode;
+}) {
+  // `bottom`, not a transform: a transform moves where an item is drawn but
+  // not where its press is judged, and a tap there could be dropped (see
+  // KeyboardLift).
+  const held = useAnimatedStyle(() => ({ bottom: bottom + rise.get() }), [bottom]);
+  return (
+    <Animated.View accessibilityRole="menu" style={[styles.menu, { left, width, maxHeight }, held]}>
+      <ScrollView bounces={false} keyboardShouldPersistTaps="handled">
+        {children}
+      </ScrollView>
+    </Animated.View>
   );
 }
 
@@ -507,30 +454,7 @@ function Item({ on, lead, label, note, onPress }: { on: boolean; lead: ReactNode
 }
 
 const styles = StyleSheet.create({
-  fill: { flex: 1 },
-  scrim: { position: 'absolute', top: 0, right: 0, bottom: 0, left: 0, backgroundColor: 'rgba(0,0,0,0.6)' },
-  // On a wide screen the sheet rises from the middle of the foot, no wider
-  // than reads well, rather than across the whole screen.
-  room: { flex: 1, width: '100%', maxWidth: READABLE_WIDTH, alignSelf: 'center', justifyContent: 'flex-end' },
-  sheet: {
-    backgroundColor: t.card,
-    borderTopLeftRadius: 18,
-    borderTopRightRadius: 18,
-    borderTopWidth: 1,
-    borderColor: t.border,
-    shadowColor: '#000',
-    shadowOpacity: 0.55,
-    shadowRadius: 25,
-    shadowOffset: { width: 0, height: -20 },
-  },
-  sheetContent: { flexShrink: 1 },
-  grabber: { width: 36, height: 5, borderRadius: 3, backgroundColor: t.border, alignSelf: 'center', marginTop: 8, marginBottom: 6 },
-  head: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingTop: 4, paddingBottom: 14, paddingLeft: 16, paddingRight: 12 },
-  headText: { flex: 1, minWidth: 0, gap: 1 },
-  title: { fontFamily: font.proseSemibold, fontSize: size.value, color: t.text },
-  host: { fontFamily: font.prose, fontSize: 12, color: t.dim },
-  close: { width: 32, height: 32, borderRadius: 16, backgroundColor: t.sunken, alignItems: 'center', justifyContent: 'center' },
-  fields: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, paddingHorizontal: 12 },
+  fields: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   field: {
     width: '48%',
     minWidth: 0,
@@ -550,8 +474,6 @@ const styles = StyleSheet.create({
   fieldValue: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   fieldText: { flex: 1, minWidth: 0, fontFamily: font.proseMedium, fontSize: size.body, color: t.text },
   prompt: {
-    marginTop: 8,
-    marginHorizontal: 12,
     height: 112,
     borderRadius: size.radiusLg,
     backgroundColor: t.sunken,
@@ -562,8 +484,7 @@ const styles = StyleSheet.create({
     lineHeight: 22,
     textAlignVertical: 'top',
   },
-  note: { paddingHorizontal: 16, paddingTop: 8, fontSize: size.detail },
-  actions: { paddingTop: 10, paddingHorizontal: 12 },
+  note: { fontSize: size.detail },
   menu: {
     position: 'absolute',
     padding: 4,
@@ -571,11 +492,6 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: t.border,
     borderRadius: size.radiusCard,
-    shadowColor: '#000',
-    shadowOpacity: 0.6,
-    shadowRadius: 20,
-    shadowOffset: { width: 0, height: 18 },
-    elevation: 12,
   },
   menuHeading: { paddingTop: 8, paddingBottom: 4, paddingHorizontal: 12, fontFamily: font.proseMedium, fontSize: 11.5, color: t.faint },
   item: { height: 44, flexDirection: 'row', alignItems: 'center', gap: 11, paddingHorizontal: 12, borderRadius: size.radius },

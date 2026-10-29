@@ -126,6 +126,11 @@ pub struct PaneAgentStatus {
     /// own; never sent on.
     #[serde(skip)]
     pub(crate) covered: Option<PermissionQuestion>,
+    /// Whether the screen-read dialog was drawn over an idle pane rather
+    /// than a waiting one — Codex's "Implement this plan?", after its
+    /// `Stop` — so the pane is idle again when the dialog goes.
+    #[serde(skip)]
+    pub(crate) covered_idle: bool,
     pub(crate) roster: Roster,
 }
 
@@ -176,6 +181,7 @@ impl PaneAgentStatus {
             question: None,
             answered: None,
             covered: None,
+            covered_idle: false,
             roster: Roster::default(),
         }
     }
@@ -235,6 +241,7 @@ impl PaneAgentStatus {
         self.note = None;
         self.question = None;
         self.covered = None;
+        self.covered_idle = false;
         self.mutating_git = false;
         self.at_ms = at_ms;
         // Whatever it was running belonged to the turn that has just ended,
@@ -327,6 +334,16 @@ impl StatusStore {
         if !session.is_empty() && !pane.is_empty() {
             self.sessions.insert(session.to_owned(), pane.to_owned());
         }
+    }
+
+    /// The session bound to `pane` — see [`Self::bind_session`] — for a pane
+    /// nothing has reported from yet. OpenCode says nothing on resuming a
+    /// session until a message is typed to it.
+    pub fn bound_session(&self, pane: &str) -> Option<String> {
+        self.sessions
+            .iter()
+            .find(|(_, bound)| bound.as_str() == pane)
+            .map(|(session, _)| session.clone())
     }
 
     /// Corrects the inherited worktree on a Codex report.
@@ -536,6 +553,11 @@ impl StatusStore {
             && report.event != HookEvent::Notification
         {
             entry.question = entry.covered.take();
+            // Nothing was waiting under it: the agent was idle, and its
+            // report says what it is now.
+            if std::mem::take(&mut entry.covered_idle) {
+                entry.state = AgentState::Idle;
+            }
         }
 
         // Another call's news while the lead waits on a person. Claude runs
@@ -636,6 +658,7 @@ impl StatusStore {
             .is_none_or(|question| question.tool != crate::screen::DIALOG_TOOL)
         {
             entry.covered = None;
+            entry.covered_idle = false;
         }
         entry.state = state;
         entry.note.clone_from(&report.note);
@@ -649,9 +672,10 @@ impl StatusStore {
     ///
     /// A dialog takes the question's place while it is up, under
     /// [`crate::screen::DIALOG_TOOL`] with the dialog's own options, and the
-    /// covered prompt comes back when it goes. Only a pane already waiting
-    /// is read, so a dialog is never invented for a pane at work. Returns
-    /// whether anything changed.
+    /// covered prompt comes back when it goes. A pane waiting or idle is
+    /// read, never one at work: an idle pane waits on the dialog while it
+    /// is up, and is idle again when it goes. Returns whether anything
+    /// changed.
     pub fn screen_dialog(
         &mut self,
         pane: &str,
@@ -667,27 +691,35 @@ impl StatusStore {
             .is_some_and(|question| question.tool == crate::screen::DIALOG_TOOL);
         match dialog {
             Some(dialog) => {
-                if entry.state != AgentState::AwaitingPermission {
+                let idle = entry.state == AgentState::Idle;
+                if entry.state != AgentState::AwaitingPermission && !idle {
                     return false;
                 }
+                let prompt = crate::agent_hooks::Prompt::Dialog {
+                    title: dialog.title,
+                    options: dialog.options,
+                };
+                // Asked by its title alone, a dialog's question line can be
+                // empty: the same one is the same words and the same choices.
                 let same = showing_dialog
-                    && entry.question.as_ref().and_then(|q| q.subject.as_deref())
-                        == Some(dialog.question.as_str());
+                    && entry.question.as_ref().is_some_and(|q| {
+                        q.subject.as_deref() == Some(dialog.question.as_str())
+                            && q.prompt.as_ref() == Some(&prompt)
+                    });
                 if same {
                     return false;
                 }
                 if !showing_dialog {
                     entry.covered = entry.question.take();
+                    entry.covered_idle = idle;
+                    entry.state = AgentState::AwaitingPermission;
                 }
-                tracing::debug!(pane, agent = %entry.agent, title = %dialog.title, "dialog on screen");
+                tracing::debug!(pane, agent = %entry.agent, ?prompt, "dialog on screen");
                 entry.question = Some(PermissionQuestion {
                     tool: crate::screen::DIALOG_TOOL.to_owned(),
                     subject: Some(dialog.question),
                     id: next_question_id(),
-                    prompt: Some(crate::agent_hooks::Prompt::Dialog {
-                        title: dialog.title,
-                        options: dialog.options,
-                    }),
+                    prompt: Some(prompt),
                 });
                 entry.at_ms = now_ms;
             }
@@ -697,6 +729,9 @@ impl StatusStore {
                 }
                 tracing::debug!(pane, agent = %entry.agent, "dialog gone from screen");
                 entry.question = entry.covered.take();
+                if std::mem::take(&mut entry.covered_idle) {
+                    entry.state = AgentState::Idle;
+                }
                 entry.at_ms = now_ms;
             }
         }
@@ -759,6 +794,56 @@ impl StatusStore {
         };
         tracing::debug!(pane, agent = %entry.agent, tool = %question.tool, "prompt gone: hook ended");
         entry.stop(now_ms);
+        self.revision += 1;
+        true
+    }
+
+    /// Prompt `question` on `pane` was answered from a phone: ket pressed
+    /// the agent's own key for `allowed`, so the pane is no longer waiting.
+    ///
+    /// The agent says so itself only with its next report — for an allowed
+    /// command, when the command finishes — and until then the prompt reads
+    /// as still up: a second tap on the phone passed as an answer and typed
+    /// the key again. So the answer is taken in here, as the call's own
+    /// report would take it: allowed is the call running, with the prompt's
+    /// subject for its note until the `PreToolUse` replaces it; denied is
+    /// the same guess `escape` makes, Idle, which the agent's refusal or
+    /// stop puts right within a moment. Returns whether it applied: only
+    /// to a pane waiting on that very permission, never on a question or a
+    /// plan, which are answered through their hook.
+    pub fn answered(&mut self, pane: &str, question: u64, allowed: bool, now_ms: u64) -> bool {
+        let Some(entry) = self.panes.get_mut(pane).filter(|e| {
+            e.state == AgentState::AwaitingPermission
+                && e.question
+                    .as_ref()
+                    .is_some_and(|asked| asked.id == question && asked.prompt.is_none())
+        }) else {
+            return false;
+        };
+        let Some(asked) = entry.question.take() else {
+            return false;
+        };
+        tracing::debug!(pane, agent = %entry.agent, tool = %asked.tool, allowed, "prompt answered from a phone");
+        if allowed {
+            entry.state = AgentState::ExecutingTool;
+            entry.note = asked.subject.clone();
+            entry.mutating_git = false;
+            entry.at_ms = now_ms;
+            entry.covered = None;
+            entry.last_tool = Some(ToolCall {
+                note: asked.subject.clone(),
+                mutating_git: false,
+                started_at_ms: now_ms,
+                ended_at_ms: None,
+            });
+        } else {
+            entry.stop(now_ms);
+        }
+        entry.answered = Some(Answered {
+            question: asked,
+            allowed,
+            at_ms: now_ms,
+        });
         self.revision += 1;
         true
     }
@@ -858,4 +943,22 @@ fn restates_turn(event: HookEvent) -> bool {
             | HookEvent::SubagentStart
             | HookEvent::SubagentStop
     )
+}
+
+#[cfg(test)]
+mod bound_session_tests {
+    use super::*;
+
+    #[test]
+    fn a_resumed_session_is_found_by_its_pane_before_any_report() {
+        let mut store = StatusStore::new(crate::now_ms());
+        store.bind_session("ses_one", "wt|opencode|1");
+        assert_eq!(
+            store.bound_session("wt|opencode|1").as_deref(),
+            Some("ses_one")
+        );
+        assert_eq!(store.bound_session("wt|opencode|2"), None);
+        store.bind_session("", "wt|opencode|2");
+        assert_eq!(store.bound_session("wt|opencode|2"), None);
+    }
 }

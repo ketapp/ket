@@ -1,8 +1,9 @@
 import { describe, expect, jest, test } from '@jest/globals';
-import { fireEvent, render } from '@testing-library/react-native';
+import { fireEvent, render, waitFor } from '@testing-library/react-native';
 import { ScrollView, StyleSheet, Text, View } from 'react-native';
 import type { Risk } from '@ket/remote';
 import { CommandMenu } from './Commands';
+import { ComposerMenu, PlusButton, SendButton } from './Composer';
 import * as Icons from './icons';
 import { RiskBadge } from './Risk';
 import { READABLE_WIDTH, SplitContext } from '../lib/layout';
@@ -227,6 +228,61 @@ describe('shared UI controls', () => {
 });
 
 describe('small components', () => {
+  test('Send is pressable only with something to send, and is Stop while the agent works', async () => {
+    const press = jest.fn();
+    const view = await render(<SendButton ready={false} stop={false} stopping={false} launches={0} onPress={press} />);
+    await fireEvent.press(view.getByLabelText('Send'));
+    expect(press).not.toHaveBeenCalled();
+    await view.rerender(<SendButton ready stop={false} stopping={false} launches={0} onPress={press} />);
+    await fireEvent.press(view.getByLabelText('Send'));
+    expect(press).toHaveBeenCalledTimes(1);
+    await view.rerender(<SendButton ready={false} stop stopping={false} launches={1} onPress={press} />);
+    expect(view.queryByLabelText('Send')).toBeNull();
+    await fireEvent.press(view.getByLabelText('Stop'));
+    expect(press).toHaveBeenCalledTimes(2);
+    // Stop pressed and not yet taken: not again.
+    await view.rerender(<SendButton ready={false} stop stopping launches={1} onPress={press} />);
+    await fireEvent.press(view.getByLabelText('Stop'));
+    expect(press).toHaveBeenCalledTimes(2);
+    await view.unmount();
+  });
+
+  test('+ says what it does either way, and a closed float is out of the tree', async () => {
+    const press = jest.fn();
+    const view = await render(
+      <>
+        <PlusButton open={false} onPress={press} />
+        <ComposerMenu open={false}>
+          <Text>Photos</Text>
+        </ComposerMenu>
+      </>,
+    );
+    expect(view.queryByText('Photos')).toBeNull();
+    await fireEvent.press(view.getByLabelText('Attach a photo or file'));
+    expect(press).toHaveBeenCalled();
+    await view.rerender(
+      <>
+        <PlusButton open onPress={press} />
+        <ComposerMenu open>
+          <Text>Photos</Text>
+        </ComposerMenu>
+      </>,
+    );
+    expect(view.getByLabelText('Close the attach menu')).toBeTruthy();
+    expect(view.getByText('Photos')).toBeTruthy();
+    await view.rerender(
+      <>
+        <PlusButton open={false} onPress={press} />
+        <ComposerMenu open={false}>
+          <Text>Photos</Text>
+        </ComposerMenu>
+      </>,
+    );
+    // Gone once its close has played.
+    await waitFor(() => expect(view.queryByText('Photos')).toBeNull());
+    await view.unmount();
+  });
+
   test('selects slash commands', async () => {
     const pick = jest.fn();
     const commands = [

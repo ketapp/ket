@@ -35,7 +35,9 @@ export const TerminalView = forwardRef<TerminalHandle, Props>(function TerminalV
   { onInput, onReady, onSize },
   ref,
 ) {
-  const webview = useRef<WebView>(null);
+  // react-native-webview 14 types its props as `WebViewProps & P` with `P`
+  // defaulting to `undefined`, which makes them `never`: an empty `P` instead.
+  const webview = useRef<WebView<object>>(null);
   const call = (message: object) =>
     webview.current?.injectJavaScript(`window.ket(${JSON.stringify(message)}); true;`);
 
@@ -88,7 +90,7 @@ export const TerminalView = forwardRef<TerminalHandle, Props>(function TerminalV
   };
 
   return (
-    <WebView
+    <WebView<object>
       ref={webview}
       style={styles.webview}
       originWhitelist={['*']}

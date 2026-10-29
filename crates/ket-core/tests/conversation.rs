@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use ket_core::conversation::{TurnKind, claude_transcript, queued, read};
+use ket_core::conversation::{BACKGROUNDED, TurnKind, claude_transcript, queued, read};
 
 mod common;
 use common::Sandbox;
@@ -621,6 +621,27 @@ fn claude_transcript_refuses_a_session_id_with_a_path_separator() {
 #[test]
 fn claude_transcript_refuses_a_session_id_that_tries_to_escape() {
     assert_eq!(claude_transcript("../../etc/passwd"), None);
+}
+
+// ---- continued-in -------------------------------------------------------------
+
+#[test]
+fn a_backgrounded_session_says_so_where_its_transcript_ends() {
+    let sandbox = Sandbox::new("conv-backgrounded");
+    let path = sandbox.path("t.jsonl");
+    write(
+        &path,
+        &jsonl(&[
+            user("make it"),
+            serde_json::json!({"type": "cost-state", "sessionId": "old"}),
+            serde_json::json!({"type": "continued-in", "sessionId": "old", "continuedInSessionId": "new"}),
+        ]),
+    );
+
+    let found = read(&path, 0).unwrap();
+    assert_eq!(found.turns.len(), 2);
+    assert_eq!(found.turns[1].kind, TurnKind::Assistant);
+    assert_eq!(found.turns[1].text, BACKGROUNDED);
 }
 
 // ---- queued -------------------------------------------------------------------

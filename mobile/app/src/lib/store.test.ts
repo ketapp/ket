@@ -1,20 +1,21 @@
 import { beforeEach, describe, expect, jest, test } from '@jest/globals';
 import {
+  DEFAULT_NOTIFY,
   forgetHost,
   getCollapsed,
   getDesktop,
-  getFit,
   getHost,
   getLastWork,
   getLock,
+  getNotify,
   listHosts,
   phoneKey,
   saveCollapsed,
   saveDesktop,
-  saveFit,
   saveHost,
   saveLastWork,
   saveLock,
+  saveNotify,
   toPaired,
   type LockConfig,
   type SavedHost,
@@ -90,11 +91,9 @@ describe('secure mobile storage', () => {
     await saveCollapsed('h', ['a', 'b']);
     expect(await getCollapsed('h')).toEqual(['a', 'b']);
 
-    expect(await getFit()).toBe(false);
-    await saveFit(true);
-    expect(await getFit()).toBe(true);
-    await saveFit(false);
-    expect(await getFit()).toBe(false);
+    expect(await getNotify()).toEqual(DEFAULT_NOTIFY);
+    await saveNotify({ ...DEFAULT_NOTIFY, on: true, checks: false });
+    expect(await getNotify()).toEqual({ on: true, waiting: true, finished: true, checks: false });
 
     const lock: LockConfig = { salt: 's', hash: 'h', afterMs: 60, failures: 2, waitUntil: 3 };
     expect(await getLock()).toBeNull();

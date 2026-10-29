@@ -69,6 +69,18 @@ const DELETE_WAIT: Duration = if cfg!(test) {
     Duration::from_secs(120)
 };
 
+/// How long a phone's wake waits for the window to open the tab's terminal.
+/// Waking resumes an agent, which reads its session back first; past this
+/// the phone is told it did not hear back, and the tab wakes regardless.
+const WAKE_WAIT: Duration = if cfg!(test) {
+    Duration::from_secs(2)
+} else {
+    Duration::from_secs(45)
+};
+
+/// What a phone's wake comes to: the terminal the tab is now, or why not.
+pub(super) type Woken = std::result::Result<u64, String>;
+
 /// What a window says of a phone's delete: the branch it kept, or why not.
 pub(super) type Deleted = std::result::Result<Option<String>, String>;
 
@@ -177,6 +189,11 @@ struct Entry {
     /// reported before that may already have been answered at the desktop —
     /// see [`Host::answer_prompt`].
     typed_at_ms: u64,
+    /// The prompt whose answer ket last typed from a phone. The screen
+    /// still shows it until the agent reads the keys, so this is what keeps
+    /// a second phone, or a retry, from typing the answer again — into
+    /// whatever comes next. See [`Host::respond_prompt`].
+    typed_answer: Option<u64>,
 }
 
 /// Why [`Host::answer_prompt`] pressed nothing.
@@ -230,6 +247,11 @@ pub(super) struct Host {
     backlog: Mutex<(VecDeque<HookReport>, VecDeque<StatusLine>)>,
     /// Where agents report, with credentials bound to terminal pane keys.
     hook_bindings: agent_hooks::HookBindings,
+    /// The network inspector's proxy, once a terminal has asked for it —
+    /// see [`crate::network`].
+    network: Mutex<Option<Arc<crate::network::Proxy>>>,
+    /// The proxy's tokens, each bound to the pane it was issued for.
+    network_bindings: crate::network::NetworkBindings,
     /// The host listener's address and compatibility endpoint token.
     hooks: (u16, String),
     /// Questions and plans whose hooks the host's listener is holding open,
@@ -247,6 +269,14 @@ pub(super) struct Host {
     /// Each connected window's worktrees, by connection. Merged into
     /// `status` — see [`Host::merge_worktrees`].
     registries: Mutex<BTreeMap<u64, Vec<(String, PathBuf)>>>,
+    /// Each connected window's asleep tabs, by connection, for phones — see
+    /// [`Request::Asleep`]. Kept by connection so a wake goes to the window
+    /// that has the tab.
+    asleep: Mutex<BTreeMap<u64, Vec<wire::AsleepTab>>>,
+    /// Phone wakes waiting for a terminal to open under the tab's key, or
+    /// for the window to say why none will.
+    wake_waiting: Mutex<BTreeMap<u64, (String, mpsc::Sender<Woken>)>>,
+    next_wake: AtomicU64,
     /// The agents' plan usage, as a window last reported it, for phones. The
     /// host fetches none itself: a window already does, and a second fetcher
     /// would double the processes that costs.
@@ -424,6 +454,11 @@ impl Host {
         lock(&self.status).snapshot()
     }
 
+    /// The session resumed in pane `pane` when it was opened, if one was.
+    pub(super) fn bound_session(&self, pane: &str) -> Option<String> {
+        lock(&self.status).bound_session(pane)
+    }
+
     /// The agents' plan usage, as a window last reported it.
     /// The theme a window last said it is drawn in.
     pub(super) fn theme(&self) -> Option<crate::theme::Theme> {
@@ -478,9 +513,51 @@ impl Host {
         }
     }
 
+    /// The network inspector's proxy, started the first time a terminal asks
+    /// for it. `None` when it cannot start: the terminal then goes straight
+    /// to its provider, as if it had not asked.
+    fn network_proxy(&self) -> Option<Arc<crate::network::Proxy>> {
+        let mut proxy = lock(&self.network);
+        if proxy.is_none() {
+            match crate::network::Proxy::start(self.network_bindings.clone()) {
+                Ok(started) => {
+                    tracing::info!(port = started.port(), "network inspector listening");
+                    *proxy = Some(Arc::new(started));
+                }
+                Err(error) => tracing::warn!(%error, "network inspector could not start"),
+            }
+        }
+        proxy.clone()
+    }
+
+    /// Points the agent `spec` launches at the network inspector, when it is
+    /// one ket can inspect and nothing already sends it elsewhere.
+    fn inspect(&self, spec: &mut crate::terminal::TerminalSpec) {
+        let Some(pane) = spec.key.clone() else {
+            return;
+        };
+        let agent = pane.split('|').nth(1).unwrap_or_default().to_owned();
+        let Some(route) = crate::network::route_for(&agent) else {
+            return;
+        };
+        if crate::network::sent_elsewhere(route, &spec.env) {
+            tracing::info!(%pane, "network inspector: the agent is sent elsewhere already; left as it is");
+            return;
+        }
+        let Some(proxy) = self.network_proxy() else {
+            return;
+        };
+        let token = self
+            .network_bindings
+            .bind(crate::network::Binding { pane, agent, route });
+        spec.env
+            .extend(crate::network::launch_env(route, &proxy.base(&token)));
+    }
+
     /// Forgets the panes of terminals that have gone, and tells the windows.
     fn clear_panes(&self, keys: &[String]) {
         self.hook_bindings.unbind(keys);
+        self.network_bindings.unbind(keys);
         let changed = {
             let mut status = lock(&self.status);
             keys.iter()
@@ -563,12 +640,15 @@ impl Host {
         if keys.is_empty() {
             return Err(AnswerRefused::Unknown);
         }
-        // Declining with Escape ends the turn, as it would typed.
-        let escaped = keys == [0x1b] && status.escape(&key, crate::now_ms());
+        // The key pressed is the prompt answered: the pane moves on now
+        // rather than when the agent next reports, so a second tap finds
+        // nothing to answer and types nothing. Escape declines it.
+        let allowed = keys != [0x1b];
         let sent = entry.terminal.send_input(keys);
+        let moved = sent.is_ok() && status.answered(&key, question, allowed, crate::now_ms());
         drop(status);
         drop(terminals);
-        if escaped {
+        if moved {
             self.broadcast_status();
         }
         sent.map_err(|_| AnswerRefused::Gone)
@@ -587,18 +667,22 @@ impl Host {
         question: u64,
         decide: impl FnOnce(&agent_hooks::PermissionQuestion) -> Option<agent_hooks::Decision>,
     ) -> std::result::Result<(), AnswerRefused> {
-        let terminals = lock(&self.terminals);
-        let entry = terminals.get(&id).ok_or(AnswerRefused::Gone)?;
+        let mut terminals = lock(&self.terminals);
+        let entry = terminals.get_mut(&id).ok_or(AnswerRefused::Gone)?;
         let status = lock(&self.status);
         let (key, pane) = showing(entry, &status, question)?;
         let current = pane.question.as_ref().ok_or(AnswerRefused::Changed)?;
         if current.prompt.is_none() {
             return Err(AnswerRefused::Unknown);
         }
+        // Typed already: the agent has the keys, and has not said so yet.
+        if entry.typed_answer == Some(question) {
+            return Err(AnswerRefused::Answered);
+        }
         // A dialog read off the screen has no hook to answer through: its
         // option's number and Enter go to the terminal — while the screen
         // still shows it, read again now rather than trusted from a tick ago.
-        if let Some(agent_hooks::Prompt::Dialog { options, .. }) = &current.prompt {
+        if let Some(agent_hooks::Prompt::Dialog { title, options }) = &current.prompt {
             let Some(agent_hooks::Decision::Pick(at)) = decide(current) else {
                 return Err(AnswerRefused::Unfit);
             };
@@ -610,14 +694,45 @@ impl Host {
                 .with_term(|term| crate::screen::bottom_rows(term, crate::screen::DIALOG_ROWS));
             // The same dialog, option for option: a number means nothing
             // against a list that has changed since the phone saw it.
-            match crate::screen::codex_rate_limit(&rows) {
-                Some(dialog) if dialog.options == *options => {}
+            let dialog = match crate::screen::codex_dialog(&rows) {
+                Some(dialog) if dialog.title == *title && dialog.options == *options => dialog,
                 _ => return Err(AnswerRefused::Changed),
-            }
-            return entry
+            };
+            entry
                 .terminal
-                .send_input(format!("{}\r", at + 1).into_bytes())
-                .map_err(|_| AnswerRefused::Gone);
+                .send_input(dialog.keys(at))
+                .map_err(|_| AnswerRefused::Gone)?;
+            entry.typed_answer = Some(question);
+            return Ok(());
+        }
+        // Codex's question form: its hook cannot answer, so each question's
+        // option number is typed in turn — a number picks and moves on, and
+        // the last one sends. Only from the form's first question with
+        // nothing answered, read now: from anywhere else the numbers would
+        // land on the wrong questions.
+        if current.tool == agent_hooks::CODEX_ASK_TOOL {
+            let Some(agent_hooks::Prompt::Ask { questions }) = &current.prompt else {
+                return Err(AnswerRefused::Unknown);
+            };
+            if !agent_hooks::codex_answerable(questions) {
+                return Err(AnswerRefused::Unknown);
+            }
+            let Some(agent_hooks::Decision::Picks(picks)) = decide(current) else {
+                return Err(AnswerRefused::Unfit);
+            };
+            let rows = entry
+                .terminal
+                .with_term(|term| crate::screen::bottom_rows(term, usize::MAX));
+            if !crate::screen::codex_user_input_from_start(&rows, questions.len()) {
+                return Err(AnswerRefused::Changed);
+            }
+            let keys: String = picks.iter().map(|at| (at + 1).to_string()).collect();
+            entry
+                .terminal
+                .send_input(keys.into_bytes())
+                .map_err(|_| AnswerRefused::Gone)?;
+            entry.typed_answer = Some(question);
+            return Ok(());
         }
         let decision = decide(current).ok_or(AnswerRefused::Unfit)?;
         self.prompts
@@ -628,20 +743,23 @@ impl Host {
             })
     }
 
-    /// Reads the screen of every Codex pane waiting on a prompt for a dialog
-    /// drawn over it, and puts what it finds on the pane's status — see
-    /// [`crate::screen`]. Returns whether any status changed.
+    /// Reads the screen of every Codex pane waiting on a prompt or idle for
+    /// a dialog drawn over it, and puts what it finds on the pane's status —
+    /// see [`crate::screen`]. Returns whether any status changed.
     ///
-    /// Codex only, and only while waiting: the status is scanned once, and
-    /// no terminal is touched unless one of its panes is a Codex pane on a
-    /// prompt. A read is [`crate::screen::DIALOG_ROWS`] rows under the
-    /// parser's lock, which is held for the length of a row copy.
+    /// Codex only, and never at work: the status is scanned once, and no
+    /// terminal is touched unless one of its panes is a Codex pane on a
+    /// prompt or idle — where "Implement this plan?" goes up after a plan's
+    /// turn has ended. A read is [`crate::screen::DIALOG_ROWS`] rows under
+    /// the parser's lock, which is held for the length of a row copy.
     fn read_codex_dialogs(&self) -> bool {
         let waiting: Vec<String> = lock(&self.status)
             .entries()
             .filter(|pane| {
-                pane.state == crate::event::AgentState::AwaitingPermission
-                    && crate::agents::harness(&pane.agent).eq_ignore_ascii_case("codex")
+                matches!(
+                    pane.state,
+                    crate::event::AgentState::AwaitingPermission | crate::event::AgentState::Idle
+                ) && crate::agents::harness(&pane.agent).eq_ignore_ascii_case("codex")
             })
             .map(|pane| pane.pane.clone())
             .collect();
@@ -660,7 +778,7 @@ impl Host {
         for (key, terminal) in screens {
             let rows = terminal
                 .with_term(|term| crate::screen::bottom_rows(term, crate::screen::DIALOG_ROWS));
-            let dialog = crate::screen::codex_rate_limit(&rows);
+            let dialog = crate::screen::codex_dialog(&rows);
             changed |= lock(&self.status).screen_dialog(&key, dialog, now);
         }
         changed
@@ -866,6 +984,72 @@ impl Host {
     /// Delivers the window's answer to the phone's waiting delete.
     pub(super) fn finish_delete_work(&self, req: u64, answer: Deleted) {
         if let Some(waiting) = lock(&self.delete_waiting).remove(&req) {
+            let _ = waiting.send(answer);
+        }
+    }
+
+    /// The asleep tabs every window has reported, each with the connection
+    /// that reported it, less any whose key a running terminal has: a
+    /// window's report can lag its own wake by a tick. The first window to
+    /// report a key has it.
+    pub(super) fn asleep_tabs(&self) -> Vec<(u64, wire::AsleepTab)> {
+        let live = self.pane_keys();
+        let mut seen = HashSet::new();
+        lock(&self.asleep)
+            .iter()
+            .flat_map(|(conn, tabs)| tabs.iter().map(move |tab| (*conn, tab.clone())))
+            .filter(|(_, tab)| !live.contains(&tab.key) && seen.insert(tab.key.clone()))
+            .collect()
+    }
+
+    /// Wakes the asleep tab `key` for a phone: asks the window that reported
+    /// it, then waits up to [`WAKE_WAIT`] for a terminal to open under that
+    /// key — the window's own wake counts — or for the window to say why
+    /// none will. The terminal's id, or why not.
+    pub(super) fn wake(&self, key: &str) -> Woken {
+        let owner = lock(&self.asleep)
+            .iter()
+            .find(|(_, tabs)| tabs.iter().any(|tab| tab.key == key))
+            .map(|(conn, _)| *conn);
+        let out = owner.and_then(|owner| {
+            lock(&self.outs)
+                .iter()
+                .find(|(conn, _)| *conn == owner)
+                .map(|(_, out)| out.clone())
+        });
+        let Some(out) = out.filter(|out| out.alive.load(Ordering::Acquire)) else {
+            return Err("open ket on your Mac to wake this tab".to_owned());
+        };
+        let req = self.next_wake.fetch_add(1, Ordering::Relaxed);
+        let (sender, receiver) = mpsc::channel();
+        lock(&self.wake_waiting).insert(req, (key.to_owned(), sender));
+        if !out.reply(&Reply::Wake {
+            req,
+            key: key.to_owned(),
+        }) {
+            lock(&self.wake_waiting).remove(&req);
+            return Err("the ket window closed before it could wake the tab".to_owned());
+        }
+        let deadline = Instant::now() + WAKE_WAIT;
+        let woken = loop {
+            match receiver.recv_timeout(FIX_CHECKS_LOOK) {
+                Ok(answer) => break answer,
+                Err(_) if !out.alive.load(Ordering::Acquire) => {
+                    break Err("the ket window closed before the tab woke".to_owned());
+                }
+                Err(_) if Instant::now() >= deadline => {
+                    break Err("ket on your Mac didn't say whether the tab woke".to_owned());
+                }
+                Err(_) => {}
+            }
+        };
+        lock(&self.wake_waiting).remove(&req);
+        woken
+    }
+
+    /// A window's answer to [`Reply::Wake`]: why the tab stays asleep.
+    pub(super) fn finish_wake(&self, req: u64, answer: Woken) {
+        if let Some((_, waiting)) = lock(&self.wake_waiting).remove(&req) {
             let _ = waiting.send(answer);
         }
     }
@@ -1082,6 +1266,56 @@ fn showing(
     Ok((key, pane))
 }
 
+/// Whether `bytes` is nothing but reports a terminal sends with nobody at
+/// the keyboard: mouse motion and wheel reports, in SGR (`ESC [ < b;x;y M`)
+/// or the legacy encoding (`ESC [ M` and three bytes), and focus in and out
+/// (`ESC [ I`, `ESC [ O`). A button press or release is not one of them: a
+/// click can answer a prompt. Empty input is not either.
+fn only_passive_reports(bytes: &[u8]) -> bool {
+    // Motion sets bit 32 of the button code, the wheel bit 64.
+    let passive = |code: u32| code & (32 | 64) != 0;
+    let mut rest = bytes;
+    if rest.is_empty() {
+        return false;
+    }
+    while !rest.is_empty() {
+        if let Some(after) = rest
+            .strip_prefix(b"\x1b[I")
+            .or_else(|| rest.strip_prefix(b"\x1b[O"))
+        {
+            rest = after;
+        } else if let Some(after) = rest.strip_prefix(b"\x1b[<") {
+            let Some(end) = after.iter().position(|&b| b == b'M' || b == b'm') else {
+                return false;
+            };
+            let body = &after[..end];
+            if !body.iter().all(|&b| b.is_ascii_digit() || b == b';') {
+                return false;
+            }
+            let code = body
+                .split(|&b| b == b';')
+                .next()
+                .and_then(|code| std::str::from_utf8(code).ok())
+                .and_then(|code| code.parse::<u32>().ok());
+            if !code.is_some_and(passive) {
+                return false;
+            }
+            rest = &after[end + 1..];
+        } else if let Some(after) = rest.strip_prefix(b"\x1b[M") {
+            let [code, _, _, tail @ ..] = after else {
+                return false;
+            };
+            if !passive(u32::from(code.wrapping_sub(32))) {
+                return false;
+            }
+            rest = tail;
+        } else {
+            return false;
+        }
+    }
+    true
+}
+
 /// A host with terminals and nothing else — no socket, no hook listener,
 /// phones off — for `super::phones`' tests.
 #[cfg(test)]
@@ -1101,7 +1335,12 @@ impl Host {
             phones: Mutex::new(None),
             status: Mutex::new(StatusStore::new(crate::now_ms())),
             hook_bindings: agent_hooks::HookBindings::default(),
+            network: Mutex::new(None),
+            network_bindings: crate::network::NetworkBindings::default(),
             registries: Mutex::new(BTreeMap::new()),
+            asleep: Mutex::new(BTreeMap::new()),
+            wake_waiting: Mutex::new(BTreeMap::new()),
+            next_wake: AtomicU64::new(1),
             usage: Mutex::new(Vec::new()),
             agents: Mutex::new(Vec::new()),
             theme: Mutex::new(None),
@@ -1137,6 +1376,7 @@ impl Host {
                 window_size: None,
                 fitted: None,
                 typed_at_ms: 0,
+                typed_answer: None,
             },
         );
         id
@@ -1230,6 +1470,8 @@ pub(super) fn run() -> Result<()> {
         outs: Mutex::new(Vec::new()),
         backlog: Mutex::new((VecDeque::new(), VecDeque::new())),
         hook_bindings,
+        network: Mutex::new(None),
+        network_bindings: crate::network::NetworkBindings::default(),
         hooks: (hook_listener.port(), token),
         prompts: hook_listener.waiters(),
         phones: Mutex::new(None),
@@ -1237,6 +1479,9 @@ pub(super) fn run() -> Result<()> {
         // one describes terminals that died with it.
         status: Mutex::new(StatusStore::new(crate::now_ms())),
         registries: Mutex::new(BTreeMap::new()),
+        asleep: Mutex::new(BTreeMap::new()),
+        wake_waiting: Mutex::new(BTreeMap::new()),
+        next_wake: AtomicU64::new(1),
         usage: Mutex::new(Vec::new()),
         agents: Mutex::new(Vec::new()),
         theme: Mutex::new(None),
@@ -1488,10 +1733,17 @@ fn serve_connection(host: &Arc<Host>, stream: UnixStream) {
             Frame::Input { id, bytes } => {
                 // A keystroke at the desktop takes control back from any
                 // phone that had it, then and there. Not the size: a phone
-                // fitting it keeps it until it closes the terminal.
+                // fitting it keeps it until it closes the terminal. Nor the
+                // pointer passing over a program that tracks it, or the
+                // window gaining focus: those reports are sent with nobody
+                // typing, and counting them refused a phone's answer as
+                // "already answered" whenever the mouse moved on the Mac.
+                let typed = !only_passive_reports(&bytes);
                 let terminal = lock(&host.terminals).get_mut(&id).map(|entry| {
-                    entry.lease = None;
-                    entry.typed_at_ms = crate::now_ms();
+                    if typed {
+                        entry.lease = None;
+                        entry.typed_at_ms = crate::now_ms();
+                    }
                     entry.terminal.clone()
                 });
                 if let Some(terminal) = terminal {
@@ -1514,6 +1766,7 @@ fn serve_connection(host: &Arc<Host>, stream: UnixStream) {
     if lock(&host.registries).remove(&conn).is_some() {
         host.merge_worktrees();
     }
+    lock(&host.asleep).remove(&conn);
     host.clients.fetch_sub(1, Ordering::AcqRel);
 }
 
@@ -1643,10 +1896,18 @@ fn handle(host: &Arc<Host>, conn: u64, out: &Arc<Out>, request: Request) -> bool
                         .insert(agent_hooks::TOKEN_ENV.to_owned(), token.clone());
                 }
             }
+            // Taken out whatever happens: it is a word to the host, not the
+            // agent's.
+            let inspected = spec.env.remove(crate::network::LOG_ENV).is_some();
             let adopted = spec
                 .adopt
                 .then(|| adoptable(host, spec.key.as_deref()))
                 .flatten();
+            // A terminal adopted is already running with the environment it
+            // started with; only a new one can be pointed at the proxy.
+            if inspected && adopted.is_none() {
+                host.inspect(&mut spec);
+            }
             if spec.adopt_only && adopted.is_none() {
                 out.reply(&Reply::Failed {
                     req,
@@ -1673,6 +1934,7 @@ fn handle(host: &Arc<Host>, conn: u64, out: &Arc<Out>, request: Request) -> bool
                                 window_size: None,
                                 fitted: None,
                                 typed_at_ms: 0,
+                                typed_answer: None,
                             },
                         );
                         (id, terminal, false)
@@ -1697,6 +1959,14 @@ fn handle(host: &Arc<Host>, conn: u64, out: &Arc<Out>, request: Request) -> bool
                 adopted,
                 pid: terminal.pid(),
             });
+            // A phone waiting for this key's tab to wake has its terminal.
+            if let Some(key) = spec.key.as_deref() {
+                for (woken, waiting) in lock(&host.wake_waiting).values() {
+                    if woken == key {
+                        let _ = waiting.send(Ok(id));
+                    }
+                }
+            }
             watch(host, conn, out, id, terminal);
             true
         }
@@ -1760,6 +2030,16 @@ fn handle(host: &Arc<Host>, conn: u64, out: &Arc<Out>, request: Request) -> bool
         Request::Worktrees { worktrees } => {
             lock(&host.registries).insert(conn, worktrees);
             host.merge_worktrees();
+            true
+        }
+        Request::Asleep { tabs } => {
+            lock(&host.asleep).insert(conn, tabs);
+            true
+        }
+        Request::WakeResult { req, error } => {
+            if let Some(why) = error {
+                host.finish_wake(req, Err(why));
+            }
             true
         }
         Request::Usage { providers } => {
@@ -2936,6 +3216,232 @@ mod tests {
     }
 
     #[test]
+    fn answering_the_same_prompt_twice_types_it_once() {
+        let host = Host::for_tests();
+        let (id, terminal) = pane(&host, "wt|claude|1");
+        let question = ask_permission(&host, "wt|claude|1", "Bash", None);
+
+        assert_eq!(host.answer_prompt(id, question, allow_once), Ok(()));
+        assert!(
+            wait_until(Duration::from_secs(5), || screen(&terminal)
+                .contains("allowed-from-phone")),
+            "{}",
+            screen(&terminal)
+        );
+        std::thread::sleep(Duration::from_millis(100));
+        // Echoed by the tty and again by `cat`: however many that is, the
+        // second tap adds none. The key is pressed, the pane has moved on,
+        // and there is nothing left to answer.
+        let typed = screen(&terminal).matches("allowed-from-phone").count();
+        assert_eq!(
+            host.answer_prompt(id, question, allow_once),
+            Err(AnswerRefused::Answered)
+        );
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(
+            screen(&terminal).matches("allowed-from-phone").count(),
+            typed
+        );
+        terminal.kill();
+    }
+
+    #[test]
+    fn a_phones_allow_moves_the_pane_to_running_and_a_deny_to_idle() {
+        let host = Host::for_tests();
+        let (id, terminal) = pane(&host, "wt|claude|1");
+        let key = "wt|claude|1";
+        let pane_of = |host: &Host| {
+            host.agent_status()
+                .panes
+                .into_iter()
+                .find(|p| p.pane == key)
+                .expect("the pane")
+        };
+
+        let question = ask_permission(&host, key, "Bash", None);
+        assert_eq!(host.answer_prompt(id, question, allow_once), Ok(()));
+        let pane = pane_of(&host);
+        assert_eq!(pane.state, crate::event::AgentState::ExecutingTool);
+        assert!(pane.question.is_none());
+        let answered = pane.answered.expect("remembered");
+        assert!(answered.allowed);
+        assert_eq!(answered.question.id, question);
+
+        let question = ask_permission(&host, key, "Bash", None);
+        assert_eq!(
+            host.answer_prompt(id, question, |_, _| Some(b"\x1b".as_slice())),
+            Ok(())
+        );
+        let pane = pane_of(&host);
+        assert_eq!(pane.state, crate::event::AgentState::Idle);
+        assert!(pane.question.is_none());
+        assert!(!pane.answered.expect("remembered").allowed);
+        terminal.kill();
+    }
+
+    /// A Codex pane keyed `key` whose screen shows `shows` at its foot, as
+    /// Codex draws its dialogs, then echoes whatever is typed.
+    fn codex_pane(host: &Arc<Host>, key: &str, shows: &str) -> (u64, Arc<LocalTerminal>) {
+        let foot = format!("{}{shows}", "\n".repeat(23 - shows.lines().count()));
+        let terminal = LocalTerminal::open(&spec(
+            "/bin/sh",
+            &["-c", "printf '%s\\n' \"$1\"; exec cat", "sh", &foot],
+        ))
+        .expect("a terminal");
+        let last = shows.lines().last().unwrap_or_default().trim().to_owned();
+        let id = host.file_keyed_for_tests(terminal, Some(key.to_owned()));
+        let terminal = host.find(id).expect("filed");
+        assert!(
+            wait_until(Duration::from_secs(5), || terminal
+                .with_term(|term| crate::screen::bottom_rows(term, 24))
+                .iter()
+                .any(|row| row.contains(&last))),
+            "{}",
+            screen(&terminal)
+        );
+        (id, terminal)
+    }
+
+    /// `event` from Codex in pane `key`, asking `question` if anything.
+    fn codex_report(
+        key: &str,
+        event: agent_hooks::HookEvent,
+        question: Option<agent_hooks::PermissionQuestion>,
+    ) -> agent_hooks::HookReport {
+        agent_hooks::HookReport {
+            agent: "codex".to_owned(),
+            event,
+            tool_name: question.as_ref().map(|q| q.tool.clone()),
+            question: question.map(Box::new),
+            ..prompt_report(key)
+        }
+    }
+
+    fn question_id(host: &Host, key: &str) -> Option<u64> {
+        lock(&host.status)
+            .snapshot()
+            .panes
+            .into_iter()
+            .find(|p| p.pane == key)
+            .and_then(|p| p.question)
+            .map(|q| q.id)
+    }
+
+    #[test]
+    fn codexs_question_form_is_answered_with_each_options_number() {
+        let host = Host::for_tests();
+        let key = "wt|codex|1";
+        let (id, terminal) = pane(&host, key);
+        let asked = |question: &str, options: &[&str]| agent_hooks::Asked {
+            question: question.to_owned(),
+            header: String::new(),
+            options: options
+                .iter()
+                .map(|&label| agent_hooks::Offered {
+                    label: label.to_owned(),
+                    description: String::new(),
+                })
+                .collect(),
+            multi_select: false,
+        };
+        let form = agent_hooks::PermissionQuestion {
+            tool: agent_hooks::CODEX_ASK_TOOL.to_owned(),
+            subject: Some("Which crate?".to_owned()),
+            id: 0,
+            prompt: Some(agent_hooks::Prompt::Ask {
+                questions: vec![
+                    asked("Which crate?", &["ket-core", "ket-ui"]),
+                    asked("Tests too?", &["Yes", "No"]),
+                ],
+            }),
+        };
+        let report = codex_report(key, agent_hooks::HookEvent::PreTool, Some(form));
+        assert!(lock(&host.status).report(&report, |_| true));
+        let question = question_id(&host, key).expect("the form");
+        let picks =
+            |_: &agent_hooks::PermissionQuestion| Some(agent_hooks::Decision::Picks(vec![1, 0]));
+
+        // The form is not on screen: numbers would land somewhere else.
+        assert_eq!(
+            host.respond_prompt(id, question, picks),
+            Err(AnswerRefused::Changed)
+        );
+        // An answer for the wrong number of questions does not fit.
+        terminal
+            .send_input(b"Question 1/2 (2 unanswered)\n".to_vec())
+            .unwrap();
+        assert!(wait_until(Duration::from_secs(5), || terminal
+            .with_term(|term| crate::screen::bottom_rows(term, 24))
+            .iter()
+            .any(|row| row.starts_with("Question 1/2"))));
+        assert_eq!(
+            host.respond_prompt(id, question, |_| Some(agent_hooks::Decision::Pick(0))),
+            Err(AnswerRefused::Unfit)
+        );
+        assert_eq!(host.respond_prompt(id, question, picks), Ok(()));
+        assert!(
+            wait_until(Duration::from_secs(5), || screen(&terminal).contains("21")),
+            "{}",
+            screen(&terminal)
+        );
+        // A second phone, before Codex has said it has the answer: the
+        // screen still shows the form, but the keys are not typed again.
+        assert_eq!(
+            host.respond_prompt(id, question, picks),
+            Err(AnswerRefused::Answered)
+        );
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(!screen(&terminal).contains("2121"), "{}", screen(&terminal));
+        terminal.kill();
+    }
+
+    #[test]
+    fn codexs_plan_question_after_its_turn_is_answered_with_a_bare_number() {
+        let host = Host::for_tests();
+        let key = "wt|codex|1";
+        let (id, terminal) = codex_pane(
+            &host,
+            key,
+            "  Implement this plan?\n\n\
+             › 1. Yes, implement this plan          Switch to Default and start coding\n\
+             \x20 2. Yes, clear context and implement  Fresh thread with this plan\n\
+             \x20 3. No, stay in Plan mode             Continue planning with the model\n\n\
+             \x20 Press enter to confirm or esc to go back",
+        );
+        let stop = codex_report(key, agent_hooks::HookEvent::Stop, None);
+        assert!(lock(&host.status).report(&stop, |_| true));
+
+        assert!(host.read_codex_dialogs());
+        let pane = lock(&host.status)
+            .snapshot()
+            .panes
+            .into_iter()
+            .find(|p| p.pane == key)
+            .expect("the pane");
+        assert_eq!(pane.state, crate::event::AgentState::AwaitingPermission);
+        let question = pane.question.expect("the plan question");
+        assert_eq!(question.tool, crate::screen::DIALOG_TOOL);
+
+        assert_eq!(
+            host.respond_prompt(id, question.id, |_| Some(agent_hooks::Decision::Pick(0))),
+            Ok(())
+        );
+        assert_eq!(
+            host.respond_prompt(id, question.id, |_| Some(agent_hooks::Decision::Pick(2))),
+            Err(AnswerRefused::Answered)
+        );
+        assert!(
+            wait_until(Duration::from_secs(5), || terminal
+                .with_term(|term| crate::screen::bottom_rows(term, 24))
+                .iter()
+                .any(|row| row == "1")),
+            "{}",
+            screen(&terminal)
+        );
+        terminal.kill();
+    }
+
+    #[test]
     fn a_respond_needs_a_question_with_a_prompt_and_a_hook_still_held() {
         let host = Host::for_tests();
         let (id, terminal) = pane(&host, "wt|claude|1");
@@ -3160,5 +3666,162 @@ mod tests {
         assert!(keys.contains("wt|claude|1"));
         assert!(!keys.contains("wt|claude|2"));
         live_terminal.kill();
+    }
+
+    // ---- asleep tabs and their waking -----------------------------------------
+
+    fn asleep_tab(key: &str) -> wire::AsleepTab {
+        wire::AsleepTab {
+            key: key.to_owned(),
+            worktree: "wt".to_owned(),
+            agent: "claude".to_owned(),
+            title: "claude".to_owned(),
+            since_ms: 1,
+            freed_bytes: 2,
+        }
+    }
+
+    #[test]
+    fn asleep_tabs_are_merged_across_windows_less_any_running_again() {
+        let host = Host::for_tests();
+        let (out, _reader) = out_pair();
+        assert!(handle(
+            &host,
+            1,
+            &out,
+            Request::Asleep {
+                tabs: vec![asleep_tab("wt|claude|a"), asleep_tab("wt|claude|b")],
+            }
+        ));
+        assert!(handle(
+            &host,
+            2,
+            &out,
+            Request::Asleep {
+                tabs: vec![asleep_tab("wt|claude|b"), asleep_tab("wt|claude|c")],
+            }
+        ));
+        // `b` woke: a terminal runs under its key again.
+        let (_id, _terminal) = pane(&host, "wt|claude|b");
+        let mut listed: Vec<(u64, String)> = host
+            .asleep_tabs()
+            .into_iter()
+            .map(|(conn, tab)| (conn, tab.key))
+            .collect();
+        listed.sort();
+        assert_eq!(
+            listed,
+            vec![(1, "wt|claude|a".to_owned()), (2, "wt|claude|c".to_owned())]
+        );
+    }
+
+    #[test]
+    fn a_wake_is_asked_of_the_window_that_reported_the_tab_and_resolves_when_its_terminal_opens() {
+        let host = Host::for_tests();
+        let (out, mut reader) = window(&host);
+        assert!(handle(
+            &host,
+            1,
+            &out,
+            Request::Asleep {
+                tabs: vec![asleep_tab("wt|claude|z")],
+            }
+        ));
+        let waking = {
+            let host = host.clone();
+            std::thread::spawn(move || host.wake("wt|claude|z"))
+        };
+        let req = match next_reply(&mut reader) {
+            Reply::Wake { req, key } => {
+                assert_eq!(key, "wt|claude|z");
+                req
+            }
+            other => panic!("expected a wake, got {other:?}"),
+        };
+        assert!(req > 0);
+        assert!(handle(
+            &host,
+            1,
+            &out,
+            Request::Open {
+                req: 5,
+                spec: Box::new(keyed_spec("wt|claude|z")),
+            }
+        ));
+        let id = match next_reply(&mut reader) {
+            Reply::Opened { id, .. } => id,
+            other => panic!("expected the terminal, got {other:?}"),
+        };
+        assert_eq!(waking.join().unwrap(), Ok(id));
+    }
+
+    #[test]
+    fn a_wake_the_window_refuses_says_why() {
+        let host = Host::for_tests();
+        let (out, mut reader) = window(&host);
+        assert!(handle(
+            &host,
+            1,
+            &out,
+            Request::Asleep {
+                tabs: vec![asleep_tab("wt|claude|y")],
+            }
+        ));
+        let waking = {
+            let host = host.clone();
+            std::thread::spawn(move || host.wake("wt|claude|y"))
+        };
+        let Reply::Wake { req, .. } = next_reply(&mut reader) else {
+            panic!("expected a wake");
+        };
+        assert!(handle(
+            &host,
+            1,
+            &out,
+            Request::WakeResult {
+                req,
+                error: Some("This agent is unavailable".to_owned()),
+            }
+        ));
+        assert_eq!(
+            waking.join().unwrap(),
+            Err("This agent is unavailable".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_wake_without_its_window_is_refused_at_once() {
+        let host = Host::for_tests();
+        let (out, _reader) = out_pair();
+        // Reported by a connection no window is on.
+        assert!(handle(
+            &host,
+            9,
+            &out,
+            Request::Asleep {
+                tabs: vec![asleep_tab("wt|claude|x")],
+            }
+        ));
+        let refused = Err("open ket on your Mac to wake this tab".to_owned());
+        assert_eq!(host.wake("wt|claude|x"), refused);
+        assert_eq!(host.wake("wt|claude|none"), refused);
+    }
+
+    #[test]
+    fn the_mouse_passing_over_a_terminal_is_not_typing_at_the_desktop() {
+        // SGR motion and wheel reports, legacy motion, focus in and out.
+        assert!(only_passive_reports(b"\x1b[<35;10;5M"));
+        assert!(only_passive_reports(b"\x1b[<64;10;5M\x1b[<65;10;5M"));
+        assert!(only_passive_reports(b"\x1b[M\x43\x2a\x25"));
+        assert!(only_passive_reports(b"\x1b[I"));
+        assert!(only_passive_reports(b"\x1b[O\x1b[<35;1;1M"));
+        // A click, a release, a key, a paste and nothing at all are not.
+        assert!(!only_passive_reports(b"\x1b[<0;10;5M"));
+        assert!(!only_passive_reports(b"\x1b[<0;10;5m"));
+        assert!(!only_passive_reports(b"\x1b[M\x20\x2a\x25"));
+        assert!(!only_passive_reports(b"y"));
+        assert!(!only_passive_reports(b"\x1b[<35;10;5My"));
+        assert!(!only_passive_reports(b"\x1b[<35;10;5"));
+        assert!(!only_passive_reports(b""));
     }
 }

@@ -106,6 +106,7 @@ beforeEach(() => {
     appState: { remove: () => {} },
     snapshot: null,
     starting: [],
+    asked: [],
   });
   Object.assign(conn, { host: { id: 'host' } as SavedHost, status: 'connected' });
 });
@@ -177,10 +178,12 @@ describe('HostConnection requests', () => {
       case: 'startWork',
       value: { projectId: 'project', prompt: 'fix it', agent: 'codex' },
     });
-    // The desktop took it: a row stands in for the work until it arrives.
+    // The desktop took it: a row stands in for the work until it arrives,
+    // and the request is kept for the chat that follows it.
     expect(conn.starting).toEqual([
       { project: 'project', prompt: 'fix it', agent: 'codex', at: expect.any(Number), before: [] },
     ]);
+    expect(conn.asked).toEqual(conn.starting);
     nextReply = reply({ case: 'error', value: { code: 0, message: 'ket is closed' } });
     await expect(conn.startWork('project', 'fix it')).resolves.toBe('ket is closed');
     expect(conn.starting).toHaveLength(1);
@@ -230,6 +233,8 @@ describe('HostConnection requests', () => {
 
   test('sends explicit start choices and opens fresh sessions', async () => {
     await expect(conn.startWork('project', 'fix it', 'codex', { base: 'release', model: 'gpt-6.1-sol', effort: 'high' })).resolves.toBeNull();
+    // Kept with the request, for asking again.
+    expect(conn.asked.at(-1)?.choices).toEqual({ base: 'release', model: 'gpt-6.1-sol', effort: 'high' });
     expect(sent[0].payload).toEqual({ case: 'startWork', value: {
       projectId: 'project', prompt: 'fix it', agent: 'codex', base: 'release', model: 'gpt-6.1-sol', effort: 'high',
     } });

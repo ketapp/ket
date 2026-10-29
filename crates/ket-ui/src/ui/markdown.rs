@@ -7,6 +7,11 @@
 //! edited as plain text in a composer, and this is what shows when nobody is
 //! typing in it.
 //!
+//! A line break is kept where it was typed, as the composer shows it, not
+//! folded into a space as Markdown folds a soft break: a note is written a
+//! line at a time — a list of links, steps one under another — and reading
+//! it back run together is not what was written.
+//!
 //! What it draws: headings, paragraphs, emphasis, strong, strikethrough,
 //! inline code and fenced or indented code blocks, links, block quotes,
 //! ordered, unordered and task lists, and rules. Tables, footnotes and HTML
@@ -36,22 +41,7 @@ const MARKER_W: Pixels = px(20.0);
 
 /// `source` drawn at `size`, as a column of blocks.
 pub(crate) fn markdown(source: &str, size: Pixels, t: &Theme) -> Div {
-    let mut options = Options::empty();
-    options.insert(Options::ENABLE_STRIKETHROUGH);
-    options.insert(Options::ENABLE_TASKLISTS);
-
-    let mut doc = Doc {
-        t,
-        size,
-        frames: vec![Frame::new(Kind::Root)],
-        inline: Inline::default(),
-        style: Style::default(),
-        code: None,
-    };
-    for event in Parser::new_ext(source, options) {
-        doc.event(event);
-    }
-    doc.flush();
+    let mut doc = read(source, size, t);
     let root = doc
         .frames
         .pop()
@@ -66,6 +56,28 @@ pub(crate) fn markdown(source: &str, size: Pixels, t: &Theme) -> Div {
         .line_height(relative(LINE_HEIGHT))
         .text_color(paint(t.text.primary))
         .children(root)
+}
+
+/// `source` parsed and built into blocks, every inline run flushed.
+fn read<'a>(source: &str, size: Pixels, t: &'a Theme) -> Doc<'a> {
+    let mut options = Options::empty();
+    options.insert(Options::ENABLE_STRIKETHROUGH);
+    options.insert(Options::ENABLE_TASKLISTS);
+    let mut doc = Doc {
+        t,
+        size,
+        frames: vec![Frame::new(Kind::Root)],
+        inline: Inline::default(),
+        style: Style::default(),
+        code: None,
+        #[cfg(test)]
+        drawn: Vec::new(),
+    };
+    for event in Parser::new_ext(source, options) {
+        doc.event(event);
+    }
+    doc.flush();
+    doc
 }
 
 /// A block still being built, with what it holds so far.
@@ -121,6 +133,10 @@ struct Doc<'a> {
     style: Style,
     /// A code block's text, while inside one.
     code: Option<String>,
+    /// The text of each run and code block, in the order drawn: what a
+    /// test reads, since a drawn element can't be read back.
+    #[cfg(test)]
+    drawn: Vec<String>,
 }
 
 impl Doc<'_> {
@@ -139,7 +155,7 @@ impl Doc<'_> {
                     ..self.style
                 },
             ),
-            Event::SoftBreak => self.push(" ", self.style),
+            Event::SoftBreak => self.push("\n", self.style),
             Event::HardBreak => self.push("\n", self.style),
             Event::Html(text) | Event::InlineHtml(text) => self.push(&text, self.style),
             Event::Rule => {
@@ -256,6 +272,8 @@ impl Doc<'_> {
             TagEnd::CodeBlock => {
                 let code = self.code.take().unwrap_or_default();
                 let code = code.trim_end_matches('\n').to_owned();
+                #[cfg(test)]
+                self.drawn.push(code.clone());
                 let block = div()
                     .px(px(10.0))
                     .py(px(8.0))
@@ -365,6 +383,8 @@ impl Doc<'_> {
         if text.trim().is_empty() {
             return;
         }
+        #[cfg(test)]
+        self.drawn.push(text.clone());
         let t = self.t;
         let heading = self
             .frames
@@ -416,5 +436,57 @@ impl Doc<'_> {
             .collect();
         let text = StyledText::new(text).with_runs(runs);
         self.child(div().child(text).into_any_element());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What `source` draws, run by run.
+    fn drawn(source: &str) -> Vec<String> {
+        let theme = Theme::dark();
+        read(source, px(14.0), &theme).drawn
+    }
+
+    #[test]
+    fn a_line_break_is_kept_where_it_was_typed() {
+        let links = "https://example.com/one\nhttps://example.com/two\nhttps://example.com/three";
+        assert_eq!(
+            drawn(links),
+            ["https://example.com/one\nhttps://example.com/two\nhttps://example.com/three"]
+        );
+        assert_eq!(
+            drawn("first line\nsecond line"),
+            ["first line\nsecond line"]
+        );
+    }
+
+    #[test]
+    fn a_blank_line_still_starts_a_new_paragraph() {
+        assert_eq!(drawn("one\n\ntwo"), ["one", "two"]);
+    }
+
+    #[test]
+    fn a_hard_break_is_one_line_break_as_before() {
+        assert_eq!(drawn("one  \ntwo"), ["one\ntwo"]);
+        assert_eq!(drawn("one\\\ntwo"), ["one\ntwo"]);
+    }
+
+    #[test]
+    fn lines_inside_a_list_item_and_a_quote_keep_their_breaks() {
+        assert_eq!(
+            drawn("- step one\n  more of it\n- step two"),
+            ["step one\nmore of it", "step two"]
+        );
+        assert_eq!(drawn("> quoted\n> on two lines"), ["quoted\non two lines"]);
+    }
+
+    #[test]
+    fn a_code_block_keeps_its_lines() {
+        assert_eq!(
+            drawn("```\nlet a = 1;\nlet b = 2;\n```"),
+            ["let a = 1;\nlet b = 2;"]
+        );
     }
 }

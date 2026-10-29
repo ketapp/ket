@@ -155,6 +155,21 @@ impl Shell {
         self.ensure_cursor_visible(&key);
     }
 
+    /// Moves the active editor's cursor to a one-based line, if an editor is
+    /// open, and brings it into view.
+    pub(crate) fn jump_active_editor_to_line(&mut self, line: u32) -> bool {
+        let Some(key) = self.active_editor_key() else {
+            return false;
+        };
+        let Some(state) = self.editors.get_mut(key.as_ref()) else {
+            return false;
+        };
+        let cursor = state.buffer.char_at_line_col(LineCol { line, column: 1 });
+        state.buffer.set_cursor(cursor);
+        self.ensure_cursor_visible(&key);
+        true
+    }
+
     /// Brings every buffer held this session back in line with disk — the
     /// shell's answer to "the agent just rewrote the file I am looking at".
     ///

@@ -14,7 +14,7 @@ html { height: 100%; overflow: hidden; overscroll-behavior: none; touch-action: 
 #terminal, .xterm, .xterm-viewport, .xterm-screen { touch-action: none; }
 #hist { position: fixed; left: 50%; bottom: 12px; transform: translateX(-50%); display: none;
   padding: 7px 14px; border-radius: 16px; font: 500 13px -apple-system, system-ui, sans-serif;
-  background: ${t.accent}; color: ${t.card}; box-shadow: 0 4px 14px rgba(0,0,0,.45); z-index: 10; }
+  background: ${t.accent}; color: ${t.card}; z-index: 10; }
 html, body { margin: 0; padding: 0; background: ${t.card}; }
 #terminal { padding: 6px 4px; display: inline-block; }
 .xterm { overflow: hidden; }

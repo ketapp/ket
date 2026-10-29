@@ -69,6 +69,8 @@ const MENU_ORIGIN: &str = "sidebar-more";
 pub(crate) enum SidebarAction {
     QuickPrompt,
     AddProject,
+    /// Folds every project when any is open, else opens them all.
+    FoldProjects,
 }
 
 /// Which tile a peek belongs to.
@@ -224,7 +226,8 @@ impl Shell {
     }
 
     /// The ⋯ button and, while open, its menu: Quick prompt and Add project,
-    /// which used to be two glyphs of their own on the strip.
+    /// which used to be two glyphs of their own on the strip, and Collapse
+    /// all or Expand all.
     pub(crate) fn sidebar_more_button(&self, cx: &mut Context<Self>) -> AnyElement {
         let rail = self.sidebar_compact;
         let open = self.sidebar_menu.is_some();
@@ -277,7 +280,7 @@ impl Shell {
         self.rail_hover = RailHover::default();
 
         let chord = Chord::parse("cmd+shift+p").expect("the shipped chord parses");
-        let entries = vec![
+        let mut entries = vec![
             MenuEntry::Item(
                 MenuItem::new(SidebarAction::QuickPrompt, "Quick prompt")
                     .icon(Icon::Pencil)
@@ -287,6 +290,20 @@ impl Shell {
                 MenuItem::new(SidebarAction::AddProject, "Add project…").icon(Icon::FolderPlus),
             ),
         ];
+        // Only where projects fold: the status sort and the rail list no
+        // project with a caret, so there the pick would change nothing on
+        // screen.
+        if !self.activity_view && !self.sidebar_compact && !self.projects.is_empty() {
+            let item = if self.projects.iter().any(|project| project.expanded) {
+                MenuItem::new(SidebarAction::FoldProjects, "Collapse all")
+                    .icon(Icon::ChevronsDownUp)
+            } else {
+                MenuItem::new(SidebarAction::FoldProjects, "Expand all")
+                    .icon(Icon::ChevronsUpDown)
+            };
+            entries.push(MenuEntry::Separator);
+            entries.push(MenuEntry::Item(item));
+        }
         let menu = OpenMenu::new(MENU_ORIGIN.into(), None, MENU_W, entries).uncapped();
         // Hung under the button with its right edge on the button's on the
         // strip; beside it on the rail, where the window clamps it up off
@@ -304,6 +321,13 @@ impl Shell {
         match action {
             SidebarAction::QuickPrompt => self.open_quick_prompt(cx),
             SidebarAction::AddProject => self.add_project(cx),
+            SidebarAction::FoldProjects => {
+                let open = !self.projects.iter().any(|project| project.expanded);
+                for project in &mut self.projects {
+                    project.expanded = open;
+                }
+                self.persist_view();
+            }
         }
         cx.notify();
     }

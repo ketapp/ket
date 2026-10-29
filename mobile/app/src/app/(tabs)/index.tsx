@@ -4,11 +4,11 @@
 
 import { StyleSheet, View } from 'react-native';
 
-import { WorktreeList } from '../components/WorktreeList';
-import { BrandMark } from '../components/icons';
-import { Prose, Screen } from '../components/ui';
-import { useSplit } from '../lib/layout';
-import { t } from '../lib/theme';
+import { WorktreeList } from '../../components/WorktreeList';
+import { BrandMark } from '../../components/icons';
+import { Prose, Screen } from '../../components/ui';
+import { useSplit } from '../../lib/layout';
+import { t } from '../../lib/theme';
 
 export default function Worktrees() {
   const split = useSplit();

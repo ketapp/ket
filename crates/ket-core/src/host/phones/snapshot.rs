@@ -59,22 +59,88 @@ fn pull_request_summary(open: &crate::github::PullRequestStatus) -> proto::PullR
     }
 }
 
+/// The background sessions a Claude terminal lists while it shows Claude's
+/// agent view — see [`crate::agent_view`] — or `None` for any other.
+fn agent_view(
+    id: u64,
+    agent: &str,
+    terminal: &crate::terminal::LocalTerminal,
+    place: Option<&super::places::Place>,
+) -> Option<proto::AgentView> {
+    use crate::agent_view::SessionState;
+    use proto::background_session::State;
+
+    if terminal.is_closed() {
+        crate::agent_view::forget(id);
+        return None;
+    }
+    // A Claude tab, or a shell someone typed `claude agents` into — which
+    // is agent view by its command line alone.
+    let foreground = match terminal.foreground() {
+        Some(crate::activity::Foreground::Running(command)) => Some(command),
+        _ => None,
+    };
+    let started_as = foreground
+        .as_deref()
+        .is_some_and(crate::agent_view::runs_agent_view);
+    let claude = crate::agents::harness(agent).eq_ignore_ascii_case("claude")
+        || foreground
+            .as_deref()
+            .is_some_and(crate::agent_view::runs_claude);
+    if !claude {
+        return None;
+    }
+    let rows = terminal.with_term(|term| crate::screen::bottom_rows(term, usize::MAX));
+    let title = terminal.title().unwrap_or_default();
+    if !crate::agent_view::in_agent_view(id, &rows, &title, terminal.foreground_group(), started_as)
+    {
+        return None;
+    }
+    let (sessions, listed) = place
+        .map(|place| crate::agent_view::listing(&place.path))
+        // No checkout to ask about: nothing more is coming.
+        .unwrap_or((Vec::new(), true));
+    Some(proto::AgentView {
+        listed,
+        sessions: sessions
+            .into_iter()
+            .map(|session| proto::BackgroundSession {
+                session: session.session,
+                name: session.name,
+                state: match session.state {
+                    SessionState::NeedsYou => State::NeedsYou,
+                    SessionState::Working => State::Working,
+                    SessionState::Done => State::Done,
+                } as i32,
+                started_at_ms: session.started_at_ms,
+                active_at_ms: session.active_at_ms,
+                doing: session.doing,
+            })
+            .collect(),
+    })
+}
+
 /// The host's terminals, grouped by worktree and project, with what each
 /// worktree's agent is doing.
 pub(super) fn snapshot(host: &Host, phones: &Phones) -> proto::HostSnapshot {
     let listing = host.listing();
+    // Tabs the windows have put to sleep: no terminal, still the worktree's.
+    let asleep = host.asleep_tabs();
     // Every worktree a terminal is filed under, so one made a moment ago is
     // placed in its project now rather than a few seconds from now.
     let named: Vec<&str> = listing
         .iter()
         .filter_map(|(_, key, _)| key.as_deref())
         .map(|key| key.split('|').next().unwrap_or_default())
+        .chain(asleep.iter().map(|(_, tab)| tab.worktree.as_str()))
         .filter(|worktree| !worktree.is_empty())
         .collect();
     let places = phones.places_knowing(&named);
     let figures = phones.figures(&places);
     let backlogs = phones.backlog_counts(&places);
     let now = crate::now_ms();
+    // Which session each pane's agent is in, for its mode.
+    let panes = host.agent_status().panes;
     let mut worktrees: Vec<proto::WorktreeSummary> = Vec::new();
     // Which terminal each pane is, for naming the one a prompt is in.
     let mut terminal_of: HashMap<String, u64> = HashMap::new();
@@ -91,6 +157,53 @@ pub(super) fn snapshot(host: &Host, phones: &Phones) -> proto::HostSnapshot {
             .filter(|a| *a != "shell")
             .unwrap_or_default()
             .to_owned();
+        let agent_view = agent_view(id, &agent, &terminal, places.get(&worktree));
+        let session = key
+            .as_deref()
+            .filter(|_| !agent.is_empty())
+            .and_then(|key| {
+                panes
+                    .iter()
+                    .find(|pane| pane.pane == key)
+                    .and_then(|pane| pane.session.clone())
+                    .or_else(|| host.bound_session(key))
+            });
+        let settings = key
+            .as_deref()
+            .filter(|_| !agent.is_empty())
+            .and_then(|_| crate::agent_model::settings(&agent, session.as_deref()))
+            .map(|settings| {
+                let choices = |choices: Vec<crate::agent_model::Choice>| {
+                    choices
+                        .into_iter()
+                        .map(|choice| proto::AgentChoice {
+                            id: choice.id,
+                            label: choice.label,
+                        })
+                        .collect()
+                };
+                proto::AgentSettings {
+                    model: settings.model,
+                    effort: settings.effort,
+                    models: choices(settings.models),
+                    efforts: choices(settings.efforts),
+                    saves_default: settings.saves_default,
+                }
+            });
+        let modes = key.as_deref().filter(|_| !agent.is_empty()).and_then(|_| {
+            crate::agent_mode::modes(&agent, session.as_deref()).map(|modes| proto::AgentModes {
+                current: modes.current,
+                choices: modes
+                    .choices
+                    .into_iter()
+                    .map(|mode| proto::AgentMode {
+                        id: mode.id,
+                        label: mode.label,
+                        detail: mode.detail,
+                    })
+                    .collect(),
+            })
+        });
         let summary = proto::TerminalSummary {
             id,
             title: terminal.title().unwrap_or_else(|| {
@@ -102,6 +215,9 @@ pub(super) fn snapshot(host: &Host, phones: &Phones) -> proto::HostSnapshot {
             }),
             agent,
             closed: terminal.is_closed(),
+            agent_view,
+            modes,
+            settings,
         };
         match worktrees.iter_mut().find(|w| w.id == worktree) {
             Some(existing) => existing.terminals.push(summary),
@@ -122,6 +238,40 @@ pub(super) fn snapshot(host: &Host, phones: &Phones) -> proto::HostSnapshot {
                         .map(|open| pull_request_summary(&open)),
                     id: worktree,
                     terminals: vec![summary],
+                    ..Default::default()
+                });
+            }
+        }
+    }
+
+    // An asleep tab is listed with its worktree, for the phone to wake.
+    for (_, tab) in &asleep {
+        let summary = proto::AsleepTerminal {
+            key: tab.key.clone(),
+            title: tab.title.clone(),
+            agent: tab.agent.clone(),
+            since_ms: tab.since_ms,
+            freed_bytes: tab.freed_bytes,
+        };
+        match worktrees.iter_mut().find(|w| w.id == tab.worktree) {
+            Some(existing) => existing.asleep.push(summary),
+            None => {
+                let place = places.get(&tab.worktree);
+                let figure = figures.get(&tab.worktree).copied().unwrap_or_default();
+                worktrees.push(proto::WorktreeSummary {
+                    name: place.map_or_else(|| tab.worktree.clone(), |p| p.name.clone()),
+                    branch: place.map(|p| p.branch.clone()).unwrap_or_default(),
+                    base: place.and_then(|p| p.base.clone()).unwrap_or_default(),
+                    pinned: place.is_some_and(|p| p.pinned),
+                    files_changed: figure.files_changed,
+                    lines_added: figure.lines_added,
+                    lines_removed: figure.lines_removed,
+                    commits_ahead: figure.commits_ahead,
+                    pull_request: host
+                        .pull_request(&tab.worktree)
+                        .map(|open| pull_request_summary(&open)),
+                    id: tab.worktree.clone(),
+                    asleep: vec![summary],
                     ..Default::default()
                 });
             }
@@ -328,6 +478,12 @@ fn question_of(
     let answerable = match question.prompt {
         // Read off the screen and answered with its number: no hook to hold.
         Some(Prompt::Dialog { .. }) => bound,
+        // Codex's form, answered with its numbers: no hook to hold either.
+        Some(Prompt::Ask { ref questions })
+            if question.tool == crate::agent_hooks::CODEX_ASK_TOOL =>
+        {
+            bound && crate::agent_hooks::codex_answerable(questions)
+        }
         Some(_) => bound && host.prompt_held(&pane.pane, question),
         None => {
             bound
@@ -375,19 +531,27 @@ fn question_of(
                     multi_select: asked.multi_select,
                 })
                 .collect(),
-            // One question, the dialog's, with its options as choices.
-            Some(Prompt::Dialog { title, options }) => vec![proto::Asked {
-                question: question.subject.clone().unwrap_or_default(),
-                header: title.clone(),
-                choices: options
-                    .iter()
-                    .map(|option| proto::asked::Choice {
-                        label: option.clone(),
-                        description: String::new(),
-                    })
-                    .collect(),
-                multi_select: false,
-            }],
+            // One question, the dialog's, with its options as choices. A
+            // dialog with no question line of its own is asked by its title.
+            Some(Prompt::Dialog { title, options }) => {
+                let subject = question.subject.clone().unwrap_or_default();
+                let (asked, header) = match subject.is_empty() {
+                    true => (title.clone(), String::new()),
+                    false => (subject, title.clone()),
+                };
+                vec![proto::Asked {
+                    question: asked,
+                    header,
+                    choices: options
+                        .iter()
+                        .map(|option| proto::asked::Choice {
+                            label: option.clone(),
+                            description: String::new(),
+                        })
+                        .collect(),
+                    multi_select: false,
+                }]
+            }
             _ => Vec::new(),
         },
         plan: matches!(question.prompt, Some(Prompt::Plan)),

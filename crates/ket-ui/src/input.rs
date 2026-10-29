@@ -68,10 +68,10 @@
 use std::ops::Range;
 
 use gpui::{
-    App, Bounds, ClipboardItem, Context, Div, Element, ElementId, ElementInputHandler, Entity,
-    EntityInputHandler, FocusHandle, GlobalElementId, InspectorElementId, IntoElement, Keystroke,
-    LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
-    ShapedLine, SharedString, Stateful, Style as GpuiStyle, TextRun, UTF16Selection,
+    AnyElement, App, Bounds, ClipboardItem, Context, Div, Element, ElementId, ElementInputHandler,
+    Entity, EntityInputHandler, FocusHandle, GlobalElementId, InspectorElementId, IntoElement,
+    Keystroke, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad,
+    Pixels, Point, ShapedLine, SharedString, Stateful, Style as GpuiStyle, TextRun, UTF16Selection,
     UnderlineStyle, Window, div, fill, point, prelude::*, px, relative, size,
 };
 use ket_core::buffer::Buffer;
@@ -102,6 +102,10 @@ pub(crate) struct Style<'a> {
     /// placeholder alone. Ignored by [`text_line`], which has no box to hang
     /// one in.
     leading: Option<Icon>,
+    /// Something after the text, inside the well: the style guide's trailing
+    /// key hint, or a caption saying where the value came from. Ignored by
+    /// [`text_line`] too.
+    trailing: Option<AnyElement>,
 }
 
 impl<'a> Style<'a> {
@@ -111,12 +115,19 @@ impl<'a> Style<'a> {
             theme,
             blink,
             leading: None,
+            trailing: None,
         }
     }
 
     /// With an icon before the text.
     pub(crate) fn leading(mut self, which: Icon) -> Self {
         self.leading = Some(which);
+        self
+    }
+
+    /// With something after the text, inside the well.
+    pub(crate) fn trailing(mut self, element: impl IntoElement) -> Self {
+        self.trailing = Some(element.into_any_element());
         self
     }
 }
@@ -1104,13 +1115,14 @@ pub(crate) fn text_field(
     input: &Entity<TextInput>,
     id: impl Into<ElementId>,
     invalid: bool,
-    style: Style<'_>,
+    mut style: Style<'_>,
     window: &mut Window,
     cx: &mut App,
 ) -> Stateful<Div> {
     let t = style.theme;
     grant_focus(input, window, cx);
     let element = laid_out(input, &style, cx);
+    let trailing = style.trailing.take();
     let state = input.read(cx);
 
     // The masked text, not the real one. It only decides whether the well
@@ -1126,10 +1138,13 @@ pub(crate) fn text_field(
     let drawn = well
         .body(
             div()
+                .flex()
                 .flex_1()
                 .min_w_0()
-                .overflow_hidden()
-                .child(element)
+                .items_center()
+                .gap(px(8.0))
+                .child(div().flex_1().min_w_0().overflow_hidden().child(element))
+                .children(trailing)
                 .into_any_element(),
         )
         .render(t)

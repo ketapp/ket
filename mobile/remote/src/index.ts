@@ -1,7 +1,7 @@
 // The phone side of the ket remote protocol. See client.ts to connect,
 // noise.ts for the handshake, and the generated contract in gen/.
 
-export { type Greeting, type PairedHost, Remote, confirmationCode, envelope, pair, resume, MAJOR, MINOR } from './client.ts';
+export { type Greeting, type PairedHost, DialError, Remote, confirmationCode, envelope, pair, resume, MAJOR, MINOR } from './client.ts';
 export { type Keypair, generateKeypair, keypairFrom } from './noise.ts';
 export { type Offer, parseOffer, validRelayUrl, fromBase64Url, toBase64Url } from './offer.ts';
 export { utf8 } from './bytes.ts';

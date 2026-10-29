@@ -609,11 +609,40 @@ pub fn finish_phone_delete(req: u64, outcome: std::result::Result<Option<String>
     }
 }
 
+/// The oldest of the asleep tabs phones asked this window to wake: the
+/// host's request number, and the tab's key.
+pub fn take_phone_wake() -> Option<(u64, String)> {
+    let mut asked = client::PHONE_WAKES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    (!asked.is_empty()).then(|| asked.remove(0))
+}
+
+/// Tells the host's waiting phone why an asleep tab stays asleep. A wake
+/// that works needs no answer: the host sees the terminal opened under the
+/// tab's key.
+pub fn finish_phone_wake(req: u64, error: String) {
+    if let Some(conn) = client::current() {
+        let _ = conn.request(&wire::Request::WakeResult {
+            req,
+            error: Some(error),
+        });
+    }
+}
+
 /// Whether the host has said ket's store changed under this window's
 /// sidebar since the last call — a phone pinned a worktree — so the sidebar
 /// is to be read again.
 pub fn take_worktrees_changed() -> bool {
     client::WORKTREES_CHANGED.swap(false, std::sync::atomic::Ordering::AcqRel)
+}
+
+/// Whether a phone has asked this window for anything since the last call —
+/// work to start, a merge, a delete, a wake, or the store's worktrees
+/// changing. The window looks at the queues on its tick; this is for looking
+/// sooner, so a task started from a phone is not left waiting out the tick.
+pub fn take_phone_asked() -> bool {
+    client::PHONE_ASKED.swap(false, std::sync::atomic::Ordering::AcqRel)
 }
 
 /// The host's newest agent status snapshot, if one has arrived since the last
@@ -699,6 +728,25 @@ pub fn publish_pull_requests(pull_requests: Vec<(String, crate::github::PullRequ
     }
     if let Some(conn) = client::current() {
         let _ = conn.request(&wire::Request::PullRequests { pull_requests });
+    }
+}
+
+/// Tells the host which tabs this window has put to sleep, for phones — see
+/// [`wire::Request::Asleep`]. Kept and sent again on every new connection;
+/// sent now only if the set changed and a host is connected. The first is
+/// always sent, even when there are none, as pull requests are.
+pub fn publish_asleep(tabs: Vec<wire::AsleepTab>) {
+    {
+        let mut published = client::ASLEEP
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if published.as_ref() == Some(&tabs) {
+            return;
+        }
+        *published = Some(tabs.clone());
+    }
+    if let Some(conn) = client::current() {
+        let _ = conn.request(&wire::Request::Asleep { tabs });
     }
 }
 

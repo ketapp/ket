@@ -5,32 +5,52 @@
 // View-only until the phone types: focusing the message line, sending, or a
 // key from the key row takes control, with no button to press first, and
 // leaving the screen lets it go. A line at the bottom sends a whole message;
-// the keys a phone keyboard lacks sit behind a button beside it. The desktop
+// switched to live keys, it sends each key as it is pressed instead, for a
+// program that answers a lone keystroke — a digit for Claude's offers, y or
+// n, a pager. The keys a phone keyboard lacks sit behind a button beside it. The desktop
 // can take control back with a keystroke, and the phone says so. Interrupting
 // needs no control: stopping an agent is always the phone's to do.
 
 import { router, useLocalSearchParams } from 'expo-router';
 import { useEffect, useRef, useState } from 'react';
-import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import {
+  Keyboard as SystemKeyboard,
+  Pressable,
+  StyleSheet,
+  Text,
+  TextInput,
+  type TextInputInstance,
+  View,
+} from 'react-native';
 import { KeyboardAvoidingView } from 'react-native-keyboard-controller';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { CommandMenu } from '../../../components/Commands';
 import { TerminalView, type TerminalHandle } from '../../../components/TerminalView';
 import { AgentMark, Keyboard, Send, TerminalGlyph } from '../../../components/icons';
-import { Bar, Card, Marked, Prose, Screen, TabStrip } from '../../../components/ui';
+import { Bar, Card, Dot, Marked, Prose, Screen, Segmented, TabStrip } from '../../../components/ui';
 import { agentTerminal, everyWorktree, stateOf, terminalName } from '../../../lib/activity';
 import { type Command, commandsFor, matching } from '../../../lib/commands';
 import { useHost } from '../../../lib/hosts';
-import { getFit } from '../../../lib/store';
 import { font, size, t, tint } from '../../../lib/theme';
 
 /** The pause between a message and its Enter — see `send`. */
 const ENTER_AFTER_MS = 80;
 
+/** What a terminal's Backspace sends. */
+const BACKSPACE = '\x7f';
+
+/** How far apart a key and the change it made are told of — see `unpaired`. */
+const PAIRED_MS = 100;
+
+/** How the line at the bottom types: a whole message and Enter, or each key
+ * as it is pressed. */
+type Typing = 'message' | 'live';
+
 const KEYS: { label: string; send: string; name?: string }[] = [
   { label: 'esc', send: '\x1b' },
   { label: 'tab', send: '\t' },
+  { label: '⇧⇥', send: '\x1b[Z', name: 'Shift Tab' },
   { label: '←', send: '\x1b[D', name: 'Left' },
   { label: '↓', send: '\x1b[B', name: 'Down' },
   { label: '↑', send: '\x1b[A', name: 'Up' },
@@ -57,16 +77,72 @@ export default function TerminalScreen() {
   // control and types in one go must not wait for a render in between.
   const held = useRef(false);
   const [keysOpen, setKeysOpen] = useState(false);
-  // Settings › Fit terminal to phone: while the phone has control, the
-  // host's terminal takes the phone's size, and the desktop's comes back
-  // when control ends.
-  const [fit, setFitSetting] = useState(false);
-  useEffect(() => {
-    void getFit().then(setFitSetting);
-  }, []);
+  // While the phone shows a terminal it takes the phone's size, so text
+  // wraps to the screen at a size you can read; the desktop gets its own
+  // size back when the phone leaves.
   const [ctrl, setCtrl] = useState(false);
+  // What `ctrl` is this instant: two keys pressed before a render must not
+  // both take the latch.
+  const ctrlOn = useRef(false);
   const [note, setNote] = useState('');
   const [message, setMessage] = useState('');
+  // Kept across tabs: a choice about how to type, not about one terminal.
+  const [typing, setTyping] = useState<Typing>('message');
+  const live = typing === 'live';
+  // Live keys: what the field holds, as the terminal has been sent it. The
+  // field is left to itself rather than held empty — emptying it after each
+  // key races the next one and types it twice — and each change is sent as
+  // Backspaces and new keys from where it parts from this.
+  const liveField = useRef<TextInputInstance>(null);
+  const liveText = useRef('');
+  // The keys in the order pressed: the first may wait on taking control,
+  // and the ones after it must not overtake it.
+  const liveQueue = useRef<Promise<unknown>>(Promise.resolve());
+  // When the last key went: an Enter right behind a key reads as part of a
+  // paste, as in `send`, which keys held back until control arrive would be.
+  const lastKeyAt = useRef(0);
+  // The terminal on screen now, so a grant of control still on its way when
+  // a tab switches terminals is given back rather than kept.
+  const shown = useRef(terminalId);
+  // Bumped to drop every key still queued: on a tab switching terminals, and
+  // when a key does not arrive — the desktop took control back, or the
+  // connection failed — so what was typed after it is not replayed on top.
+  const keysFor = useRef(0);
+  // A Backspace that deletes is told of twice, as a key and as a change, in
+  // either order: iOS and some Android keyboards the key first, others the
+  // change. Whichever comes first waits here, briefly, for the other, and the
+  // pair counts once, as the change; a key with no change — Backspace in an
+  // empty field, a held Backspace's repeats there — goes on its own.
+  const unpaired = useRef<{ by: 'key' | 'change'; at: number } | null>(null);
+  // Whether the keyboard was up when switching, so the other field takes it.
+  const [focusOnSwitch, setFocusOnSwitch] = useState(false);
+  // A tab switches terminals in place, on this same screen, so what belonged
+  // to the last one does not carry over: its control (let go by the effect
+  // below), a note about it, a half-typed message, a held ctrl. Reset while
+  // rendering, so the effects never see the new terminal with the old state.
+  const [shownFor, setShownFor] = useState(terminalId);
+  if (shownFor !== terminalId) {
+    setShownFor(terminalId);
+    setControl(false);
+    setNote('');
+    setMessage('');
+    setCtrl(false);
+    setFocusOnSwitch(false);
+  }
+  useEffect(() => {
+    shown.current = terminalId;
+    held.current = false;
+    ctrlOn.current = false;
+    liveText.current = '';
+    keysFor.current++;
+    liveQueue.current = Promise.resolve();
+  }, [terminalId]);
+
+  /** Drops the keys still queued — see `keysFor`. */
+  const dropKeys = () => {
+    keysFor.current++;
+    liveQueue.current = Promise.resolve();
+  };
 
   const located = everyWorktree(conn?.snapshot ?? null)
     .map((l) => ({ ...l, terminal: l.worktree.terminals.find((x) => x.id === terminalId) }))
@@ -116,10 +192,10 @@ export default function TerminalScreen() {
   // Said again on every reconnect — the desktop gives its size back when a
   // phone's session ends, so a new session has to ask afresh.
   const online = conn?.status === 'connected';
-  useEffect(() => view.current?.setFit(fit && ready), [fit, ready, online]);
+  useEffect(() => view.current?.setFit(ready), [ready, online]);
 
   const fitTo = (cols: number, rows: number) => {
-    if (conn && fit) void conn.resize(terminalId, cols, rows).catch(() => {});
+    if (conn) void conn.resize(terminalId, cols, rows).catch(() => {});
   };
 
   // Letting go when leaving the screen.
@@ -136,28 +212,47 @@ export default function TerminalScreen() {
     if (held.current) return true;
     if (!conn) return false;
     const ok = await conn.takeControl(terminalId).catch(() => false);
+    // Granted for a terminal a tab has since switched away from.
+    if (shown.current !== terminalId) {
+      if (ok) conn.releaseControl(terminalId);
+      return false;
+    }
     held.current = ok;
     setControl(ok);
     setNote(ok ? '' : 'Another device is in control of this terminal.');
     return ok;
   };
 
+  /** A lone key as ctrl makes it, while ctrl is held, letting go of ctrl. */
+  const latch = (text: string): string => {
+    if (!ctrlOn.current || text.length !== 1) return text;
+    ctrlOn.current = false;
+    setCtrl(false);
+    return String.fromCharCode(text.toUpperCase().charCodeAt(0) & 0x1f);
+  };
+
+  const toggleCtrl = () => {
+    ctrlOn.current = !ctrlOn.current;
+    setCtrl(ctrlOn.current);
+  };
+
   /** Types into the terminal, taking control first if need be; `false` when
    * it did not arrive, with why. */
   const type = async (data: string): Promise<boolean> => {
     if (!conn || !(await ensureControl())) return false;
-    let text = data;
-    if (ctrl && text.length === 1) {
-      text = String.fromCharCode(text.toUpperCase().charCodeAt(0) & 0x1f);
-      setCtrl(false);
-    }
     try {
-      if (await conn.type(terminalId, text)) return true;
+      if (await conn.type(terminalId, data)) return true;
+      // Refused for a terminal a tab has since switched away from: nothing
+      // here to drop or let go.
+      if (shown.current !== terminalId) return false;
+      dropKeys();
       held.current = false;
       setControl(false);
       setNote('Your desktop took control back.');
     } catch (e) {
       // Not the desktop taking over: the message never reached it.
+      if (shown.current !== terminalId) return false;
+      dropKeys();
       setNote(`Not sent: ${e instanceof Error ? e.message : String(e)}`);
     }
     return false;
@@ -180,7 +275,7 @@ export default function TerminalScreen() {
       return;
     }
     let failed = false;
-    const sent = type(text).then((ok) => {
+    const sent = type(latch(text)).then((ok) => {
       failed = !ok;
       return ok;
     });
@@ -192,6 +287,62 @@ export default function TerminalScreen() {
     const entered = type('\r');
     if (!(await sent)) setMessage(text);
     await entered;
+  };
+
+  /** Types `keys` after any still waiting on control: a live key, the key
+   * row, the terminal's own keyboard. Ctrl is taken now, by the key pressed
+   * while it was held, not by whichever key reaches the terminal first. */
+  const press = (keys: string) => {
+    const text = latch(keys);
+    const batch = keysFor.current;
+    liveQueue.current = liveQueue.current.then(async () => {
+      const early = lastKeyAt.current + ENTER_AFTER_MS - Date.now();
+      if (text === '\r' && early > 0) await new Promise((resolve) => setTimeout(resolve, early));
+      // Checked last thing before control, which a dropped key must not
+      // take back from the desktop.
+      if (batch !== keysFor.current) return;
+      if (!(await ensureControl())) {
+        if (batch === keysFor.current) dropKeys();
+        return;
+      }
+      if (batch !== keysFor.current) return;
+      lastKeyAt.current = Date.now();
+      void type(text);
+    });
+  };
+
+  /** Whether a Backspace's other half is waiting to be paired — see
+   * `unpaired`. */
+  const waiting = (by: 'key' | 'change') =>
+    unpaired.current?.by === by && Date.now() - unpaired.current.at < PAIRED_MS;
+
+  // By character, not UTF-16 unit: an emoji is one Backspace, and a change
+  // inside one never sends half of it.
+  const changeLive = (text: string) => {
+    const was = Array.from(liveText.current);
+    const now = Array.from(text);
+    let same = 0;
+    while (same < was.length && same < now.length && was[same] === now[same]) same++;
+    liveText.current = text;
+    if (now.length < was.length && same === now.length) {
+      unpaired.current = waiting('key') ? null : { by: 'change', at: Date.now() };
+    }
+    const keys = BACKSPACE.repeat(was.length - same) + now.slice(same).join('');
+    if (keys) press(keys);
+  };
+
+  // Enter starts the field afresh: what came before it is the terminal's now.
+  const enterLive = () => {
+    liveText.current = '';
+    liveField.current?.clear();
+    press('\r');
+  };
+
+  const switchTyping = (to: Typing) => {
+    if (to === typing) return;
+    setFocusOnSwitch(SystemKeyboard.isVisible());
+    liveText.current = '';
+    setTyping(to);
   };
 
   const agent = summary?.agent ?? '';
@@ -225,7 +376,7 @@ export default function TerminalScreen() {
                   state: stateFor(x.id),
                 }))}
                 value={terminal}
-                onChange={(key) => router.replace(`/terminal/${hostId}/${key}`)}
+                onChange={(key) => router.setParams({ terminal: key })}
               />
             ) : undefined
           }
@@ -246,7 +397,7 @@ export default function TerminalScreen() {
         <View style={styles.body}>
           <Card style={styles.terminalCard}>
             <View style={styles.fill}>
-              <TerminalView ref={view} onReady={() => setReady(true)} onInput={(data) => void type(data)} onSize={fitTo} />
+              <TerminalView ref={view} onReady={() => setReady(true)} onInput={press} onSize={fitTo} />
               {drawn ? null : (
                 <View pointerEvents="none" style={styles.waiting} accessibilityLiveRegion="polite">
                   <Prose>
@@ -263,16 +414,24 @@ export default function TerminalScreen() {
 
           <Card style={[styles.panel, { marginBottom: Math.max(insets.bottom, size.gutter) }]}>
             {note ? <Prose style={styles.small}>{note}</Prose> : null}
-            {suggested.length > 0 ? <CommandMenu commands={suggested} onPick={pick} /> : null}
+            {!live && suggested.length > 0 ? <CommandMenu commands={suggested} onPick={pick} /> : null}
             {keysOpen ? (
               <View style={styles.keys}>
-                <Key label="ctrl" active={ctrl} onPress={() => setCtrl(!ctrl)} />
+                <Key label="ctrl" active={ctrl} onPress={toggleCtrl} />
                 {KEYS.map((key) => (
-                  <Key key={key.label} label={key.label} name={key.name} onPress={() => void type(key.send)} />
+                  <Key key={key.label} label={key.label} name={key.name} onPress={() => press(key.send)} />
                 ))}
                 <Key label="^C" name="Interrupt" danger onPress={() => conn?.interrupt(terminalId)} />
               </View>
             ) : null}
+            <Segmented
+              segments={[
+                { key: 'message', label: 'Message' },
+                { key: 'live', label: 'Live keys', icon: live ? <Dot color={t.brand} /> : undefined },
+              ]}
+              value={typing}
+              onChange={switchTyping}
+            />
             <View style={styles.composer}>
               <Pressable
                 accessibilityRole="button"
@@ -283,28 +442,73 @@ export default function TerminalScreen() {
               >
                 <Keyboard size={18} color={keysOpen ? t.text : t.dim} />
               </Pressable>
-              <TextInput
-                value={message}
-                onChangeText={setMessage}
-                onFocus={() => void ensureControl()}
-                onSubmitEditing={() => void send()}
-                placeholder={`Message ${agent || 'the terminal'}…`}
-                placeholderTextColor={t.faint}
-                autoCapitalize="sentences"
-                autoCorrect
-                spellCheck
-                returnKeyType="send"
-                style={styles.input}
-              />
-              <Pressable
-                accessibilityRole="button"
-                accessibilityLabel="Send"
-                disabled={!message}
-                onPress={() => void send()}
-                style={[styles.send, message ? styles.sendReady : null]}
-              >
-                <Send size={18} color={message ? t.onBrand : t.faint} weight={2.3} />
-              </Pressable>
+              {live ? (
+                <TextInput
+                  // A new field for each terminal: what the last one holds
+                  // was typed into that terminal, not this one.
+                  key={`live-${terminal}`}
+                  ref={liveField}
+                  autoFocus={focusOnSwitch}
+                  defaultValue=""
+                  onChangeText={changeLive}
+                  // Backspace on an empty field changes nothing, so it is
+                  // only heard as a key; one that changes the field is left
+                  // to `changeLive` — see `unpaired`.
+                  onKeyPress={(e) => {
+                    if (e.nativeEvent.key !== 'Backspace') return;
+                    if (waiting('change')) unpaired.current = null;
+                    else if (liveText.current !== '') unpaired.current = { by: 'key', at: Date.now() };
+                    else press(BACKSPACE);
+                  }}
+                  onFocus={() => void ensureControl()}
+                  onSubmitEditing={enterLive}
+                  // The field stays up for the next key: `submitBehavior` on
+                  // the phone, `blurOnSubmit` in the browser, which knows
+                  // only that.
+                  submitBehavior="submit"
+                  blurOnSubmit={false}
+                  accessibilityLabel="Live keys"
+                  placeholder="Each key goes straight in"
+                  placeholderTextColor={t.faint}
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  spellCheck={false}
+                  smartInsertDelete={false}
+                  returnKeyType="default"
+                  style={[styles.input, styles.liveInput]}
+                />
+              ) : (
+                <TextInput
+                  key="message"
+                  autoFocus={focusOnSwitch}
+                  value={message}
+                  onChangeText={setMessage}
+                  onFocus={() => void ensureControl()}
+                  onSubmitEditing={() => void send()}
+                  placeholder={`Message ${agent || 'the terminal'}…`}
+                  placeholderTextColor={t.faint}
+                  autoCapitalize="sentences"
+                  autoCorrect
+                  spellCheck
+                  returnKeyType="send"
+                  style={styles.input}
+                />
+              )}
+              {live ? (
+                <Pressable accessibilityRole="button" accessibilityLabel="Enter" onPress={enterLive} style={styles.send}>
+                  <Text style={styles.enterText}>⏎</Text>
+                </Pressable>
+              ) : (
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Send"
+                  disabled={!message}
+                  onPress={() => void send()}
+                  style={[styles.send, message ? styles.sendReady : null]}
+                >
+                  <Send size={18} color={message ? t.onBrand : t.faint} weight={2.3} />
+                </Pressable>
+              )}
             </View>
           </Card>
         </View>
@@ -384,6 +588,10 @@ const styles = StyleSheet.create({
   },
   // Something to send: ket's own green, as in the chat.
   sendReady: { backgroundColor: t.brand },
+  // Live keys: ringed in the brand's green, so the field never passes for
+  // the message line, and in the face of what a terminal draws.
+  liveInput: { fontFamily: font.chrome, fontSize: 14, borderWidth: 1, borderColor: tint(t.brand, 0.35) },
+  enterText: { fontFamily: font.chrome, fontSize: 16, color: t.text },
   // Round, beside the round field and Send.
   menu: {
     width: size.control,

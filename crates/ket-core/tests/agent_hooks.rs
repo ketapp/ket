@@ -201,6 +201,90 @@ fn codex_user_input_tool_waits_until_its_answer_returns() {
 }
 
 #[test]
+fn codex_user_input_tool_carries_its_questions_until_answered() {
+    let hooks = Hooks::new();
+    let mut status = StatusStore::new(1);
+    let known = |pane: &str| pane == "pane-1";
+    let input = json!({
+        "questions": [
+            {
+                "id": "scope", "header": "Scope", "question": "Which crate?",
+                "isOther": true,
+                "options": [
+                    { "label": "ket-core", "description": "The engine" },
+                    { "label": "ket-ui", "description": "The window" },
+                ],
+            },
+            { "id": "why", "header": "Why", "question": "Anything else?" },
+        ],
+    });
+    let call = |name: &str| {
+        let payload = event(
+            name,
+            json!({
+                "tool_name": "request_user_input",
+                "tool_use_id": "question-1",
+                "tool_input": input,
+            }),
+        );
+        hooks.post(&envelope("codex", payload)).expect("reported")
+    };
+
+    let asked = call("PreToolUse");
+    status.report(&asked, known);
+    let pane = status.get("pane-1").unwrap();
+    assert_eq!(pane.state, AgentState::AwaitingPermission);
+    let question = pane.question.as_ref().expect("the form, as a question");
+    assert_eq!(question.tool, "request_user_input");
+    assert_eq!(question.subject.as_deref(), Some("Which crate?"));
+    let offered = |label: &str, description: &str| Offered {
+        label: label.to_owned(),
+        description: description.to_owned(),
+    };
+    assert_eq!(
+        question.prompt,
+        Some(Prompt::Ask {
+            questions: vec![
+                Asked {
+                    question: "Which crate?".to_owned(),
+                    header: "Scope".to_owned(),
+                    options: vec![
+                        offered("ket-core", "The engine"),
+                        offered("ket-ui", "The window"),
+                        offered("None of the above", ""),
+                    ],
+                    multi_select: false,
+                },
+                // Kept without options, so the answers line up with the form.
+                Asked {
+                    question: "Anything else?".to_owned(),
+                    header: "Why".to_owned(),
+                    options: Vec::new(),
+                    multi_select: false,
+                },
+            ],
+        })
+    );
+    let Some(Prompt::Ask { questions }) = &question.prompt else {
+        unreachable!()
+    };
+    // One question needs words, which a number cannot type.
+    assert!(!agent_hooks::codex_answerable(questions));
+    assert!(agent_hooks::codex_answerable(&questions[..1]));
+
+    status.report(&call("PostToolUse"), known);
+    let pane = status.get("pane-1").unwrap();
+    assert_eq!(pane.state, AgentState::Thinking);
+    assert!(pane.question.is_none());
+
+    // Claude has no such tool: the same name from it asks nothing.
+    let claude = hooks
+        .claude(pre_tool("request_user_input", input.clone()))
+        .expect("reported");
+    assert!(claude.question.is_none());
+}
+
+#[test]
 fn a_report_says_where_it_came_from() {
     let hooks = Hooks::new();
     let report = hooks

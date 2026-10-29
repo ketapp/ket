@@ -15,8 +15,9 @@ The experiment is intentionally narrow:
   validates the private classes, selectors, method encodings, and NSView
   inheritance before sending private messages.
 - The framebuffer connection uses SimulatorKit's private Swift ABI. It is
-  restricted to Apple silicon and the exact SimulatorKit 1005.2 / CoreSimulator
-  1171.7 pair; every other version is rejected before the bridge is called.
+  restricted to Apple silicon and the SimulatorKit and CoreSimulator builds
+  listed in `ios_simulator.rs` (Xcode 27.1, 27.0 and 26.6 as of 2026-10-28);
+  every other version is rejected before the bridge is called.
 - The tab and its native objects are process-local and are not persisted.
 - There is only one simulator tab per ket process.
 

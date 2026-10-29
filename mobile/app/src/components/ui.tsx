@@ -5,14 +5,27 @@
 // signal. Every screen builds from these; none draws its own control.
 
 import { router } from 'expo-router';
-import { useEffect, useRef, useState, type ReactNode } from 'react';
-import { Platform, Pressable, ScrollView, StyleSheet, Text, View, type StyleProp, type TextStyle, type ViewStyle } from 'react-native';
+import { Fragment, useEffect, useRef, useState, type ReactNode } from 'react';
+import {
+  Platform,
+  Pressable,
+  ScrollView,
+  type ScrollViewInstance,
+  StyleSheet,
+  Text,
+  View,
+  type StyleProp,
+  type TextStyle,
+  type ViewStyle,
+} from 'react-native';
+import Animated, { Easing, Keyframe, ReduceMotion } from 'react-native-reanimated';
 import Svg, { Defs, LinearGradient, Rect, Stop } from 'react-native-svg';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { READABLE_WIDTH, showBeside, useSplit } from '../lib/layout';
 import { font, size, t, tint } from '../lib/theme';
 import { Back, Check, Chevron, Gauge, Inbox, ListTodo, Sliders, Tree } from './icons';
+import { Fade, Wipe } from './Swap';
 
 /** A whole screen: the desk, clear of the status bar. On a wide screen its
  * content is a column no wider than reads well, in the middle; `full` gives
@@ -177,6 +190,7 @@ export function Row({
   marker,
   chevron,
   small,
+  live,
   onPress,
   onLongPress,
   children,
@@ -190,11 +204,25 @@ export function Row({
   marker?: boolean;
   chevron?: boolean;
   small?: boolean;
+  /** Its detail and state change under a wipe as updates land, as a
+   * worktree's do, rather than at once. */
+  live?: boolean;
   onPress?: () => void;
   /** Held: the row's menu. */
   onLongPress?: () => void;
   children?: ReactNode;
 }) {
+  const detailText = (text: string, color?: string) => (
+    <Text style={[styles.detail, color ? { color } : null]} numberOfLines={1}>
+      {text}
+    </Text>
+  );
+  const stateMark = (s: RowState) => (
+    <>
+      <Dot color={s.color} size={6} />
+      <Text style={[styles.stateText, { color: s.color }]}>{s.word}</Text>
+    </>
+  );
   return (
     <Pressable
       onPress={onPress}
@@ -213,19 +241,22 @@ export function Row({
         <Text style={[styles.name, small && { fontFamily: font.prose }]} numberOfLines={1}>
           {title}
         </Text>
-        {detail ? (
-          <Text style={[styles.detail, detailColor ? { color: detailColor } : null]} numberOfLines={1}>
-            {detail}
-          </Text>
+        {detail && live ? (
+          <Wipe token={detail} item={{ detail, detailColor }} fill={marker ? t.hover : t.card} style={styles.detailLine}>
+            {(it) => detailText(it.detail, it.detailColor)}
+          </Wipe>
+        ) : detail ? (
+          detailText(detail, detailColor)
         ) : null}
         {children}
       </View>
       {meta}
-      {state ? (
-        <View style={styles.state}>
-          <Dot color={state.color} size={6} />
-          <Text style={[styles.stateText, { color: state.color }]}>{state.word}</Text>
-        </View>
+      {state && live ? (
+        <Fade token={state.word} item={state} style={styles.state}>
+          {stateMark}
+        </Fade>
+      ) : state ? (
+        <View style={styles.state}>{stateMark(state)}</View>
       ) : null}
       {chevron ? <Chevron size={16} color={t.faint} /> : null}
     </Pressable>
@@ -345,7 +376,7 @@ export function TabStrip<K extends string>({
   label: string;
   style?: StyleProp<ViewStyle>;
 }) {
-  const scroller = useRef<ScrollView>(null);
+  const scroller = useRef<ScrollViewInstance>(null);
   // Where each tab sits in the scrolled row, and how much of the row shows.
   const spans = useRef(new Map<K, { x: number; width: number }>());
   const shown = useRef({ offset: 0, width: 0, content: 0 });
@@ -574,11 +605,20 @@ export function Prose({ children, color, style }: { children: ReactNode; color?:
   return <Text style={[styles.prose, color ? { color } : null, style]}>{children}</Text>;
 }
 
+/** A button's mark landing over its words: a little pop. */
+const MARK_IN = new Keyframe({
+  0: { opacity: 0, transform: [{ scale: 0.4 }] },
+  100: { opacity: 1, transform: [{ scale: 1 }], easing: Easing.bezier(0.34, 1.56, 0.64, 1) },
+})
+  .duration(240)
+  .reduceMotion(ReduceMotion.System);
+
 export function Button({
   title,
   onPress,
   kind = 'secondary',
   icon,
+  mark,
   disabled,
   style,
 }: {
@@ -586,13 +626,17 @@ export function Button({
   onPress: () => void;
   kind?: 'primary' | 'brand' | 'secondary' | 'ghost' | 'danger';
   icon?: ReactNode;
+  /** Pressed, and what it did is done: its mark stands over its words, at
+   * full strength, and it takes no more presses. */
+  mark?: ReactNode;
   disabled?: boolean;
   style?: StyleProp<ViewStyle>;
 }) {
+  const marked = mark != null;
   return (
     <Pressable
       onPress={onPress}
-      disabled={disabled}
+      disabled={disabled || marked}
       style={({ pressed }) => [
         styles.button,
         kind === 'primary' && styles.primary,
@@ -605,11 +649,11 @@ export function Button({
             : kind === 'brand'
               ? { backgroundColor: '#9aeaa4' }
               : { backgroundColor: t.hover }),
-        disabled && { opacity: 0.55 },
+        disabled && !marked && { opacity: 0.55 },
         style,
       ]}
     >
-      {icon}
+      {marked && icon ? <View style={styles.unseen}>{icon}</View> : icon}
       <Text
         style={[
           styles.buttonText,
@@ -617,10 +661,16 @@ export function Button({
           kind === 'brand' && styles.brandText,
           kind === 'ghost' && { color: t.dim },
           kind === 'danger' && { color: t.failed },
+          marked && styles.unseen,
         ]}
       >
         {title}
       </Text>
+      {marked ? (
+        <Animated.View entering={MARK_IN} pointerEvents="none" style={styles.buttonMark}>
+          {mark}
+        </Animated.View>
+      ) : null}
     </Pressable>
   );
 }
@@ -649,6 +699,32 @@ export function IconButton({
     >
       {children}
     </Pressable>
+  );
+}
+
+/**
+ * Related glyph buttons in one frame — the desktop's `icon_cluster`: the
+ * mode pill's edge, fill and height, touching cells with a hairline between.
+ * The cells are 34 tall; hit-slop makes up the rest of the touch target.
+ */
+export function IconCluster({ actions }: { actions: { label: string; onPress: () => void; icon: ReactNode }[] }) {
+  return (
+    <View style={styles.cluster}>
+      {actions.map((action, index) => (
+        <Fragment key={action.label}>
+          {index > 0 ? <View style={styles.clusterRule} /> : null}
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={action.label}
+            onPress={action.onPress}
+            hitSlop={{ top: 5, bottom: 5 }}
+            style={({ pressed }) => [styles.clusterCell, pressed && { backgroundColor: t.selection }]}
+          >
+            {action.icon}
+          </Pressable>
+        </Fragment>
+      ))}
+    </View>
   );
 }
 
@@ -797,6 +873,16 @@ export function TabBar({
   );
 }
 
+/** A row's inset from its edge to its mark's slot. */
+export const ROW_INSET = 14;
+
+/** The slot a row's mark is centred in: a project badge's width, so an
+ * agent's mark under a project heading sits on the badge's centreline. */
+export const MARK_SLOT = 22;
+
+/** From the slot to the row's words. */
+export const MARK_GAP = 8;
+
 /** Room a scrolling screen leaves under its content for the tab bar. */
 export const TAB_BAR_ROOM = 104;
 
@@ -854,12 +940,16 @@ export const styles = StyleSheet.create({
   },
   headingText: { fontFamily: font.proseMedium, fontSize: size.detail, color: t.dim },
   count: { fontFamily: font.chrome, fontSize: 12, color: t.faint },
+  // Its badge stands in the same slot a row's mark does, so the badge and
+  // the marks under it share one column and every name starts at the
+  // same inset.
   project: {
-    height: 40,
+    height: 48,
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 10,
-    paddingHorizontal: 6,
+    gap: MARK_GAP,
+    paddingLeft: ROW_INSET,
+    paddingRight: 6,
     borderRadius: size.radiusRow,
   },
   open: { transform: [{ rotate: '90deg' }] },
@@ -869,17 +959,19 @@ export const styles = StyleSheet.create({
     minHeight: size.row,
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 11,
+    gap: MARK_GAP,
     paddingVertical: 9,
-    paddingLeft: 14,
+    paddingLeft: ROW_INSET,
     paddingRight: 12,
     borderRadius: size.radiusRow,
   },
   marker: { position: 'absolute', left: 0, top: 12, bottom: 12, width: 3, borderRadius: 2, backgroundColor: t.marker },
-  mark: { width: 16, alignItems: 'center' },
+  mark: { width: MARK_SLOT, alignItems: 'center' },
   rowText: { flex: 1, minWidth: 0, gap: 3 },
   name: { fontFamily: font.chrome, fontSize: size.name, color: t.text },
   detail: { fontFamily: font.prose, fontSize: size.detail, color: t.dim },
+  // Only as wide as its words, so the wipe starts at the text's end.
+  detailLine: { alignSelf: 'flex-start', maxWidth: '100%' },
   state: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   stateText: { fontFamily: font.chrome, fontSize: 11.5 },
   figure: { gap: 3, minWidth: 0 },
@@ -959,10 +1051,6 @@ export const styles = StyleSheet.create({
     height: 54,
     gap: 10,
     backgroundColor: t.brand,
-    shadowColor: t.brand,
-    shadowOpacity: 0.28,
-    shadowRadius: 14,
-    shadowOffset: { width: 0, height: 8 },
   },
   // The system's own sans, not a brand face: the one call to action reads
   // as the phone's.
@@ -975,7 +1063,22 @@ export const styles = StyleSheet.create({
   secondary: { borderWidth: 1, borderColor: t.border },
   danger: { borderWidth: 1, borderColor: tint(t.failed, 0.45) },
   buttonText: { fontFamily: font.proseMedium, fontSize: size.body, color: t.text },
+  // Over the words it stands for, which keep the button its width.
+  buttonMark: { ...StyleSheet.absoluteFill, alignItems: 'center', justifyContent: 'center' },
+  unseen: { opacity: 0 },
   iconButton: { width: 40, height: 40, borderRadius: size.radius, alignItems: 'center', justifyContent: 'center' },
+  cluster: {
+    height: 34,
+    flexDirection: 'row',
+    alignItems: 'stretch',
+    borderRadius: 17,
+    borderWidth: 1,
+    borderColor: t.border,
+    backgroundColor: t.sunken,
+    overflow: 'hidden',
+  },
+  clusterRule: { width: 1, backgroundColor: t.border },
+  clusterCell: { width: 40, alignItems: 'center', justifyContent: 'center' },
   banner: { borderWidth: 1, borderRadius: size.radiusCard, padding: 12, gap: 10 },
   toggle: {
     width: 44,
@@ -1019,10 +1122,6 @@ export const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: t.border,
     borderRadius: 29,
-    shadowColor: '#000',
-    shadowOpacity: 0.6,
-    shadowRadius: 18,
-    shadowOffset: { width: 0, height: 16 },
   },
   tab: { width: 64, height: 46, borderRadius: 23, alignItems: 'center', justifyContent: 'center' },
   tabOn: { backgroundColor: t.selection },

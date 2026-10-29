@@ -10,7 +10,7 @@ describe('confirm', () => {
 
   test('uses browser confirm on web', async () => {
     Object.defineProperty(Platform, 'OS', { configurable: true, value: 'web' });
-    const browser = jest.fn(() => true);
+    const browser = jest.fn((_message?: string) => true);
     Object.defineProperty(globalThis, 'confirm', { configurable: true, value: browser });
     await expect(confirm('Forget?', 'This removes it.', 'Forget')).resolves.toBe(true);
     expect(browser).toHaveBeenCalledWith('Forget?\n\nThis removes it.');

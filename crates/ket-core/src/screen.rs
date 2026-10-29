@@ -8,9 +8,14 @@
 //! dialog itself on the pane's status, as a question with the dialog's own
 //! numbered options — see [`crate::agent_status::StatusStore::screen_dialog`].
 //!
-//! Read only for a Codex pane already waiting on a prompt, on the host's
+//! Codex also asks things no hook reports at all. A plan finished in Plan
+//! mode ends its turn — `Stop` fires — and only then does the TUI ask
+//! "Implement this plan?", so the pane reads idle while it waits on a
+//! person. That is read here the same way, and the pane waits on it.
+//!
+//! Read only for a Codex pane waiting on a prompt or idle, on the host's
 //! one-second tick, [`DIALOG_ROWS`] rows under the parser's lock: nothing
-//! for any other agent, and nothing for a Codex pane at work or idle.
+//! for any other agent, and nothing for a Codex pane at work.
 //!
 //! Grok's own permission menu is read here too, but only when a phone
 //! answers it: its rows change with the prompt, so the number to press is
@@ -41,6 +46,27 @@ pub struct Dialog {
     pub question: String,
     /// Its numbered options in order, without the numbers.
     pub options: Vec<String>,
+    /// Whether Enter follows the option's number. Codex's pickers take the
+    /// number alone, and an Enter after it lands in whatever comes next —
+    /// the composer, with any draft in it.
+    pub enter: bool,
+}
+
+impl Dialog {
+    /// The keys that pick option `at`, counted from zero.
+    pub fn keys(&self, at: usize) -> Vec<u8> {
+        let mut keys = (at + 1).to_string().into_bytes();
+        if self.enter {
+            keys.push(b'\r');
+        }
+        keys
+    }
+}
+
+/// Whichever Codex dialog is up at the foot of the screen, if any — see
+/// [`codex_rate_limit`] and [`codex_plan_implementation`].
+pub fn codex_dialog(rows: &[String]) -> Option<Dialog> {
+    codex_rate_limit(rows).or_else(|| codex_plan_implementation(rows))
 }
 
 /// The bottom `n` rows of the screen as text, each trimmed on the right.
@@ -75,8 +101,35 @@ pub fn bottom_rows<T>(term: &Term<T>, n: usize) -> Vec<String> {
 /// bottom: that is what says the dialog is up now rather than left in the
 /// scrollback above.
 pub fn codex_rate_limit(rows: &[String]) -> Option<Dialog> {
-    const TITLE: &str = "Approaching rate limits";
-    let at = rows.iter().rposition(|row| row.contains(TITLE))?;
+    // Answered as #77 shipped it, number and Enter.
+    codex_titled(rows, "Approaching rate limits", true)
+}
+
+/// Codex's question once a plan made in Plan mode is done, as Codex CLI
+/// 0.164 draws it:
+///
+/// ```text
+/// Implement this plan?
+///
+/// › 1. Yes, implement this plan          Switch to Default and start coding
+///   2. Yes, clear context and implement  Fresh thread with this plan
+///   3. No, stay in Plan mode             Continue planning with the model
+///
+/// Press enter to confirm or esc to go back
+/// ```
+///
+/// It is drawn after the turn's `Stop`, and no hook says it is up. A digit
+/// picks its option and takes it at once, so no Enter follows. The options
+/// are their labels alone, without the descriptions beside them. `None` on
+/// the same terms as [`codex_rate_limit`].
+pub fn codex_plan_implementation(rows: &[String]) -> Option<Dialog> {
+    codex_titled(rows, "Implement this plan?", false)
+}
+
+/// A Codex picker headed `title`: an optional line asking something, its
+/// numbered options, and the footer that says it is live.
+fn codex_titled(rows: &[String], title: &str, enter: bool) -> Option<Dialog> {
+    let at = rows.iter().rposition(|row| row.contains(title))?;
     let live_from = rows.len().saturating_sub(FOOTER_ROWS);
     let mut question = None;
     let mut options = Vec::new();
@@ -100,14 +153,16 @@ pub fn codex_rate_limit(rows: &[String]) -> Option<Dialog> {
         }
     }
     (footer && options.len() >= 2).then(|| Dialog {
-        title: TITLE.to_owned(),
+        title: title.to_owned(),
         question: question.unwrap_or_default(),
         options,
+        enter,
     })
 }
 
 /// `1. Switch to gpt-6-luna`, with or without a selection mark before the
-/// number.
+/// number. A description drawn beside the label, a column over, is left
+/// off.
 fn numbered_option(row: &str) -> Option<String> {
     let row = row.trim_start_matches(['\u{203a}', '>', '\u{276f}', '\u{2022}', ' ']);
     let (number, rest) = row.split_once(". ")?;
@@ -115,7 +170,21 @@ fn numbered_option(row: &str) -> Option<String> {
         return None;
     }
     let rest = rest.trim();
-    (!rest.is_empty()).then(|| rest.to_owned())
+    let label = rest.split_once("  ").map_or(rest, |(label, _)| label);
+    (!label.is_empty()).then(|| label.to_owned())
+}
+
+/// Whether Codex's `request_user_input` form is up on its first question
+/// of `count`, none of them answered yet: `Question 1/2 (2 unanswered)`,
+/// as Codex CLI 0.164 heads it. Its numbers answer one question each, in
+/// order, so they mean what the phone meant only from there.
+pub fn codex_user_input_from_start(rows: &[String], count: usize) -> bool {
+    let start = format!("Question 1/{count} ({count} unanswered)");
+    rows.iter()
+        .rev()
+        .map(|row| row.trim())
+        .find(|row| row.starts_with("Question ") && row.contains('/'))
+        .is_some_and(|row| row.starts_with(&start))
 }
 
 /// Grok's permission menu, as Grok 1.0.62's TUI draws it: the options in
@@ -185,4 +254,110 @@ fn grok_option(row: &str) -> Option<(u8, String)> {
         .or_else(|| rest.trim_start().strip_prefix("(\u{25cf})"))?;
     let label = rest.trim();
     (!label.is_empty()).then(|| (digit, label.to_owned()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rows(text: &str) -> Vec<String> {
+        text.lines().map(|row| row.trim_end().to_owned()).collect()
+    }
+
+    /// Codex CLI 0.164's plan question, at the foot of an 80-column screen.
+    const PLAN: &str = "\
+• Proposed plan: split the parser.
+
+  Implement this plan?
+
+
+› 1. Yes, implement this plan          Switch to Default and start coding
+  2. Yes, clear context and implement  Start a fresh thread (current context:
+                                       89% used)
+  3. No, stay in Plan mode             Continue planning with the model
+
+  Press enter to confirm or esc to go back";
+
+    #[test]
+    fn codexs_plan_question_is_read_with_its_labels_alone() {
+        let dialog = codex_dialog(&rows(PLAN)).expect("the plan question");
+        assert_eq!(dialog.title, "Implement this plan?");
+        assert_eq!(dialog.question, "");
+        assert_eq!(
+            dialog.options,
+            [
+                "Yes, implement this plan",
+                "Yes, clear context and implement",
+                "No, stay in Plan mode"
+            ]
+        );
+        // The number takes it; an Enter would go to the composer after.
+        assert_eq!(dialog.keys(0), b"1");
+    }
+
+    #[test]
+    fn a_plan_question_left_in_the_scrollback_is_not_up() {
+        let mut screen = rows(PLAN);
+        screen.extend(["", "", "", "› ", "", "  ? for shortcuts"].map(str::to_owned));
+        assert_eq!(codex_dialog(&screen), None);
+    }
+
+    #[test]
+    fn the_rate_limit_notice_keeps_its_enter() {
+        let screen = rows(
+            "\
+  Approaching rate limits
+  Switch to gpt-6-luna for lower credit usage?
+› 1. Switch to gpt-6-luna
+  2. Keep current model
+  3. Keep current model (never show again)
+  Press enter to confirm or esc to go back",
+        );
+        let dialog = codex_dialog(&screen).expect("the notice");
+        assert_eq!(dialog.title, "Approaching rate limits");
+        assert_eq!(
+            dialog.question,
+            "Switch to gpt-6-luna for lower credit usage?"
+        );
+        assert_eq!(dialog.options.len(), 3);
+        assert_eq!(dialog.keys(1), b"2\r");
+    }
+
+    #[test]
+    fn codexs_form_is_answered_only_from_its_first_question() {
+        let form = |progress: &str| {
+            rows(&format!(
+                "\
+  {progress}
+  Which crate?
+
+  › 1. ket-core  The engine
+    2. ket-ui    The window
+
+  tab to add notes | enter to submit answer | esc to interrupt"
+            ))
+        };
+        assert!(codex_user_input_from_start(
+            &form("Question 1/2 (2 unanswered)"),
+            2
+        ));
+        assert!(codex_user_input_from_start(
+            &form("Question 1/1 (1 unanswered) · auto-resolves in 1m 00s"),
+            1
+        ));
+        // Moved on at the desk, partly answered, or another form entirely.
+        assert!(!codex_user_input_from_start(
+            &form("Question 2/2 (1 unanswered)"),
+            2
+        ));
+        assert!(!codex_user_input_from_start(
+            &form("Question 1/2 (1 unanswered)"),
+            2
+        ));
+        assert!(!codex_user_input_from_start(
+            &form("Question 1/3 (3 unanswered)"),
+            2
+        ));
+        assert!(!codex_user_input_from_start(&rows("› "), 1));
+    }
 }

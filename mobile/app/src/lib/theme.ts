@@ -193,6 +193,18 @@ export function tint(hex: string, alpha: number): string {
   return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${alpha})`;
 }
 
+/** `over` at some opacity laid on `under`, as one solid colour: the tint
+ * for something drawn over other things, which must not show through. */
+export function blend(under: string, over: string, alpha: number): string {
+  const a = parseInt(under.slice(1), 16);
+  const b = parseInt(over.slice(1), 16);
+  const channel = (shift: number) =>
+    Math.round(((a >> shift) & 255) * (1 - alpha) + ((b >> shift) & 255) * alpha)
+      .toString(16)
+      .padStart(2, '0');
+  return `#${channel(16)}${channel(8)}${channel(0)}`;
+}
+
 export const font = {
   chrome: 'GeistMono_400Regular',
   chromeMedium: 'GeistMono_500Medium',
@@ -215,7 +227,7 @@ export const size = {
   value: 15,
   title: 15,
   /** A worktree row. */
-  row: 56,
+  row: 58,
   /** A plain list row: a setting, a device. */
   rowSm: 48,
   control: 44,

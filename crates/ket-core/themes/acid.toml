@@ -1,81 +1,82 @@
-# Deep green cards on a lime desk, lit with lime and yellow.
+# Deep green cards on a near-black desk, lit with lime and yellow.
 #
-# Inverts the ladder every other theme climbs: the desk — the gutters
-# between the cards, and the status bar's ground — is the loud colour,
-# and the cards set into it are a deep, dark green. Lime is then spent
-# on everything a highlight can be: the chrome accent, keywords, the
-# cursor, "running", hairlines and the selection. Yellow is the
-# `marker`, "waiting on you", a modified line and strings; a paler step
-# of either stands in for a third state. Red is kept for failures and
-# removed lines only: a broken session has to look broken. What sits
-# straight on the desk reads it through `on-backdrop`.
+# The ladder every other dark theme climbs — a desk darker than the cards
+# set into it — so a phone, which draws its whole screen on the desk, reads
+# it as it reads Desk. The acid is in the light: lime is spent on
+# everything a highlight can be — the chrome accent, keywords, the cursor,
+# "running", an added line — softened from neon so a full window of it
+# does not glare. Yellow is the `marker`, "waiting on you", a modified line
+# and strings; a paler step of either stands in for a third state. The dim
+# ink is a sage rather than a yellow-green, so secondary text recedes
+# instead of glowing. Red is kept for failures and removed lines only: a
+# broken session has to look broken.
 
 label = "Acid"
 appearance = "dark"
-backdrop = "#a6f000"
-surface = "#061a0b"
-panel = "#061a0b"
-elevated = "#0e2c14"
-sunken = "#0a2410"
-hover = "#0f2b14"
-selection = "#1f4d16"
-border = "#3f7a12"
-rule = "#18401a"
-marker = "#ffe600"
-accent = "#b6ff00"
-accent_hover = "#e2ff8c"
-on_accent = "#000000"
-focus_ring = "#b6ff00"
+backdrop = "#020904"
+surface = "#07140a"
+panel = "#07140a"
+elevated = "#0d2212"
+sunken = "#0a1a0d"
+hover = "#0c1f10"
+selection = "#18361a"
+border = "#1f3d1f"
+rule = "#12291a"
+marker = "#f2d94a"
+accent = "#a6e22e"
+accent_hover = "#c8f07a"
+on_accent = "#071206"
+focus_ring = "#a6e22e"
 
 [text]
-primary = "#efffd2"
-dim = "#a3d16a"
+primary = "#eaf7dc"
+dim = "#93b07e"
 
 [diff]
-added = "#b6ff00"
-removed = "#ff3355"
-modified = "#ffe600"
-context = "#a3d16a"
-hunk_header = "#ffe600"
+added = "#a6e22e"
+removed = "#ff5a6e"
+modified = "#f2d94a"
+context = "#93b07e"
+hunk_header = "#f2d94a"
 
 [status]
-running = "#b6ff00"
-attention = "#ffe600"
-failed = "#ff3355"
-merging = "#e2ff8c"
+running = "#8fdc3a"
+attention = "#f2d94a"
+failed = "#ff5a6e"
+merging = "#c8f07a"
 
 [quota]
-warm = "#fff38a"
-hot = "#ffe600"
-critical = "#ff3355"
+warm = "#f5e58a"
+hot = "#f2d94a"
+critical = "#ff5a6e"
 
 [terminal]
-foreground = "#efffd2"
-background = "#061a0b"
-cursor = "#b6ff00"
+foreground = "#eaf7dc"
+background = "#07140a"
+cursor = "#a6e22e"
 
 [terminal.ansi]
-black = "#1f4d16"
-red = "#ff3355"
-green = "#b6ff00"
-yellow = "#ffe600"
-blue = "#d4ff4d"
-magenta = "#fff38a"
-cyan = "#e2ff8c"
-white = "#dcf5a8"
-bright_black = "#5f9a2c"
-bright_red = "#ff8095"
-bright_green = "#e2ff8c"
-bright_yellow = "#fff38a"
-bright_blue = "#e6ff99"
-bright_magenta = "#fff9c2"
-bright_cyan = "#f0ffc2"
+black = "#18361a"
+red = "#ff5a6e"
+green = "#a6e22e"
+yellow = "#f2d94a"
+blue = "#b8e070"
+magenta = "#f5e58a"
+cyan = "#c8f07a"
+white = "#d6ecc2"
+bright_black = "#5f8a48"
+bright_red = "#ff8a99"
+bright_green = "#c8f07a"
+bright_yellow = "#f8ea98"
+bright_blue = "#d4f09a"
+bright_magenta = "#faf2c4"
+bright_cyan = "#e4f8bc"
 bright_white = "#ffffff"
 
 [syntax]
-keyword = "#b6ff00"
-string = "#ffe600"
-comment = "#6ea83a"
-number = "#fff38a"
-kind = "#e2ff8c"
-punctuation = "#a3d16a"
+keyword = "#a6e22e"
+string = "#f2d94a"
+comment = "#5f8a48"
+number = "#f5e58a"
+kind = "#c8f07a"
+punctuation = "#93b07e"

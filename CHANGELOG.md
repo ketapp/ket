@@ -15,6 +15,114 @@ words; no internal names, no commit hashes. ket reads this file
 
 ### New
 
+- The phone's terminal can send keys one at a time: switch the line at the
+  bottom from Message to Live keys and each key you press goes straight to the
+  terminal, with no Enter after it. Use it to answer a prompt that takes a
+  single key, such as a digit for Claude Code's suggestions, or y and n.
+- The New worktree dialog opens on a prompt, like the phone's New task: say
+  what the agent should do and ket makes the worktree, names the branch from
+  the prompt's first words, and starts the agent on it with the model and
+  effort you pick beside the agent. The branch can be typed over, and a
+  reset puts the prompt's name back. Leave the prompt empty for a worktree
+  with just a shell, as before. Economy is a small menu in the dialog's
+  footer now, showing what the chosen level changes.
+- When nothing needs you, the phone's Needs you tab shows the planet from
+  ket's welcome window rising under the tab bar, drawn in glyphs and turning
+  slowly, instead of a lone card on black. It holds still under Reduce Motion
+  and while the tab is out of sight.
+- Shift-click Delete in a worktree's right-click menu to delete it without the
+  confirmation. The row reads "Delete, don't ask" while shift is held, and
+  work that would be lost still stops the delete and asks.
+- Jump to a line in the open editor from the file finder: press ⌘P, type `:122`,
+  and press Return. In a diff tab the same lands on that line of the file as
+  it is now, or on the nearest change after it when the line is not part of
+  one.
+- Your phone can tell you what needs you while ket is not in front: a banner
+  when an agent stops on a prompt, when a task finishes or fails, and when a
+  check fails on a pull request, with the app's badge counting the prompts
+  waiting. Turn it on in Settings → Notifications, with a switch for each
+  kind. The phone posts these itself from what your Mac tells it, so they
+  arrive while the connection is still up — about half a minute after you
+  leave the app — and the rest wait for the next open.
+- Arrange your snippets: drag one in the list in Settings → Snippets to a new
+  place, or hold ⌥ and press ↑ or ↓ to move the one showing in the editor.
+  The order you leave is the order menus offer them in.
+
+### Improved
+
+- The top of the phone's Worktrees screen is as tall as every other screen's
+  header, and the desktop's name sits in a rounded bar across its width with
+  the lock set into its end. The ket mark beside it shows how the line to the
+  desktop is: green when connected, grey while connecting, red when it is
+  down.
+- The buttons at the top of a chat on your phone, the mode pill and the
+  worktree and terminal buttons beside it, are a little taller with larger
+  glyphs, so they are easier to hit.
+- A terminal’s agent view list on your phone looks like the rest of the app:
+  the same margin as every other screen, a terminal button framed like the
+  chat’s, and each group as one card with its name and count at the top, as
+  on the Needs you tab.
+- A worktree’s right-click menu is shorter, with Git actions grouped in a
+  submenu and wider menus to give labels more room. Its header says Worktree,
+  and it opens directly on its actions, without a search row.
+
+- On the phone, the Mac switcher comes up as a sheet from the foot of the
+  screen instead of a menu under the pill, and every sheet — New task, a
+  session's settings, the Mac switcher — now rises the same way.
+- On your phone's Worktrees list a project's badge and the agent marks under
+  it now sit in one column, so every name starts at the same place; rows and
+  project headings have a little more room; and the list's card ends above
+  the tab bar instead of running off the foot of the screen behind it.
+- A worktree's screen on your phone is its changes: the files it changed
+  since its base with the lines and commits ahead over them, and Merge or
+  Pull request docked at the foot. The figures that repeated the chat and
+  the list, and the Terminal and New session buttons, are gone; the
+  terminal, a new session, Pin, Delete and the rest of a pull request's
+  actions are in the ⋯ menu in the bar, and a pull request's first thing
+  to do takes the foot while it is open.
+- Tap your Mac's name at the top of Worktrees on your phone or iPad to see
+  the Macs paired with it and how each is connected, and switch between them.
+  It opens with one Mac too.
+- Start task on your phone opens a chat straight away: your task as the
+  message on its way, and under it what your Mac is doing — making the
+  worktree, then starting the agent — with the seconds counted. It becomes
+  the agent's own chat the moment the agent is up, and anything you typed
+  meanwhile is kept as the draft. Two minutes without a worktree and it says
+  so, with the choice to keep waiting, ask again or let it go. The row on
+  Worktrees shows the same stage and opens the chat.
+- Your Mac picks up a task from your phone within a moment. It used to wait
+  for the window's next refresh, up to half a minute with ket in the
+  background.
+- Add project no longer stops at a folder that isn't ready. A folder that
+  isn't a Git repository offers Create repository; one with no commits yet
+  offers Make the first commit; a base branch that doesn't exist offers to
+  create it. Each is one button in the dialog, instead of git's error.
+- Acid is easier on the eyes: a near-black green desk instead of neon lime,
+  with lime and yellow kept for what's lit — running, waiting, the accent —
+  in softer shades, and sage for secondary text. On your phone it's no
+  longer a lime sheet with pale words on it.
+- On the phone, Worktrees no longer carries a prompt box above the tab bar.
+  New work starts from the green Start button at the top of the list, which
+  opens the full sheet: project, agent, base, model and effort.
+- The phone's composer moves: Send lights up green the moment there is
+  something to send, launches its arrow on the tap and turns into Stop
+  while the agent works; + turns into × as its menu opens; and the + and /
+  menus float over the chat, so nothing under them shifts and the keyboard
+  stays up. With Reduce Motion on, it all lands at once.
+- The green Secure pill at the top of your phone's Worktrees screen is now a
+  padlock on the end of your Mac's name. It hangs open and grey while the
+  phone connects, and snaps shut and turns green the moment the line to your
+  Mac is sealed, on every connect and reconnect. Tap it, as before, for what
+  that means. With Reduce Motion on it is simply open or shut.
+- In Settings, MCP has a section of its own beside Agents and Permissions: the
+  servers the selected worktree's agent CLIs are configured with, the calls ket
+  has seen them make, and the commands that set them up — no longer at the
+  bottom of the Agents section.
+
+- On your phone, a tab running Claude Code's agent view lists its background
+  sessions — waiting on you, working and done — and each opens as a chat you
+  can read and reply to. Replying opens that session in agent view on your
+  Mac first, so the message never lands in a different one.
 - The phone's Worktrees screen looks like your Mac's sidebar: a compact
   filter with New beside it, and the list running the full height under a
   floating tab bar. Worktrees at work open up to show what their agent is
@@ -24,7 +132,7 @@ words; no internal names, no commit hashes. ket reads this file
   project, act on its pull request, or delete it. Delete asks first, and
   offers Delete anyway when it would lose uncommitted work. Your
   repository's own checkout can't be pinned or deleted.
-- Put idle agents to sleep from a worktree's menu while their tabs stay open, then wake into the same conversation. You can turn on automatic sleep and choose its delay in Settings → General.
+- Put idle agents to sleep from a worktree's menu while their tabs stay open, then wake into the same conversation. You can turn on automatic sleep and choose its delay in Settings → General. Asleep agents show on your phone too, with when they slept and what that freed, and a tap wakes one on your Mac and opens its chat — rather than the worktree saying nothing is running until you click the tab on the Mac.
 - Merge a pull request, update its branch, mark a draft ready, reopen a closed one, or give its review comments to the agent — from the worktree's menu on your Mac, or from the pull request card on your phone.
 - Reach your Mac from your phone over Tailscale away from home, or add an address for another network without pairing again.
 - Open a pull request from your phone: Pull request… beside Merge on a
@@ -114,6 +222,16 @@ words; no internal names, no commit hashes. ket reads this file
 
 ### Improved
 
+- Deleting a worktree from your phone takes it off the list the moment you
+  confirm, instead of some twenty seconds later when your Mac has finished
+  with git. If the delete is refused, the row comes back with the reason.
+- A terminal on your phone always takes the phone's size now, so its text
+  wraps to the screen at a size you can read; the switch for it in Settings
+  is gone. The desktop gets its own size back when you leave the terminal.
+- On your phone, nothing casts a shadow any more: the tab bar, the quick
+  prompt, menus, the New task sheet and the buttons sit flat on the screen.
+- On your phone, picking another of a terminal's tabs swaps the terminal in
+  place instead of sliding a new screen in.
 - ⌘/ in the editor comments out the selected lines, or the line you're on,
   and uncomments them when you press it again, as in VS Code. Everywhere
   else ⌘/ still opens your snippets.
@@ -160,6 +278,68 @@ words; no internal names, no commit hashes. ket reads this file
 
 ### Fixed
 
+- Returning to Worktrees on your phone keeps the list in place, including
+  its scroll position, filter and folded projects.
+- In New task on your phone, a field's menu opens just above that field
+  and stays on it while the keyboard goes down. The Base branch, Model and
+  Effort menus used to float above the whole form, rows away from what you
+  tapped.
+- Starting a task from your phone takes you to its chat once: when the
+  agent opens, that chat carries on where you are instead of a second
+  screen sliding in. Until the agent has your message, the chat shows just
+  the message on its way, not "No agent has reported from this terminal
+  yet" above it.
+- Changing Claude's effort from your phone no longer says it wasn't
+  switched when it was. The session sheet now moves its mark to your pick
+  as you tap, says at its foot while the change goes through, and then
+  says whether it took, or why not.
+- The Screenshot to agent dialog no longer offers the snippets menu or its
+  shortcut, which did not work correctly with mobile screenshots.
+- Clear build output now finds `target`, `node_modules` and `.next`
+  directories anywhere in a worktree, not only at its root, so a checkout
+  with a package under a subfolder shows them as build output and the menu
+  item is there to clear them. A config ket wrote under the old list moves
+  to the new one; a list you edited yourself is kept.
+- Holding a worktree on your phone no longer nudges its row a pixel as its
+  menu opens.
+- Moving between screens on your phone or iPad no longer shows white or
+  grey behind them: everything behind a screen is drawn in your theme.
+- A Claude tab that Claude Code reattached to one of its background sessions
+  now opens on your phone as that session's conversation, instead of saying
+  the chat couldn't be read until you went back to agent view.
+- A worktree name with spaces in it, like `new worktree bug`, now creates the
+  branch `new-worktree-bug` instead of the dialog showing git's refusal.
+  Anything else git will not have in a branch name is dropped the same way.
+  The status line that flashed under the fields while the worktree was
+  created is gone.
+- When Claude Code backgrounds a session, the phone's chat now says so where
+  it stops, instead of leaving a message you sent marked unseen.
+- Answer Codex's questions from your phone's chat. When Codex asks you to
+  pick between options, the chat shows them as buttons instead of only
+  saying it is waiting; a question that needs typed words still opens the
+  terminal. When Codex finishes a plan and asks "Implement this plan?", the
+  phone shows that too, with Codex's own three choices.
+- Switch Codex out of planning mode from your phone in the same session and
+  worktree, using the Switch mode popup without leaving chat, or Shift+Tab
+  in the terminal's keys.
+- Answering a permission from your phone closes the prompt the moment you
+  tap, and a second tap no longer types the agent's key again. The Mac's
+  sidebar shows the agent running, or stopped if you denied it, as soon as
+  you answer rather than when the agent next reports.
+- OpenCode chats load on your phone again. OpenCode 2 keeps its sessions
+  somewhere new, and the phone said it couldn't read them. A session ket
+  reopened for you reads straight away too, rather than saying no agent has
+  reported until you type to it.
+- Hold any line in a phone chat to copy it, including the ones about the
+  chat itself — why it's empty, what went wrong.
+- OpenCode's questions reach your phone as a card with their choices, as
+  Claude's do, and your pick answers the form on your Mac. A question with a
+  free-text field still waits for the terminal.
+- A chat's bar shows the mode its agent is in — Claude's permission mode,
+  OpenCode's agent, Codex's planning — as a pill beside the name. Tap it to
+  pick another: your Mac presses the agent's own shortcut until the agent
+  reports the mode you chose. Codex, which never says, gets the toggle
+  without a tick.
 - Approving a Grok prompt from your phone no longer rejects it. Grok's
   choices move about from one prompt to the next, so ket now reads the menu
   on screen and picks the choice you tapped by name. When Grok offers no

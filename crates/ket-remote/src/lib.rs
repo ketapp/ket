@@ -27,6 +27,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use prost::Message;
+use snow::params::{DHChoice, HashChoice};
+use snow::resolvers::{CryptoResolver, DefaultResolver};
 
 /// The application contract, generated from `remote.proto`.
 #[allow(missing_docs, clippy::all)]
@@ -43,7 +45,7 @@ pub use session::{MAX_MESSAGE, Session};
 /// This build's protocol version. See the header of `remote.proto`.
 pub const MAJOR: u32 = 1;
 /// See [`MAJOR`].
-pub const MINOR: u32 = 26;
+pub const MINOR: u32 = 29;
 
 /// The Noise pattern a phone pairs with: the pairing secret is mixed in last.
 const PAIR: &str = "Noise_IKpsk2_25519_ChaChaPoly_BLAKE2s";
@@ -127,6 +129,22 @@ fn random<const N: usize>() -> [u8; N] {
     let mut bytes = [0u8; N];
     getrandom::fill(&mut bytes).expect("the operating system has no randomness to give");
     bytes
+}
+
+/// A host's id: the first sixteen bytes of the SHA-256 of its static public
+/// key. A relay can then tell that a host owns the id it asks for from the
+/// key alone, without keeping a list of whose id is whose — see
+/// [`Host::prove`].
+pub fn host_id(public: &[u8; 32]) -> [u8; 16] {
+    let mut hash = DefaultResolver
+        .resolve_hash(&HashChoice::SHA256)
+        .expect("snow's default resolver has SHA-256");
+    let mut digest = [0u8; 32];
+    hash.input(public);
+    hash.result(&mut digest);
+    let mut id = [0u8; 16];
+    id.copy_from_slice(&digest[..16]);
+    id
 }
 
 fn builder(pattern: &'static str) -> snow::Builder<'static> {
@@ -463,23 +481,50 @@ pub struct Peer {
 impl Host {
     /// A host with a new identity and nothing paired.
     pub fn generate() -> Result<Self> {
-        Ok(Self {
-            id: random(),
-            keys: Keypair::generate()?,
-            offers: Vec::new(),
-            grants: Vec::new(),
-        })
+        Ok(Self::restore(Keypair::generate()?, Vec::new()))
     }
 
-    /// A host read back from storage: its id, its key pair, and the phones
-    /// it had granted. Offers are never stored — a restart spends them.
-    pub fn restore(id: [u8; 16], keys: Keypair, grants: Vec<Grant>) -> Self {
-        Self {
-            id,
+    /// A host read back from storage: its key pair, which its id comes from
+    /// (see [`host_id`]), and the phones it had granted. Offers are never
+    /// stored — a restart spends them.
+    pub fn restore(keys: Keypair, grants: Vec<Grant>) -> Self {
+        let mut host = Self {
+            id: [0; 16],
             keys,
             offers: Vec::new(),
             grants,
+        };
+        host.id = host_id(&host.public());
+        host
+    }
+
+    /// Answers a relay's challenge: HMAC-SHA256 over
+    /// [`ket_relay_protocol::proof_message`], keyed by the X25519 agreement
+    /// of this host's static key with the relay's one-time `ephemeral`. Only
+    /// the holder of the key this host's id comes from can make it, and only
+    /// for this `nonce`.
+    pub fn prove(&self, nonce: &[u8; 32], ephemeral: &[u8; 32]) -> Result<[u8; 32]> {
+        let mut dh = DefaultResolver
+            .resolve_dh(&DHChoice::Curve25519)
+            .expect("snow's default resolver has X25519");
+        dh.set(&self.keys.private);
+        let mut shared = [0u8; 32];
+        dh.dh(ephemeral, &mut shared)?;
+        // A low-order point gives everyone the same agreement, so a proof
+        // keyed by it would prove nothing.
+        if shared == [0; 32] {
+            return Err(Error::Protocol("a relay challenge with a low-order key"));
         }
+        let mut hash = DefaultResolver
+            .resolve_hash(&HashChoice::SHA256)
+            .expect("snow's default resolver has SHA-256");
+        let mut tag = [0u8; 32];
+        hash.hmac(
+            &shared,
+            &ket_relay_protocol::proof_message(nonce, &self.id),
+            &mut tag,
+        );
+        Ok(tag)
     }
 
     /// The host's key pair, for writing to storage.

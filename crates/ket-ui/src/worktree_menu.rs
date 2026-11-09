@@ -1016,7 +1016,17 @@ impl Shell {
                 },
             )
         });
-        Some(div().child(parent).children(git).into_any_element())
+        // Out of the flow, as each menu inside it is: the window's root is a
+        // column with a gap between its children, and an in-flow wrapper,
+        // empty as it lays out, still took a gap's worth of height from the
+        // workspace, lifting the status bar while the menu was open.
+        Some(
+            div()
+                .absolute()
+                .child(parent)
+                .children(git)
+                .into_any_element(),
+        )
     }
 
     /// Open Git on hover, allowing a diagonal crossing into its panel.

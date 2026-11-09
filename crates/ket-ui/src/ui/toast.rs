@@ -11,6 +11,12 @@
 //! just did, and it takes itself away again so nobody has to dismiss the news
 //! that something worked.
 //!
+//! **An alert stays.** The one kind that is not news but a warning the reader
+//! must not miss — personal data sent off the machine — is the same card
+//! with buttons under its words: what to do about it, and Dismiss. It does
+//! not leave on its own, and a click on the card does not take it away;
+//! only Dismiss, or its action, does. See [`Spec::actions`].
+//!
 //! **Tone is carried by hue, by a shape, and by the words, never by hue
 //! alone.** Four colours with no other difference is a signal a colour-blind
 //! reader does not get, so each tone also has a mark — tick, triangle, cross —
@@ -187,6 +193,10 @@ pub(crate) struct Spec {
     pub(crate) corner: Corner,
     /// How far through its exit it is, 0 to 1, once it has started leaving.
     pub(crate) exit: Option<f32>,
+    /// For an alert, the buttons under its words — the caller's, Dismiss
+    /// among them. An alert is taken away only by one of them: a click on
+    /// the card does nothing, and it has no timer.
+    pub(crate) actions: Option<AnyElement>,
     /// Its height as last laid out, which the caller keeps across frames.
     ///
     /// The slot a toast sits in opens and closes by animating its height, and
@@ -219,6 +229,7 @@ pub(crate) fn toast(
     let colour = spec.tone.colour(t);
     let inner_w = TOAST_W - 2.0;
     let leaving = spec.exit.is_some();
+    let alert = spec.actions.is_some();
     let exit = spec.exit.map_or(0.0, |p| p.clamp(0.0, 1.0));
     let shown = 1.0 - (exit / FADE_TO).clamp(0.0, 1.0);
     let closed = ease_in_out_cubic(((exit - CLOSE_FROM) / (1.0 - CLOSE_FROM)).clamp(0.0, 1.0));
@@ -246,6 +257,14 @@ pub(crate) fn toast(
                 .text_size(CAPTION)
                 .text_color(paint(t.text.dim))
                 .child(detail)
+        }))
+        .children(spec.actions.map(|actions| {
+            div()
+                .flex()
+                .flex_wrap()
+                .gap(px(6.0))
+                .pt(px(8.0))
+                .child(actions)
         }));
 
     let card = div()
@@ -253,7 +272,8 @@ pub(crate) fn toast(
         .flex()
         .flex_row()
         .flex_none()
-        .items_center()
+        .when(alert, |el| el.items_start())
+        .when(!alert, |el| el.items_center())
         .gap(px(13.0))
         .w(px(inner_w))
         .min_h(px(MIN_H - 2.0))
@@ -304,11 +324,13 @@ pub(crate) fn toast(
         // than falling through to whatever it is floating over. Not once it is
         // leaving: a card that is fading should not swallow a click meant for
         // whatever is showing through it.
-        .when(!leaving, |el| {
+        .when(!leaving && !alert, |el| {
             el.occlude()
                 .cursor_pointer()
                 .on_mouse_down(MouseButton::Left, on_press)
         })
+        // An alert takes the pointer for its buttons, and only they act.
+        .when(!leaving && alert, |el| el.occlude())
         .child(card)
         // Offset rather than moved in the layout, so the stack's alignment
         // and the room's measurement are the resting card's from the first

@@ -13,10 +13,12 @@ use ket_core::github::{self, Checkout};
 
 use crate::Shell;
 use crate::paint::paint;
+use crate::ui::banner::banner;
 use crate::ui::chip::{caption, tag};
 use crate::ui::icon::Icon;
 use crate::ui::menu::{MenuEntry, MenuItem, MenuKey, OpenMenu, dropdown};
 use crate::ui::select::select;
+use crate::ui::toast::Tone;
 
 impl Shell {
     /// Has the open settings check which repository the project's issues go
@@ -65,10 +67,14 @@ impl Shell {
         if !self.github.connected() {
             return Some(self.github_setup("project-github", cx));
         }
+        // A refusal in a banner rather than a red caption: it is the one
+        // thing here to act on, and a sentence long.
         let repo = match &dialog.github_repo {
-            None => caption("Checking the repository\u{2026}", t),
-            Some(Ok(repo)) => caption(format!("Issues go to {repo}"), t),
-            Some(Err(why)) => caption(why.clone(), t).text_color(paint(t.status.failed)),
+            None => caption("Checking the repository\u{2026}", t).into_any_element(),
+            Some(Ok(repo)) => caption(format!("Issues go to {repo}"), t).into_any_element(),
+            Some(Err(why)) => {
+                banner("project-github-repo", Tone::Warning, why.clone(), t).into_any_element()
+            }
         };
         Some(
             div()

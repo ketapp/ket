@@ -27,6 +27,10 @@ use crate::terminal::{LocalTerminal, OutputCursor, Since, StopOutcome, TerminalS
 /// How often housekeeping runs: foregrounds, reaping, idleness.
 const TICK: Duration = Duration::from_secs(1);
 
+/// How often the network inspector's logs are swept of what has outlived
+/// [`crate::network::store::KEPT`].
+const NETWORK_SWEEP: Duration = Duration::from_secs(60 * 60);
+
 /// How often hook reports are passed on to windows.
 const HOOK_TICK: Duration = Duration::from_millis(200);
 
@@ -78,11 +82,41 @@ const WAKE_WAIT: Duration = if cfg!(test) {
     Duration::from_secs(45)
 };
 
+/// How long `ket browser` waits for the window to say what the page did. The
+/// window gives a load ten seconds; a screenshot of a long page, or a slow
+/// evaluation, can take a few more. The CLI waits a little longer than this
+/// in all, so it hears why from the host rather than giving up first.
+const BROWSER_WAIT: Duration = if cfg!(test) {
+    Duration::from_secs(2)
+} else {
+    Duration::from_secs(20)
+};
+
+/// What a window says of `ket browser`'s request: what the page did, or why
+/// not.
+pub(super) type Browsed = std::result::Result<wire::BrowserAnswer, String>;
+
+/// A `ket browser` request waiting for its answer: the window it went to,
+/// the only connection whose answer counts, and where the answer goes.
+type BrowserWaiter = (Arc<Out>, mpsc::Sender<Browsed>);
+
 /// What a phone's wake comes to: the terminal the tab is now, or why not.
 pub(super) type Woken = std::result::Result<u64, String>;
 
+/// What a window says of a phone's Start fresh: the fresh tab's key, or why
+/// not.
+type Freshened = std::result::Result<String, String>;
+
 /// What a window says of a phone's delete: the branch it kept, or why not.
 pub(super) type Deleted = std::result::Result<Option<String>, String>;
+
+/// A phone's request waiting on a window: the window it went to, the only
+/// connection whose answer counts — see [`answered`] — and where the answer
+/// goes.
+type Waiter<T> = (Arc<Out>, mpsc::Sender<T>);
+
+/// A phone's wake waiting on a window: a [`Waiter`] that keeps the tab's key.
+type WakeWaiter = (Arc<Out>, (String, mpsc::Sender<Woken>));
 
 /// Why a phone's delete did not happen.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -117,6 +151,9 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// Every connected window, by connection serial — see `Host::outs`.
+type Outs = Arc<Mutex<Vec<(u64, Arc<Out>)>>>;
+
 /// Writes to one window. Shared by every thread with something to tell it.
 struct Out {
     stream: Mutex<UnixStream>,
@@ -127,7 +164,7 @@ struct Out {
     greeted: AtomicBool,
     /// Whether the other end is a ket window rather than another program,
     /// such as the CLI — see `same_program`. Only a window can be handed
-    /// work to start or merge.
+    /// work to start or merge, or the hook traffic kept for one.
     window: bool,
 }
 
@@ -241,8 +278,10 @@ pub(super) struct Host {
     /// When the host last had a window or a running terminal.
     busy_at: Mutex<Instant>,
     build: String,
-    /// Every connected window, for what is not about one terminal.
-    outs: Mutex<Vec<(u64, Arc<Out>)>>,
+    /// Every connected window, for what is not about one terminal. Shared
+    /// with the network inspector's log thread, which tells the windows of
+    /// each request it writes down.
+    outs: Outs,
     /// Hook traffic that arrived with no window to hear it.
     backlog: Mutex<(VecDeque<HookReport>, VecDeque<StatusLine>)>,
     /// Where agents report, with credentials bound to terminal pane keys.
@@ -273,10 +312,14 @@ pub(super) struct Host {
     /// [`Request::Asleep`]. Kept by connection so a wake goes to the window
     /// that has the tab.
     asleep: Mutex<BTreeMap<u64, Vec<wire::AsleepTab>>>,
-    /// Phone wakes waiting for a terminal to open under the tab's key, or
-    /// for the window to say why none will.
-    wake_waiting: Mutex<BTreeMap<u64, (String, mpsc::Sender<Woken>)>>,
+    /// Phone wakes waiting for the window asked to open a terminal under the
+    /// tab's key, or to say why it won't.
+    wake_waiting: Mutex<BTreeMap<u64, WakeWaiter>>,
     next_wake: AtomicU64,
+    /// Phone Start freshes waiting for the window to name the tab it opened
+    /// beside the cold one, or to say why it opened none.
+    fresh_waiting: Mutex<BTreeMap<u64, mpsc::Sender<Freshened>>>,
+    next_fresh: AtomicU64,
     /// The agents' plan usage, as a window last reported it, for phones. The
     /// host fetches none itself: a window already does, and a second fetcher
     /// would double the processes that costs.
@@ -293,14 +336,18 @@ pub(super) struct Host {
     /// Like `usage`, the host asks GitHub nothing itself.
     pull_requests: Mutex<Vec<(String, crate::github::PullRequestStatus)>>,
     /// Phone requests waiting for a window to report that the agent started.
-    fix_checks_waiting: Mutex<BTreeMap<u64, mpsc::Sender<std::result::Result<(), String>>>>,
+    fix_checks_waiting: Mutex<BTreeMap<u64, Waiter<std::result::Result<(), String>>>>,
     next_fix_checks: AtomicU64,
     /// Phone reviews waiting for a window to say the agent has them.
-    review_waiting: Mutex<BTreeMap<u64, mpsc::Sender<std::result::Result<(), String>>>>,
+    review_waiting: Mutex<BTreeMap<u64, Waiter<std::result::Result<(), String>>>>,
     next_review: AtomicU64,
     /// Phone deletes waiting for a window to say the worktree is gone.
-    delete_waiting: Mutex<BTreeMap<u64, mpsc::Sender<Deleted>>>,
+    delete_waiting: Mutex<BTreeMap<u64, Waiter<Deleted>>>,
     next_delete: AtomicU64,
+    /// `ket browser` requests waiting for a window to say what the page did,
+    /// each with the window it went to — see [`Host::finish_browser`].
+    browser_waiting: Mutex<BTreeMap<u64, BrowserWaiter>>,
+    next_browser: AtomicU64,
 }
 
 impl Host {
@@ -322,21 +369,19 @@ impl Host {
     }
 
     /// Turns phones on or off in place. On runs the relay on the Mac at the
-    /// configured port — or dials `KET_RELAY_URL`, when that is set — and off
-    /// ends every phone's session and stops listening; no terminal is
-    /// touched either way. Returns whether phones are on afterwards.
+    /// configured port — or dials `KET_RELAY_URL`, when that is set — and
+    /// links to the relay elsewhere the config names, and off ends every
+    /// phone's session and stops listening; no terminal is touched either
+    /// way. Asked to turn on while on, it takes up a change to the relay
+    /// elsewhere. Returns whether phones are on afterwards.
     fn set_phones(self: &Arc<Self>, enabled: bool) -> Result<bool> {
         let mut slot = lock(&self.phones);
+        let config = crate::config::Config::load().unwrap_or_default().phones;
         match (enabled, slot.is_some()) {
             (true, false) => {
                 let relay = match super::relay_url() {
                     Some(url) => super::phones::Relay::External(url),
-                    None => super::phones::Relay::Local {
-                        port: crate::config::Config::load()
-                            .unwrap_or_default()
-                            .phones
-                            .port,
-                    },
+                    None => super::phones::Relay::Local { port: config.port },
                 };
                 *slot = Some(super::phones::start(self.clone(), relay)?);
             }
@@ -346,6 +391,15 @@ impl Host {
                 }
             }
             _ => {}
+        }
+        // The relay elsewhere as the config has it now, linked, changed or
+        // dropped in place (#142). None beside a development relay.
+        if let Some(phones) = slot.as_ref() {
+            let hosted = super::relay_url()
+                .is_none()
+                .then(|| config.hosted_relay())
+                .flatten();
+            phones.set_hosted(self, hosted);
         }
         Ok(slot.is_some())
     }
@@ -519,7 +573,22 @@ impl Host {
     fn network_proxy(&self) -> Option<Arc<crate::network::Proxy>> {
         let mut proxy = lock(&self.network);
         if proxy.is_none() {
-            match crate::network::Proxy::start(self.network_bindings.clone()) {
+            // Each request written down goes to every window, as the hook
+            // reports do, so a Network panel adds the row as it lands.
+            let outs = self.outs.clone();
+            let told: crate::network::Told = Arc::new(move |worktree: &str, summary| {
+                let reply = Reply::NetworkRequest {
+                    worktree: worktree.to_owned(),
+                    summary: Box::new(summary.clone()),
+                };
+                let Ok(frame) = wire::json(&reply) else {
+                    return;
+                };
+                for out in windows(&outs) {
+                    out.send(&frame);
+                }
+            });
+            match crate::network::Proxy::start(self.network_bindings.clone(), told) {
                 Ok(started) => {
                     tracing::info!(port = started.port(), "network inspector listening");
                     *proxy = Some(Arc::new(started));
@@ -540,18 +609,22 @@ impl Host {
         let Some(route) = crate::network::route_for(&agent) else {
             return;
         };
-        if crate::network::sent_elsewhere(route, &spec.env) {
+        if crate::network::sent_elsewhere(route, spec) {
             tracing::info!(%pane, "network inspector: the agent is sent elsewhere already; left as it is");
             return;
         }
         let Some(proxy) = self.network_proxy() else {
             return;
         };
-        let token = self
-            .network_bindings
-            .bind(crate::network::Binding { pane, agent, route });
-        spec.env
-            .extend(crate::network::launch_env(route, &proxy.base(&token)));
+        let token = self.network_bindings.bind(crate::network::Binding {
+            pane: pane.clone(),
+            agent,
+            route,
+        });
+        if !crate::network::point(route, &proxy.base(&token), spec) {
+            self.network_bindings.forget(&token);
+            tracing::info!(%pane, "network inspector: no command line to point the agent from; left as it is");
+        }
     }
 
     /// Forgets the panes of terminals that have gone, and tells the windows.
@@ -912,6 +985,83 @@ impl Host {
         true
     }
 
+    /// The window showing the tab `key` names: only that one can open a tab
+    /// beside it.
+    fn window_showing(&self, key: &str) -> Option<Arc<Out>> {
+        let open = windows(&self.outs);
+        lock(&self.terminals)
+            .values()
+            .filter(|entry| !entry.killed && !entry.terminal.is_closed())
+            .filter(|entry| entry.key.as_deref() == Some(key))
+            .flat_map(|entry| entry.watchers.iter())
+            .filter(|watcher| watcher.watching())
+            .find_map(|watcher| {
+                open.iter()
+                    .find(|out| Arc::ptr_eq(out, &watcher.out))
+                    .cloned()
+            })
+    }
+
+    /// Starts a fresh session beside the cold one in the tab `key` names, for
+    /// a phone: asks the window showing it, waits for that window to name the
+    /// tab it opened once that tab's agent has started, then finds its
+    /// terminal — all within [`WAKE_WAIT`], since a fresh session starts an
+    /// agent as a wake does.
+    /// `session` and `since_ms` are the cold spell the phone was shown, which
+    /// the window checks is still the tab's. The fresh terminal's id, or why
+    /// not.
+    pub(super) fn start_fresh(&self, key: &str, session: &str, since_ms: u64) -> Woken {
+        let Some(out) = self.window_showing(key) else {
+            return Err("that tab isn't open in a ket window on your Mac".to_owned());
+        };
+        let req = self.next_fresh.fetch_add(1, Ordering::Relaxed);
+        let (sender, receiver) = mpsc::channel();
+        lock(&self.fresh_waiting).insert(req, sender);
+        if !out.reply(&Reply::StartFresh {
+            req,
+            key: key.to_owned(),
+            session: session.to_owned(),
+            since_ms,
+        }) {
+            lock(&self.fresh_waiting).remove(&req);
+            return Err("the ket window closed before it could start fresh".to_owned());
+        }
+        let deadline = Instant::now() + WAKE_WAIT;
+        let named = loop {
+            match receiver.recv_timeout(FIX_CHECKS_LOOK) {
+                Ok(answer) => break answer,
+                Err(_) if !out.alive.load(Ordering::Acquire) => {
+                    break Err("the ket window closed before it started fresh".to_owned());
+                }
+                Err(_) if Instant::now() >= deadline => {
+                    break Err("ket on your Mac didn't say whether it started fresh".to_owned());
+                }
+                Err(_) => {}
+            }
+        };
+        lock(&self.fresh_waiting).remove(&req);
+        let fresh = named?;
+        // Its agent has started, so its terminal is open; looked for again
+        // while the host files it, which can trail the window by a moment.
+        while Instant::now() < deadline {
+            let opened = self.listing().into_iter().find(|(_, key, terminal)| {
+                key.as_deref() == Some(fresh.as_str()) && !terminal.is_closed()
+            });
+            if let Some((id, _, _)) = opened {
+                return Ok(id);
+            }
+            std::thread::sleep(FIX_CHECKS_LOOK);
+        }
+        Err("the fresh session didn't start on your Mac".to_owned())
+    }
+
+    /// A window's answer to [`Reply::StartFresh`].
+    pub(super) fn finish_fresh(&self, req: u64, answer: Freshened) {
+        if let Some(waiting) = lock(&self.fresh_waiting).remove(&req) {
+            let _ = waiting.send(answer);
+        }
+    }
+
     /// Hands a phone's merge to one window, which runs ket's own merge.
     /// `false` when no window is open to do it.
     pub(super) fn merge_work(&self, worktree: String) -> bool {
@@ -955,7 +1105,7 @@ impl Host {
         };
         let req = self.next_delete.fetch_add(1, Ordering::Relaxed);
         let (sender, receiver) = mpsc::channel();
-        lock(&self.delete_waiting).insert(req, sender);
+        lock(&self.delete_waiting).insert(req, (out.clone(), sender));
         if !out.reply(&Reply::DeleteWork {
             req,
             worktree,
@@ -981,9 +1131,10 @@ impl Host {
         deleted
     }
 
-    /// Delivers the window's answer to the phone's waiting delete.
-    pub(super) fn finish_delete_work(&self, req: u64, answer: Deleted) {
-        if let Some(waiting) = lock(&self.delete_waiting).remove(&req) {
+    /// Delivers `from`'s answer to the phone's waiting delete, when `from` is
+    /// the window it went to — see [`answered`].
+    fn finish_delete_work(&self, req: u64, from: &Arc<Out>, answer: Deleted) {
+        if let Some(waiting) = answered(&self.delete_waiting, req, from, "delete") {
             let _ = waiting.send(answer);
         }
     }
@@ -1017,12 +1168,12 @@ impl Host {
                 .find(|(conn, _)| *conn == owner)
                 .map(|(_, out)| out.clone())
         });
-        let Some(out) = out.filter(|out| out.alive.load(Ordering::Acquire)) else {
+        let Some(out) = out.filter(|out| out.window && out.alive.load(Ordering::Acquire)) else {
             return Err("open ket on your Mac to wake this tab".to_owned());
         };
         let req = self.next_wake.fetch_add(1, Ordering::Relaxed);
         let (sender, receiver) = mpsc::channel();
-        lock(&self.wake_waiting).insert(req, (key.to_owned(), sender));
+        lock(&self.wake_waiting).insert(req, (out.clone(), (key.to_owned(), sender)));
         if !out.reply(&Reply::Wake {
             req,
             key: key.to_owned(),
@@ -1047,9 +1198,10 @@ impl Host {
         woken
     }
 
-    /// A window's answer to [`Reply::Wake`]: why the tab stays asleep.
-    pub(super) fn finish_wake(&self, req: u64, answer: Woken) {
-        if let Some((_, waiting)) = lock(&self.wake_waiting).remove(&req) {
+    /// `from`'s answer to [`Reply::Wake`], why the tab stays asleep, when
+    /// `from` is the window it went to — see [`answered`].
+    fn finish_wake(&self, req: u64, from: &Arc<Out>, answer: Woken) {
+        if let Some((_, waiting)) = answered(&self.wake_waiting, req, from, "wake") {
             let _ = waiting.send(answer);
         }
     }
@@ -1091,7 +1243,7 @@ impl Host {
         };
         let req = self.next_fix_checks.fetch_add(1, Ordering::Relaxed);
         let (sender, receiver) = mpsc::channel();
-        lock(&self.fix_checks_waiting).insert(req, sender);
+        lock(&self.fix_checks_waiting).insert(req, (out.clone(), sender));
         if !out.reply(&Reply::FixChecks {
             req,
             worktree,
@@ -1119,9 +1271,10 @@ impl Host {
         handed
     }
 
-    /// Delivers the window's answer to the phone's waiting request.
-    pub(super) fn finish_fix_checks(&self, req: u64, error: Option<String>) {
-        if let Some(waiting) = lock(&self.fix_checks_waiting).remove(&req) {
+    /// Delivers `from`'s answer to the phone's waiting request, when `from`
+    /// is the window it went to — see [`answered`].
+    fn finish_fix_checks(&self, req: u64, from: &Arc<Out>, error: Option<String>) {
+        if let Some(waiting) = answered(&self.fix_checks_waiting, req, from, "fix") {
             let _ = waiting.send(error.map_or(Ok(()), Err));
         }
     }
@@ -1141,7 +1294,7 @@ impl Host {
         };
         let req = self.next_review.fetch_add(1, Ordering::Relaxed);
         let (sender, receiver) = mpsc::channel();
-        lock(&self.review_waiting).insert(req, sender);
+        lock(&self.review_waiting).insert(req, (out.clone(), sender));
         let taken_by = REVIEW_WAIT.saturating_sub(REVIEW_GRACE);
         let until_ms =
             crate::now_ms().saturating_add(u64::try_from(taken_by.as_millis()).unwrap_or(u64::MAX));
@@ -1175,10 +1328,75 @@ impl Host {
         sent
     }
 
-    /// Delivers the window's answer to the phone's waiting review.
-    pub(super) fn finish_send_review(&self, req: u64, error: Option<String>) {
-        if let Some(waiting) = lock(&self.review_waiting).remove(&req) {
+    /// Delivers `from`'s answer to the phone's waiting review, when `from` is
+    /// the window it went to — see [`answered`].
+    fn finish_send_review(&self, req: u64, from: &Arc<Out>, error: Option<String>) {
+        if let Some(waiting) = answered(&self.review_waiting, req, from, "review") {
             let _ = waiting.send(error.map_or(Ok(()), Err));
+        }
+    }
+
+    /// Hands `ket browser`'s request to the window showing the worktree's
+    /// agent — see [`Host::window_for`] — or else to any window but the
+    /// connection that asked, and waits up to [`BROWSER_WAIT`] for what the
+    /// page did. `Err` says why not, as the terminal prints it.
+    fn browser(&self, worktree: String, action: wire::BrowserAction, asker: &Arc<Out>) -> Browsed {
+        // A CLI run from the host's own executable passes for a window.
+        let other = |out: &Arc<Out>| !Arc::ptr_eq(out, asker);
+        let Some(out) = self
+            .window_for(&worktree)
+            .filter(other)
+            .or_else(|| windows(&self.outs).into_iter().find(other))
+        else {
+            return Err("no ket window is open to run the browser in".into());
+        };
+        let req = self.next_browser.fetch_add(1, Ordering::Relaxed);
+        let (sender, receiver) = mpsc::channel();
+        lock(&self.browser_waiting).insert(req, (out.clone(), sender));
+        if !out.reply(&Reply::BrowserAction {
+            req,
+            worktree,
+            action,
+        }) {
+            lock(&self.browser_waiting).remove(&req);
+            return Err("the ket window closed before it could run the browser".into());
+        }
+        let deadline = Instant::now() + BROWSER_WAIT;
+        let answer = loop {
+            match receiver.recv_timeout(FIX_CHECKS_LOOK) {
+                Ok(answer) => break answer,
+                Err(_) if !out.alive.load(Ordering::Acquire) => {
+                    break Err("the ket window closed before the browser answered".into());
+                }
+                Err(_) if Instant::now() >= deadline => {
+                    break Err("the ket window didn't answer in time".into());
+                }
+                Err(_) => {}
+            }
+        };
+        lock(&self.browser_waiting).remove(&req);
+        answer
+    }
+
+    /// Delivers the answer connection `from` gave to `ket browser`'s waiting
+    /// request — when `from` is the window it went to. Request numbers are
+    /// easy to guess, so any other connection, another program that said
+    /// hello among them, is ignored: its answer would be a forged page
+    /// handed to the terminal, and the real window's then dropped.
+    fn finish_browser(&self, req: u64, from: &Arc<Out>, answer: Browsed) {
+        let mut waiting = lock(&self.browser_waiting);
+        let Some((asked, _)) = waiting.get(&req) else {
+            return;
+        };
+        if !Arc::ptr_eq(asked, from) {
+            tracing::debug!(
+                req,
+                "ket host: ignored a browser answer from another connection"
+            );
+            return;
+        }
+        if let Some((_, sender)) = waiting.remove(&req) {
+            let _ = sender.send(answer);
         }
     }
 
@@ -1328,7 +1546,7 @@ impl Host {
             clients: AtomicUsize::new(0),
             busy_at: Mutex::new(Instant::now()),
             build: String::new(),
-            outs: Mutex::new(Vec::new()),
+            outs: Arc::new(Mutex::new(Vec::new())),
             backlog: Mutex::new((VecDeque::new(), VecDeque::new())),
             hooks: (0, String::new()),
             prompts: Arc::default(),
@@ -1341,6 +1559,8 @@ impl Host {
             asleep: Mutex::new(BTreeMap::new()),
             wake_waiting: Mutex::new(BTreeMap::new()),
             next_wake: AtomicU64::new(1),
+            fresh_waiting: Mutex::new(BTreeMap::new()),
+            next_fresh: AtomicU64::new(1),
             usage: Mutex::new(Vec::new()),
             agents: Mutex::new(Vec::new()),
             theme: Mutex::new(None),
@@ -1351,6 +1571,8 @@ impl Host {
             next_review: AtomicU64::new(1),
             delete_waiting: Mutex::new(BTreeMap::new()),
             next_delete: AtomicU64::new(1),
+            browser_waiting: Mutex::new(BTreeMap::new()),
+            next_browser: AtomicU64::new(1),
         })
     }
 
@@ -1382,6 +1604,11 @@ impl Host {
         id
     }
 
+    /// Takes an agent's hook report as the hook listener does.
+    pub(super) fn report_for_tests(&self, report: &agent_hooks::HookReport) -> bool {
+        lock(&self.status).report(report, |_| true)
+    }
+
     /// Takes pull requests as a window's `Request::PullRequests` does.
     pub(super) fn pull_requests_for_tests(
         &self,
@@ -1402,6 +1629,26 @@ impl Host {
         });
         lock(&self.outs).push((u64::MAX, out));
         b
+    }
+
+    /// [`Host::finish_fix_checks`] from the window [`Self::window_for_tests`]
+    /// made.
+    pub(super) fn finish_fix_checks_for_tests(&self, req: u64, error: Option<String>) {
+        self.finish_fix_checks(req, &self.test_window(), error);
+    }
+
+    /// [`Host::finish_delete_work`] from the window [`Self::window_for_tests`]
+    /// made.
+    pub(super) fn finish_delete_work_for_tests(&self, req: u64, answer: Deleted) {
+        self.finish_delete_work(req, &self.test_window(), answer);
+    }
+
+    fn test_window(&self) -> Arc<Out> {
+        lock(&self.outs)
+            .iter()
+            .find(|(conn, _)| *conn == u64::MAX)
+            .map(|(_, out)| out.clone())
+            .expect("a window from window_for_tests")
     }
 }
 
@@ -1467,7 +1714,7 @@ pub(super) fn run() -> Result<()> {
         clients: AtomicUsize::new(0),
         busy_at: Mutex::new(Instant::now()),
         build: super::build_id(),
-        outs: Mutex::new(Vec::new()),
+        outs: Arc::new(Mutex::new(Vec::new())),
         backlog: Mutex::new((VecDeque::new(), VecDeque::new())),
         hook_bindings,
         network: Mutex::new(None),
@@ -1482,6 +1729,8 @@ pub(super) fn run() -> Result<()> {
         asleep: Mutex::new(BTreeMap::new()),
         wake_waiting: Mutex::new(BTreeMap::new()),
         next_wake: AtomicU64::new(1),
+        fresh_waiting: Mutex::new(BTreeMap::new()),
+        next_fresh: AtomicU64::new(1),
         usage: Mutex::new(Vec::new()),
         agents: Mutex::new(Vec::new()),
         theme: Mutex::new(None),
@@ -1492,6 +1741,8 @@ pub(super) fn run() -> Result<()> {
         next_review: AtomicU64::new(1),
         delete_waiting: Mutex::new(BTreeMap::new()),
         next_delete: AtomicU64::new(1),
+        browser_waiting: Mutex::new(BTreeMap::new()),
+        next_browser: AtomicU64::new(1),
     });
 
     watch_signals(host.clone());
@@ -1534,11 +1785,18 @@ pub(super) fn run() -> Result<()> {
     Ok(())
 }
 
-/// Foregrounds, reaping, and leaving when idle.
+/// Foregrounds, reaping, sweeping old network logs, and leaving when idle.
 fn housekeeping(host: &Arc<Host>, socket: &std::path::Path) {
+    let mut swept: Option<Instant> = None;
     loop {
         std::thread::sleep(TICK);
         let now = Instant::now();
+        // On starting, then hourly: logs past their time go whether or not
+        // the inspector is on now.
+        if swept.is_none_or(|at| now.duration_since(at) >= NETWORK_SWEEP) {
+            crate::network::store::sweep_expired();
+            swept = Some(now);
+        }
         // Changes are collected under the lock and sent after it: a window
         // that is slow to read must not hold up every other request.
         let mut changes: Vec<(u64, Option<Running>, Vec<Arc<Out>>)> = Vec::new();
@@ -1632,20 +1890,32 @@ fn forward_hooks(host: &Host, listener: &Listener) {
         if reports.is_empty() && lines.is_empty() {
             continue;
         }
-        let outs = greeted(&host.outs);
-        if outs.is_empty() {
-            let mut backlog = lock(&host.backlog);
-            backlog.0.extend(reports);
-            backlog.1.extend(lines);
-            let excess = backlog.0.len().saturating_sub(BACKLOG_REPORTS);
-            backlog.0.drain(..excess);
-            let excess = backlog.1.len().saturating_sub(BACKLOG_LINES);
-            backlog.1.drain(..excess);
-            continue;
-        }
-        for out in &outs {
-            send_hooks(out, &reports, &lines);
-        }
+        pass_on_hooks(host, reports, lines);
+    }
+}
+
+/// Sends hook traffic to every window, or keeps it for the next one when
+/// none is listening. Windows only: the CLI says hello too but skips hook
+/// traffic to get to its answer, so a `ket host devices` that happened to be
+/// connected would have taken reports a window wanted for usage.
+fn pass_on_hooks(host: &Host, reports: Vec<HookReport>, lines: Vec<StatusLine>) {
+    // Whether a window is there, and keeping these when none is, under the
+    // backlog's lock: a window greeted between the two would take the
+    // backlog before these reached it, and they would wait for the next one.
+    let mut backlog = lock(&host.backlog);
+    let outs = windows(&host.outs);
+    if outs.is_empty() {
+        backlog.0.extend(reports);
+        backlog.1.extend(lines);
+        let excess = backlog.0.len().saturating_sub(BACKLOG_REPORTS);
+        backlog.0.drain(..excess);
+        let excess = backlog.1.len().saturating_sub(BACKLOG_LINES);
+        backlog.1.drain(..excess);
+        return;
+    }
+    drop(backlog);
+    for out in &outs {
+        send_hooks(out, &reports, &lines);
     }
 }
 
@@ -1658,10 +1928,34 @@ fn greeted(outs: &Mutex<Vec<(u64, Arc<Out>)>>) -> Vec<Arc<Out>> {
         .collect()
 }
 
-/// Of [`greeted`], the ones that are ket windows: what work is handed to.
-/// The CLI says hello too, and a request it makes must not come back to it.
+/// Of [`greeted`], the ones that are ket windows: what work and hook traffic
+/// are handed to. The CLI says hello too, and a request it makes must not
+/// come back to it.
 fn windows(outs: &Mutex<Vec<(u64, Arc<Out>)>>) -> Vec<Arc<Out>> {
     greeted(outs).into_iter().filter(|out| out.window).collect()
+}
+
+/// Takes request `req` out of `waiting`, each entry kept beside the window
+/// it went to, for connection `from`'s answer — when `from` is that window.
+/// Request numbers count up from 1, so any other connection, another
+/// program that said hello among them, is ignored and the request left
+/// waiting: its answer would be a forgery handed to the phone, and the real
+/// window's then dropped.
+fn answered<V>(
+    waiting: &Mutex<BTreeMap<u64, (Arc<Out>, V)>>,
+    req: u64,
+    from: &Arc<Out>,
+    what: &str,
+) -> Option<V> {
+    let mut waiting = lock(waiting);
+    if !Arc::ptr_eq(&waiting.get(&req)?.0, from) {
+        tracing::debug!(
+            req,
+            "ket host: ignored a {what} answer from another connection"
+        );
+        return None;
+    }
+    waiting.remove(&req).map(|(_, kept)| kept)
 }
 
 fn send_hooks(out: &Out, reports: &[HookReport], lines: &[StatusLine]) {
@@ -1844,7 +2138,7 @@ fn refuse_outsider(out: &Arc<Out>, request: &Request) -> bool {
 
 fn handle(host: &Arc<Host>, conn: u64, out: &Arc<Out>, request: Request) -> bool {
     match request {
-        Request::Hello { protocol, build } => {
+        Request::Hello { build, .. } => {
             if build != host.build {
                 tracing::info!(window = %build, "a window from another build connected");
             }
@@ -1853,9 +2147,6 @@ fn handle(host: &Arc<Host>, conn: u64, out: &Arc<Out>, request: Request) -> bool
                 build: host.build.clone(),
                 live: host.live(),
             });
-            if protocol != wire::PROTOCOL {
-                return false;
-            }
             // Status first, whole: a window that has just arrived sees what
             // every other window sees, not whatever hooks happen to come
             // next. Taken under the status lock and greeted before it is
@@ -1870,8 +2161,12 @@ fn handle(host: &Arc<Host>, conn: u64, out: &Arc<Out>, request: Request) -> bool
             }
             // What agents reported while no window was listening — for usage
             // and rollouts; the snapshot above already holds their status.
-            let (reports, lines) = std::mem::take(&mut *lock(&host.backlog));
-            send_hooks(out, &Vec::from(reports), &Vec::from(lines));
+            // Kept for a window: the CLI skips hook traffic, so handing it
+            // there would lose it.
+            if out.window {
+                let (reports, lines) = std::mem::take(&mut *lock(&host.backlog));
+                send_hooks(out, &Vec::from(reports), &Vec::from(lines));
+            }
             true
         }
         Request::Open { req, mut spec } => {
@@ -1959,10 +2254,12 @@ fn handle(host: &Arc<Host>, conn: u64, out: &Arc<Out>, request: Request) -> bool
                 adopted,
                 pid: terminal.pid(),
             });
-            // A phone waiting for this key's tab to wake has its terminal.
+            // A phone waiting for this key's tab to wake has its terminal,
+            // when this is the window asked to wake it: any other
+            // connection can name the key.
             if let Some(key) = spec.key.as_deref() {
-                for (woken, waiting) in lock(&host.wake_waiting).values() {
-                    if woken == key {
+                for (asked, (woken, waiting)) in lock(&host.wake_waiting).values() {
+                    if woken == key && Arc::ptr_eq(asked, out) {
                         let _ = waiting.send(Ok(id));
                     }
                 }
@@ -2033,13 +2330,29 @@ fn handle(host: &Arc<Host>, conn: u64, out: &Arc<Out>, request: Request) -> bool
             true
         }
         Request::Asleep { tabs } => {
-            lock(&host.asleep).insert(conn, tabs);
+            // Only a ket window's: any other program could list tabs that
+            // aren't there, on the phone and as the one asked to wake them.
+            if out.window {
+                lock(&host.asleep).insert(conn, tabs);
+            } else {
+                tracing::debug!(
+                    conn,
+                    "ket host: asleep tabs from a connection that isn't a window, ignored"
+                );
+            }
             true
         }
         Request::WakeResult { req, error } => {
             if let Some(why) = error {
-                host.finish_wake(req, Err(why));
+                host.finish_wake(req, out, Err(why));
             }
+            true
+        }
+        Request::FreshResult { req, key, error } => {
+            let answer = key.ok_or_else(|| {
+                error.unwrap_or_else(|| "ket on your Mac didn't start fresh".to_owned())
+            });
+            host.finish_fresh(req, answer);
             true
         }
         Request::Usage { providers } => {
@@ -2055,11 +2368,11 @@ fn handle(host: &Arc<Host>, conn: u64, out: &Arc<Out>, request: Request) -> bool
             true
         }
         Request::FixChecksResult { req, error } => {
-            host.finish_fix_checks(req, error);
+            host.finish_fix_checks(req, out, error);
             true
         }
         Request::SendReviewResult { req, error } => {
-            host.finish_send_review(req, error);
+            host.finish_send_review(req, out, error);
             true
         }
         Request::DeleteWorkResult {
@@ -2067,7 +2380,7 @@ fn handle(host: &Arc<Host>, conn: u64, out: &Arc<Out>, request: Request) -> bool
             error,
             kept_branch,
         } => {
-            host.finish_delete_work(req, error.map_or(Ok(kept_branch), Err));
+            host.finish_delete_work(req, out, error.map_or(Ok(kept_branch), Err));
             true
         }
         Request::StartWork {
@@ -2090,6 +2403,21 @@ fn handle(host: &Arc<Host>, conn: u64, out: &Arc<Out>, request: Request) -> bool
                 false,
             );
             out.reply(&Reply::WorkTaken { taken });
+            true
+        }
+        Request::Browser {
+            req,
+            worktree,
+            action,
+        } => {
+            // Waited for here, on this connection's own thread: the CLI asks
+            // one thing and waits for it, so there is nothing else to read.
+            let result = host.browser(worktree, action, out);
+            out.reply(&Reply::BrowserAnswer { req, result });
+            true
+        }
+        Request::BrowserResult { req, result } => {
+            host.finish_browser(req, out, result);
             true
         }
         Request::Theme { theme } => {
@@ -2147,7 +2475,8 @@ fn handle(host: &Arc<Host>, conn: u64, out: &Arc<Out>, request: Request) -> bool
                     })
                     .collect()
             });
-            out.reply(&Reply::Devices { devices });
+            let hosted = host.phones().and_then(|phones| phones.hosted_relay());
+            out.reply(&Reply::Devices { devices, hosted });
             true
         }
         Request::Pairings => {
@@ -2494,26 +2823,61 @@ mod tests {
         }
     }
 
+    /// A CLI connected while no window is open — `ket host devices` — once
+    /// took the backlog and counted as listening, losing reports a window
+    /// wanted for usage.
     #[test]
-    fn hello_with_a_mismatched_protocol_ends_the_connection() {
+    fn only_a_window_takes_hook_traffic() {
         let host = Host::for_tests();
-        let (out, mut reader) = out_pair();
+        let hello = || Request::Hello {
+            protocol: wire::PROTOCOL,
+            build: String::new(),
+        };
+        lock(&host.backlog).0.push_back(prompt_report("before"));
 
-        let still_open = handle(
-            &host,
-            1,
-            &out,
-            Request::Hello {
-                protocol: wire::PROTOCOL + 1,
-                build: "some-window-build".to_owned(),
-            },
+        let (stream, mut cli_reader) = UnixStream::pair().expect("a socket pair");
+        let cli = Arc::new(Out {
+            stream: Mutex::new(stream),
+            alive: AtomicBool::new(true),
+            greeted: AtomicBool::new(false),
+            window: false,
+        });
+        lock(&host.outs).push((1, cli.clone()));
+        assert!(handle(&host, 1, &cli, hello()));
+        assert!(matches!(next_reply(&mut cli_reader), Reply::Welcome { .. }));
+        assert!(matches!(
+            next_reply(&mut cli_reader),
+            Reply::AgentStatus { .. }
+        ));
+        pass_on_hooks(&host, vec![prompt_report("during")], Vec::new());
+        assert_eq!(lock(&host.backlog).0.len(), 2, "kept for a window");
+        cli_reader.set_nonblocking(true).expect("nonblocking");
+        let mut byte = [0u8];
+        assert!(
+            matches!(cli_reader.read(&mut byte), Err(e) if e.kind() == io::ErrorKind::WouldBlock),
+            "the CLI is sent no hook traffic"
         );
-        assert!(!still_open, "a protocol mismatch ends the connection");
 
+        let (window, mut reader) = out_pair();
+        lock(&host.outs).push((2, window.clone()));
+        assert!(handle(&host, 2, &window, hello()));
+        assert!(matches!(next_reply(&mut reader), Reply::Welcome { .. }));
+        assert!(matches!(next_reply(&mut reader), Reply::AgentStatus { .. }));
+        let panes: Vec<_> = (0..2)
+            .map(|_| match next_reply(&mut reader) {
+                Reply::Hook { report } => report.pane,
+                other => panic!("expected a backlogged report, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(panes, [Some("before".into()), Some("during".into())]);
+        assert!(lock(&host.backlog).0.is_empty());
+
+        pass_on_hooks(&host, vec![prompt_report("after")], Vec::new());
         match next_reply(&mut reader) {
-            Reply::Welcome { protocol, .. } => assert_eq!(protocol, wire::PROTOCOL),
-            other => panic!("still gets a welcome, got {other:?}"),
+            Reply::Hook { report } => assert_eq!(report.pane.as_deref(), Some("after")),
+            other => panic!("expected a live report, got {other:?}"),
         }
+        assert!(lock(&host.backlog).0.is_empty());
     }
 
     #[test]
@@ -2523,7 +2887,10 @@ mod tests {
         let (out, mut reader) = out_pair();
         assert!(handle(&host, 1, &out, Request::Devices));
         match next_reply(&mut reader) {
-            Reply::Devices { devices } => assert!(devices.is_none()),
+            Reply::Devices { devices, hosted } => {
+                assert!(devices.is_none());
+                assert!(hosted.is_none());
+            }
             other => panic!("expected devices, got {other:?}"),
         }
 
@@ -3540,7 +3907,7 @@ mod tests {
                 assert_eq!(worktree, "wt-7");
                 assert_eq!(prompt, "The checks failed");
                 assert!(!fixing.is_finished(), "the phone still waits for the agent");
-                host.finish_fix_checks(req, None);
+                host.finish_fix_checks(req, &out, None);
             }
             other => panic!("{other:?}"),
         }
@@ -3552,7 +3919,7 @@ mod tests {
         });
         match next_reply(&mut reader) {
             Reply::FixChecks { req, .. } => {
-                host.finish_fix_checks(req, Some("agent is not configured".to_owned()));
+                host.finish_fix_checks(req, &out, Some("agent is not configured".to_owned()));
             }
             other => panic!("{other:?}"),
         }
@@ -3582,6 +3949,210 @@ mod tests {
             started.elapsed() < FIX_CHECKS_WAIT,
             "it did not wait the window out"
         );
+    }
+
+    /// A connection from `ket browser`: the CLI, which says hello as a
+    /// window does without being one — or, run from the host's own
+    /// executable, while passing for one.
+    fn cli(host: &Arc<Host>, conn: u64, window: bool) -> (Arc<Out>, UnixStream) {
+        let (stream, mut reader) = UnixStream::pair().expect("a socket pair");
+        let out = Arc::new(Out {
+            stream: Mutex::new(stream),
+            alive: AtomicBool::new(true),
+            greeted: AtomicBool::new(false),
+            window,
+        });
+        lock(&host.outs).push((conn, out.clone()));
+        assert!(handle(
+            host,
+            conn,
+            &out,
+            Request::Hello {
+                protocol: wire::PROTOCOL,
+                build: String::new(),
+            },
+        ));
+        assert!(matches!(next_reply(&mut reader), Reply::Welcome { .. }));
+        assert!(matches!(next_reply(&mut reader), Reply::AgentStatus { .. }));
+        reader
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("a read timeout");
+        (out, reader)
+    }
+
+    /// Has `ket browser` ask `action` of `worktree` over connection `conn`,
+    /// on a thread of its own, as its connection's reader would.
+    fn ask_browser(
+        host: &Arc<Host>,
+        conn: u64,
+        out: &Arc<Out>,
+        action: wire::BrowserAction,
+    ) -> std::thread::JoinHandle<bool> {
+        let (host, out) = (host.clone(), out.clone());
+        std::thread::spawn(move || {
+            handle(
+                &host,
+                conn,
+                &out,
+                Request::Browser {
+                    req: 7,
+                    worktree: "wt-1".to_owned(),
+                    action,
+                },
+            )
+        })
+    }
+
+    fn browser_answer(reader: &mut UnixStream) -> (u64, Browsed) {
+        match next_reply(reader) {
+            Reply::BrowserAnswer { req, result } => (req, result),
+            other => panic!("expected the browser's answer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ket_browser_goes_to_a_window_and_its_answer_comes_back() {
+        let host = Host::for_tests();
+
+        // No window, or only the asker passing for one: nobody to ask.
+        let (alone, mut alone_reader) = cli(&host, 9, true);
+        assert!(
+            ask_browser(&host, 9, &alone, wire::BrowserAction::Tabs)
+                .join()
+                .unwrap()
+        );
+        assert_eq!(
+            browser_answer(&mut alone_reader),
+            (
+                7,
+                Err("no ket window is open to run the browser in".to_owned())
+            )
+        );
+        lock(&host.outs).retain(|(conn, _)| *conn != 9);
+
+        let (window, mut window_reader) = window(&host);
+        let (asker, mut asker_reader) = cli(&host, 2, false);
+        let open = wire::BrowserAction::Open {
+            url: Some("localhost:3000".to_owned()),
+        };
+        let asking = ask_browser(&host, 2, &asker, open.clone());
+        let req = match next_reply(&mut window_reader) {
+            Reply::BrowserAction {
+                req,
+                worktree,
+                action,
+            } => {
+                assert_eq!(worktree, "wt-1");
+                assert_eq!(action, open);
+                req
+            }
+            other => panic!("expected the browser action, got {other:?}"),
+        };
+        assert!(!asking.is_finished(), "the CLI waits for the page");
+        let done = wire::BrowserAnswer::Done {
+            url: "http://localhost:3000/".to_owned(),
+            title: "Sign in".to_owned(),
+        };
+        assert!(handle(
+            &host,
+            1,
+            &window,
+            Request::BrowserResult {
+                req,
+                result: Ok(done.clone()),
+            },
+        ));
+        assert!(asking.join().unwrap());
+        assert_eq!(browser_answer(&mut asker_reader), (7, Ok(done)));
+
+        // The window's own words for what went wrong reach the CLI as they are.
+        let asking = ask_browser(&host, 2, &asker, wire::BrowserAction::Back);
+        let Reply::BrowserAction { req, .. } = next_reply(&mut window_reader) else {
+            panic!("expected the browser action");
+        };
+        host.finish_browser(
+            req,
+            &window,
+            Err("there's no page to go back to".to_owned()),
+        );
+        assert!(asking.join().unwrap());
+        assert_eq!(
+            browser_answer(&mut asker_reader),
+            (7, Err("there's no page to go back to".to_owned()))
+        );
+
+        // A window that goes meanwhile: said at once, not waited out.
+        let started = Instant::now();
+        let asking = ask_browser(&host, 2, &asker, wire::BrowserAction::Reload);
+        assert!(matches!(
+            next_reply(&mut window_reader),
+            Reply::BrowserAction { .. }
+        ));
+        window.alive.store(false, Ordering::Release);
+        assert!(asking.join().unwrap());
+        assert!(matches!(
+            browser_answer(&mut asker_reader),
+            (7, Err(why)) if why.contains("closed")
+        ));
+        assert!(
+            started.elapsed() < BROWSER_WAIT,
+            "it did not wait the window out"
+        );
+        assert!(lock(&host.browser_waiting).is_empty());
+    }
+
+    /// Any program that says hello could once answer a pending `ket browser`
+    /// request, the numbers being easy to guess: the terminal printed what
+    /// it made up, and the real window's answer was dropped.
+    #[test]
+    fn ket_browser_hears_only_the_window_it_asked() {
+        let host = Host::for_tests();
+        let (window, mut window_reader) = window(&host);
+        let (asker, mut asker_reader) = cli(&host, 2, false);
+        let (forger, _forger_reader) = cli(&host, 3, false);
+        let (other_window, _other_reader) = cli(&host, 4, true);
+
+        let asking = ask_browser(&host, 2, &asker, wire::BrowserAction::Tabs);
+        let Reply::BrowserAction { req, .. } = next_reply(&mut window_reader) else {
+            panic!("expected the browser action");
+        };
+        let forged = wire::BrowserAnswer::Done {
+            url: "https://forged.example/".to_owned(),
+            title: "Forged".to_owned(),
+        };
+        for (conn, out) in [(3, &forger), (4, &other_window), (2, &asker)] {
+            assert!(handle(
+                &host,
+                conn,
+                out,
+                Request::BrowserResult {
+                    req,
+                    result: Ok(forged.clone()),
+                },
+            ));
+            assert!(
+                lock(&host.browser_waiting).contains_key(&req),
+                "connection {conn} was not asked, so its answer does not count"
+            );
+        }
+        assert!(!asking.is_finished(), "the CLI still waits for the window");
+
+        let done = wire::BrowserAnswer::Done {
+            url: "http://localhost:3000/".to_owned(),
+            title: "Sign in".to_owned(),
+        };
+        assert!(handle(
+            &host,
+            1,
+            &window,
+            Request::BrowserResult {
+                req,
+                result: Ok(done.clone()),
+            },
+        ));
+        assert!(asking.join().unwrap());
+        assert_eq!(browser_answer(&mut asker_reader), (7, Ok(done)));
+        assert!(lock(&host.browser_waiting).is_empty());
     }
 
     /// Reports that pane `key` has started a turn, as its prompt hook would.
@@ -3789,6 +4360,168 @@ mod tests {
         );
     }
 
+    /// The next reply that is not a terminal's output: a window watching a
+    /// terminal is sent its screen between replies.
+    fn next_json_reply(reader: &mut impl Read) -> Reply {
+        loop {
+            if let Frame::Json(body) = next_frame(reader) {
+                return serde_json::from_slice(&body).expect("a reply");
+            }
+        }
+    }
+
+    /// Opens a terminal under `key` from the window on `out`, which then
+    /// shows it, and returns its id.
+    fn opened(
+        host: &Arc<Host>,
+        out: &Arc<Out>,
+        reader: &mut UnixStream,
+        req: u64,
+        key: &str,
+    ) -> u64 {
+        assert!(handle(
+            host,
+            1,
+            out,
+            Request::Open {
+                req,
+                spec: Box::new(keyed_spec(key)),
+            }
+        ));
+        match next_json_reply(reader) {
+            Reply::Opened { id, .. } => id,
+            other => panic!("expected the terminal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_fresh_start_is_asked_of_the_window_showing_the_tab_and_resolves_when_the_fresh_one_opens()
+    {
+        let host = Host::for_tests();
+        let (out, mut reader) = window(&host);
+        opened(&host, &out, &mut reader, 1, "wt|claude|cold");
+        let starting = {
+            let host = host.clone();
+            std::thread::spawn(move || host.start_fresh("wt|claude|cold", "s", 1))
+        };
+        let req = match next_json_reply(&mut reader) {
+            Reply::StartFresh {
+                req,
+                key,
+                session,
+                since_ms,
+            } => {
+                assert_eq!(key, "wt|claude|cold");
+                assert_eq!((session.as_str(), since_ms), ("s", 1));
+                req
+            }
+            other => panic!("expected a fresh start, got {other:?}"),
+        };
+        // The window names the tab it opened, then its terminal opens.
+        assert!(handle(
+            &host,
+            1,
+            &out,
+            Request::FreshResult {
+                req,
+                key: Some("wt|claude|fresh".to_owned()),
+                error: None,
+            }
+        ));
+        let fresh = opened(&host, &out, &mut reader, 2, "wt|claude|fresh");
+        assert_eq!(starting.join().unwrap(), Ok(fresh));
+    }
+
+    #[test]
+    fn a_fresh_start_the_window_refuses_says_why() {
+        let host = Host::for_tests();
+        let (out, mut reader) = window(&host);
+        opened(&host, &out, &mut reader, 1, "wt|claude|busy");
+        let starting = {
+            let host = host.clone();
+            std::thread::spawn(move || host.start_fresh("wt|claude|busy", "s", 1))
+        };
+        let Reply::StartFresh { req, .. } = next_json_reply(&mut reader) else {
+            panic!("expected a fresh start");
+        };
+        assert!(handle(
+            &host,
+            1,
+            &out,
+            Request::FreshResult {
+                req,
+                key: None,
+                error: Some("it's working".to_owned()),
+            }
+        ));
+        assert_eq!(starting.join().unwrap(), Err("it's working".to_owned()));
+    }
+
+    #[test]
+    fn a_fresh_start_for_a_tab_no_window_shows_is_refused_at_once() {
+        let host = Host::for_tests();
+        let (out, mut reader) = window(&host);
+        opened(&host, &out, &mut reader, 1, "wt|claude|shown");
+        // Another tab in the same worktree, which no window is showing.
+        assert_eq!(
+            host.start_fresh("wt|claude|elsewhere", "s", 1),
+            Err("that tab isn't open in a ket window on your Mac".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_fresh_start_does_not_keep_waiting_when_its_window_closes() {
+        let host = Host::for_tests();
+        let (out, mut reader) = window(&host);
+        let id = opened(&host, &out, &mut reader, 1, "wt|claude|cold");
+        let starting = {
+            let host = host.clone();
+            std::thread::spawn(move || host.start_fresh("wt|claude|cold", "s", 1))
+        };
+        assert!(matches!(
+            next_json_reply(&mut reader),
+            Reply::StartFresh { .. }
+        ));
+        out.alive.store(false, Ordering::Release);
+        assert_eq!(
+            starting.join().unwrap(),
+            Err("the ket window closed before it started fresh".to_owned())
+        );
+        assert!(lock(&host.fresh_waiting).is_empty());
+        assert!(!host.find(id).unwrap().is_closed());
+        host.find(id).unwrap().kill();
+    }
+
+    #[test]
+    fn a_fresh_start_without_a_tab_or_error_gets_a_useful_failure() {
+        let host = Host::for_tests();
+        let (out, mut reader) = window(&host);
+        let id = opened(&host, &out, &mut reader, 1, "wt|claude|cold");
+        let starting = {
+            let host = host.clone();
+            std::thread::spawn(move || host.start_fresh("wt|claude|cold", "s", 1))
+        };
+        let Reply::StartFresh { req, .. } = next_json_reply(&mut reader) else {
+            panic!("expected a fresh start");
+        };
+        assert!(handle(
+            &host,
+            1,
+            &out,
+            Request::FreshResult {
+                req,
+                key: None,
+                error: None
+            }
+        ));
+        assert_eq!(
+            starting.join().unwrap(),
+            Err("ket on your Mac didn't start fresh".to_owned())
+        );
+        assert!(lock(&host.fresh_waiting).is_empty());
+        host.find(id).unwrap().kill();
+    }
+
     #[test]
     fn a_wake_without_its_window_is_refused_at_once() {
         let host = Host::for_tests();
@@ -3805,6 +4538,161 @@ mod tests {
         let refused = Err("open ket on your Mac to wake this tab".to_owned());
         assert_eq!(host.wake("wt|claude|x"), refused);
         assert_eq!(host.wake("wt|claude|none"), refused);
+    }
+
+    // ---- a phone's requests answered only by the window asked -----------------
+    //
+    // Any program that says hello could once answer a phone's pending wake,
+    // fix, review or delete, the numbers counting up from 1: the phone was
+    // told what it made up, and the real window's answer was dropped.
+
+    /// Has a program that said hello, and a CLI passing for a window — neither
+    /// asked anything — each send every request `forged` makes, and checks
+    /// after each that request `req` still waits in `waiting`.
+    fn strangers_answer<V>(
+        host: &Arc<Host>,
+        waiting: &Mutex<BTreeMap<u64, V>>,
+        req: u64,
+        forged: impl Fn() -> Vec<Request>,
+    ) {
+        let (forger, _forger_reader) = cli(host, 3, false);
+        let (other_window, _other_reader) = cli(host, 4, true);
+        for (conn, out) in [(3, &forger), (4, &other_window)] {
+            for request in forged() {
+                assert!(handle(host, conn, out, request));
+                assert!(
+                    lock(waiting).contains_key(&req),
+                    "connection {conn} was not asked, so its answer does not count"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_phones_wake_hears_only_the_window_it_asked() {
+        let host = Host::for_tests();
+        let (window, mut reader) = window(&host);
+        let tabs = vec![asleep_tab("wt|claude|w")];
+        assert!(handle(&host, 1, &window, Request::Asleep { tabs }));
+        let waking = {
+            let host = host.clone();
+            std::thread::spawn(move || host.wake("wt|claude|w"))
+        };
+        let Reply::Wake { req, .. } = next_reply(&mut reader) else {
+            panic!("expected a wake");
+        };
+        // Nor does a terminal opened under the tab's key: any can name it.
+        strangers_answer(&host, &host.wake_waiting, req, || {
+            vec![
+                Request::WakeResult {
+                    req,
+                    error: Some("forged".to_owned()),
+                },
+                Request::Open {
+                    req: 1,
+                    spec: Box::new(keyed_spec("wt|claude|w")),
+                },
+            ]
+        });
+        assert!(handle(
+            &host,
+            1,
+            &window,
+            Request::Open {
+                req: 5,
+                spec: Box::new(keyed_spec("wt|claude|w")),
+            }
+        ));
+        let id = loop {
+            if let Reply::Opened { id, .. } = next_reply(&mut reader) {
+                break id;
+            }
+        };
+        assert_eq!(waking.join().unwrap(), Ok(id));
+        for entry in lock(&host.terminals).values() {
+            entry.terminal.kill();
+        }
+    }
+
+    #[test]
+    fn a_phones_fix_hears_only_the_window_it_asked() {
+        let host = Host::for_tests();
+        let (window, mut reader) = window(&host);
+        let fixing = {
+            let host = host.clone();
+            std::thread::spawn(move || host.fix_checks("wt".to_owned(), "Fix it".to_owned()))
+        };
+        let Reply::FixChecks { req, .. } = next_reply(&mut reader) else {
+            panic!("expected the checks");
+        };
+        strangers_answer(&host, &host.fix_checks_waiting, req, || {
+            vec![Request::FixChecksResult {
+                req,
+                error: Some("forged".to_owned()),
+            }]
+        });
+        let given = Request::FixChecksResult { req, error: None };
+        assert!(handle(&host, 1, &window, given));
+        assert_eq!(fixing.join().unwrap(), Handed::Given);
+    }
+
+    #[test]
+    fn a_phones_review_hears_only_the_window_it_asked() {
+        let host = Host::for_tests();
+        let (window, mut reader) = window(&host);
+        let reviewing = {
+            let host = host.clone();
+            std::thread::spawn(move || host.send_review("wt".to_owned(), None, Vec::new()))
+        };
+        let Reply::SendReview { req, .. } = next_reply(&mut reader) else {
+            panic!("expected the review");
+        };
+        strangers_answer(&host, &host.review_waiting, req, || {
+            vec![Request::SendReviewResult { req, error: None }]
+        });
+        let busy = Request::SendReviewResult {
+            req,
+            error: Some("The agent is busy".to_owned()),
+        };
+        assert!(handle(&host, 1, &window, busy));
+        assert_eq!(
+            reviewing.join().unwrap(),
+            Err("The agent is busy".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_phones_delete_hears_only_the_window_it_asked() {
+        let host = Host::for_tests();
+        let (window, mut reader) = window(&host);
+        let deleting = {
+            let host = host.clone();
+            std::thread::spawn(move || host.delete_work("wt".to_owned(), false))
+        };
+        let Reply::DeleteWork { req, .. } = next_reply(&mut reader) else {
+            panic!("expected the delete");
+        };
+        strangers_answer(&host, &host.delete_waiting, req, || {
+            vec![
+                Request::DeleteWorkResult {
+                    req,
+                    error: None,
+                    kept_branch: Some("forged".to_owned()),
+                },
+                Request::DeleteWorkResult {
+                    req,
+                    error: Some("forged".to_owned()),
+                    kept_branch: None,
+                },
+            ]
+        });
+        let deleted = Request::DeleteWorkResult {
+            req,
+            error: None,
+            kept_branch: Some("phone-work".to_owned()),
+        };
+        assert!(handle(&host, 1, &window, deleted));
+        assert_eq!(deleting.join().unwrap(), Ok(Some("phone-work".to_owned())));
     }
 
     #[test]

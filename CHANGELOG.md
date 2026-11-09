@@ -15,6 +15,86 @@ words; no internal names, no commit hashes. ket reads this file
 
 ### New
 
+- Reach your Mac from your phone or iPad anywhere, with no VPN: turn on
+  Reach it from anywhere in Settings › Devices, and devices away from your
+  Wi-Fi and your tailnet connect through ket's relay. It passes along what
+  it cannot read, and the row says whether your Mac is connected to it and,
+  when not, why. At home your devices still connect to the Mac directly.
+- Browser tabs run on Chromium instead of WebKit, and the tabs and the
+  Browser entry in the + menu carry its mark. Pages render and behave as they do in
+  Chromium-based browsers, each worktree keeps its own sign-ins and site data
+  apart from the others, a tab takes its page's title, back and forward dim
+  when there is nowhere to go, and the code button in the toolbar opens
+  DevTools in a window of its own. If a page's renderer crashes, the pane
+  says so and offers Reload. The camera in the toolbar sends a screenshot of
+  the page to an agent in its worktree, as Screenshot to agent does for the
+  iPhone and Android tabs. Downloads save straight to your Downloads folder,
+  a new name if the file is already there, and the tab shows how one is going
+  and offers Show in Finder when it is done. A link that opens a new tab or
+  window, or a sign-in popup, opens as a tab beside the page that opened it
+  and can still talk back to it, and closes its tab when it is finished.
+  Deleting a worktree closes its browser tabs and deletes the sign-ins and
+  site data they kept. A page's alerts, confirms and prompts show in its tab,
+  as Chrome shows them, rather than as a window that stops all of ket.
+- Agents can drive their worktree's Chromium browser tab from the terminal:
+  `ket browser open` goes to a page, `ket browser screenshot` saves one,
+  `ket browser console` reads what the page logged and `ket browser eval`
+  runs a line of JavaScript in it. They can use a page as a person would:
+  `ket browser snapshot` lists what is on it with short refs, and `click`,
+  `fill`, `type`, `press`, `scroll` and `wait` act on them with real mouse
+  and keyboard events, inside the page's frames from its own site too.
+  `ket browser record start` and `ket browser record
+  stop` save a video of the tab and a few stills an agent can look at, to
+  show you what happened. When the page opens an alert, a confirm or a
+  prompt, the command says what it asks at once rather than waiting, and
+  `ket browser dialog accept` or `dismiss` answers it. `ket browser --help`
+  lists the rest.
+- Settings → Browser shows which Chromium ket runs and lists each worktree's
+  browser profile with its size. Delete one, or every removed worktree's, to
+  sign that worktree out everywhere.
+- See what your agents send to their model providers. Turn on Log what
+  agents send in Settings → Network and ket keeps every request Claude Code
+  and Codex make from a worktree, on this Mac only: the Network view in the right
+  panel lists them, newest first, with how much was sent and how much of it
+  was new, and a request opens as a tab showing what this turn added, which
+  you can copy or delete from the log. Logs are kept for five days, deleted
+  with their worktree, and each worktree's can be cleared from the view's ⋯
+  menu or deleted from Settings. Off unless you turn it on, for agents
+  started from then on.
+- A request that sent something shaped like a secret or a personal
+  identifier — an API key, a Social Security number, a card number, a date
+  of birth, a phone number, an email address or a public IP address — is
+  flagged in the Network view: its row is tinted, with a tag naming what was
+  found, and the warning button above the list counts them and shows only
+  those. An alert says so as it happens, whichever worktree it came from,
+  and stays until you dismiss it or open the request from it; more from the
+  same worktree update its count rather than stacking. Opened, the request
+  says what was found and where it came from — your message, or a file the
+  agent read, which opens from there — opens on
+  the first match, and offers to stop agents reading that file (a rule you
+  can undo in Settings → Permissions) and, for a key, a link to rotate it.
+  Only what you typed and what the agent's tools read are checked, not the
+  model's own replies, and nothing is changed or blocked. It goes by
+  pattern, so names and clinical details are not detected.
+- A project's badge can show a small picture instead of its letter: open
+  Project Settings, click the badge, and pick one of 47 glyphs — a terminal,
+  a globe, a book, a rocket and more — or keep the letter. Your phone shows
+  the same badge now, glyph or typed icon, where it used to show only the
+  letter.
+- Economy's Heavy and Max levels can now ask Claude Code to reply as terse
+  notes for the whole session, not just at its start: no filler, no recaps,
+  results first. Code, commands, commit messages, pull requests and warnings
+  are still written normally. It comes with the standard Economy pack's next
+  version.
+- Opening a Claude session whose prompt cache has expired now says what
+  picking it up again costs, and offers a fresh session beside it, leaving
+  the old one open with anything typed in it. Coming back to a long session
+  after an hour away re-sends the whole conversation at the cache-write
+  price, often the dearest prompt of the day. Your message is never held:
+  ket asks as the tab opens, not when you send. The phone asks the same as
+  its chat opens, and Start fresh there follows the new session.
+  Settings → Economy turns it off, or sets how large a session must be
+  before it asks.
 - The phone's terminal can send keys one at a time: switch the line at the
   bottom from Message to Live keys and each key you press goes straight to the
   terminal, with no Enter after it. Use it to answer a prompt that takes a
@@ -47,14 +127,59 @@ words; no internal names, no commit hashes. ket reads this file
 - Arrange your snippets: drag one in the list in Settings → Snippets to a new
   place, or hold ⌥ and press ↑ or ↓ to move the one showing in the editor.
   The order you leave is the order menus offer them in.
+- Help → Export Diagnostics… saves a zip to attach to a bug report or email
+  to hello@ketapp.dev: ket's and macOS's versions, what `ket doctor` finds,
+  your settings, ket's recent logs and crash reports. Passwords, API keys,
+  tokens and phone pairing codes are taken out first, and a README inside
+  says what's there. `ket diagnostics` makes the same zip when the app won't
+  open.
+- A worktree's screen on your phone lists its tabs: each chat, each
+  terminal with what it is running and for how long, each asleep tab, and a
+  new session or shell. Tap one to open it. Needs the Mac's ket updated for
+  what each tab is doing.
+- Two new themes: Cobalt, Punk printed in electric blue on a cobalt-black
+  ground, and Ultraviolet, electric violet and acid lime on indigo-black.
+  Your phone draws in them too.
 
 ### Improved
 
-- The top of the phone's Worktrees screen is as tall as every other screen's
-  header, and the desktop's name sits in a rounded bar across its width with
-  the lock set into its end. The ket mark beside it shows how the line to the
-  desktop is: green when connected, grey while connecting, red when it is
-  down.
+- When the phone only knows how to reach your Mac on its own network, the
+  Mac's screen and the help shown while it can't connect say so, and what
+  to turn on and scan for away from home.
+- A phone or iPad paired before Tailscale or Reach it from anywhere was on
+  can learn the new ways to reach your Mac without pairing again: Show code
+  under Away from home in the Mac's Settings › Devices, and scan it with the
+  device's Camera or in ket under Pair a desktop.
+- Settings › Devices has an Away from home group. It says whether Tailscale
+  is on this Mac, signed out, turned off or not installed, with the step to
+  take and a button to get or open it, and holds the Reach it from anywhere
+  switch beside it.
+- A request in the Network view wraps its long lines, so a long message is
+  read in full instead of running off the edge. The wrap button beside Copy,
+  or View › Wrap Lines (⌥⌘W), turns it off and on.
+
+- Phones and iPads paired with your Mac before this update need pairing
+  again, once: turn on Devices in the Mac's Settings and scan the new code.
+  Your Mac's identity now comes from its own key, which a relay can check,
+  so nobody else can stand in for it on the way to your phone.
+- Screenshots in the Screenshot to agent dialog no longer have a close
+  button sitting over the corner of the image.
+- While an agent works, the phone shows a ring circling its mark in place
+  of the three dots. The mark stays still. Tap the row in a chat to
+  see the agent's status in full and how long the turn has run.
+- The bar beside the selected worktree takes its project's colour, so you
+  can tell which project you are in at a glance. Projects with no colour
+  keep the amber bar.
+- While your phone loads your Mac's worktrees, the Worktrees screen shows
+  their outline pulsing gently instead of saying nothing is running. If
+  nothing really is running, it says so a few seconds later, centred in the
+  list with your Mac's name, rather than as a stray line at the top.
+- The status bar's Memory and CPU count Chromium's helper processes in ket's
+  own figure, and the popover shows them on a line of their own.
+- The top of the phone's Worktrees screen has your Mac's name as a large
+  title, with how the phone reaches it underneath. Over it, the ket mark shows
+  how the line to the desktop is: green when connected, grey while
+  connecting, red when it is down.
 - The buttons at the top of a chat on your phone, the mode pill and the
   worktree and terminal buttons beside it, are a little taller with larger
   glyphs, so they are easier to hit.
@@ -109,11 +234,11 @@ words; no internal names, no commit hashes. ket reads this file
   while the agent works; + turns into × as its menu opens; and the + and /
   menus float over the chat, so nothing under them shifts and the keyboard
   stays up. With Reduce Motion on, it all lands at once.
-- The green Secure pill at the top of your phone's Worktrees screen is now a
-  padlock on the end of your Mac's name. It hangs open and grey while the
-  phone connects, and snaps shut and turns green the moment the line to your
-  Mac is sealed, on every connect and reconnect. Tap it, as before, for what
-  that means. With Reduce Motion on it is simply open or shut.
+- The Secure pill at the top of your phone's Worktrees screen has a padlock
+  that hangs open and grey while the phone connects, and snaps shut and turns
+  green the moment the line to your Mac is sealed, on every connect and
+  reconnect. Tap it, as before, for what that means. With Reduce Motion on it
+  is simply open or shut.
 - In Settings, MCP has a section of its own beside Agents and Permissions: the
   servers the selected worktree's agent CLIs are configured with, the calls ket
   has seen them make, and the commands that set them up — no longer at the
@@ -132,6 +257,11 @@ words; no internal names, no commit hashes. ket reads this file
   project, act on its pull request, or delete it. Delete asks first, and
   offers Delete anyway when it would lose uncommitted work. Your
   repository's own checkout can't be pinned or deleted.
+- On your phone's Worktrees screen each project is a card of its own, and a
+  folded one names the worktrees inside it. Hold a project to start a task
+  in it, open its backlog, pin it to the top or hide it from that phone.
+  Hidden projects wait behind a line under the cards, and come back while an
+  agent in one is waiting on you.
 - Put idle agents to sleep from a worktree's menu while their tabs stay open, then wake into the same conversation. You can turn on automatic sleep and choose its delay in Settings → General. Asleep agents show on your phone too, with when they slept and what that freed, and a tap wakes one on your Mac and opens its chat — rather than the worktree saying nothing is running until you click the tab on the Mac.
 - Merge a pull request, update its branch, mark a draft ready, reopen a closed one, or give its review comments to the agent — from the worktree's menu on your Mac, or from the pull request card on your phone.
 - Reach your Mac from your phone over Tailscale away from home, or add an address for another network without pairing again.
@@ -278,6 +408,52 @@ words; no internal names, no commit hashes. ket reads this file
 
 ### Fixed
 
+- The iOS Simulator tab works with any Xcode 27 or 26 release, 27.2
+  included, instead of saying a new point release isn't supported yet.
+- Switching Claude's model or effort from your phone in a conversation it
+  has already answered in works at once, instead of saying after a wait that
+  it didn't switch while Claude sat asking at your Mac whether to.
+- Sending a message from your phone no longer jumps the chat: the agent's
+  working line stays put from the moment you send until the agent answers,
+  instead of going and coming back as the message lands.
+- A lone tool call in a chat on your phone is folded under "1 tool call"
+  like a run of them, a tap away.
+- A message you send from your phone while the agent is working keeps its
+  photos and files while it waits in the agent's queue, rather than showing
+  them only once the agent reads it. A message queued at your Mac shows the
+  files it carries as files, not as a list of paths.
+- An agent's words on your phone read their markdown the way GitHub does:
+  bold around `code`, emphasis inside bold, escaped stars, numbered and
+  nested lists, quotes holding lists, links in angle brackets and images
+  as their links all show as meant instead of with their marks.
+- The buttons under a question on your phone are the same width, and Send
+  answer and In the terminal each carry an icon.
+- Tapping a notice on your phone opens the agent's chat, including a notice
+  that a task finished, and opens it when the notice started the app too.
+- A chat on your phone no longer shows its agent busy when the busy one is
+  a program in another of the worktree's tabs, like a dev server, and an
+  agent's status survives a compacted conversation sitting quiet.
+- Wide tables and code blocks in a chat on your phone scroll sideways from
+  the first drag, and holding one still copies the message.
+- Uninstalling ket with Homebrew takes its hooks out of Claude Code, Codex,
+  OpenCode and Grok, and gives Claude back the status line you had before
+  ket. Until now they stayed behind, and Claude lost its status line for good
+  if you also removed ket's data. Remove ket from your agents in Settings
+  also takes out hooks an older version of ket put there.
+- New Codex tasks from the phone carry their prompt through startup, and
+  reopening a task's chat keeps its undelivered message available to copy.
+- OpenCode's usage popover now shows a short sign-in message and a Reconnect
+  button that opens its account settings, with a link to the OpenCode console
+  and Save and refresh to apply replacement credentials.
+- The status bar no longer jumps up while a worktree's menu is open.
+- A project's settings say in plain words when its GitHub account can't see
+  the repository, and suggest picking one that can, instead of showing
+  GitHub's own error in red. A project with no remote on GitHub says that,
+  rather than that ket is not signed in.
+- A question or permission an agent has been waiting on for more than ten
+  minutes still shows on your phone with its buttons, and the sidebar keeps
+  the worktree waiting while another of its tabs runs something like a dev
+  server. Both used to drop it, though the agent was still waiting.
 - Sleep in a worktree's menu now works on the selected idle agent and shows
   a message when an agent cannot sleep.
 - Returning to Worktrees on your phone keeps the list in place, including
@@ -386,3 +562,8 @@ words; no internal names, no commit hashes. ket reads this file
 - An OpenCode 2 pane now runs its own server, so the plugin reports the pane
   it is in rather than nothing; an OpenCode 1 pane is unchanged, and a
   settings file saved by an earlier ket picks this up without being edited.
+- A worktree where Codex asked to run a command no longer reads "waiting on
+  you" for the rest of the turn after you approve it at the desk. Codex says
+  nothing more about a command that was still running when its call came
+  back, so the row waited until the turn ended; its next call now moves it
+  on.

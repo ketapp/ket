@@ -33,7 +33,7 @@ use ket_core::theme::{Color, Theme};
 use crate::fonts::Prose;
 use crate::paint::{alpha, paint};
 use crate::ui::agent;
-use crate::ui::button::icon_button;
+use crate::ui::button::{button, icon_button};
 use crate::ui::icon::{Icon, sized_icon};
 use crate::ui::popup::{self, Placement};
 use crate::ui::progress::progress;
@@ -608,7 +608,13 @@ fn extras(snapshot: &ProviderSnapshot, now_ms: u64, t: &Theme) -> Option<AnyElem
 
 /// One provider section, including honest no-data states
 /// instead of percentages inferred from absence.
-fn usage_provider(snapshot: ProviderSnapshot, now_ms: u64, last: bool, t: &Theme) -> AnyElement {
+fn usage_provider(
+    snapshot: ProviderSnapshot,
+    now_ms: u64,
+    last: bool,
+    t: &Theme,
+    cx: &mut Context<Shell>,
+) -> AnyElement {
     let quiet = quiet(&snapshot);
     // A stale reading says so beside the name, in the attention colour. A
     // fresh one says nothing here: the header's `Updated` covers it, and three
@@ -629,6 +635,23 @@ fn usage_provider(snapshot: ProviderSnapshot, now_ms: u64, last: bool, t: &Theme
                     .windows
                     .iter()
                     .map(|window| usage_window(window, now_ms, t)),
+            )
+            .into_any_element(),
+        SnapshotStatus::Unavailable { reason } if snapshot.provider == Provider::OpenCode => div()
+            .flex()
+            .items_center()
+            .gap(px(10.0))
+            .child(div().flex_1().min_w_0().child(note(reason.clone(), t)))
+            .child(
+                button("opencode-usage-reconnect", "Reconnect")
+                    .small()
+                    .ghost()
+                    .render(t)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.open_opencode_usage_settings(cx);
+                        cx.stop_propagation();
+                        cx.notify();
+                    })),
             )
             .into_any_element(),
         SnapshotStatus::Unavailable { reason } => note(format!("Unavailable — {reason}"), t),
@@ -865,12 +888,13 @@ impl Shell {
                 .max()
                 .map(|fetched| format!("Updated {}", age(fetched, now)));
             let last = providers.len();
-            let body = div().flex().flex_col().children(
-                providers
-                    .into_iter()
-                    .enumerate()
-                    .map(|(index, snapshot)| usage_provider(snapshot, now, index + 1 == last, t)),
-            );
+            let body =
+                div()
+                    .flex()
+                    .flex_col()
+                    .children(providers.into_iter().enumerate().map(|(index, snapshot)| {
+                        usage_provider(snapshot, now, index + 1 == last, t, cx)
+                    }));
             div()
                 .flex()
                 .flex_col()

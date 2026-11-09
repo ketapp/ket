@@ -23,6 +23,8 @@ pub(super) struct ProjectPlace {
     pub(super) name: String,
     /// The colour chosen for it, `#rrggbb`, or empty for ket's default.
     pub(super) color: String,
+    /// Its icon as stored, `glyph:<name>` or text, or empty for none.
+    pub(super) icon: String,
 }
 
 pub(super) struct Place {
@@ -129,6 +131,7 @@ impl Places {
                             .and_then(|s| s.display_name.clone())
                             .unwrap_or(p.name),
                         color: chosen.and_then(|s| s.color.clone()).unwrap_or_default(),
+                        icon: chosen.and_then(|s| s.icon.clone()).unwrap_or_default(),
                     }
                 })
                 .collect(),

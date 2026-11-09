@@ -310,6 +310,7 @@ fn a_pack_policy_converts_field_for_field_into_an_economy_policy() {
         reasoning_summary: Some("concise".to_owned()),
         output_limit: None,
         command_filter: None,
+        style: None,
     };
     let economy: ket_core::worktree::EconomyPolicy = (&policy).into();
     assert_eq!(economy.effort.as_deref(), Some("high"));
@@ -370,4 +371,52 @@ fn an_output_cap_in_a_schema_2_pack_is_still_read_by_this_ket() {
             .output_limit,
         Some(5_000)
     );
+}
+
+// ---- schema 4: a style ---------------------------------------------------------
+
+fn schema4(levels: &str) -> String {
+    format!(
+        r#"{{"schemaVersion":4,"packId":"test-pack","packVersion":1,"levels":[{levels}],"defaultLevel":"l"}}"#
+    )
+}
+
+#[test]
+fn a_schema_4_pack_carries_a_style_to_claude() {
+    let json = schema4(&level_with_claude(r#""style":"terse""#));
+    let pack = parse(json.as_bytes()).expect("parse");
+    assert_eq!(pack.levels[0].claude.style.as_deref(), Some("terse"));
+    assert_eq!(
+        pack.levels()[0].policy_for("claude").style.as_deref(),
+        Some("terse")
+    );
+}
+
+#[test]
+fn a_style_ket_does_not_have_is_refused_with_the_ones_it_does() {
+    let json = schema4(&level_with_claude(r#""style":"caveman""#));
+    let error = parse(json.as_bytes()).expect_err("refused").to_string();
+    assert!(error.contains("`caveman`"), "{error}");
+    assert!(error.contains("terse"), "{error}");
+}
+
+#[test]
+fn a_style_in_a_block_without_one_is_refused() {
+    let json = schema4(r#"{"id":"l","label":"L","description":"D","codex":{"style":"terse"}}"#);
+    let error = parse(json.as_bytes()).expect_err("refused").to_string();
+    assert!(error.contains("codex.style"), "{error}");
+}
+
+#[test]
+fn the_shipped_standard_pack_is_one_this_ket_reads() {
+    // The file people point `[pack] url` at. A field added here that the
+    // loader does not know yet would only surface as a refused fetch.
+    let pack = parse(include_bytes!("../../../packs/decost-standard.json")).expect("parse");
+    let max = pack
+        .levels()
+        .into_iter()
+        .find(|level| level.id == "maximum-reduction")
+        .expect("a Max level");
+    assert_eq!(max.policy_for("claude").style.as_deref(), Some("terse"));
+    assert_eq!(max.policy_for("codex").style, None);
 }

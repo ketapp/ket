@@ -215,11 +215,12 @@ fn tab_mark(kind: &TabKind) -> Icon {
         TabKind::Audio(_) => Icon::Layers,
         TabKind::Image(_) => Icon::Camera,
         TabKind::Terminal(_) => Icon::Terminal,
-        TabKind::Browser(_) => Icon::ExternalLink,
+        TabKind::Browser(_) => crate::browser::browser_tab_mark().0,
         #[cfg(target_os = "macos")]
         TabKind::IosSimulator => Icon::Smartphone,
         TabKind::Android => Icon::Smartphone,
         TabKind::Diff(_) => Icon::GitCompare,
+        TabKind::NetworkRequest(_) => Icon::Network,
     }
 }
 
@@ -459,7 +460,10 @@ impl Shell {
                                     chip: Some((project.color, project.name.clone())),
                                     binding: None,
                                     mark: tab_mark(&tab.kind),
-                                    tint: None,
+                                    tint: match tab.kind {
+                                        TabKind::Browser(_) => crate::browser::browser_tab_mark().1,
+                                        _ => None,
+                                    },
                                     target: Target::Tab {
                                         worktree: node.id.clone(),
                                         kind: tab.kind.clone(),

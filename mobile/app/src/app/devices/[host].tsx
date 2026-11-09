@@ -14,8 +14,9 @@ import { ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import type { Device } from '@ket/remote';
 
 import { hostOf } from '../../components/ConnectionHelp';
-import { Close, Desktop, Globe, Link, Padlock, Phone, Plus, Refresh, Tablet, Wifi } from '../../components/icons';
-import { Bar, Button, Card, Figure, Heading, IconButton, Prose, Row, Screen, Tag, Value, field } from '../../components/ui';
+import { addressKind, reachesAway } from '../../lib/address-kind';
+import { Close, Cloud, Desktop, Globe, Link, Padlock, Phone, Plus, Refresh, Tablet, Wifi } from '../../components/icons';
+import { Bar, Button, Card, Figure, Heading, IconButton, Prose, Row, Screen, Tag, Value, field, oneLine } from '../../components/ui';
 import { confirm } from '../../lib/confirm';
 import { dropConnection, type HostConnection } from '../../lib/connection';
 import { useHost } from '../../lib/hosts';
@@ -129,6 +130,7 @@ export default function Devices() {
                 onChangeText={setAddress}
                 placeholder="ws:// or wss:// address"
                 placeholderTextColor={t.faint}
+                {...oneLine}
                 autoCapitalize="none"
                 autoCorrect={false}
                 autoFocus
@@ -164,6 +166,12 @@ export default function Devices() {
           {!adding && addressError ? (
             <Prose color={t.failed} style={styles.note}>
               {addressError}
+            </Prose>
+          ) : null}
+          {conn && !reachesAway(conn.host) ? (
+            <Prose color={t.dim} style={styles.note}>
+              Only on the Mac’s own network for now. To reach it from anywhere, turn on Tailscale or Reach it from
+              anywhere under Away from home in the Mac’s Settings › Devices, then scan Show code there.
             </Prose>
           ) : null}
         </Card>
@@ -296,15 +304,19 @@ function AddressRow({
 }
 
 /** What an address is, from its shape: the Mac's own name on the local
- * network, a Tailscale name, or anything else — a relay. */
+ * network, a Tailscale name, ket's relay, or anything else — a relay. */
 function kind(url: string, manual?: boolean): { name: string; icon: typeof Wifi } {
   if (manual) return { name: 'Added on this phone', icon: Link };
-  const host = hostOf(url).toLowerCase().replace(/:\d+$/, '');
-  if (host.endsWith('.ts.net') || /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(host)) return { name: 'Tailscale', icon: Globe };
-  if (host.endsWith('.local') || host === 'localhost' || /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(host)) {
-    return { name: 'Local network', icon: Wifi };
+  switch (addressKind(url)) {
+    case 'ket-relay':
+      return { name: 'ket’s relay', icon: Cloud };
+    case 'tailnet':
+      return { name: 'Tailscale', icon: Globe };
+    case 'local':
+      return { name: 'Local network', icon: Wifi };
+    default:
+      return { name: 'Relay', icon: Globe };
   }
-  return { name: 'Relay', icon: Globe };
 }
 
 /** Where the open session runs, as a phrase. */
@@ -316,6 +328,8 @@ function route(address: string | null, conn: HostConnection): string {
       return 'On the local network';
     case 'Tailscale':
       return 'Over Tailscale';
+    case 'ket’s relay':
+      return 'Through ket’s relay';
     default:
       return 'Through the relay';
   }

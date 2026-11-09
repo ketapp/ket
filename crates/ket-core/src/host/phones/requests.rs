@@ -101,6 +101,15 @@ static WAKES: Mutex<Fixes> = Mutex::new(Fixes {
     finished: VecDeque::new(),
 });
 
+/// Start freshes, kept the same way as [`WAKES`]: a phone whose connection
+/// dropped while the window was starting a fresh session asks again under
+/// the same key, and is told the fresh terminal rather than starting another.
+static FRESHES: Mutex<Fixes> = Mutex::new(Fixes {
+    asks: BTreeMap::new(),
+    going: BTreeSet::new(),
+    finished: VecDeque::new(),
+});
+
 /// A device, and the idempotency key it asked under.
 type FixAsk = (Vec<u8>, String);
 
@@ -238,6 +247,7 @@ pub(super) fn handle(
             | Payload::WakeTerminal(_)
             | Payload::SetMode(_)
             | Payload::SetModel(_)
+            | Payload::StartFresh(_)
     );
     let key = request.idempotency_key.as_str();
     if mutation {
@@ -303,6 +313,7 @@ pub(super) fn handle(
             | Payload::AddressComments(_)
             | Payload::DeleteWorktree(_)
             | Payload::WakeTerminal(_)
+            | Payload::StartFresh(_)
     );
     if mutation && succeeded && kept_here {
         lock(&phone.phones.devices)
@@ -346,6 +357,8 @@ fn expensive_cost(payload: &Payload) -> Option<u32> {
         Payload::DeleteWorktree(_) => Some(10),
         // Resumes an agent on the desktop.
         Payload::WakeTerminal(_) => Some(5),
+        // Ends a session on the desktop and starts another.
+        Payload::StartFresh(_) => Some(5),
         // Keys pressed into an agent, each waited on.
         Payload::SetMode(_) => Some(2),
         // Commands typed into an agent, each confirmed.
@@ -382,6 +395,7 @@ fn payload_name(payload: &Payload) -> &'static str {
         Payload::WakeTerminal(_) => "wake_terminal",
         Payload::SetMode(_) => "set_mode",
         Payload::SetModel(_) => "set_model",
+        Payload::StartFresh(_) => "start_fresh",
         Payload::OpenAgentSession(_) => "open_agent_session",
         _ => "other",
     }
@@ -421,6 +435,7 @@ fn apply(
         | Payload::SendFiles(_)
         | Payload::OpenAgentSession(_)
         | Payload::WakeTerminal(_)
+        | Payload::StartFresh(_)
         | Payload::SetMode(_)
         | Payload::SetModel(_)
         | Payload::Resize(_)
@@ -1355,6 +1370,7 @@ fn apply(
         // typed on the terminal's typing turn and each confirmed on screen —
         // see `crate::agent_model`. Only while it is idle: a command typed
         // mid-turn waits behind the turn, or lands in a prompt.
+        Payload::StartFresh(fresh) => fresh_from_phone(host, phone, request, feed, id, fresh),
         Payload::SetModel(set) => {
             if !host.controls(set.terminal_id, holder) {
                 return no_control();
@@ -1928,6 +1944,114 @@ fn wake_from_phone(
                 id,
                 proto::ErrorCode::Unspecified,
                 &format!("the Mac couldn't start waking the tab: {why}"),
+            ))
+        }
+    }
+}
+
+/// Opens a fresh session beside a terminal's cold one for a phone — see
+/// `crate::host::server::Host::start_fresh` — answering with the terminal it
+/// opened. Refused unless it is still the cold spell the phone was shown and
+/// the agent is idle: a prompt sent since may not have reached the
+/// transcript yet, and a session at work is not cold.
+fn fresh_from_phone(
+    host: &Arc<Host>,
+    phone: &Phone<'_>,
+    request: &proto::Envelope,
+    feed: &mpsc::Sender<Event>,
+    id: u64,
+    fresh: &proto::StartFresh,
+) -> Option<proto::Envelope> {
+    let ask: FixAsk = (phone.device.clone(), request.idempotency_key.clone());
+    if lock(&FRESHES).again(&ask, id, feed) {
+        return None;
+    }
+    if !host.controls(fresh.terminal_id, phone.holder) {
+        return Some(error(
+            id,
+            proto::ErrorCode::NotController,
+            "take control of this terminal first",
+        ));
+    }
+    let Some(key) = host.key(fresh.terminal_id) else {
+        return Some(error(
+            id,
+            proto::ErrorCode::NotFound,
+            "that terminal has closed",
+        ));
+    };
+    // Busy by its own report. A session just resumed still reads Starting
+    // until its first turn, so that passes here; the window, which can tell
+    // a started agent from a starting one, checks again before acting.
+    let status = host.agent_status();
+    let pane = status.panes.iter().find(|pane| pane.pane == key);
+    let busy = pane.is_some_and(|pane| {
+        use crate::event::AgentState;
+        matches!(
+            pane.state,
+            AgentState::Thinking | AgentState::ExecutingTool | AgentState::AwaitingPermission
+        )
+    });
+    if busy {
+        return Some(error(
+            id,
+            proto::ErrorCode::Unspecified,
+            "it's working — start fresh once this turn is done",
+        ));
+    }
+    let session = pane
+        .and_then(|pane| pane.session.clone())
+        .or_else(|| host.bound_session(&key));
+    let last = session
+        .as_deref()
+        .filter(|session| *session == fresh.session)
+        .and_then(crate::conversation::claude_transcript)
+        .and_then(|path| crate::cold::claude_last_call(&path));
+    if last.is_none_or(|last| last.at_ms != fresh.since_ms) {
+        return Some(error(
+            id,
+            proto::ErrorCode::Unspecified,
+            "that session has been used since — it isn't cold any more",
+        ));
+    }
+    {
+        let mut freshes = lock(&FRESHES);
+        if freshes.again(&ask, id, feed) {
+            return None;
+        }
+        if !freshes.start(ask.clone(), &key, id, feed) {
+            return Some(error(
+                id,
+                proto::ErrorCode::Unspecified,
+                "ket is already starting this one fresh",
+            ));
+        }
+    }
+    let host = Arc::clone(host);
+    let starting = ask.clone();
+    let tab = key.clone();
+    let session = fresh.session.clone();
+    let since_ms = fresh.since_ms;
+    let spawned = std::thread::Builder::new()
+        .name("ket-host-fresh".into())
+        .spawn(move || {
+            let answer = match host.start_fresh(&tab, &session, since_ms) {
+                Ok(terminal_id) => Payload::FreshStarted(proto::FreshStarted { terminal_id }),
+                Err(message) => Payload::Error(proto::Error {
+                    code: proto::ErrorCode::Unspecified as i32,
+                    message,
+                }),
+            };
+            lock(&FRESHES).finish(starting, &tab, answer);
+        });
+    match spawned {
+        Ok(_) => None,
+        Err(why) => {
+            lock(&FRESHES).forget(&ask, &key);
+            Some(error(
+                id,
+                proto::ErrorCode::Unspecified,
+                &format!("the Mac couldn't start fresh: {why}"),
             ))
         }
     }

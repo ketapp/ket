@@ -89,6 +89,36 @@ fn wait_for_text(terminal: &LocalTerminal, needle: &str) -> bool {
 }
 
 #[test]
+fn codex_startup_waits_for_input_without_putting_the_prompt_in_its_launch() {
+    let sandbox = Sandbox::new("codex-ready-prompt");
+    let gate = sandbox.path("ready");
+    let received = sandbox.path("prompt");
+    let mut spec = shell(
+        sandbox.root(),
+        "printf 'starting Codex\\n'; while [ ! -f \"$READY_GATE\" ]; do sleep 0.01; done; \
+         stty -echo; printf '\\033[?2004h\\033[?25h\\033[22;1H› Explain this codebase\\033[24;1H? for shortcuts\\033[22;3H'; \
+         IFS= read -r message; printf '%s' \"$message\" > \"$RECEIVED_PROMPT\"",
+    );
+    spec.env
+        .insert("READY_GATE".into(), gate.display().to_string());
+    spec.env
+        .insert("RECEIVED_PROMPT".into(), received.display().to_string());
+    let prompt = "--literal private prompt: $HOME and 'quotes'";
+    assert!(!format!("{spec:?}").contains(prompt));
+    let terminal = LocalTerminal::open(&spec).unwrap();
+    assert!(wait_for_text(&terminal, "starting Codex"));
+    assert!(!terminal.with_term(|term| ket_core::screen::codex_prompt_ready(term)));
+    assert!(!received.exists());
+    std::fs::write(gate, "").unwrap();
+    assert!(wait_until(Duration::from_secs(10), || {
+        terminal.with_term(|term| ket_core::screen::codex_prompt_ready(term))
+    }));
+    terminal.send_input(format!("{prompt}\n")).unwrap();
+    assert!(wait_until(Duration::from_secs(10), || terminal.is_closed()));
+    assert_eq!(std::fs::read_to_string(received).unwrap(), prompt);
+}
+
+#[test]
 fn what_the_program_printed_ends_up_in_the_grid() {
     let sandbox = Sandbox::new("terminal-basic");
     let terminal = LocalTerminal::open(&shell(sandbox.root(), "printf 'hello from the pty\\n'"))
@@ -689,10 +719,10 @@ fn a_launch_line_survives_the_shell_that_types_it() {
     // quoted; the command is shell text and goes through untouched, which is
     // what lets it be an alias.
     let line = ket_core::shell::line(
-        "claude-personal",
+        "claude-alt",
         &["--model".to_owned(), "it's fine".to_owned()],
     );
-    assert_eq!(line, r#"claude-personal --model 'it'\''s fine'"#);
+    assert_eq!(line, r#"claude-alt --model 'it'\''s fine'"#);
 
     // zsh is handed the wrapper and told what to type. It is a login shell and
     // nothing more: the command must not appear in argv, or it would run before

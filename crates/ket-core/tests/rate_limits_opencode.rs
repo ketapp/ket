@@ -111,8 +111,13 @@ fn normalize_cookie_of_an_empty_string_is_empty() {
 fn a_keyed_fetch_succeeds_on_a_valid_usage_response() {
     let body = r#"{"usage":{"rolling":{"percent":12.5,"resetsAt":"2026-01-01T00:00:00Z"},"weekly":{"percent":40.0}}}"#;
     let http = Arc::new(ScriptedHttp::default().route("/zen/go/v1/usage", 200, body));
-    let source =
-        OpenCodeRateLimitSource::with(http, no_creds(), Arc::new(FakeKeyStore(Some("key-1"))));
+    // A saved browser session need not stay valid once a Go key is supplied.
+    // Only the keyed URL is scripted, so trying the cookie would fail this test.
+    let source = OpenCodeRateLimitSource::with(
+        http,
+        creds("", "st_expired", ""),
+        Arc::new(FakeKeyStore(Some("key-1"))),
+    );
 
     let snapshot = source.fetch(timeout());
 
@@ -308,11 +313,11 @@ fn a_cookie_that_carries_no_session_is_reported_rather_than_guessed_at() {
 }
 
 #[test]
-fn a_console_session_rejected_at_401_says_to_sign_in_again() {
+fn a_rejected_usage_cookie_reports_that_sign_in_is_needed() {
     let http = Arc::new(ScriptedHttp::default().route("/orgs", 401, ""));
     let source = OpenCodeRateLimitSource::with(http, creds("", "st_abc", ""), no_key());
     let snapshot = source.fetch(timeout());
-    assert!(reason(&snapshot).contains("sign in again"));
+    assert_eq!(reason(&snapshot), "Sign-in needed");
 }
 
 #[test]
@@ -320,7 +325,7 @@ fn a_sign_in_page_returned_as_200_is_treated_as_a_lost_session() {
     let http = Arc::new(ScriptedHttp::default().route("/orgs", 200, "<html>sign in</html>"));
     let source = OpenCodeRateLimitSource::with(http, creds("", "st_abc", ""), no_key());
     let snapshot = source.fetch(timeout());
-    assert!(reason(&snapshot).contains("does not recognise"));
+    assert_eq!(reason(&snapshot), "Sign-in needed");
 }
 
 #[test]

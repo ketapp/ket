@@ -32,16 +32,25 @@ mod audio;
 mod backlog;
 mod browser;
 // The workspace's fifth `unsafe` carve-out; see its lint block and the
-// module doc for why.
-#[cfg(target_os = "macos")]
+// module doc for why. WebKit's alone: a Chromium page's still comes through
+// its DevTools protocol.
+#[cfg(all(target_os = "macos", not(feature = "chromium")))]
 #[allow(unsafe_code)]
 mod browser_snapshot;
 #[cfg(target_os = "macos")]
 mod browser_view;
 mod checks;
+#[cfg(feature = "chromium")]
+mod chromium;
+// Chromium is embedded the macOS way — a framework and helper apps inside
+// ket.app — and nowhere else yet.
+#[cfg(all(feature = "chromium", not(target_os = "macos")))]
+compile_error!("the `chromium` feature is macOS only");
 mod clear_build;
+mod cold_resume;
 mod commands;
 mod device_capture;
+mod diagnostics;
 mod diff_view;
 mod discard_changes;
 mod editor;
@@ -65,6 +74,7 @@ mod local_models;
 mod merge_pull_request;
 mod merge_worktree;
 mod motion;
+mod network_panel;
 mod notify;
 mod orbit;
 mod overhead;
@@ -264,6 +274,8 @@ actions!(
         ShowSearchPanel,
         /// Show the Git panel.
         ShowGitPanel,
+        /// Show the Network panel.
+        ShowNetworkPanel,
         /// Create a worktree in the current project context.
         NewWorktree,
         /// Open the quick prompt.
@@ -332,6 +344,8 @@ actions!(
         ProjectStorage,
         /// Open the existing feedback form.
         SendFeedback,
+        /// Save a diagnostics bundle for a bug report.
+        ExportDiagnostics,
     ]
 );
 
@@ -346,6 +360,10 @@ actions!(
 /// and ket's own handling of ⌘C and ⌘V in terminals, the editor and every
 /// text field — which comes first and stops the key — is untouched. Only a
 /// chord nothing in ket took goes on to the menu.
+///
+/// A Chromium page takes the menu's selectors the same way when its view has
+/// the keyboard; when they come back to ket instead, the actions hand them to
+/// the page — see `Shell::chromium_edit`.
 #[cfg(target_os = "macos")]
 const EDIT_CONTEXT: &str = "KetNativeEditMenu";
 
@@ -515,6 +533,11 @@ struct Shell {
     pub(crate) panel_view: crate::panel::PanelView,
     /// The right panel's Git view. See `crate::git_panel`.
     pub(crate) git_panel: crate::git_panel::GitPanel,
+    /// The right panel's Network view. See `crate::network_panel`.
+    pub(crate) network_panel: crate::network_panel::NetworkPanel,
+    /// Open request tabs' state, by the request each shows. See
+    /// `crate::network_panel`.
+    pub(crate) network_requests: crate::network_panel::Requests,
     /// Open diff tabs' state, by the comparison each shows. See
     /// `crate::diff_view`.
     pub(crate) diffs: crate::diff_view::Diffs,
@@ -751,6 +774,9 @@ struct Shell {
     pub(crate) meta_widths: std::collections::HashMap<WorktreeId, Pixels>,
     /// The open "clear build output?" question, if there is one.
     pub(crate) confirm_clear_build: Option<crate::clear_build::ClearBuildConfirm>,
+    /// Worktrees whose build output is being cleared right now, so a second
+    /// clear cannot start on a tree that is already going.
+    pub(crate) clearing_builds: std::collections::HashSet<WorktreeId>,
     /// The open "discard changes?" question for a file in the Git view.
     pub(crate) confirm_discard: Option<crate::discard_changes::DiscardConfirm>,
     /// What each worktree costs on disk. See `crate::storage`.
@@ -854,6 +880,9 @@ struct Shell {
     /// The close-tab confirmation for a terminal running a CLI agent session,
     /// while it is up. See `crate::tabs::CloseSessionConfirm`.
     pub(crate) confirm_close_session: Option<crate::tabs::CloseSessionConfirm>,
+    /// Whether to pick up a session whose prompt cache went cold — see
+    /// `crate::cold_resume`.
+    pub(crate) cold_resume: crate::cold_resume::ColdResumeState,
     /// Open editor tabs' buffers and UI state, keyed by absolute path. See
     /// `editor.rs`'s module doc for why a buffer lives here rather than on
     /// the `Tab` itself.
@@ -892,6 +921,10 @@ struct Shell {
     pub(crate) browsers: HashMap<BrowserId, BrowserHandle>,
     /// The next browser tab's process-local identity.
     pub(crate) next_browser: u64,
+    /// The window's side of Chromium, when browser tabs are Chromium's — see
+    /// `crate::chromium`.
+    #[cfg(feature = "chromium")]
+    pub(crate) chromium: crate::chromium::Chromium,
     /// The single process-local SimulatorKit surface, while its tab is open.
     #[cfg(target_os = "macos")]
     pub(crate) ios_simulator: Option<IosSimulatorHandle>,
@@ -1047,6 +1080,7 @@ impl Shell {
             || self.review_draft_focused()
             || self.feedback.typing()
             || self.browser_typing(window, cx)
+            || self.chromium_dialog_typing_any(window, cx)
             || self.searches.explorer.read(cx).is_focused(window)
     }
 
@@ -1066,6 +1100,7 @@ impl Shell {
             || self.confirm_clear_build.is_some()
             || self.confirm_discard.is_some()
             || self.confirm_close_session.is_some()
+            || self.cold_resume.dialog.is_some()
             || self.confirm_merge_worktree.is_some()
             || self.confirm_pull_request.is_some()
             || self.confirm_merge_pull_request.is_some()
@@ -1241,7 +1276,12 @@ impl Shell {
         // their phone.
         cx.spawn(async move |shell, cx| {
             loop {
-                cx.background_executor().timer(STATUS_WAKE).await;
+                // The tick, or sooner when the host hands this window
+                // something to do.
+                tokio::select! {
+                    () = cx.background_executor().timer(STATUS_WAKE) => {}
+                    () = ket_core::host::phone_asked() => {}
+                }
                 if shell
                     .update(cx, |shell, cx| {
                         if shell.take_phone_reviews(cx) {
@@ -1255,6 +1295,9 @@ impl Shell {
                             shell.announce_waiting();
                             shell.refresh_rule_offers();
                             shell.drain_local_queue(cx);
+                            cx.notify();
+                        }
+                        if shell.drain_network_requests(cx) {
                             cx.notify();
                         }
                     })
@@ -1361,6 +1404,8 @@ impl Shell {
                     panel_width: px(280.0),
                     panel_view: Default::default(),
                     git_panel: Default::default(),
+                    network_panel: Default::default(),
+                    network_requests: Default::default(),
                     diffs: Default::default(),
                     reviews: HashMap::new(),
                     review_draft: None,
@@ -1424,6 +1469,7 @@ impl Shell {
                     collapsed_subagents: std::collections::HashSet::new(),
                     meta_widths: std::collections::HashMap::new(),
                     confirm_clear_build: None,
+                    clearing_builds: Default::default(),
                     confirm_discard: None,
                     sizes: crate::storage::Sizes::new(),
                     measuring: false,
@@ -1460,6 +1506,7 @@ impl Shell {
                     tab_dragging: false,
                     confirm_remove_worktree: None,
                     confirm_close_session: None,
+                    cold_resume: Default::default(),
                     editors: HashMap::new(),
                     window_bounds: None,
                     view_saved: None,
@@ -1470,6 +1517,8 @@ impl Shell {
                     images: image::ImageFrames::default(),
                     browsers: HashMap::new(),
                     next_browser: 0,
+                    #[cfg(feature = "chromium")]
+                    chromium: crate::chromium::Chromium::default(),
                     #[cfg(target_os = "macos")]
                     ios_simulator: None,
                     android: None,
@@ -1536,6 +1585,8 @@ impl Shell {
             panel_width: px(280.0),
             panel_view: Default::default(),
             git_panel: Default::default(),
+            network_panel: Default::default(),
+            network_requests: Default::default(),
             diffs: Default::default(),
             reviews: HashMap::new(),
             review_draft: None,
@@ -1599,6 +1650,7 @@ impl Shell {
             collapsed_subagents: std::collections::HashSet::new(),
             meta_widths: std::collections::HashMap::new(),
             confirm_clear_build: None,
+            clearing_builds: Default::default(),
             confirm_discard: None,
             sizes: crate::storage::Sizes::new(),
             measuring: false,
@@ -1635,6 +1687,7 @@ impl Shell {
             tab_dragging: false,
             confirm_remove_worktree: None,
             confirm_close_session: None,
+            cold_resume: Default::default(),
             editors: HashMap::new(),
             window_bounds: None,
             view_saved: None,
@@ -1645,6 +1698,8 @@ impl Shell {
             images: image::ImageFrames::default(),
             browsers: HashMap::new(),
             next_browser: 0,
+            #[cfg(feature = "chromium")]
+            chromium: crate::chromium::Chromium::default(),
             #[cfg(target_os = "macos")]
             ios_simulator: None,
             android: None,
@@ -1848,6 +1903,7 @@ impl Render for Shell {
         #[cfg(target_os = "macos")]
         self.sync_ios_simulator_visibility(cx);
         self.sync_terminal_views(cx);
+        self.check_cold_resume(window, cx);
         // Pictures whose tabs have closed since the last frame, while the
         // window is here to free their textures.
         self.prune_images(window, cx);
@@ -1961,6 +2017,7 @@ impl Render for Shell {
         let backlog = self.backlog_view(window, cx);
         let quick_capture = self.quick_capture_view(window, cx);
         let close_session = self.close_session_view(cx);
+        let cold_resume = self.cold_resume_view(cx);
         // One at a time: two modals stacked is a state with no way back.
         let modal = storage_dialog
             .or(release_dialog)
@@ -1979,7 +2036,8 @@ impl Render for Shell {
             .or(quick_prompt)
             .or(backlog)
             .or(quick_capture)
-            .or(close_session);
+            .or(close_session)
+            .or(cold_resume);
         let header = {
             let _span = crate::frametrace::span("build:header");
             self.window_header(window, cx)
@@ -2164,6 +2222,13 @@ impl Render for Shell {
                 }
                 this.show_panel_view(crate::panel::PanelView::Git, cx);
             }))
+            .on_action(cx.listener(|this, _: &ShowNetworkPanel, _, cx| {
+                this.menu_dirty = true;
+                if this.modal_open() {
+                    return;
+                }
+                this.show_panel_view(crate::panel::PanelView::Network, cx);
+            }))
             .on_action(cx.listener(|this, _: &NewWorktree, _, cx| {
                 this.menu_dirty = true;
                 if this.modal_open() {
@@ -2234,6 +2299,10 @@ impl Render for Shell {
                 if this.new_worktree_edit(crate::editor::NativeEdit::Undo, window, cx) {
                     return;
                 }
+                #[cfg(feature = "chromium")]
+                if !this.modal_open() && this.chromium_edit(ket_chromium::Edit::Undo) {
+                    return;
+                }
                 if !this.modal_open()
                     && !this.native_editor_edit(crate::editor::NativeEdit::Undo, cx)
                 {
@@ -2243,6 +2312,10 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &EditRedo, window, cx| {
                 this.menu_dirty = true;
                 if this.new_worktree_edit(crate::editor::NativeEdit::Redo, window, cx) {
+                    return;
+                }
+                #[cfg(feature = "chromium")]
+                if !this.modal_open() && this.chromium_edit(ket_chromium::Edit::Redo) {
                     return;
                 }
                 if !this.modal_open()
@@ -2256,6 +2329,10 @@ impl Render for Shell {
                 if this.new_worktree_edit(crate::editor::NativeEdit::Cut, window, cx) {
                     return;
                 }
+                #[cfg(feature = "chromium")]
+                if !this.modal_open() && this.chromium_edit(ket_chromium::Edit::Cut) {
+                    return;
+                }
                 if !this.modal_open() {
                     this.native_editor_edit(crate::editor::NativeEdit::Cut, cx);
                 }
@@ -2263,6 +2340,10 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &EditCopy, window, cx| {
                 this.menu_dirty = true;
                 if this.new_worktree_edit(crate::editor::NativeEdit::Copy, window, cx) {
+                    return;
+                }
+                #[cfg(feature = "chromium")]
+                if !this.modal_open() && this.chromium_edit(ket_chromium::Edit::Copy) {
                     return;
                 }
                 if !this.modal_open()
@@ -2277,6 +2358,10 @@ impl Render for Shell {
                 if this.new_worktree_edit(crate::editor::NativeEdit::Paste, window, cx) {
                     return;
                 }
+                #[cfg(feature = "chromium")]
+                if !this.modal_open() && this.chromium_edit(ket_chromium::Edit::Paste) {
+                    return;
+                }
                 if !this.modal_open()
                     && !this.native_editor_edit(crate::editor::NativeEdit::Paste, cx)
                     && let Some(id) = this.active_terminal_id()
@@ -2287,6 +2372,10 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &EditSelectAll, window, cx| {
                 this.menu_dirty = true;
                 if this.new_worktree_edit(crate::editor::NativeEdit::SelectAll, window, cx) {
+                    return;
+                }
+                #[cfg(feature = "chromium")]
+                if !this.modal_open() && this.chromium_edit(ket_chromium::Edit::SelectAll) {
                     return;
                 }
                 if !this.modal_open() {
@@ -2615,6 +2704,11 @@ impl Render for Shell {
                     this.toggle_active_editor_wrap(cx);
                 }
             }))
+            .on_action(cx.listener(|this, _: &ExportDiagnostics, _, cx| {
+                if !this.modal_open() {
+                    this.export_diagnostics(cx);
+                }
+            }))
             .on_action(cx.listener(|this, _: &ReportIssue, _, cx| {
                 if !this.modal_open() {
                     cx.open_url("https://github.com/ketapp/ket/issues/new");
@@ -2714,6 +2808,7 @@ impl Render for Shell {
                         | this.worktree_snippet_menu.take().is_some()
                         | this.project_menu.take().is_some()
                         | this.sidebar_menu.take().is_some()
+                        | this.network_panel.menu.take().is_some()
                         | this.tab_open_in.take().is_some()
                         | this.tab_snippets.take().is_some()
                         | this.tab_context_menu.take().is_some()
@@ -2877,6 +2972,11 @@ impl Render for Shell {
                         stop_unless_text(event, cx);
                         return;
                     }
+                    if this.cold_resume_key(event, cx) {
+                        cx.notify();
+                        stop_unless_text(event, cx);
+                        return;
+                    }
                     if this.quick_prompt_key(event, cx) {
                         this.caret_wake(cx);
                         cx.notify();
@@ -2913,6 +3013,11 @@ impl Render for Shell {
                         return;
                     }
                     if this.sidebar_menu_key(event, cx) {
+                        cx.notify();
+                        stop_unless_text(event, cx);
+                        return;
+                    }
+                    if this.network_menu_key(event, cx) {
                         cx.notify();
                         stop_unless_text(event, cx);
                         return;
@@ -3015,7 +3120,9 @@ impl Render for Shell {
                     // The browser's address field is ordinary GPUI text, so it
                     // gets the same editing and IME path as the rest of the
                     // shell before shortcuts or the pane underneath it.
-                    if this.browser_key(event, window, cx) {
+                    if this.browser_key(event, window, cx)
+                        || this.chromium_dialog_key_any(event, window, cx)
+                    {
                         this.caret_wake(cx);
                         cx.notify();
                         stop_unless_text(event, cx);
@@ -3340,6 +3447,10 @@ fn open_main_window(cx: &mut App) {
                 // `text_sm` and `text_xs` on exactly those, and shrinks the
                 // padding that goes with them in step.
                 let shell = cx.new(Shell::load);
+                // Where browser tabs' pages go, from now: one opened before
+                // the first frame — by an agent — has its page at once.
+                #[cfg(feature = "chromium")]
+                shell.update(cx, |shell, _| shell.chromium.adopt_root(window));
                 // Installed before the shell existed, so it names the
                 // status bar's default; this names what was restored.
                 cx.set_menus(app_menus(&crate::app_menu::MenuState::from_shell(
@@ -3471,6 +3582,14 @@ fn main() {
             ),
         ]);
         cx.on_action::<Quit>(|_, cx| cx.quit());
+        // Chromium closes its pages and stops before gpui lets the windows
+        // go, and in its own time: gpui waits on what it is handed here for
+        // only 100 ms, so this does its work before handing anything back.
+        #[cfg(feature = "chromium")]
+        std::mem::forget(cx.on_app_quit(|_| {
+            crate::chromium::shutdown();
+            async {}
+        }));
         cx.set_menus(app_menus(&crate::app_menu::MenuState::default()));
 
         // Before anything asks which fonts exist — see `fonts`.

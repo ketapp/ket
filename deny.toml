@@ -26,6 +26,17 @@ allow = [
     "Zlib",
 ]
 
+# Only in the tree to build embedded Chromium: cef-rs's build script
+# downloads CEF's distribution over rustls with Mozilla's root certificates
+# and unpacks it with a Rust bzip2. Neither ships in ket.
+[[licenses.exceptions]]
+crate = "webpki-roots"
+allow = ["CDLA-Permissive-2.0"]
+
+[[licenses.exceptions]]
+crate = "libbz2-rs-sys"
+allow = ["bzip2-1.0.6"]
+
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"

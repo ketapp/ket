@@ -13,6 +13,7 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
+use crate::id::WorktreeId;
 use crate::{KetError, Result};
 
 /// Reads an environment variable. Injected so resolution stays testable.
@@ -151,6 +152,12 @@ pub fn phone_uploads_dir() -> Result<PathBuf> {
     Ok(data_dir()?.join("phone-uploads"))
 }
 
+/// Directory holding the network inspector's logs, each worktree's in a
+/// directory of its own — see [`crate::network::store`].
+pub fn network_dir() -> Result<PathBuf> {
+    Ok(data_dir()?.join("network"))
+}
+
 /// Directory holding user-defined themes — `<config_dir>/themes`.
 ///
 /// A theme only needs to exist to override the shipped dark or light default,
@@ -163,6 +170,42 @@ pub fn themes_dir() -> Result<PathBuf> {
 /// Path to a named theme file — `<themes_dir>/<name>.toml`.
 pub fn theme_file(name: &str) -> Result<PathBuf> {
     Ok(themes_dir()?.join(format!("{name}.toml")))
+}
+
+/// Where Chromium keeps everything for ket's browser tabs — `<data_dir>/chromium`,
+/// or `<data_dir>/chromium-dev` for a development build, since Chromium locks
+/// its root and a dev ket runs beside a release one. Each worktree's profile
+/// is a directory beneath it, named by [`chromium_profile_name`].
+pub fn chromium_root(dev: bool) -> Result<PathBuf> {
+    Ok(data_dir()?.join(if dev { "chromium-dev" } else { "chromium" }))
+}
+
+/// Both of Chromium's roots, release first: a worktree can have a profile
+/// under either.
+pub fn chromium_roots() -> Result<[PathBuf; 2]> {
+    Ok([chromium_root(false)?, chromium_root(true)?])
+}
+
+/// The directory a worktree's browser profile has beneath a Chromium root:
+/// its id, with anything but ASCII letters, digits, `_` and `-` made `_` —
+/// never a path out of the root, and never the root itself.
+pub fn chromium_profile_name(worktree: &WorktreeId) -> String {
+    let name: String = worktree
+        .as_str()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if name.is_empty() {
+        "_".to_owned()
+    } else {
+        name
+    }
 }
 
 /// The append-only event journal — `<data_dir>/events.jsonl`.
@@ -220,6 +263,21 @@ mod tests {
     fn missing_home_is_an_error_not_a_panic() {
         let e = env(&[]);
         assert!(matches!(data_dir_with(&e), Err(KetError::Path { .. })));
+    }
+
+    #[test]
+    fn a_browser_profile_is_named_for_its_worktree_in_safe_characters() {
+        assert_eq!(
+            chromium_profile_name(&WorktreeId::new("demo-site-1a2b_3c")),
+            "demo-site-1a2b_3c"
+        );
+        assert_eq!(
+            chromium_profile_name(&WorktreeId::new("a/../b c")),
+            "a____b_c"
+        );
+        assert_eq!(chromium_profile_name(&WorktreeId::new("ünï")), "_n_");
+        // Never the root itself, which Chromium refuses as a profile.
+        assert_eq!(chromium_profile_name(&WorktreeId::new("")), "_");
     }
 
     #[test]

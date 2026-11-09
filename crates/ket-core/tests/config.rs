@@ -58,10 +58,10 @@ fn a_pty_agent_with_no_launch_override_opens_with_its_own_command_and_args() {
 fn a_launch_override_wins_over_either_transports_default() {
     let mut agent = acp_agent("claude");
     agent.launch = Some(AgentLaunch {
-        command: "claude-personal".to_owned(),
+        command: "claude-alt".to_owned(),
         args: vec!["--resume".to_owned()],
     });
-    assert_eq!(agent.launch_command(), "claude-personal");
+    assert_eq!(agent.launch_command(), "claude-alt");
     assert_eq!(agent.launch_args(), ["--resume".to_owned()]);
 }
 

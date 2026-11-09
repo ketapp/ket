@@ -9,6 +9,7 @@
 import type { HostSnapshot, ProjectSummary, WorktreeSummary } from '@ket/remote';
 
 import type { Starting } from './connection';
+import { STARTING_FOR_MS } from './connection';
 import { agentLabel } from './theme';
 
 /** Where new work has got to, as far as the snapshot says. */
@@ -42,6 +43,38 @@ export function worktreeOf(work: Starting, project: ProjectSummary | undefined):
   return project?.worktrees.find(
     (w) => !work.before.includes(w.id) && w.branch.startsWith(stem) && w.branch.length === stem.length + 4,
   );
+}
+
+/** Binds each request once to the first agent terminal its worktree opens.
+ * A later snapshot cannot move that request to a replacement tab. */
+export function bindTasks(asked: Starting[], snapshot: HostSnapshot | null, now = Date.now()): Starting[] {
+  return asked.map((work) => {
+    if (work.terminal !== undefined || now - work.at > STARTING_FOR_MS) return work;
+    const project = snapshot?.projects.find((p) => p.id === work.project);
+    const first = worktreeOf(work, project)?.terminals.find((t) => !t.closed && t.agent !== '');
+    return first ? { ...work, terminal: first.id, openedAt: now } : work;
+  });
+}
+
+/** The original task for a bound terminal, including when its chat is reopened. */
+export function taskForTerminal(asked: Starting[], terminal: bigint): Starting | undefined {
+  return asked.find((work) => work.terminal === terminal);
+}
+
+/** Remembers delivery or a conversation change on the retained request.
+ * Returns whether its prompt should stop appearing as undelivered. */
+export function reconcileTask(work: Starting, session: string, delivered: boolean, active = false): boolean {
+  if (!work.delivery && session) {
+    if (work.session && work.session !== session) work.delivery = 'superseded';
+    else {
+      work.session = session;
+      if (delivered) work.delivery = 'delivered';
+      // A first read returns only the recent end. Once the conversation
+      // contains work, absence from that window cannot prove non-delivery.
+      else if (active) work.delivery = 'superseded';
+    }
+  }
+  return work.delivery !== undefined;
 }
 
 /** Where `work` has got to, as far as the snapshot says. */

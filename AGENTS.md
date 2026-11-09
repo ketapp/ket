@@ -71,8 +71,8 @@ not an implementation detail.
 warnings` have to be clean. The workspace denies `clippy::all` and
 `unsafe_code`, and warns on `missing_docs`.
 
-There are five documented `unsafe` carve-outs, and the reason for each is in
-the workspace manifest's lint block. Adding a sixth is a maintainer's call,
+There are six documented `unsafe` carve-outs, and the reason for each is in
+the workspace manifest's lint block. Adding a seventh is a maintainer's call,
 not yours.
 
 ## Commit messages

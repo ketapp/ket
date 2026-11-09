@@ -988,6 +988,7 @@ impl Shell {
             crate::panel::PanelView::Files => self.explorer_panel(window, cx),
             crate::panel::PanelView::Search => self.workspace_search_panel(window, cx),
             crate::panel::PanelView::Git => self.git_panel(cx),
+            crate::panel::PanelView::Network => self.network_panel(cx),
         };
 
         crate::header::card(&self.theme)

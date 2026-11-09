@@ -9,21 +9,46 @@ use std::time::{Duration, Instant};
 
 use futures::{SinkExt, StreamExt};
 use ket_relay_protocol::{Control, Frame, Kind};
+use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
+use tokio_tungstenite::{Connector, MaybeTlsStream, WebSocketStream, tungstenite};
 
 use super::session::serve_phone;
 use super::{Event, HANDSHAKE_TIMEOUT, MAX_PENDING_HANDSHAKES, PREADMIT_BYTES, Phones, lock};
 use crate::Result;
 use crate::host::server::Host;
 
-pub(super) async fn link_forever(host: &Arc<Host>, phones: &Arc<Phones>) {
+/// A relay the host links to: where it is, how the host takes its place
+/// there, and how the link is doing.
+pub(super) struct Target {
+    pub(super) url: String,
+    /// The key the host claims its own relay with, made fresh each time
+    /// phones are turned on; `None` for a relay elsewhere, which is not told
+    /// it and is proved to instead. See [`ket_relay::Own`].
+    pub(super) claim: Option<[u8; 32]>,
+    pub(super) status: Arc<LinkStatus>,
+}
+
+/// How a link is doing, for Settings to say.
+#[derive(Default)]
+pub(super) struct LinkStatus {
+    /// Registered with the relay now.
+    pub(super) linked: AtomicBool,
+    /// Why the last attempt failed.
+    pub(super) error: std::sync::Mutex<Option<String>>,
+}
+
+pub(super) async fn link_forever(host: &Arc<Host>, phones: &Arc<Phones>, target: &Target) {
     let mut backoff = Duration::from_secs(1);
     loop {
         let started = Instant::now();
-        match link(host, phones).await {
-            Ok(()) => tracing::info!("relay link closed"),
+        let outcome = link(host, phones, target).await;
+        target.status.linked.store(false, Ordering::Release);
+        match outcome {
+            Ok(()) => tracing::info!(relay = %target.url, "relay link closed"),
             Err(error) => {
-                tracing::warn!(%error, relay = %phones.relay.dial(), "relay link failed");
+                tracing::warn!(%error, relay = %target.url, "relay link failed");
+                *lock(&target.status.error) = Some(error.to_string());
             }
         }
         // A link that held for a while earns a fast retry.
@@ -37,22 +62,101 @@ pub(super) async fn link_forever(host: &Arc<Host>, phones: &Arc<Phones>) {
 
 type Link = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
-async fn link(host: &Arc<Host>, phones: &Arc<Phones>) -> Link {
-    // Nagle off, for the reason the relay turns it off on its side: every
-    // frame is a keystroke or an echo someone is waiting on.
+/// The host's socket to a relay.
+pub(super) type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
+
+/// Dials the relay at `url`: `ws://` to the host's own on this Mac, or
+/// `wss://` to one elsewhere, whose certificate is checked against the
+/// operating system's root certificates — or against `connector`'s, when a
+/// test brings a certificate of its own. Nagle off, for the reason the relay
+/// turns it off on its side: every frame is a keystroke or an echo someone
+/// is waiting on.
+pub(super) async fn dial(
+    url: &str,
+    connector: Option<Connector>,
+) -> Result<Socket, tungstenite::Error> {
     let (socket, _) =
-        tokio_tungstenite::connect_async_with_config(phones.relay.dial(), None, true).await?;
-    let (mut sink, mut incoming) = socket.split();
-    let host_id = lock(&phones.identity).id;
-    // Our own relay is claimed with the key it was started with; a relay
-    // elsewhere is only told the id.
-    let register = match phones.claim {
-        Some(key) => Control::Claim { host: host_id, key },
-        None => Control::Register { host: host_id },
+        tokio_tungstenite::connect_async_tls_with_config(url, None, true, connector).await?;
+    Ok(socket)
+}
+
+/// How long a relay has to confirm the host's registration, from the first
+/// frame the host sends it.
+const REGISTRATION_TIMEOUT: Duration = Duration::from_secs(10);
+
+type Sink = futures::stream::SplitSink<Socket, WsMessage>;
+type Incoming = futures::stream::SplitStream<Socket>;
+
+/// Takes this host's place on the relay: our own is claimed with the key it
+/// was started with; one elsewhere is told the host's id and key, and the
+/// host proves it holds the key (#141). Done once the relay says so.
+async fn register(
+    phones: &Phones,
+    claim: Option<[u8; 32]>,
+    sink: &mut Sink,
+    incoming: &mut Incoming,
+) -> Link {
+    async fn send(sink: &mut Sink, control: Control) -> Link {
+        sink.send(WsMessage::Binary(control.frame(0).encode()?.into()))
+            .await?;
+        Ok(())
+    }
+    let (host, public) = {
+        let identity = lock(&phones.identity);
+        (identity.id, identity.public())
     };
-    sink.send(WsMessage::Binary(register.frame(0).encode()?.into()))
-        .await?;
-    tracing::info!(relay = %phones.relay.dial(), "registered with the relay");
+    match claim {
+        Some(key) => send(sink, Control::Claim { host, key }).await?,
+        None => {
+            send(sink, Control::Identify { host, public }).await?;
+            let Control::Challenge { nonce, ephemeral } = next_control(incoming).await? else {
+                return Err("the relay answered with something other than a challenge".into());
+            };
+            let tag = lock(&phones.identity).prove(&nonce, &ephemeral)?;
+            send(sink, Control::Prove { tag }).await?;
+        }
+    }
+    match next_control(incoming).await? {
+        Control::Registered => Ok(()),
+        Control::Refused { reason } => {
+            Err(format!("the relay refused this host's registration (reason {reason})").into())
+        }
+        _ => Err("the relay answered with something other than a registration".into()),
+    }
+}
+
+/// The next control message from the relay, skipping anything that is not a
+/// frame.
+async fn next_control(
+    incoming: &mut Incoming,
+) -> Result<Control, Box<dyn std::error::Error + Send + Sync>> {
+    loop {
+        let bytes = match incoming.next().await {
+            Some(message) => match message? {
+                WsMessage::Binary(bytes) => bytes,
+                WsMessage::Close(_) => return Err("the relay closed the link".into()),
+                _ => continue,
+            },
+            None => return Err("the relay closed the link".into()),
+        };
+        let frame = Frame::decode(&bytes)?;
+        if frame.kind == Kind::Control {
+            return Ok(Control::parse(&frame.body)?);
+        }
+    }
+}
+
+async fn link(host: &Arc<Host>, phones: &Arc<Phones>, target: &Target) -> Link {
+    let socket = dial(&target.url, None).await?;
+    let (mut sink, mut incoming) = socket.split();
+    tokio::time::timeout(
+        REGISTRATION_TIMEOUT,
+        register(phones, target.claim, &mut sink, &mut incoming),
+    )
+    .await??;
+    target.status.linked.store(true, Ordering::Release);
+    *lock(&target.status.error) = None;
+    tracing::info!(relay = %target.url, "registered with the relay");
 
     let (out, mut outgoing) = tokio::sync::mpsc::unbounded_channel::<Frame>();
     let writer = tokio::spawn(async move {
@@ -64,7 +168,7 @@ async fn link(host: &Arc<Host>, phones: &Arc<Phones>) -> Link {
         }
     });
 
-    let mut connections: HashMap<u64, Opened> = HashMap::new();
+    let mut connections = Connections::default();
     while let Some(message) = incoming.next().await {
         let bytes = match message? {
             WsMessage::Binary(bytes) => bytes,
@@ -139,11 +243,37 @@ async fn link(host: &Arc<Host>, phones: &Arc<Phones>) -> Link {
             }
         }
     }
-    for link in connections.values() {
-        let _ = link.tx.send(Event::Closed);
-    }
     writer.abort();
     Ok(())
+}
+
+/// The phones that came in over one link, by the relay's connection id.
+/// However the link ends — the relay closing it, an error, or the link
+/// being stopped mid-await — each is told its connection has gone, so no
+/// session outlives the socket it came through.
+#[derive(Default)]
+struct Connections(HashMap<u64, Opened>);
+
+impl std::ops::Deref for Connections {
+    type Target = HashMap<u64, Opened>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for Connections {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl Drop for Connections {
+    fn drop(&mut self) {
+        for (_, link) in self.0.drain() {
+            let _ = link.tx.send(Event::Closed);
+        }
+    }
 }
 
 /// The relay link's side of one phone connection.

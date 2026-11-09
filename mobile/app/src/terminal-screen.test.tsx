@@ -363,3 +363,37 @@ describe('TerminalScreen', () => {
     await view.unmount();
   });
 });
+
+describe('TerminalScreen typing as typed', () => {
+  test('the message line does not capitalise', async () => {
+    const view = await render(<TerminalScreen />);
+    const input = await waitFor(() => view.getByPlaceholderText('Message codex…'));
+    expect(input.props.autoCapitalize).toBe('none');
+    await view.unmount();
+  });
+
+  test('a message goes with the dashes and quotes iOS made smart undone', async () => {
+    const view = await render(<TerminalScreen />);
+    const input = await waitFor(() => view.getByPlaceholderText('Message codex…'));
+    await fireEvent.changeText(input, 'claude-alt —resume “one” ‘two’ wait…');
+    await fireEvent.press(view.getByLabelText('Send'));
+    await waitFor(() =>
+      expect(mockConn.type).toHaveBeenCalledWith(7n, 'claude-alt --resume "one" \'two\' wait...'),
+    );
+    await view.unmount();
+  });
+
+  test('a live dash iOS folds into an em dash is a second dash, and deleting it deletes both', async () => {
+    const view = await render(<TerminalScreen />);
+    await fireEvent.press(view.getByText('Live keys'));
+    const field = view.getByPlaceholderText('Each key goes straight in');
+    await fireEvent.changeText(field, 'a-');
+    await waitFor(() => expect(mockConn.type).toHaveBeenLastCalledWith(7n, 'a-'));
+    // The keyboard replaces the field's `-` with `—` as the second is typed.
+    await fireEvent.changeText(field, 'a—');
+    await waitFor(() => expect(mockConn.type).toHaveBeenLastCalledWith(7n, '-'));
+    await fireEvent.changeText(field, 'a');
+    await waitFor(() => expect(mockConn.type).toHaveBeenLastCalledWith(7n, '\x7f\x7f'));
+    await view.unmount();
+  });
+});

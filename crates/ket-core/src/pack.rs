@@ -59,7 +59,8 @@ use crate::worktree::{EconomyPolicy, TokenReduction};
 /// - **1**: levels with shared wording and Claude-shaped settings.
 /// - **2**: per-provider blocks (`claude`, `codex`, `opencode`, `grok`).
 /// - **3**: `outputLimit` and `commandFilter` in a provider block.
-pub const SCHEMA_VERSION: u32 = 3;
+/// - **4**: `style` in a provider block.
+pub const SCHEMA_VERSION: u32 = 4;
 
 /// Provider-specific launch settings in a schema-v2 pack.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -106,6 +107,10 @@ pub struct PackPolicy {
     /// and ignored in the other blocks.
     #[serde(default)]
     pub command_filter: Option<bool>,
+    /// How the session writes its replies: one of ket's styles by name, such
+    /// as `terse` — see `crate::style`. Schema 4; Claude Code only.
+    #[serde(default)]
+    pub style: Option<String>,
 }
 
 impl From<&PackPolicy> for EconomyPolicy {
@@ -123,6 +128,7 @@ impl From<&PackPolicy> for EconomyPolicy {
             reasoning_summary: policy.reasoning_summary.clone(),
             output_limit: policy.output_limit,
             command_filter: policy.command_filter,
+            style: policy.style.clone(),
         }
     }
 }
@@ -387,6 +393,7 @@ pub fn parse(bytes: &[u8]) -> Result<Pack> {
                 policy.autocompact.as_deref(),
             )?;
             validate_output_limit(provider, policy.output_limit)?;
+            validate_style(provider, policy.style.as_deref())?;
         }
     }
 
@@ -422,6 +429,31 @@ fn validate_output_limit(provider: &str, limit: Option<u32>) -> Result<()> {
     if limit > 1_000_000 {
         return Err(KetError::Config(format!(
             "pack {provider}.outputLimit must be at most 1000000 {unit}"
+        )));
+    }
+    Ok(())
+}
+
+/// Refuses a style ket does not have, or one in a block whose agent cannot
+/// take it.
+///
+/// Refused rather than skipped, like an unknown verbosity: a level that asked
+/// for terse replies and quietly launched without them would be a level whose
+/// description is wrong. Only Claude Code has a system prompt ket can append
+/// to, so a style in any other block is a typo in the wrong place.
+fn validate_style(provider: &str, style: Option<&str>) -> Result<()> {
+    let Some(style) = style else {
+        return Ok(());
+    };
+    if provider != "claude" {
+        return Err(KetError::Config(format!(
+            "pack {provider}.style is not a setting {provider} has"
+        )));
+    }
+    if !crate::style::exists(style) {
+        let known = crate::style::names().collect::<Vec<_>>().join(", ");
+        return Err(KetError::Config(format!(
+            "pack claude.style `{style}` is not a style this ket has ({known})"
         )));
     }
     Ok(())

@@ -13,10 +13,17 @@ publish.workspace = true
 [dependencies]
 futures.workspace = true
 ket-relay-protocol.workspace = true
-tokio = { workspace = true, features = ["net"] }
+# Checking a host's proof of its id (#141): X25519, HMAC-SHA256, SHA-256.
+ring.workspace = true
+tokio = { workspace = true, features = ["io-util", "net"] }
 tokio-tungstenite.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+# A real host's side of the proof, in the tests alone: the relay itself
+# still cannot name what it carries.
+[dev-dependencies]
+ket-remote.workspace = true
 
 [lints]
 workspace = true

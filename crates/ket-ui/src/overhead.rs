@@ -2,10 +2,10 @@
 //! bar's right end, and the popover they open.
 //!
 //! `ket 358 MB · 0.3% CPU` and `agents 1.9 GB · 1.3% CPU`. Two because they
-//! answer different questions: the first is what ket itself costs — the window
-//! and the host behind its terminals — and the second is what the work running
-//! in them costs. One total would let a build in a terminal read as ket being
-//! heavy.
+//! answer different questions: the first is what ket itself costs — the window,
+//! the Chromium behind its browser tabs, and the host behind its terminals —
+//! and the second is what the work running in them costs. One total would let
+//! a build in a terminal read as ket being heavy.
 //!
 //! **CPU is a share of this Mac**, every core together, though
 //! `ket_core::overhead` counts per core as Activity Monitor does. The figures
@@ -20,9 +20,9 @@
 //! which on a Mac with many is a few percent and would never colour otherwise.
 //!
 //! **The popover** charts the last [`HISTORY`] of the total, splits ket into
-//! window and host, lists each session by what runs in it and where, and lists
-//! the models a local Ollama holds: outside ket's totals, since Ollama.app
-//! starts it, but where a local agent's weight really is. While it is open it
+//! window, Chromium and host, lists each session by what runs in it and where,
+//! and lists the models a local Ollama holds: outside ket's totals, since
+//! Ollama.app starts it, but where a local agent's weight really is. While it is open it
 //! reads every [`MIN_SPAN`] rather than on the shell's ten-second tick.
 //!
 //! **It does things, too**, the few that save a trip to Activity Monitor: a
@@ -356,6 +356,7 @@ impl Shell {
             .take(MOST_LISTED)
             .filter_map(|session| session.reading.cpu)
             .chain(overhead.window.cpu)
+            .chain(overhead.chromium.and_then(|chromium| chromium.reading.cpu))
             .chain(overhead.host.and_then(|host| host.cpu))
             .map(|cpu| mac.cpu_share(cpu))
             .fold(0.0_f32, f32::max);
@@ -389,6 +390,23 @@ impl Shell {
                 None,
                 t,
             ))
+            // The browser tabs' GPU, network and renderer processes: the
+            // window's, though the system lists each on its own.
+            .children(overhead.chromium.map(|chromium| {
+                line(
+                    sized_icon(Icon::BrowserWindow, px(13.0), paint(t.text.dim)),
+                    "Chromium",
+                    Some(match chromium.processes {
+                        1 => "1 process".to_owned(),
+                        n => format!("{n} processes"),
+                    }),
+                    chromium.reading,
+                    scale,
+                    None,
+                    None,
+                    t,
+                )
+            }))
             .children(overhead.host.map(|host| {
                 line(
                     sized_icon(Icon::Terminal, px(13.0), paint(t.text.dim)),

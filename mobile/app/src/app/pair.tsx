@@ -8,7 +8,8 @@ import { KeyboardAvoidingView, Platform, ScrollView, StyleSheet, Text, TextInput
 import { pair, toBase64Url } from '@ket/remote';
 
 import { Ping } from '../components/Ping';
-import { Bar, Button, Card, Heading, Prose, Screen, field } from '../components/ui';
+import { Bar, Button, Card, Heading, Prose, Screen, field, oneLine } from '../components/ui';
+import { reachIn } from '../lib/addresses';
 import { dropConnection } from '../lib/connection';
 import { phoneKey, saveHost } from '../lib/store';
 import { font, size, t } from '../lib/theme';
@@ -34,6 +35,14 @@ export default function Pair() {
   const waiting = state === 'pairing' || state === 'confirm';
 
   const start = async (scanned: string) => {
+    // A desktop's reach code, scanned here rather than with the Camera: it
+    // adds to a pairing this phone has, and needs no handshake.
+    const reach = reachIn(scanned);
+    if (reach && !busy.current) {
+      busy.current = true;
+      router.replace(`/reach?host=${reach.hostId}&at=${encodeURIComponent(reach.addresses.join(' '))}`);
+      return;
+    }
     const text = codeIn(scanned);
     if (busy.current || !text) return;
     busy.current = true;
@@ -166,6 +175,7 @@ export default function Pair() {
               placeholder="ket://pair/…"
               autoFocus={paste === '1'}
               placeholderTextColor={t.faint}
+              {...oneLine}
               autoCapitalize="none"
               autoCorrect={false}
             />

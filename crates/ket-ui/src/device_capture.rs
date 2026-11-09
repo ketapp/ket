@@ -11,6 +11,10 @@
 //! device's full size, with no window chrome and no screen-recording
 //! permission. It is written to ket's cache (see `ket_core::capture`) and
 //! handed to the agent as a pasted path, which the agents attach as an image.
+//!
+//! A Chromium browser tab takes one the same way, from the camera in its
+//! toolbar: the page as Chromium draws it, through its DevTools protocol —
+//! see `Shell::capture_chromium`.
 
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
@@ -40,6 +44,9 @@ const ANDROID_SHOT: Duration = Duration::from_secs(10);
 pub(crate) enum DeviceKind {
     Iphone,
     Android,
+    /// A Chromium browser tab's page.
+    #[cfg(feature = "chromium")]
+    Browser(crate::browser::BrowserId),
 }
 
 /// How a screenshot is to be taken, found on the UI thread and taken off it.
@@ -195,6 +202,8 @@ impl Shell {
                 #[cfg(not(target_os = "macos"))]
                 DeviceKind::Iphone => false,
                 DeviceKind::Android => space.has_android(),
+                #[cfg(feature = "chromium")]
+                DeviceKind::Browser(browser) => space.browser_ids().contains(&browser),
             };
             holds.then(|| id.clone())
         })
@@ -212,6 +221,8 @@ impl Shell {
             #[cfg(not(target_os = "macos"))]
             DeviceKind::Iphone => None,
             DeviceKind::Android => self.android_shot(),
+            #[cfg(feature = "chromium")]
+            DeviceKind::Browser(browser) => return self.capture_chromium(browser, cx),
         };
         let Some(source) = source else {
             self.toast(

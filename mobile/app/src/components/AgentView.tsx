@@ -16,7 +16,7 @@ import { useHost } from '../lib/hosts';
 import { font, size, t } from '../lib/theme';
 import { ChevronDown, Send, TerminalWindow } from './icons';
 import { KeyboardLift } from './KeyboardLift';
-import { Bar, Button, Card, Dot, IconCluster, Prose, Row, Screen, field } from './ui';
+import { Bar, Button, Card, Dot, IconCluster, Prose, Row, Screen, field, oneLine } from './ui';
 
 /** Terminal `terminalId` as the snapshot has it: `undefined` while the
  * snapshot doesn't, and its agent view, if it shows one, otherwise. */
@@ -242,6 +242,7 @@ export function AgentViewList({
             onChangeText={setTask}
             placeholder="Describe a task for a new session"
             placeholderTextColor={t.faint}
+            {...oneLine}
             accessibilityLabel="A task for a new session"
             returnKeyType="send"
             onSubmitEditing={() => void start()}

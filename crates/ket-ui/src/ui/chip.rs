@@ -73,25 +73,41 @@ pub(crate) fn key_hint(
 /// twenty it was the tallest thing in a row that is otherwise all text.
 pub(crate) const BADGE: Pixels = px(16.0);
 
+/// A glyph's side inside a [`BADGE`]: Lucide's 2px stroke lands near 1px, the
+/// weight of the letter it stands in for.
+const BADGE_GLYPH: Pixels = px(11.0);
+
+/// `label` is the project's icon or initial; an icon naming a glyph
+/// ([`super::glyph`]) is drawn as that picture, in the same ink a letter
+/// would be.
 pub(crate) fn badge(colour: Color, label: impl Into<SharedString>, t: &Theme) -> Div {
     let on_badge = if contrast_ratio(t.surface, colour) >= contrast_ratio(t.text.primary, colour) {
         t.surface
     } else {
         t.text.primary
     };
+    let label = label.into();
 
-    div()
+    let square = div()
         .flex()
         .flex_none()
         .items_center()
         .justify_center()
         .size(BADGE)
         .rounded(px(4.0))
-        .bg(paint(colour))
-        .text_size(px(9.5))
-        .font_weight(gpui::FontWeight::SEMIBOLD)
-        .text_color(paint(on_badge))
-        .child(label.into())
+        .bg(paint(colour));
+    match super::glyph::named(&label) {
+        Some(glyph) => square.child(super::icon::sized_icon(
+            super::icon::Icon::Glyph(glyph),
+            BADGE_GLYPH,
+            paint(on_badge),
+        )),
+        None => square
+            .text_size(px(9.5))
+            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .text_color(paint(on_badge))
+            .child(label),
+    }
 }
 
 /// One beat of a moving dot.
@@ -146,11 +162,12 @@ pub(crate) fn status_dot(colour: Rgba, motion: Motion, size: Pixels) -> Div {
     div().flex_none().size(size).rounded_full().bg(ink)
 }
 
-/// The selected row's rail: a short amber bar at the row's leading edge,
-/// inset from its top and bottom. Absolutely placed, so it costs the row no
-/// width and nothing beside it moves when the selection does. The row must be
-/// `relative`.
-pub(crate) fn marker(t: &Theme) -> Div {
+/// The selected row's rail: a short bar at the row's leading edge, inset from
+/// its top and bottom — the theme's amber, or a worktree's project colour
+/// ([`crate::projects::rail_colour`]). Absolutely placed, so it costs the row
+/// no width and nothing beside it moves when the selection does. The row must
+/// be `relative`.
+pub(crate) fn marker(colour: Color) -> Div {
     div()
         .absolute()
         .left_0()
@@ -158,7 +175,7 @@ pub(crate) fn marker(t: &Theme) -> Div {
         .bottom(MARKER_INSET)
         .w(MARKER_W)
         .rounded(px(2.0))
-        .bg(paint(t.marker))
+        .bg(paint(colour))
 }
 
 /// How wide the selection rail is.

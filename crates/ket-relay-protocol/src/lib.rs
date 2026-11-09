@@ -15,6 +15,12 @@
 //! Big-endian, 14 bytes of header, and at most [`MAX_FRAME`] bytes in all. A
 //! larger application message is split by the sender and reassembled by the
 //! receiver, end to end, never by the relay.
+//!
+//! A host registers with a relay it did not start by proving it holds the
+//! key its id comes from — [`Control::Identify`], [`Control::Challenge`],
+//! [`Control::Prove`] — so nobody who can reach the relay can take a host's
+//! place on it. The arithmetic is X25519 and HMAC-SHA256, done by the two
+//! ends with their own libraries; this crate only lays out the bytes.
 
 use std::fmt;
 
@@ -146,13 +152,11 @@ impl Frame {
 /// ```text
 /// op u8 | payload
 /// ```
+///
+/// Op 1 was `Register`, a host taking an id on a development relay with no
+/// proof; retired for [`Self::Identify`] and refused like any unknown op.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Control {
-    /// Host to relay: route phones asking for this host id to me.
-    Register {
-        /// The host id from the host's pairing codes.
-        host: [u8; 16],
-    },
     /// Phone to relay: connect me to this host.
     Connect {
         /// The host id from the pairing code.
@@ -171,33 +175,74 @@ pub enum Control {
     },
     /// Host to its own relay: route phones asking for this host id to me,
     /// and here is the key that shows I am the host that started you. A
-    /// relay running inside a host takes only this, never [`Self::Register`],
-    /// so nothing else that can reach the port — even on the same Mac — can
-    /// take the host's place.
+    /// relay running inside a host takes only this, never
+    /// [`Self::Identify`], so nothing else that can reach the port — even on
+    /// the same Mac — can take the host's place.
     Claim {
         /// The host id from the host's pairing codes.
         host: [u8; 16],
         /// The secret the host gave its relay when it started it.
         key: [u8; 32],
     },
+    /// Host to a relay elsewhere: I am this host, and this is the static key
+    /// its id comes from — the first sixteen bytes of the key's SHA-256. The
+    /// relay checks that much at once and answers with a [`Self::Challenge`].
+    Identify {
+        /// The host id from the host's pairing codes.
+        host: [u8; 16],
+        /// The host's static X25519 public key, which its phones pin.
+        public: [u8; 32],
+    },
+    /// Relay to host: show me. Both halves are fresh for this socket, and
+    /// the host answers with [`Self::Prove`].
+    Challenge {
+        /// Random bytes, so a proof fits this challenge and no other.
+        nonce: [u8; 32],
+        /// A one-time X25519 public key of the relay's.
+        ephemeral: [u8; 32],
+    },
+    /// Host to relay: the proof. `tag` is HMAC-SHA256 over [`proof_message`],
+    /// keyed by the X25519 agreement of the host's static private key and the
+    /// challenge's ephemeral. Only the holder of the key the id came from can
+    /// make it, and only for that challenge.
+    Prove {
+        /// The tag.
+        tag: [u8; 32],
+    },
+    /// Relay to host: your registration is live, by claim or by proof, and
+    /// phones asking for your id now reach you.
+    Registered,
 }
 
 /// The host a phone asked for is not connected to the relay.
 pub const REFUSED_HOST_OFFLINE: u8 = 1;
-/// The first frame on a socket was not a registration or a connection.
+/// The first frame on a socket was not a registration or a connection, or
+/// a challenge was answered with something other than a proof.
 pub const REFUSED_PROTOCOL: u8 = 2;
 /// The socket fell too far behind reading what was sent to it.
 pub const REFUSED_BACKPRESSURE: u8 = 3;
+/// The host's id does not come from the key it showed, or its proof did not
+/// check out against the challenge.
+pub const REFUSED_IDENTITY: u8 = 4;
+
+/// What a host's proof authenticates: a label, so the tag can be nothing but
+/// a relay proof; the challenge's nonce, so it fits one challenge; and the
+/// host id, so it fits one host.
+pub fn proof_message(nonce: &[u8; 32], host: &[u8; 16]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(PROOF_LABEL.len() + 32 + 16);
+    out.extend_from_slice(PROOF_LABEL);
+    out.extend_from_slice(nonce);
+    out.extend_from_slice(host);
+    out
+}
+
+const PROOF_LABEL: &[u8] = b"ket relay host proof v1";
 
 impl Control {
     /// This control message as a frame on `connection`.
     pub fn frame(&self, connection: u64) -> Frame {
-        let mut body = Vec::with_capacity(17);
+        let mut body = Vec::with_capacity(65);
         match self {
-            Self::Register { host } => {
-                body.push(1);
-                body.extend_from_slice(host);
-            }
             Self::Connect { host } => {
                 body.push(2);
                 body.extend_from_slice(host);
@@ -214,6 +259,21 @@ impl Control {
                 body.extend_from_slice(host);
                 body.extend_from_slice(key);
             }
+            Self::Identify { host, public } => {
+                body.push(8);
+                body.extend_from_slice(host);
+                body.extend_from_slice(public);
+            }
+            Self::Challenge { nonce, ephemeral } => {
+                body.push(9);
+                body.extend_from_slice(nonce);
+                body.extend_from_slice(ephemeral);
+            }
+            Self::Prove { tag } => {
+                body.push(10);
+                body.extend_from_slice(tag);
+            }
+            Self::Registered => body.push(11),
         }
         Frame {
             connection,
@@ -224,20 +284,30 @@ impl Control {
 
     /// Reads a control frame's body.
     pub fn parse(body: &[u8]) -> Result<Self, Error> {
-        let host =
-            |rest: &[u8]| -> Result<[u8; 16], Error> { rest.try_into().map_err(|_| Error::Short) };
+        fn take<const N: usize>(bytes: &[u8]) -> Result<[u8; N], Error> {
+            bytes.try_into().map_err(|_| Error::Short)
+        }
         match body.split_first() {
-            Some((1, rest)) => Ok(Self::Register { host: host(rest)? }),
-            Some((2, rest)) => Ok(Self::Connect { host: host(rest)? }),
+            Some((2, rest)) => Ok(Self::Connect { host: take(rest)? }),
             Some((3, [])) => Ok(Self::Opened),
             Some((4, [])) => Ok(Self::Connected),
             Some((5, [])) => Ok(Self::Closed),
             Some((6, [reason])) => Ok(Self::Refused { reason: *reason }),
             Some((7, rest)) if rest.len() == 48 => Ok(Self::Claim {
-                host: host(&rest[..16])?,
-                key: rest[16..].try_into().map_err(|_| Error::Short)?,
+                host: take(&rest[..16])?,
+                key: take(&rest[16..])?,
             }),
-            Some((7, _)) => Err(Error::Short),
+            Some((8, rest)) if rest.len() == 48 => Ok(Self::Identify {
+                host: take(&rest[..16])?,
+                public: take(&rest[16..])?,
+            }),
+            Some((9, rest)) if rest.len() == 64 => Ok(Self::Challenge {
+                nonce: take(&rest[..32])?,
+                ephemeral: take(&rest[32..])?,
+            }),
+            Some((10, rest)) => Ok(Self::Prove { tag: take(rest)? }),
+            Some((11, [])) => Ok(Self::Registered),
+            Some((7..=9, _)) => Err(Error::Short),
             Some((op, _)) => Err(Error::Kind(*op)),
             None => Err(Error::Short),
         }

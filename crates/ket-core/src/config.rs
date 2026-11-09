@@ -60,7 +60,7 @@ pub struct AgentSpec {
     ///
     /// ACP agents use `command` and `args` for their protocol adapter, which
     /// is not necessarily the CLI a person wants to interact with. Keeping
-    /// this separate lets a profile such as `claude-personal` launch in the
+    /// this separate lets a profile such as `claude-alt` launch in the
     /// terminal without replacing the Claude ACP adapter.
     ///
     /// The command is *shell text*, not a path: it is typed at a real prompt
@@ -357,6 +357,52 @@ pub struct AgentConfig {
     /// it depends on how long the reader's tasks run, which ket cannot know.
     #[serde(default)]
     pub autocompact: Option<String>,
+    /// The network inspector — see [`crate::network`].
+    #[serde(default)]
+    pub network: NetworkConfig,
+    /// Whether opening a session whose prompt cache has expired says what
+    /// continuing costs and offers a fresh session — see `crate::cold`.
+    ///
+    /// Unset means on. It asks as the session is opened, never at Send: a
+    /// message always goes as it was typed. `false` never asks.
+    #[serde(default)]
+    pub cold_resume: Option<bool>,
+    /// The fewest tokens a cold session must have to re-cache before opening
+    /// it asks. Unset means [`DEFAULT_COLD_RESUME_MIN_TOKENS`].
+    #[serde(default)]
+    pub cold_resume_min_tokens: Option<u64>,
+}
+
+/// Below this, picking a cold session up again is cheap enough not to ask
+/// about: 100,000 tokens is about $2 to re-cache on Fable at the one-hour
+/// rate, and a few cents on Haiku.
+pub const DEFAULT_COLD_RESUME_MIN_TOKENS: u64 = 100_000;
+
+impl AgentConfig {
+    /// Whether opening a cold session asks first — see
+    /// [`AgentConfig::cold_resume`].
+    pub fn asks_on_cold_resume(&self) -> bool {
+        self.cold_resume.unwrap_or(true)
+    }
+
+    /// See [`AgentConfig::cold_resume_min_tokens`].
+    pub fn cold_resume_min_tokens(&self) -> u64 {
+        self.cold_resume_min_tokens
+            .unwrap_or(DEFAULT_COLD_RESUME_MIN_TOKENS)
+    }
+}
+
+/// The network inspector: whether what agents send to their providers is
+/// logged on this Mac — see [`crate::network`].
+///
+/// Off unless asked for. Logging is a record of everything an agent sent,
+/// the person's files included, and the choice to keep that is theirs.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct NetworkConfig {
+    /// Whether agents started from now on are logged. One already running
+    /// keeps going as it started.
+    pub log: bool,
 }
 
 /// Settings for the web shell's local server (Epic 5).
@@ -1063,12 +1109,14 @@ impl JevConfig {
     }
 }
 
-/// Phones, on the local network.
+/// Phones and iPads.
 ///
 /// Off until turned on in Settings → Devices. On, `ket-host` runs the relay
-/// itself on [`Self::port`] and dials it, so a phone on the same Wi-Fi can
-/// reach the Mac with nothing else started. The pairing keys are the whole of
-/// the authentication; there is no account.
+/// itself on [`Self::port`] and dials it, so a device on the same Wi-Fi, or
+/// on the same tailnet, can reach the Mac with nothing else started; and,
+/// when [`Self::relay`] names one, it dials that too, so a device can reach
+/// it from anywhere. The pairing keys are the whole of the authentication;
+/// there is no account.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct PhonesConfig {
@@ -1076,6 +1124,22 @@ pub struct PhonesConfig {
     pub enabled: bool,
     /// The port the relay listens on, on every interface.
     pub port: u16,
+    /// A relay elsewhere to link to as well, as a `wss://` URL — ket's own
+    /// is [`HOSTED_RELAY`] — so devices away from this Mac's networks can
+    /// reach it. Empty, the default, links to none.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub relay: String,
+}
+
+/// The relay ket runs, for devices away from their Mac's networks (#142).
+pub const HOSTED_RELAY: &str = "wss://relay.ketapp.dev";
+
+impl PhonesConfig {
+    /// The relay elsewhere to link to, if one is named.
+    pub fn hosted_relay(&self) -> Option<String> {
+        let url = self.relay.trim();
+        (!url.is_empty()).then(|| url.to_owned())
+    }
 }
 
 /// The relay's port unless the config names another.
@@ -1086,6 +1150,7 @@ impl Default for PhonesConfig {
         Self {
             enabled: false,
             port: DEFAULT_PHONES_PORT,
+            relay: String::new(),
         }
     }
 }
@@ -1827,8 +1892,44 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_relay_elsewhere_is_off_unless_one_is_named() {
+        let config = Config::default();
+        assert_eq!(config.phones.hosted_relay(), None);
+        assert!(!toml::to_string(&config).unwrap().contains("relay ="));
+
+        let named: Config =
+            toml::from_str(&format!("[phones]\nrelay = \" {HOSTED_RELAY} \"\n")).unwrap();
+        assert_eq!(named.phones.hosted_relay().as_deref(), Some(HOSTED_RELAY));
+        let blank: Config = toml::from_str("[phones]\nrelay = \"  \"\n").unwrap();
+        assert_eq!(blank.phones.hosted_relay(), None);
+    }
+    #[test]
     fn defaults_are_valid() {
         Config::default().validate().unwrap();
+    }
+
+    #[test]
+    fn existing_configs_ask_about_cold_sessions_above_the_default_threshold() {
+        for config in [Config::default(), toml::from_str("[agent]\n").unwrap()] {
+            assert!(config.agent.asks_on_cold_resume());
+            assert_eq!(config.agent.cold_resume_min_tokens(), 100_000);
+        }
+    }
+
+    #[test]
+    fn cold_resume_choices_survive_a_config_round_trip() {
+        for (enabled, threshold) in [(false, 250_000), (true, 0)] {
+            let config: Config = toml::from_str(&format!(
+                "[agent]\ncold_resume = {enabled}\ncold_resume_min_tokens = {threshold}\n"
+            ))
+            .unwrap();
+            config.validate().unwrap();
+            let restored: Config = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
+            assert_eq!(restored.agent.asks_on_cold_resume(), enabled);
+            assert_eq!(restored.agent.cold_resume_min_tokens(), threshold);
+            assert_eq!(restored.agent.cold_resume, Some(enabled));
+            assert_eq!(restored.agent.cold_resume_min_tokens, Some(threshold));
+        }
     }
 
     #[test]

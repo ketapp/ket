@@ -12,10 +12,11 @@
 import { router, useLocalSearchParams } from 'expo-router';
 import type { StartOptions } from '@ket/remote';
 import { type ReactNode, useEffect, useRef, useState } from 'react';
-import { Keyboard, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Keyboard, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import Animated, { type SharedValue, useAnimatedStyle } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { MenuCard, type MenuItem, MenuList, type MenuSection } from '../../components/FloatMenu';
 import { KeyCommands } from '../../components/KeyCommands';
 import { AgentMark, Check, ChevronDown } from '../../components/icons';
 import { SHEET_HEAD, SHEET_INSET, SheetPanel, type SheetMeasure } from '../../components/Sheet';
@@ -37,7 +38,12 @@ interface Place {
 }
 
 export default function NewTask() {
-  const { host: hostId, worktree: initialWorktree } = useLocalSearchParams<{ host: string; worktree?: string }>();
+  // A worktree to start in, or a project — held on Worktrees — to start one in.
+  const {
+    host: hostId,
+    worktree: initialWorktree,
+    project: initialProject,
+  } = useLocalSearchParams<{ host: string; worktree?: string; project?: string }>();
   const conn = useHost(hostId);
   const insets = useSafeAreaInsets();
   const split = useSplit();
@@ -46,7 +52,7 @@ export default function NewTask() {
   const projects = (conn?.snapshot?.projects ?? []).filter((project) => project.id !== '');
   // The agents the desktop can start; none from a desktop too old to say.
   const agents = conn?.snapshot?.agents ?? [];
-  const [picked, setPicked] = useState<string | null>(null);
+  const [picked, setPicked] = useState<string | null>(initialProject ? decodeURIComponent(initialProject) : null);
   // Empty for the project's own agent.
   const [wanted, setWanted] = useState('');
   const [target, setTarget] = useState(initialWorktree ? decodeURIComponent(initialWorktree) : '');
@@ -71,10 +77,10 @@ export default function NewTask() {
   useEffect(() => {
     void getLastWork(hostId).then((last) => {
       if (!last || touched.current) return;
-      if (!initialWorktree) setPicked(last.project);
+      if (!initialWorktree && !initialProject) setPicked(last.project);
       setWanted(last.agent);
     });
-  }, [hostId, initialWorktree]);
+  }, [hostId, initialWorktree, initialProject]);
 
   const project = projects.find((p) => p.id === picked) ?? projects.find((p) => p.worktrees.some((w) => w.id === target)) ?? projects[0];
   const projectId = project?.id;
@@ -177,74 +183,120 @@ export default function NewTask() {
   // Under its field, but never past the screen's right edge.
   const menuLeft = Math.min((place?.x ?? 0) + SHEET_INSET, room.width - 12 - menuWidth);
 
-  // What the open menu lists.
-  const menuItems = open ? (
-    <>
-      {open === 'project' ? (
-        <>
-          <Text style={styles.menuHeading}>Projects on {conn?.host.name ?? 'this desktop'}</Text>
-          {projects.map((p) => (
-            <Item
-              key={p.id}
-              on={p.id === project?.id}
-              lead={<Badge name={p.name} color={projectColor(p)} size={20} />}
-              label={p.name}
-              onPress={() => pickProject(p.id)}
-            />
-          ))}
-        </>
-      ) : open === 'agent' ? (
-        <>
-          {!existing ? <Item
-            on={agent === ''}
-            lead={<AgentMark agent="" size={16} />}
-            label="Default"
-            note={project ? `Whatever ket uses for ${project.name}` : 'Whatever ket uses for the project'}
-            onPress={() => pickAgent('')}
-          /> : null}
-          {agents.map((name) => (
-            <Item
-              key={name}
-              on={agent === name}
-              lead={<AgentMark agent={name} size={16} />}
-              label={agentLabel(name)}
-              onPress={() => pickAgent(name)}
-            />
-          ))}
-        </>
-      ) : open === 'target' ? (
-        <>
-          <Item on={!existing} lead={null} label="New worktree" onPress={() => { setTarget(''); setKind('agent'); setOpen(null); }} />
-          {project?.worktrees.map((worktree) => (
-            <Item key={worktree.id} on={worktree.id === target} lead={null} label={worktree.name}
-              onPress={() => { setTarget(worktree.id); setOpen(null); }} />
-          ))}
-        </>
-      ) : open === 'kind' ? (
-        <>
-          <Item on={kind === 'agent'} lead={null} label="Agent session" onPress={() => { setKind('agent'); setOpen(null); }} />
-          <Item on={kind === 'shell'} lead={null} label="Shell" onPress={() => { setKind('shell'); setModel(''); setEffort(''); setOpen(null); }} />
-        </>
-      ) : (
-        <>
-          {(open === 'base' ? [currentOptions?.defaultBase ?? ''] : ['']).map((value) => (
-            <Item key={`default-${open}`} on={(open === 'base' ? selectedBase : open === 'model' ? model : effort) === value}
-              lead={null} label={open === 'base' ? `Default (${value})` : 'Default'} onPress={() => {
-                if (open === 'base') setBase(''); else if (open === 'model') setModel(''); else setEffort('');
-                setOpen(null);
-              }} />
-          ))}
-          {(open === 'base' ? currentOptions?.localBranches ?? [] : open === 'model' ? agentOptions?.models ?? [] : agentOptions?.efforts ?? []).map((value) => (
-            <Item key={value} on={(open === 'base' ? selectedBase : open === 'model' ? model : effort) === value}
-              lead={null} label={value} onPress={() => {
-                if (open === 'base') setBase(value); else if (open === 'model') setModel(value); else setEffort(value);
-                setOpen(null);
-              }} />
-          ))}
-        </>
-      )}
-    </>
-  ) : null;
+  // What the open menu lists: each choice ticked when it is the one chosen.
+  // Its press is added where the row is listed, never through `choice`.
+  const choice = (key: string, on: boolean, label: string, mark?: ReactNode, detail?: string): Omit<MenuItem, 'onPress'> => ({
+    key,
+    label,
+    selected: on,
+    icon: on ? <Check size={16} color={t.text} weight={2.2} /> : undefined,
+    mark,
+    detail,
+  });
+  const chosenValue = open === 'base' ? selectedBase : open === 'model' ? model : effort;
+  const values =
+    open === 'base' ? (currentOptions?.localBranches ?? []) : open === 'model' ? (agentOptions?.models ?? []) : (agentOptions?.efforts ?? []);
+  const defaultValue = open === 'base' ? (currentOptions?.defaultBase ?? '') : '';
+  const chooseValue = (value: string) => {
+    if (open === 'base') setBase(value);
+    else if (open === 'model') setModel(value);
+    else setEffort(value);
+    setOpen(null);
+  };
+  const menuSections: MenuSection[] =
+    open === 'project'
+      ? [
+          {
+            title: `Projects on ${conn?.host.name ?? 'this desktop'}`,
+            items: projects.map((p) => ({
+              ...choice(p.id, p.id === project?.id, p.name, <Badge name={p.name} color={projectColor(p)} icon={p.icon} size={20} />),
+              onPress: () => pickProject(p.id),
+            })),
+          },
+        ]
+      : open === 'agent'
+        ? [
+            {
+              items: [
+                ...(existing
+                  ? []
+                  : [
+                      {
+                        ...choice(
+                          'default',
+                          agent === '',
+                          'Default',
+                          <AgentMark agent="" size={16} />,
+                          project ? `Whatever ket uses for ${project.name}` : 'Whatever ket uses for the project',
+                        ),
+                        onPress: () => pickAgent(''),
+                      },
+                    ]),
+                ...agents.map((name) => ({
+                  ...choice(name, agent === name, agentLabel(name), <AgentMark agent={name} size={16} />),
+                  onPress: () => pickAgent(name),
+                })),
+              ],
+            },
+          ]
+        : open === 'target'
+          ? [
+              {
+                items: [
+                  {
+                    ...choice('new', !existing, 'New worktree'),
+                    onPress: () => {
+                      setTarget('');
+                      setKind('agent');
+                      setOpen(null);
+                    },
+                  },
+                  ...(project?.worktrees ?? []).map((worktree) => ({
+                    ...choice(worktree.id, worktree.id === target, worktree.name),
+                    onPress: () => {
+                      setTarget(worktree.id);
+                      setOpen(null);
+                    },
+                  })),
+                ],
+              },
+            ]
+          : open === 'kind'
+            ? [
+                {
+                  items: [
+                    {
+                      ...choice('agent', kind === 'agent', 'Agent session'),
+                      onPress: () => {
+                        setKind('agent');
+                        setOpen(null);
+                      },
+                    },
+                    {
+                      ...choice('shell', kind === 'shell', 'Shell'),
+                      onPress: () => {
+                        setKind('shell');
+                        setModel('');
+                        setEffort('');
+                        setOpen(null);
+                      },
+                    },
+                  ],
+                },
+              ]
+            : open
+              ? [
+                  {
+                    items: [
+                      {
+                        ...choice(`default-${open}`, chosenValue === defaultValue, open === 'base' ? `Default (${defaultValue})` : 'Default'),
+                        onPress: () => chooseValue(''),
+                      },
+                      ...values.map((value) => ({ ...choice(value, chosenValue === value, value), onPress: () => chooseValue(value) })),
+                    ],
+                  },
+                ]
+              : [];
 
   return (
     <SheetPanel
@@ -258,9 +310,14 @@ export default function NewTask() {
         open && place && measure ? (
           <>
             <Pressable accessibilityLabel="Close menu" onPress={() => setOpen(null)} style={StyleSheet.absoluteFill} />
-            <Menu rise={measure.rise} bottom={menuBottom} left={menuLeft} width={menuWidth} maxHeight={menuRoom}>
-              {menuItems}
-            </Menu>
+            <Menu
+              rise={measure.rise}
+              bottom={menuBottom}
+              left={menuLeft}
+              width={menuWidth}
+              maxHeight={menuRoom}
+              sections={menuSections}
+            />
           </>
         ) : null
       }
@@ -272,7 +329,7 @@ export default function NewTask() {
           disabled={projects.length === 0}
           onPress={() => toggle('project')}
           onLayout={placed('project')}
-          lead={project ? <Badge name={project.name} color={projectColor(project)} size={18} /> : null}
+          lead={project ? <Badge name={project.name} color={projectColor(project)} icon={project.icon} size={18} /> : null}
           value={project?.name ?? 'No projects'}
         />
         {advanced ? (
@@ -398,14 +455,16 @@ function Field({
 }
 
 /** A dropdown's menu, its foot on its field as the sheet's body scrolls and
- * the sheet comes down off the keyboard — which opening it puts away. */
+ * the sheet comes down off the keyboard — which opening it puts away. The
+ * app's one menu card and rows (components/FloatMenu.tsx), placed by the
+ * sheet rather than by the screen. */
 function Menu({
   rise,
   bottom,
   left,
   width,
   maxHeight,
-  children,
+  sections,
 }: {
   rise: SharedValue<number>;
   /** Over the foot of the sheet's room, with the body where it lays out. */
@@ -413,43 +472,19 @@ function Menu({
   left: number;
   width: number;
   maxHeight: number;
-  children: ReactNode;
+  sections: MenuSection[];
 }) {
   // `bottom`, not a transform: a transform moves where an item is drawn but
   // not where its press is judged, and a tap there could be dropped (see
   // KeyboardLift).
   const held = useAnimatedStyle(() => ({ bottom: bottom + rise.get() }), [bottom]);
   return (
-    <Animated.View accessibilityRole="menu" style={[styles.menu, { left, width, maxHeight }, held]}>
-      <ScrollView bounces={false} keyboardShouldPersistTaps="handled">
-        {children}
-      </ScrollView>
+    <Animated.View style={[styles.menu, { left, width }, held]}>
+      <MenuCard open from="below" label="Choices">
+        {/* The card's own edge is two points of the room. */}
+        <MenuList sections={sections} onChoose={(item) => item.onPress()} maxHeight={maxHeight - 2} />
+      </MenuCard>
     </Animated.View>
-  );
-}
-
-/** One choice in a dropdown's menu, ticked when it is the one chosen. */
-function Item({ on, lead, label, note, onPress }: { on: boolean; lead: ReactNode; label: string; note?: string; onPress: () => void }) {
-  return (
-    <Pressable
-      accessibilityRole="menuitem"
-      accessibilityState={{ selected: on }}
-      onPress={onPress}
-      style={({ pressed }) => [styles.item, note ? styles.itemTall : null, (on || pressed) && { backgroundColor: t.selection }]}
-    >
-      {lead}
-      <View style={styles.itemText}>
-        <Text style={styles.itemLabel} numberOfLines={1}>
-          {label}
-        </Text>
-        {note ? (
-          <Text style={styles.itemNote} numberOfLines={1}>
-            {note}
-          </Text>
-        ) : null}
-      </View>
-      {on ? <Check size={16} color={t.text} weight={2.2} /> : null}
-    </Pressable>
   );
 }
 
@@ -485,18 +520,5 @@ const styles = StyleSheet.create({
     textAlignVertical: 'top',
   },
   note: { fontSize: size.detail },
-  menu: {
-    position: 'absolute',
-    padding: 4,
-    backgroundColor: t.elevated,
-    borderWidth: 1,
-    borderColor: t.border,
-    borderRadius: size.radiusCard,
-  },
-  menuHeading: { paddingTop: 8, paddingBottom: 4, paddingHorizontal: 12, fontFamily: font.proseMedium, fontSize: 11.5, color: t.faint },
-  item: { height: 44, flexDirection: 'row', alignItems: 'center', gap: 11, paddingHorizontal: 12, borderRadius: size.radius },
-  itemTall: { height: 52 },
-  itemText: { flex: 1, minWidth: 0, gap: 1 },
-  itemLabel: { fontFamily: font.proseMedium, fontSize: size.body, color: t.text },
-  itemNote: { fontFamily: font.prose, fontSize: 11.5, color: t.dim },
+  menu: { position: 'absolute' },
 });

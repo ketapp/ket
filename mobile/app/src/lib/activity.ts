@@ -108,6 +108,13 @@ export function projectColor(project: ProjectSummary): string {
   return /^#[0-9a-f]{6}$/i.test(project.color) ? project.color : PROJECT_COLORS[0];
 }
 
+/** A project's key wherever the phone keeps something of its own about it
+ * — folded, hidden, pinned: its id, or `elsewhere` for the terminals the
+ * desktop could place in no project. */
+export function projectKey(project: ProjectSummary): string {
+  return project.id || 'elsewhere';
+}
+
 /** A worktree and the project it belongs to, flattened out of a snapshot. */
 export interface Located {
   project: ProjectSummary;
@@ -122,7 +129,17 @@ export function everyWorktree(snapshot: HostSnapshot | null): Located[] {
  * reports, else the agent in one of its terminals — an agent that has not
  * said anything yet still runs in one. Empty for a worktree of shells. */
 export function agentOf(worktree: WorktreeSummary): string {
+  // A program at work is no agent's: another tab's agent mark beside "npm"
+  // would say that agent was the one busy.
+  if (programBusy(worktree)) return '';
   return worktree.agent || agentTerminal(worktree)?.agent || worktree.asleep[0]?.agent || '';
+}
+
+/** Busy with a program in one of its tabs — a build, a dev server — rather
+ * than an agent. An agent starting or signing in lights the same, but the
+ * host names it. */
+export function programBusy(worktree: WorktreeSummary): boolean {
+  return worktree.activity === Activity.RUNNING && !worktree.agent;
 }
 
 /** The asleep tab a worktree's row wakes: the one of its reporting agent,
@@ -163,4 +180,16 @@ export function terminalName(terminal: TerminalSummary): string {
   if (terminal.agentView) return 'Agent view';
   const title = terminal.agent ? terminal.title.replace(LEADING_GLYPHS, '') : terminal.title;
   return title.trim() || (terminal.agent ? agentLabel(terminal.agent) : 'Terminal');
+}
+
+/** Which card a prompt takes, when it is not a permission. */
+export function promptKind(tool: string): 'ask' | 'plan' | undefined {
+  if (tool === 'AskUserQuestion') return 'ask';
+  // Codex's own question form.
+  if (tool === 'request_user_input') return 'ask';
+  // A dialog the desktop read off the agent's screen, with its options —
+  // Codex's "Implement this plan?" among them.
+  if (tool === 'Dialog') return 'ask';
+  if (tool === 'ExitPlanMode') return 'plan';
+  return undefined;
 }

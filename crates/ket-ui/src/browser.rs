@@ -5,6 +5,10 @@
 //! GPUI pane that owns it. Native child views always sit above GPUI's
 //! compositor, so this module explicitly hides them when a different tab or
 //! an overlay is visible.
+//!
+//! Built with the `chromium` feature, the page is Chromium's instead, in the
+//! same kind of child view: everything here but the calls into the engine is
+//! shared, and those are Chromium's — see [`crate::chromium`].
 
 #[cfg(target_os = "macos")]
 use gpui::FontWeight;
@@ -12,6 +16,8 @@ use gpui::{
     AnyElement, ClipboardItem, Context, Entity, KeyDownEvent, Pixels, Point, SharedString, Window,
     div, prelude::*, px,
 };
+
+use ket_core::id::WorktreeId;
 
 use crate::Shell;
 #[cfg(target_os = "macos")]
@@ -33,25 +39,65 @@ use crate::ui::menu::{MenuEntry, MenuItem, MenuKey, OpenMenu};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct BrowserId(pub(crate) u64);
 
-/// Browser UI and, on macOS, its lazily-created native child view.
+/// Chromium's blue, for its mark on the browser entries: like Android's on
+/// the emulator entry, the mark has no monochrome form.
+#[cfg(feature = "chromium")]
+const CHROMIUM_BLUE: gpui::Rgba = gpui::Rgba {
+    r: 0.259,
+    g: 0.522,
+    b: 0.957,
+    a: 1.0,
+};
+
+/// Gives a menu entry that opens a browser tab its mark: Chromium's, in a ket
+/// built with it, as the simulator entries carry Apple's and Android's; a
+/// browser window in one whose pages are WebKit's.
+pub(crate) fn browser_mark<T>(item: MenuItem<T>) -> MenuItem<T> {
+    #[cfg(feature = "chromium")]
+    {
+        item.tinted_icon(Icon::Chromium, CHROMIUM_BLUE)
+    }
+    #[cfg(not(feature = "chromium"))]
+    {
+        item.icon(Icon::BrowserWindow)
+    }
+}
+
+/// A browser tab's mark, and its own colour where it has one: the same as
+/// [`browser_mark`] gives the entries that open the tab, so a tab and the
+/// entry that opened it agree. `None` takes the tab strip's dim text colour.
+pub(crate) fn browser_tab_mark() -> (Icon, Option<gpui::Rgba>) {
+    #[cfg(feature = "chromium")]
+    {
+        (Icon::Chromium, Some(CHROMIUM_BLUE))
+    }
+    #[cfg(not(feature = "chromium"))]
+    {
+        (Icon::BrowserWindow, None)
+    }
+}
+
+/// Browser UI and, on macOS, its native child view: created on the tab's
+/// first render with WebKit, and as the tab opens with Chromium.
 pub(crate) struct BrowserHandle {
     address: Entity<TextInput>,
     #[cfg(target_os = "macos")]
-    view: Option<std::rc::Rc<NativeBrowser>>,
+    pub(crate) view: Option<std::rc::Rc<NativeBrowser>>,
     #[cfg(target_os = "macos")]
-    shown: bool,
+    pub(crate) shown: bool,
     /// The page the native view loads when it is created, for a tab opened
     /// on a link rather than blank.
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", not(feature = "chromium")))]
     initial: Option<String>,
     /// The page's address as it last reported loading one — a link clicked,
     /// a redirect, back or forward — and whether the address field has
     /// shown it yet. It waits while the field is being typed in.
     #[cfg(target_os = "macos")]
     page: Option<(String, bool)>,
-    /// Hears the page's loads; dropped with the tab.
+    /// Hears the page's loads — with Chromium, everything it reports; dropped
+    /// with the tab.
     #[cfg(target_os = "macos")]
-    loads: Option<gpui::Task<()>>,
+    pub(crate) loads: Option<gpui::Task<()>>,
     /// While ket's own menus or popovers are over the pane: the still of the
     /// page the pane shows in place of the live one, which is hidden — see
     /// [`Shell::sync_browser_visibility`].
@@ -65,10 +111,13 @@ pub(crate) struct BrowserHandle {
     blank: bool,
     /// The host the address last entered names, when it does not exist: the
     /// pane shows a not-found page in place of the page — see
-    /// [`Shell::look_up_host`].
-    #[cfg(target_os = "macos")]
+    /// [`Shell::look_up_host`]. Chromium shows its own.
+    #[cfg(all(target_os = "macos", not(feature = "chromium")))]
     unreachable: Option<String>,
-    error: Option<SharedString>,
+    /// What the Chromium page has reported about itself.
+    #[cfg(feature = "chromium")]
+    pub(crate) chromium: crate::chromium::PageState,
+    pub(crate) error: Option<SharedString>,
 }
 
 /// Where a browser pane is with its still, while something is over it.
@@ -88,13 +137,13 @@ enum Still {
     Settling(std::sync::Arc<gpui::RenderImage>, u8),
     /// Shown, with the live page hidden behind it.
     Shown(std::sync::Arc<gpui::RenderImage>),
-    /// WebKit gave none: the pane is blank behind the overlay, as it always
-    /// was before stills.
+    /// The engine gave none, or not in time: the pane is blank behind the
+    /// overlay, as it always was before stills.
     Failed,
 }
 
 impl BrowserHandle {
-    fn new(url: Option<String>, cx: &mut Context<Shell>) -> Self {
+    pub(crate) fn new(url: Option<String>, cx: &mut Context<Shell>) -> Self {
         let address = TextInput::new("Enter URL", cx);
         address.update(cx, |input, _| match &url {
             Some(url) => input.set_text(url),
@@ -112,7 +161,7 @@ impl BrowserHandle {
             view: None,
             #[cfg(target_os = "macos")]
             shown: false,
-            #[cfg(target_os = "macos")]
+            #[cfg(all(target_os = "macos", not(feature = "chromium")))]
             initial: url,
             #[cfg(target_os = "macos")]
             page: None,
@@ -122,17 +171,40 @@ impl BrowserHandle {
             still: Still::None,
             #[cfg(target_os = "macos")]
             blank,
-            #[cfg(target_os = "macos")]
+            #[cfg(all(target_os = "macos", not(feature = "chromium")))]
             unreachable: None,
+            #[cfg(feature = "chromium")]
+            chromium: crate::chromium::PageState::default(),
             error: None,
         }
     }
 
     /// Whether there is a page to show: something has loaded, and the
     /// address last entered exists.
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", not(feature = "chromium")))]
     fn has_page(&self) -> bool {
         !self.blank && self.unreachable.is_none()
+    }
+
+    /// Whether there is a page to show: something has loaded, and its
+    /// renderer has not ended.
+    #[cfg(feature = "chromium")]
+    fn has_page(&self) -> bool {
+        !self.blank && self.chromium.crashed.is_none() && self.chromium.dialog.is_none()
+    }
+
+    /// Whether the toolbar's back and forward go anywhere. WebKit does not
+    /// say, so both stay on.
+    #[cfg(not(feature = "chromium"))]
+    fn history(&self) -> (bool, bool) {
+        (true, true)
+    }
+
+    /// Whether the toolbar's back and forward go anywhere, as the page last
+    /// said.
+    #[cfg(feature = "chromium")]
+    fn history(&self) -> (bool, bool) {
+        (self.chromium.back, self.chromium.forward)
     }
 }
 
@@ -161,6 +233,11 @@ const LINK_MENU_W: Pixels = px(240.0);
 /// How much of a link the menu's caption spells out before eliding the rest.
 const LINK_CAPTION_CHARS: usize = 36;
 
+/// How long a Chromium page's still may take before the pane gives up on it
+/// — see `Shell::take_browser_still`.
+#[cfg(feature = "chromium")]
+const STILL_WAIT: std::time::Duration = std::time::Duration::from_millis(200);
+
 impl LinkMenu {
     fn new(uri: String, pane: PaneId, at: Point<Pixels>) -> Self {
         let caption: String = if uri.chars().count() > LINK_CAPTION_CHARS {
@@ -170,9 +247,10 @@ impl LinkMenu {
             uri.clone()
         };
         let entries = vec![
-            MenuEntry::Item(
-                MenuItem::new(LinkAction::Ket, "Open in ket Browser").icon(Icon::BrowserWindow),
-            ),
+            MenuEntry::Item(browser_mark(MenuItem::new(
+                LinkAction::Ket,
+                "Open in ket Browser",
+            ))),
             MenuEntry::Item(
                 MenuItem::new(LinkAction::System, "Open in Default Browser")
                     .icon(Icon::ExternalLink),
@@ -204,11 +282,26 @@ impl Shell {
         let Some(worktree) = self.selected_id() else {
             return;
         };
+        self.open_browser_tab_at(&worktree, pane, url, cx);
+    }
+
+    /// Opens a browser tab in `pane` of `worktree`'s space, blank or already
+    /// on `url`, and says which — `None` when the pane is not there. With
+    /// Chromium the page is created now, on screen or not.
+    pub(crate) fn open_browser_tab_at(
+        &mut self,
+        worktree: &WorktreeId,
+        pane: PaneId,
+        url: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> Option<BrowserId> {
         let id = BrowserId(self.next_browser);
         self.next_browser += 1;
+        #[cfg(feature = "chromium")]
+        let start = url.clone().unwrap_or_else(|| "about:blank".to_owned());
         self.browsers.insert(id, BrowserHandle::new(url, cx));
 
-        let opened = self.spaces.get_mut(&worktree).is_some_and(|space| {
+        let opened = self.spaces.get_mut(worktree).is_some_and(|space| {
             space.open_tab_in(
                 pane,
                 Tab {
@@ -222,7 +315,11 @@ impl Shell {
         });
         if !opened {
             self.browsers.remove(&id);
+            return None;
         }
+        #[cfg(feature = "chromium")]
+        self.open_chromium(id, worktree, &start, cx);
+        Some(id)
     }
 
     /// Asks where a link clicked in a terminal should open, from a menu at
@@ -309,7 +406,7 @@ impl Shell {
     }
 
     /// Browser tabs selected in all visible leaves of the current worktree.
-    fn active_browser_ids(&self) -> Vec<BrowserId> {
+    pub(crate) fn active_browser_ids(&self) -> Vec<BrowserId> {
         self.space()
             .map_or_else(Vec::new, |space| space.active_browser_ids())
     }
@@ -408,8 +505,9 @@ impl Shell {
         let _ = cx;
     }
 
-    /// Asks WebKit for a still of the page in browser `id`, and puts it in
-    /// the pane when it comes — unless the overlay that wanted it has gone.
+    /// Asks the engine for a still of the page in browser `id`, and puts it
+    /// in the pane when it comes — unless the overlay that wanted it has
+    /// gone.
     #[cfg(target_os = "macos")]
     fn take_browser_still(&mut self, id: BrowserId, cx: &mut Context<Self>) {
         let Some(view) = self
@@ -419,24 +517,26 @@ impl Shell {
         else {
             return;
         };
-        let (tell, still) = tokio::sync::oneshot::channel();
-        crate::browser_snapshot::take(view.raw(), move |tiff| {
-            let _ = tell.send(tiff);
-        });
+        let still = view.still();
+        // Chromium's comes through its DevTools protocol, behind whatever
+        // the page is busy with, while the menu that wanted it waits under
+        // the live page: past a moment, the pane goes blank behind the menu
+        // instead, and a still that comes later is not used.
+        #[cfg(feature = "chromium")]
+        let still = {
+            use gpui::FutureExt as _;
+            let still = still.with_timeout(STILL_WAIT, cx.background_executor());
+            async move { still.await.ok().flatten() }
+        };
         let svg = cx.svg_renderer();
         let decoder = cx.background_executor().clone();
         cx.spawn(async move |this: gpui::WeakEntity<Shell>, cx| {
-            let tiff = still.await.ok().flatten();
             // Decoded by gpui, off the main thread, in its own optimised code
             // — see `browser_snapshot` for why not by hand.
-            let image = match tiff {
-                Some(tiff) => {
+            let image = match still.await {
+                Some(still) => {
                     decoder
-                        .spawn(async move {
-                            gpui::Image::from_bytes(gpui::ImageFormat::Tiff, tiff)
-                                .to_image_data(svg)
-                                .ok()
-                        })
+                        .spawn(async move { still.image()?.to_image_data(svg).ok() })
                         .await
                 }
                 None => None,
@@ -460,6 +560,35 @@ impl Shell {
         .detach();
     }
 
+    /// Whether a page's JavaScript prompt field has the keyboard — never
+    /// without Chromium, whose pages are the only ones that show one in ket.
+    pub(crate) fn chromium_dialog_typing_any(&self, window: &Window, cx: &gpui::App) -> bool {
+        #[cfg(feature = "chromium")]
+        return self.chromium_dialog_typing(window, cx);
+        #[cfg(not(feature = "chromium"))]
+        {
+            let _ = (window, cx);
+            false
+        }
+    }
+
+    /// Keys for a page's JavaScript prompt field, with Chromium — see
+    /// `Shell::chromium_dialog_key`.
+    pub(crate) fn chromium_dialog_key_any(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        #[cfg(feature = "chromium")]
+        return self.chromium_dialog_key(event, window, cx);
+        #[cfg(not(feature = "chromium"))]
+        {
+            let _ = (event, window, cx);
+            false
+        }
+    }
+
     /// Whether any browser address field currently owns GPUI keyboard focus.
     pub(crate) fn browser_typing(&self, window: &Window, cx: &gpui::App) -> bool {
         self.browsers
@@ -481,6 +610,21 @@ impl Shell {
         }) else {
             return false;
         };
+        // Clicked into, the page took the keyboard while the field kept
+        // gpui's focus: the field lets go, and a chord such as ⌘C goes on to
+        // the Edit menu and the page rather than to the field. gpui's focus
+        // goes back to the shell, not nowhere: with none, ket's actions and
+        // shortcuts have no view to reach, and the focus repair leaves it
+        // that way while a native view has the keyboard.
+        #[cfg(feature = "chromium")]
+        if self.browsers[&id]
+            .view
+            .as_ref()
+            .is_some_and(|view| view.page_has_keyboard())
+        {
+            window.focus(&self.focus);
+            return false;
+        }
         let address = self.browsers[&id].address.clone();
 
         // Printable text must continue to GPUI's input context, while still
@@ -495,7 +639,7 @@ impl Shell {
         match event.keystroke.key.as_str() {
             "enter" => self.navigate_browser(id, cx),
             "escape" => {
-                window.blur();
+                window.focus(&self.focus);
                 self.focus_browser_page(id);
             }
             // Let application shortcuts such as Cmd-W continue to the action
@@ -509,7 +653,14 @@ impl Shell {
         #[cfg(target_os = "macos")]
         if let Some(browser) = self.browsers.get_mut(&id) {
             browser.blank = false;
-            browser.unreachable = None;
+            #[cfg(not(feature = "chromium"))]
+            {
+                browser.unreachable = None;
+            }
+            #[cfg(feature = "chromium")]
+            {
+                browser.chromium.crashed = None;
+            }
         }
         let Some(browser) = self.browsers.get(&id) else {
             return;
@@ -517,7 +668,7 @@ impl Shell {
         let url = normalize_url(&browser.address.read(cx).text());
         browser.address.update(cx, |input, _| input.set_text(&url));
 
-        #[cfg(target_os = "macos")]
+        #[cfg(all(target_os = "macos", not(feature = "chromium")))]
         if let Some(view) = browser.view.as_ref() {
             if let Err(error) = view.raw().load_url(&url) {
                 self.note = Some(format!("could not open {url}: {error}").into());
@@ -525,15 +676,22 @@ impl Shell {
             }
             self.focus_browser_page(id);
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(all(target_os = "macos", not(feature = "chromium")))]
         self.look_up_host(id, url, cx);
+
+        // Chromium shows its own page for an address it cannot reach.
+        #[cfg(feature = "chromium")]
+        if let Some(view) = browser.view.as_ref() {
+            view.page().navigate(&url);
+            self.focus_browser_page(id);
+        }
     }
 
     /// Looks up the host `url` names, off the main thread, and puts the
     /// not-found page up in browser `id` if there is no such host. WebKit
     /// tells only its delegate when a load fails, and Wry's never listens, so
     /// without this a mistyped address left the tab white.
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", not(feature = "chromium")))]
     fn look_up_host(&self, id: BrowserId, url: String, cx: &mut Context<Self>) {
         let Some(host) = url_host(&url) else {
             return;
@@ -571,7 +729,7 @@ impl Shell {
         // The not-found page stands where a new entry would: back from it is
         // the page under it, or the blank tab if there was none — with the
         // mistyped address left in the field to fix.
-        #[cfg(target_os = "macos")]
+        #[cfg(all(target_os = "macos", not(feature = "chromium")))]
         if back
             && let Some(browser) = self.browsers.get_mut(&id)
             && browser.unreachable.take().is_some()
@@ -583,7 +741,7 @@ impl Shell {
             return;
         }
 
-        #[cfg(target_os = "macos")]
+        #[cfg(all(target_os = "macos", not(feature = "chromium")))]
         if let Some(view) = self
             .browsers
             .get(&id)
@@ -597,6 +755,19 @@ impl Shell {
             let _ = view.raw().evaluate_script(script);
         }
 
+        #[cfg(feature = "chromium")]
+        if let Some(view) = self
+            .browsers
+            .get(&id)
+            .and_then(|browser| browser.view.as_ref())
+        {
+            if back {
+                view.page().back();
+            } else {
+                view.page().forward();
+            }
+        }
+
         #[cfg(not(target_os = "macos"))]
         let _ = (id, back);
     }
@@ -605,22 +776,35 @@ impl Shell {
     /// when the page said its address changed without loading — then WebKit
     /// is asked, rather than taking an address from the page. Kept for the
     /// address field, which takes it once nobody is typing in it — see
-    /// [`Shell::browser_pane`].
+    /// [`Shell::browser_pane`]. Chromium always says where.
     #[cfg(target_os = "macos")]
-    fn browser_loaded(&mut self, id: BrowserId, url: Option<String>, cx: &mut Context<Self>) {
+    pub(crate) fn browser_loaded(
+        &mut self,
+        id: BrowserId,
+        url: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(browser) = self.browsers.get_mut(&id) else {
             return;
         };
         if url.as_deref().is_some_and(|url| url != "about:blank") {
             browser.blank = false;
-            browser.unreachable = None;
+            #[cfg(not(feature = "chromium"))]
+            {
+                browser.unreachable = None;
+            }
         }
+        #[cfg(not(feature = "chromium"))]
         let url = match url {
             Some(url) => url,
             None => match browser.view.as_ref().and_then(|view| view.raw().url().ok()) {
                 Some(url) => url,
                 None => return,
             },
+        };
+        #[cfg(feature = "chromium")]
+        let Some(url) = url else {
+            return;
         };
         // The same address again — a page that rewrites its history as it
         // scrolls — changes nothing.
@@ -633,7 +817,7 @@ impl Shell {
 
     fn reload_browser(&mut self, id: BrowserId, cx: &mut Context<Self>) {
         // Nothing loaded to reload: look the address up again.
-        #[cfg(target_os = "macos")]
+        #[cfg(all(target_os = "macos", not(feature = "chromium")))]
         if self
             .browsers
             .get(&id)
@@ -643,7 +827,7 @@ impl Shell {
             return;
         }
 
-        #[cfg(target_os = "macos")]
+        #[cfg(all(target_os = "macos", not(feature = "chromium")))]
         if let Some(view) = self
             .browsers
             .get(&id)
@@ -651,6 +835,17 @@ impl Shell {
             && let Err(error) = view.raw().reload()
         {
             self.note = Some(format!("could not reload the browser: {error}").into());
+        }
+
+        // A reload is also what brings a crashed page's renderer back.
+        #[cfg(feature = "chromium")]
+        if let Some(browser) = self.browsers.get_mut(&id)
+            && let Some(view) = browser.view.as_ref()
+        {
+            view.page().reload();
+            if browser.chromium.crashed.take().is_some() {
+                self.sync_browser_visibility(cx);
+            }
         }
 
         #[cfg(not(target_os = "macos"))]
@@ -664,7 +859,10 @@ impl Shell {
             .get(&id)
             .and_then(|browser| browser.view.as_ref())
         {
+            #[cfg(not(feature = "chromium"))]
             let _ = view.raw().focus();
+            #[cfg(feature = "chromium")]
+            view.page().focus(true);
         }
 
         #[cfg(not(target_os = "macos"))]
@@ -687,10 +885,19 @@ impl Shell {
             .and_then(|id| self.browsers.get(&id))
             .and_then(|browser| browser.view.as_ref())
         {
-            let command = if redo { "redo" } else { "undo" };
-            let _ = view
-                .raw()
-                .evaluate_script(&format!("document.execCommand('{command}')"));
+            #[cfg(not(feature = "chromium"))]
+            {
+                let command = if redo { "redo" } else { "undo" };
+                let _ = view
+                    .raw()
+                    .evaluate_script(&format!("document.execCommand('{command}')"));
+            }
+            #[cfg(feature = "chromium")]
+            view.page().edit(if redo {
+                ket_chromium::Edit::Redo
+            } else {
+                ket_chromium::Edit::Undo
+            });
         }
 
         #[cfg(not(target_os = "macos"))]
@@ -706,7 +913,7 @@ impl Shell {
         cx: &mut Context<Self>,
         done: impl FnOnce(&mut Shell, String, String, &mut Context<Shell>) + 'static,
     ) {
-        #[cfg(target_os = "macos")]
+        #[cfg(all(target_os = "macos", not(feature = "chromium")))]
         {
             let Some(view) = self
                 .browsers
@@ -749,6 +956,41 @@ impl Shell {
             .detach();
         }
 
+        #[cfg(feature = "chromium")]
+        {
+            use ket_chromium::protocol::js_protocol::runtime::EvaluateParams;
+
+            let Some(browser) = self.browsers.get(&id) else {
+                return;
+            };
+            let Some(view) = browser.view.as_ref() else {
+                return;
+            };
+            let cdp = view.page().cdp();
+            let address = browser.chromium.url.clone();
+            cx.spawn(async move |this: gpui::WeakEntity<Shell>, cx| {
+                let mut ask =
+                    EvaluateParams::new("window.getSelection ? String(window.getSelection()) : ''");
+                ask.return_by_value = Some(true);
+                let Ok(answer) = cdp.call(ask).await else {
+                    return;
+                };
+                let text = answer
+                    .result
+                    .value
+                    .and_then(|value| value.as_str().map(str::to_owned))
+                    .unwrap_or_default();
+                if text.trim().is_empty() {
+                    return;
+                }
+                let _ = this.update(cx, |shell, cx| {
+                    done(shell, text, address, cx);
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
+
         #[cfg(not(target_os = "macos"))]
         let _ = (id, cx, done);
     }
@@ -769,7 +1011,7 @@ impl Shell {
         let _ = id;
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", not(feature = "chromium")))]
     fn ensure_browser_view(&mut self, id: BrowserId, window: &mut Window, cx: &mut Context<Self>) {
         use raw_window_handle::HasWindowHandle as _;
 
@@ -874,8 +1116,22 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        #[cfg(target_os = "macos")]
+        #[cfg(all(target_os = "macos", not(feature = "chromium")))]
         self.ensure_browser_view(id, window, cx);
+        #[cfg(feature = "chromium")]
+        self.ensure_chromium(id, window, cx);
+        // The same as `browser_key`'s, without waiting for a key: the field
+        // stops showing a caret once the page has the keyboard.
+        #[cfg(feature = "chromium")]
+        if let Some(browser) = self.browsers.get(&id)
+            && browser.address.read(cx).is_focused(window)
+            && browser
+                .view
+                .as_ref()
+                .is_some_and(|view| view.page_has_keyboard())
+        {
+            window.focus(&self.focus);
+        }
 
         // The address field takes the page's latest address once nobody is
         // typing in it: a link clicked in the page changes what it shows.
@@ -897,8 +1153,25 @@ impl Shell {
         let error = browser.error.clone();
         #[cfg(target_os = "macos")]
         let view = browser.view.clone();
-        #[cfg(target_os = "macos")]
-        let unreachable = browser.unreachable.clone();
+        // What the pane says in place of the page, when it has none to show.
+        #[cfg(all(target_os = "macos", not(feature = "chromium")))]
+        let notice = browser.unreachable.as_ref().map(|host| {
+            (
+                "This site can\u{2019}t be reached",
+                format!("Check if there is a typo in {host}."),
+            )
+        });
+        #[cfg(feature = "chromium")]
+        let notice = browser.chromium.crashed.as_ref().map(|why| {
+            (
+                "This page stopped working",
+                format!(
+                    "{} Reload to start it again.",
+                    crate::chromium::sentence(why)
+                ),
+            )
+        });
+        let (can_back, can_forward) = browser.history();
         #[cfg(target_os = "macos")]
         let still = match &browser.still {
             Still::Settling(image, _) | Still::Shown(image) => Some(image.clone()),
@@ -920,26 +1193,36 @@ impl Shell {
                 gpui::MouseButton::Left,
                 cx.listener(move |this, _, _, _| this.focus_browser_parent(id)),
             )
-            .child(
-                icon_button(("browser-back", id.0), Icon::ArrowLeft)
+            .child({
+                let back = icon_button(("browser-back", id.0), Icon::ArrowLeft)
                     .bare()
                     .small()
-                    .render(&theme)
-                    .on_click(cx.listener(move |this, _, _, cx| {
+                    .enabled(can_back)
+                    .render(&theme);
+                if can_back {
+                    back.on_click(cx.listener(move |this, _, _, cx| {
                         this.browser_history(id, true);
                         cx.notify();
-                    })),
-            )
-            .child(
-                icon_button(("browser-forward", id.0), Icon::ArrowRight)
+                    }))
+                } else {
+                    back
+                }
+            })
+            .child({
+                let forward = icon_button(("browser-forward", id.0), Icon::ArrowRight)
                     .bare()
                     .small()
-                    .render(&theme)
-                    .on_click(cx.listener(move |this, _, _, cx| {
+                    .enabled(can_forward)
+                    .render(&theme);
+                if can_forward {
+                    forward.on_click(cx.listener(move |this, _, _, cx| {
                         this.browser_history(id, false);
                         cx.notify();
-                    })),
-            )
+                    }))
+                } else {
+                    forward
+                }
+            })
             .child(
                 icon_button(("browser-reload", id.0), Icon::Refresh)
                     .bare()
@@ -972,6 +1255,26 @@ impl Shell {
                         cx.notify();
                     })),
             );
+        // A screenshot of the page to an agent, then Chromium's DevTools, in a
+        // window of their own.
+        #[cfg(feature = "chromium")]
+        let toolbar = toolbar.child(self.chromium_capture_button(id, cx)).child(
+            icon_button(("browser-devtools", id.0), Icon::Code)
+                .bare()
+                .small()
+                .pressed(self.chromium_devtools_open(id))
+                .render(&theme)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.toggle_chromium_devtools(id);
+                    cx.notify();
+                })),
+        );
+
+        // A JavaScript dialog the page has open, shown in its place.
+        #[cfg(feature = "chromium")]
+        let dialog = self.chromium_dialog(id, window, cx);
+        #[cfg(all(target_os = "macos", not(feature = "chromium")))]
+        let dialog: Option<AnyElement> = None;
 
         #[cfg(target_os = "macos")]
         let body = match (view, error) {
@@ -1005,7 +1308,10 @@ impl Shell {
                         .size_full()
                         .object_fit(gpui::ObjectFit::Fill)
                 }))
-                .children(unreachable.map(|host| not_found(&theme, id, &host, cx)))
+                .children(
+                    notice.map(|(heading, detail)| page_notice(&theme, id, heading, detail, cx)),
+                )
+                .children(dialog)
                 .into_any_element(),
             (None, Some(error)) => browser_message(&theme, error),
             (None, None) => browser_message(&theme, "Opening browser…"),
@@ -1020,6 +1326,12 @@ impl Shell {
             )
         };
 
+        // The latest download, under the toolbar.
+        #[cfg(feature = "chromium")]
+        let download = self.chromium_download_banner(id, cx);
+        #[cfg(not(feature = "chromium"))]
+        let download: Option<AnyElement> = None;
+
         div()
             .flex()
             .flex_col()
@@ -1027,6 +1339,7 @@ impl Shell {
             .overflow_hidden()
             .bg(paint(theme.surface))
             .child(toolbar)
+            .children(download)
             .child(body)
             .into_any_element()
     }
@@ -1036,7 +1349,7 @@ impl Shell {
 /// address may have changed whenever the page moves through its history
 /// without loading — `pushState`, `replaceState`, back and forward within
 /// it, a new `#fragment`. It sends no address; ket asks WebKit for that.
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", not(feature = "chromium")))]
 const ADDRESS_WATCH: &str = r#"(() => {
   const moved = () => {
     try { window.ipc.postMessage('address'); } catch (_) {}
@@ -1053,7 +1366,7 @@ const ADDRESS_WATCH: &str = r#"(() => {
   addEventListener('hashchange', moved);
 })();"#;
 
-fn normalize_url(value: &str) -> String {
+pub(crate) fn normalize_url(value: &str) -> String {
     let value = value.trim();
     if value.is_empty() {
         return "about:blank".to_owned();
@@ -1067,7 +1380,7 @@ fn normalize_url(value: &str) -> String {
 
 /// The host an address names, without its scheme, credentials or port.
 /// `None` for an address with no host, such as `about:blank`.
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", not(feature = "chromium")))]
 fn url_host(url: &str) -> Option<String> {
     let rest = url.split_once("://")?.1;
     let authority = rest.split(['/', '?', '#']).next()?;
@@ -1079,13 +1392,16 @@ fn url_host(url: &str) -> Option<String> {
     (!host.is_empty()).then(|| host.to_owned())
 }
 
-/// What a browser pane shows in place of the page when the address entered
-/// names a host that does not exist.
+/// What a browser pane shows in place of the page when it has none to show
+/// — with WebKit, when the address entered names a host that does not exist;
+/// with Chromium, when the page's renderer has ended — and a way to try
+/// again.
 #[cfg(target_os = "macos")]
-fn not_found(
+fn page_notice(
     theme: &ket_core::theme::Theme,
     id: BrowserId,
-    host: &str,
+    heading: &'static str,
+    detail: String,
     cx: &mut Context<Shell>,
 ) -> AnyElement {
     div()
@@ -1109,21 +1425,23 @@ fn not_found(
                 .text_size(TITLE)
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(paint(theme.text.primary))
-                .child("This site can\u{2019}t be reached"),
+                .child(heading),
         )
         .child(
             div()
                 .text_size(px(13.0))
                 .text_color(paint(theme.text.dim))
-                .child(format!("Check if there is a typo in {host}.")),
+                .child(detail),
         )
         .child(
-            // Secondary: the toolbar's Go is this surface's primary.
+            // Secondary: the toolbar's Go is this surface's primary. A reload
+            // looks a host up again that did not exist, and starts a crashed
+            // page's renderer again.
             button(("browser-retry", id.0), "Reload")
                 .leading(Icon::Refresh)
                 .render(theme)
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    this.navigate_browser(id, cx);
+                    this.reload_browser(id, cx);
                     cx.notify();
                 })),
         )
@@ -1196,7 +1514,7 @@ mod tests {
         assert_eq!(link.clipboard_item().text(), Some(uri.to_owned()));
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", not(feature = "chromium")))]
     #[test]
     fn url_host_drops_scheme_credentials_port_and_path() {
         assert_eq!(

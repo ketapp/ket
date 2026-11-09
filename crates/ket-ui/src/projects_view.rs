@@ -9,9 +9,10 @@ use ket_core::theme::Color;
 use crate::Shell;
 use crate::fonts::Prose;
 use crate::paint::paint;
+use crate::projects::rail_colour;
 use crate::tree::{Selection, row_mark, state_word};
 use crate::ui::agent::MARK;
-use crate::ui::row::block_row;
+use crate::ui::row::block_row_with_rail;
 use crate::ui::{CAPTION, ICON_GAP, LABEL};
 
 struct Entry {
@@ -90,7 +91,8 @@ impl Shell {
                 let meta = self.worktree_meta(node, project, worktree, None, window, cx);
                 let state = state_word(node, entry.signal, &self.theme);
                 let t = &self.theme;
-                block_row(("activity-worktree", row_id), selected, t)
+                let rail = rail_colour(entry.project_color, t);
+                block_row_with_rail(("activity-worktree", row_id), selected, rail, t)
                     .group(crate::tree::worktree_row_group(project, worktree))
                     .flex_row()
                     .items_center()

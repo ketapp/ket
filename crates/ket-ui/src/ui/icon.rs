@@ -14,9 +14,10 @@
 //! in a way one pass of hand-drawing was not. Phosphor's filled marks were
 //! tried here first and read too heavy against a hairline chrome.
 //!
-//! More are not from Lucide: the agent providers' own marks, and the Apple and
-//! Android marks on the simulator entries, which come from Simple Icons (see
-//! `NOTICE.md`). Logos are filled silhouettes on the same grid. A logo redrawn at a
+//! More are not from Lucide: the agent providers' own marks, the Apple and
+//! Android marks on the simulator entries and Chromium's on the browser's,
+//! which come from Simple Icons (see `NOTICE.md`). Logos are filled
+//! silhouettes on the same grid. A logo redrawn at a
 //! hairline to match a stroke set stops being the thing anyone recognises,
 //! which is the whole reason a row carries one. So is the primary checkout's
 //! boxed `p`, which no set has.
@@ -120,6 +121,8 @@ pub(crate) enum Icon {
     PanelRight,
     /// Settings.
     Sliders,
+    /// A session whose prompt cache has expired — see `ket_core::cold`.
+    Snowflake,
     /// A worktree, which is a branch with a checkout.
     GitBranch,
     /// A branch rejoining the line it came from.
@@ -234,6 +237,13 @@ pub(crate) enum Icon {
     Apple,
     /// Android — the bugdroid head, for the Android Emulator entry.
     Android,
+    /// Chromium — the ringed circle Chrome shares, for the browser entries in
+    /// a ket built with it.
+    #[cfg_attr(
+        not(feature = "chromium"),
+        allow(dead_code, reason = "a WebKit build's browser entries carry a window")
+    )]
+    Chromium,
     /// A project's backlog: a checked box beside lines.
     ListTodo,
     /// A file attached to something.
@@ -321,8 +331,18 @@ pub(crate) enum Icon {
     Dot,
     /// Something that runs off this Mac: the Cloud agents tab.
     Cloud,
+    /// What leaves this Mac: the Network panel, its request tabs and its
+    /// settings. Requests staggered down a timeline, the newest solid, as a
+    /// network log draws them.
+    Network,
     /// Something that runs on this Mac: the local agents tab.
     Laptop,
+    /// Long lines folded onto the next: a request tab's wrap toggle.
+    WrapText,
+    /// One of a project's glyphs ([`super::glyph`]), drawn as any icon is:
+    /// in a badge in its ink, and in the picker as an
+    /// [`icon_button`](super::button::icon_button).
+    Glyph(super::glyph::Glyph),
 }
 
 impl Icon {
@@ -354,6 +374,7 @@ impl Icon {
             Icon::Sidebar => "icons/sidebar.svg",
             Icon::PanelRight => "icons/panel-right.svg",
             Icon::Sliders => "icons/sliders.svg",
+            Icon::Snowflake => "icons/snowflake.svg",
             Icon::GitBranch => "icons/git-branch.svg",
             Icon::GitMerge => "icons/git-merge.svg",
             Icon::GitCommit => "icons/git-commit.svg",
@@ -398,6 +419,7 @@ impl Icon {
             Icon::Grok => "icons/agent-grok.svg",
             Icon::Apple => "icons/apple-logo.svg",
             Icon::Android => "icons/android-logo.svg",
+            Icon::Chromium => "icons/chromium-logo.svg",
             Icon::ListTodo => "icons/list-todo.svg",
             Icon::Paperclip => "icons/paperclip.svg",
             Icon::Orbit => "icons/orbit.svg",
@@ -431,7 +453,10 @@ impl Icon {
             Icon::GitHub => "icons/github.svg",
             Icon::Dot => "icons/dot.svg",
             Icon::Cloud => "icons/cloud.svg",
+            Icon::Network => "icons/network.svg",
             Icon::Laptop => "icons/laptop.svg",
+            Icon::WrapText => "icons/wrap-text.svg",
+            Icon::Glyph(glyph) => glyph.asset(),
         }
     }
 }
@@ -469,7 +494,7 @@ pub(crate) fn sized_icon(which: Icon, size: Pixels, colour: Rgba) -> Svg {
 pub(crate) struct Assets;
 
 /// The bytes for every path [`Icon::asset`] can return.
-const FILES: [(&str, &[u8]); 111] = [
+const FILES: [(&str, &[u8]); 115] = [
     (
         "icons/chevron-down.svg",
         include_bytes!("../../assets/icons/chevron-down.svg"),
@@ -561,6 +586,10 @@ const FILES: [(&str, &[u8]); 111] = [
     (
         "icons/sliders.svg",
         include_bytes!("../../assets/icons/sliders.svg"),
+    ),
+    (
+        "icons/snowflake.svg",
+        include_bytes!("../../assets/icons/snowflake.svg"),
     ),
     (
         "icons/git-branch.svg",
@@ -747,6 +776,10 @@ const FILES: [(&str, &[u8]); 111] = [
         include_bytes!("../../assets/icons/android-logo.svg"),
     ),
     (
+        "icons/chromium-logo.svg",
+        include_bytes!("../../assets/icons/chromium-logo.svg"),
+    ),
+    (
         "icons/list-todo.svg",
         include_bytes!("../../assets/icons/list-todo.svg"),
     ),
@@ -879,8 +912,16 @@ const FILES: [(&str, &[u8]); 111] = [
         include_bytes!("../../assets/icons/cloud.svg"),
     ),
     (
+        "icons/network.svg",
+        include_bytes!("../../assets/icons/network.svg"),
+    ),
+    (
         "icons/laptop.svg",
         include_bytes!("../../assets/icons/laptop.svg"),
+    ),
+    (
+        "icons/wrap-text.svg",
+        include_bytes!("../../assets/icons/wrap-text.svg"),
     ),
     // A model family's logo, drawn in its own colours by `img` — see
     // `crate::local_models`.
@@ -923,14 +964,18 @@ impl AssetSource for Assets {
         Ok(FILES
             .iter()
             .find(|(name, _)| *name == path)
-            .map(|(_, bytes)| Cow::Borrowed(*bytes)))
+            .map(|(_, bytes)| *bytes)
+            .or_else(|| super::glyph::load(path))
+            .map(Cow::Borrowed))
     }
 
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
         Ok(FILES
             .iter()
-            .filter(|(name, _)| name.starts_with(path))
-            .map(|(name, _)| SharedString::from(*name))
+            .map(|(name, _)| *name)
+            .chain(super::glyph::GLYPHS.iter().map(|(_, name, _)| *name))
+            .filter(|name| name.starts_with(path))
+            .map(SharedString::from)
             .collect())
     }
 }
@@ -1003,6 +1048,7 @@ mod tests {
             Icon::Sidebar,
             Icon::PanelRight,
             Icon::Sliders,
+            Icon::Snowflake,
             Icon::GitBranch,
             Icon::GitMerge,
             Icon::GitCommit,
@@ -1047,6 +1093,7 @@ mod tests {
             Icon::Grok,
             Icon::Apple,
             Icon::Android,
+            Icon::Chromium,
             Icon::ListTodo,
             Icon::Paperclip,
             Icon::Orbit,
@@ -1080,7 +1127,9 @@ mod tests {
             Icon::GitHub,
             Icon::Dot,
             Icon::Cloud,
+            Icon::Network,
             Icon::Laptop,
+            Icon::WrapText,
         ];
         // Logos are images, not icons: only `icons/` files have an `Icon`.
         assert_eq!(
@@ -1092,7 +1141,12 @@ mod tests {
             "an icon has no asset, or vice versa"
         );
 
-        for which in every {
+        // Glyphs live under `glyphs/`, outside that count, and are checked
+        // the same way.
+        for which in every
+            .into_iter()
+            .chain(super::super::glyph::every().map(Icon::Glyph))
+        {
             let found = Assets.load(which.asset()).unwrap();
             assert!(
                 found.is_some(),

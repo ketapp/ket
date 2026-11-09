@@ -9,6 +9,7 @@ import { router } from 'expo-router';
 import { type ReactNode, useEffect, useState } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 
+import { reachesAway } from '../lib/address-kind';
 import type { HostConnection } from '../lib/connection';
 import { font, size, t } from '../lib/theme';
 import { Banner, Button, Prose } from './ui';
@@ -34,7 +35,9 @@ export function useWaited(conn: HostConnection): number {
 /** The things that stop a phone reaching its desktop, most likely first. */
 export function checks(conn: HostConnection): ReactNode[] {
   return [
-    'At home, connect this phone to the same Wi-Fi as the Mac. Away from home, connect both to Tailscale.',
+    reachesAway(conn.host)
+      ? 'At home, connect this phone to the same Wi-Fi as the Mac. Away from home, keep Tailscale on, on both, or check Reach it from anywhere is still on in the Mac’s Settings › Devices.'
+      : `This phone only knows how to reach ${conn.host.name} on its own network. At home, connect to the same Wi-Fi. For away from home, turn on Tailscale or Reach it from anywhere under Away from home in the Mac’s Settings › Devices, then scan Show code there.`,
     'ket is open on the Mac, and Settings › Devices is turned on.',
     'The Mac is awake. A closed lid or sleep drops every phone.',
     <>

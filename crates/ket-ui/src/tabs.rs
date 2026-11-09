@@ -410,11 +410,10 @@ fn new_tab_menu(
                 .icon(Icon::TerminalWindow)
                 .chord(chord("cmd+t")),
         ),
-        MenuEntry::Item(
+        MenuEntry::Item(crate::browser::browser_mark(
             MenuItem::new(MenuAction::NewBrowser(pane), "Browser")
-                .icon(Icon::BrowserWindow)
                 .chord(chord(crate::shortcuts::NEW_BROWSER_CHORD)),
-        ),
+        )),
     ];
     #[cfg(target_os = "macos")]
     if simulator {
@@ -736,7 +735,10 @@ impl Shell {
             TabKind::Audio(path) | TabKind::Image(path) => (path.to_string(), None),
             // The file as it is now, which a deleted one no longer has.
             TabKind::Diff(key) if key.path().exists() => (key.path().display().to_string(), None),
-            TabKind::Terminal(_) | TabKind::Browser(_) | TabKind::Diff(_) => return None,
+            TabKind::Terminal(_)
+            | TabKind::Browser(_)
+            | TabKind::Diff(_)
+            | TabKind::NetworkRequest(_) => return None,
             #[cfg(target_os = "macos")]
             TabKind::IosSimulator => return None,
             TabKind::Android => return None,
@@ -1559,6 +1561,7 @@ impl Shell {
         self.prune_ios_simulator();
         self.prune_android();
         self.prune_diffs();
+        self.prune_network_requests();
         self.menu = None;
         self.close_tab_menus();
         // A rename addresses its tab by position, and closing one moves every
@@ -1658,6 +1661,9 @@ pub enum TabKind {
     Android,
     /// One file's diff, read-only. See `crate::diff_view`.
     Diff(crate::diff_view::DiffKey),
+    /// A request the network inspector logged, read-only. See
+    /// `crate::network_panel`.
+    NetworkRequest(crate::network_panel::RequestKey),
 }
 
 /// One tab in a worktree's space.
@@ -2684,6 +2690,23 @@ impl Space {
             *active = index;
         }
         true
+    }
+
+    /// Names the tab showing `kind` after what it shows, unless somebody has
+    /// renamed it. A Chromium page says what it shows; a WebKit one does not.
+    #[cfg(feature = "chromium")]
+    pub(crate) fn retitle(&mut self, kind: &TabKind, title: SharedString) {
+        let Some((pane, index)) = self.root.find_tab(kind) else {
+            return;
+        };
+        if let Some(tab) = self
+            .root
+            .leaf_mut(pane)
+            .and_then(|(tabs, _)| tabs.get_mut(index))
+            .filter(|tab| !tab.renamed)
+        {
+            tab.title = title;
+        }
     }
 
     /// Labels the simulator tab with the device it is showing.
@@ -3757,7 +3780,8 @@ impl Shell {
                                     .into_any_element()
                             }
                             TabKind::Browser(_) => {
-                                icon_mark(Icon::ExternalLink, paint(t.text.dim), !active)
+                                let (mark, tint) = crate::browser::browser_tab_mark();
+                                icon_mark(mark, tint.unwrap_or_else(|| paint(t.text.dim)), !active)
                                     .into_any_element()
                             }
                             #[cfg(target_os = "macos")]
@@ -3771,6 +3795,16 @@ impl Shell {
                             }
                             TabKind::Diff(key) => {
                                 file_mark(key.rel.as_ref(), !active, mono.clone(), t)
+                                    .into_any_element()
+                            }
+                            // A request that sent something flagged says so
+                            // from the tab strip too.
+                            TabKind::NetworkRequest(key) if self.network_request_flagged(key) => {
+                                icon_mark(Icon::TriangleAlert, paint(t.status.failed), !active)
+                                    .into_any_element()
+                            }
+                            TabKind::NetworkRequest(_) => {
+                                icon_mark(Icon::Network, paint(t.text.dim), !active)
                                     .into_any_element()
                             }
                             TabKind::Terminal(id) if self.asleep_terminals.contains_key(id) => {
@@ -4146,6 +4180,9 @@ impl Shell {
                     Some(TabKind::IosSimulator) => self.ios_simulator_pane(window, cx),
                     Some(TabKind::Android) => self.android_pane(window, cx),
                     Some(TabKind::Diff(key)) => self.diff_pane(&key, window, cx),
+                    Some(TabKind::NetworkRequest(key)) => {
+                        self.network_request_pane(&key, window, cx)
+                    }
                     None => div()
                         .flex()
                         .size_full()

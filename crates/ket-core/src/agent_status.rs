@@ -46,6 +46,19 @@ use crate::subagents::{Roster, Subagent};
 /// worktree: an agent ket did not launch, placed by its working directory.
 const UNPLACED: &str = "worktree:";
 
+/// How long after a permission prompt goes up a call starting beside it is
+/// still one dispatched *with* the call that asked, rather than after the
+/// prompt was answered — see [`StatusStore::report`].
+///
+/// An agent runs a batch's calls side by side: every `PreToolUse` fires at
+/// once, and one call's `PermissionRequest` follows its own within the time
+/// its hook takes to return. Blocked on the prompt, the agent starts nothing
+/// more. So a call starting this long after the prompt went up is the next
+/// one the model asked for, which it could only do once the prompt was
+/// answered. Generous against the hooks' own run time; a prompt is up for
+/// seconds at the least.
+const PROMPT_SIBLINGS_MS: u64 = 2_000;
+
 /// Who decided a turn was cancelled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -566,6 +579,23 @@ impl StatusStore {
         // screen. Taken as the answer, it dropped the question: the next
         // `Notification` put the pane back to waiting with nothing to ask,
         // and a phone had no prompt to answer.
+        //
+        // With one exception, for Codex: a call *starting* well after a
+        // permission went up — see [`PROMPT_SIBLINGS_MS`]. That is the
+        // model's next call, and it means the prompt was answered at the
+        // desk, however the call that asked reported it. Codex reports a
+        // command it ran after an approval only once the command has
+        // finished, and never for one that was still running when its call
+        // came back; held as another call's, every report after the approval
+        // was dropped, and the pane read "waiting" until its turn ended. A
+        // call finishing proves nothing: the one beside the prompt can finish
+        // while the prompt waits. Nor does a question, a plan or a dialog
+        // move on this way — they are answered through their own hook or the
+        // screen. Codex alone, because its `PreToolUse` is a call being
+        // dispatched: Claude reports the approved call's own result, and
+        // OpenCode reports an answer *as* the call starting, so with two of
+        // its prompts outstanding the older one's answer would take the
+        // newer one down.
         if entry.state == AgentState::AwaitingPermission
             && matches!(
                 report.event,
@@ -574,12 +604,24 @@ impl StatusStore {
             && let (Some(asked), Some(call)) = (entry.question.as_ref(), report.call.as_ref())
             && !answers(asked, call)
         {
+            let next_call = report.event == HookEvent::PreTool
+                && crate::agents::harness(&entry.agent).eq_ignore_ascii_case("codex")
+                && asked.prompt.is_none()
+                && at_ms.saturating_sub(entry.at_ms) >= PROMPT_SIBLINGS_MS;
+            if !next_call {
+                tracing::debug!(
+                    pane = %entry.pane,
+                    event = ?report.event,
+                    "another call's report while a prompt is up"
+                );
+                return true;
+            }
             tracing::debug!(
                 pane = %entry.pane,
-                event = ?report.event,
-                "another call's report while a prompt is up"
+                agent = %entry.agent,
+                tool = %asked.tool,
+                "a call started after a permission prompt: answered at the desk"
             );
-            return true;
         }
 
         // Narrowed to exactly a tool call coming back — see

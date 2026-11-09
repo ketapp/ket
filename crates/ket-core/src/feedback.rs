@@ -158,7 +158,7 @@ pub fn endpoint() -> Option<String> {
 
 /// The OS and its version, for a report that shares them: `macOS 26.0
 /// (aarch64)`.
-fn system() -> String {
+pub(crate) fn system() -> String {
     let arch = std::env::consts::ARCH;
     #[cfg(target_os = "macos")]
     {

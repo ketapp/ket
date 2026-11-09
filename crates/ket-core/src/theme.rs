@@ -718,6 +718,8 @@ pub struct Theme {
     pub rule: Color,
     /// The rail on the selected row of a list, and nothing else: the one
     /// warm colour the chrome spends, so it only ever means "you are here".
+    /// A selected worktree in a project with a colour of its own wears that
+    /// colour instead; this is the rail everywhere else.
     pub marker: Color,
     /// The fill of a primary action.
     pub accent: Color,

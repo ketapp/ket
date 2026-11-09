@@ -1,8 +1,9 @@
 //! What ket costs the machine, and what the agents it runs cost beside it.
 //!
-//! Two figures, kept apart on purpose. **ket's own** is the window and the
-//! host that serves its terminals: the part ket answers for, and the part a
-//! person comparing it against an Electron app is asking about. **The agents'**
+//! Two figures, kept apart on purpose. **ket's own** is the window, the host
+//! that serves its terminals, and Chromium's helpers once a browser tab has
+//! started it: the part ket answers for, and the part a person comparing it
+//! against an Electron app is asking about. **The agents'**
 //! is every terminal session and agent process ket started, with everything
 //! they started in turn: the part the person's own work answers for. Added
 //! together, a build running in a terminal would read as ket being heavy.
@@ -20,6 +21,13 @@
 //! **Each session is read on its own** as well as in the total: what runs in
 //! it, where, and what it costs — and the readings of the last
 //! [`HISTORY`] are kept, for a chart.
+//!
+//! **Chromium's helpers are ket's, read apart.** A browser tab in a ket built
+//! with Chromium starts its GPU, network and renderer processes as children
+//! of the window, in the window's process group, so they would otherwise be
+//! passed over as the window's own helpers — or, in a group of their own,
+//! taken for agents. They are known by name, `ket Helper …`, among the
+//! window's children, which a reading lists anyway: no extra walk.
 //!
 //! **Cheap enough to leave on.** A reading is a handful of syscalls per
 //! process: list a process's children, read its usage. No `ps`, no fork, no
@@ -56,6 +64,11 @@ pub const MIN_SPAN: Duration = Duration::from_secs(5);
 /// a reading's cost, not a figure anyone should reach. Past it, the trees not
 /// yet walked are left out of the reading rather than slowing the window.
 const MOST: usize = 4096;
+
+/// What Chromium's helpers are called: `ket Helper`, and `ket Helper (GPU)`,
+/// `(Renderer)`, `(Plugin)` and `(Alerts)` — the bundles `ket-chromium`
+/// starts them from, inside ket.app.
+const CHROMIUM_HELPER: &str = "ket Helper";
 
 /// Memory and CPU, for one process or a group of them.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -125,11 +138,27 @@ pub struct Agents {
     pub processes: usize,
 }
 
+/// Chromium's helper processes, which the window starts for its browser tabs.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Chromium {
+    /// What they add up to.
+    ///
+    /// CPU counts only helpers with a baseline, as [`Agents::reading`] does:
+    /// Chromium starts a renderer for each site a tab visits, and a figure
+    /// that went blank every time one started would rarely show anything.
+    pub reading: Reading,
+    /// How many processes they are, with anything they started.
+    pub processes: usize,
+}
+
 /// One reading of everything.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Overhead {
     /// The process reading: ket's window.
     pub window: Reading,
+    /// Chromium's helpers, while the window has any — only once a browser
+    /// tab has started Chromium, in a ket built with it.
+    pub chromium: Option<Chromium>,
     /// The host serving its terminals, when one is connected.
     pub host: Option<Reading>,
     /// What runs in them.
@@ -137,15 +166,19 @@ pub struct Overhead {
 }
 
 impl Overhead {
-    /// ket's own: the window and its host together.
+    /// ket's own: the window, its Chromium helpers and its host together.
     ///
     /// CPU only when every part has a figure. Window alone would understate a
     /// total that says it includes the host.
     pub fn ket(&self) -> Reading {
-        match self.host {
-            Some(host) => self.window.plus(host),
-            None => self.window,
+        let mut ket = self.window;
+        if let Some(chromium) = self.chromium {
+            ket = ket.plus(chromium.reading);
         }
+        if let Some(host) = self.host {
+            ket = ket.plus(host);
+        }
+        ket
     }
 
     /// ket and everything it runs.
@@ -185,12 +218,22 @@ struct OtherRaw {
     ticks: u64,
 }
 
-/// One session's tree, summed.
+/// What a tree walked from one of the window's or the host's children is
+/// counted as.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Walked {
+    /// A session, with the agents.
+    Session(SessionKind),
+    /// One of Chromium's helpers, with ket's own.
+    Chromium,
+}
+
+/// One session's tree, or one Chromium helper's, summed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TreeRaw {
     /// The root's pid and start time.
     id: (i32, u64),
-    kind: SessionKind,
+    kind: Walked,
     /// See [`Session::program`].
     program: String,
     cwd: Option<PathBuf>,
@@ -325,28 +368,40 @@ impl Meter {
             span.zip(busy.and_then(ns))
                 .and_then(|(span, busy)| percent(0, busy, span))
         };
-        let sessions = trees
+        let (helpers, walked): (Vec<&TreeRaw>, Vec<&TreeRaw>) =
+            trees.iter().partition(|tree| tree.kind == Walked::Chromium);
+        let sessions = walked
             .iter()
-            .map(|tree| Session {
-                root_pid: tree.id.0,
-                kind: tree.kind,
-                program: tree.program.clone(),
-                cwd: tree.cwd.clone(),
-                reading: Reading {
-                    memory: tree.memory,
-                    cpu: cpu(busy(tree)),
-                },
-                processes: tree.processes,
+            .filter_map(|&tree| match tree.kind {
+                Walked::Session(kind) => Some(Session {
+                    root_pid: tree.id.0,
+                    kind,
+                    program: tree.program.clone(),
+                    cwd: tree.cwd.clone(),
+                    reading: Reading {
+                        memory: tree.memory,
+                        cpu: cpu(busy(tree)),
+                    },
+                    processes: tree.processes,
+                }),
+                Walked::Chromium => None,
             })
             .collect();
         let agents = Agents {
             reading: Reading {
-                memory: trees.iter().map(|tree| tree.memory).sum(),
-                cpu: cpu(Some(trees.iter().filter_map(busy).sum())),
+                memory: walked.iter().map(|tree| tree.memory).sum(),
+                cpu: cpu(Some(walked.iter().copied().filter_map(busy).sum())),
             },
             sessions,
-            processes: trees.iter().map(|tree| tree.processes).sum(),
+            processes: walked.iter().map(|tree| tree.processes).sum(),
         };
+        let chromium = (!helpers.is_empty()).then(|| Chromium {
+            reading: Reading {
+                memory: helpers.iter().map(|tree| tree.memory).sum(),
+                cpu: cpu(Some(helpers.iter().copied().filter_map(busy).sum())),
+            },
+            processes: helpers.iter().map(|tree| tree.processes).sum(),
+        });
 
         self.at = Some(now);
         self.window = Some(own.cpu_ns);
@@ -355,6 +410,7 @@ impl Meter {
 
         let overhead = Overhead {
             window,
+            chromium,
             host,
             agents,
         };
@@ -387,6 +443,15 @@ fn percent(before_ns: u64, after_ns: u64, span: Duration) -> Option<f32> {
     let spent = after_ns.checked_sub(before_ns)?;
     let span = span.as_nanos();
     (span > 0).then(|| (spent as f64 / span as f64 * 100.0) as f32)
+}
+
+/// Whether a child of the window named `name` is one of Chromium's helpers:
+/// [`CHROMIUM_HELPER`], alone or with its kind in brackets — whole, or cut
+/// to the system's sixteen characters.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn chromium_helper(name: &str) -> bool {
+    name.strip_prefix(CHROMIUM_HELPER)
+        .is_some_and(|kind| kind.is_empty() || kind.starts_with(" ("))
 }
 
 /// The kernel's counters, read without `unsafe` through `libproc` and `nix`.
@@ -423,7 +488,7 @@ mod sample {
     use nix::sys::resource::{UsageWho, getrusage};
     use nix::sys::time::TimeValLike;
 
-    use super::{MOST, OtherRaw, OwnRaw, SessionKind, TreeRaw};
+    use super::{MOST, OtherRaw, OwnRaw, SessionKind, TreeRaw, Walked};
 
     /// Everything one reading needs: the window, its host, and the session
     /// trees under both.
@@ -521,15 +586,21 @@ mod sample {
         info(pid).as_ref().map(lineage_of)
     }
 
-    /// The program's name, as the system has it: the longer of its two
+    /// The executable's name, as the system has it: the longer of its two
     /// spellings, which only the shorter, sixteen-character one cuts off.
-    fn name_of(info: &BSDInfo) -> String {
+    fn raw_name(info: &BSDInfo) -> String {
         let long = text(&info.pbi_name);
-        let name = if long.is_empty() {
+        if long.is_empty() {
             text(&info.pbi_comm)
         } else {
             long
-        };
+        }
+    }
+
+    /// The program's name: [`raw_name`], or the program a versioned
+    /// executable was installed as.
+    fn name_of(info: &BSDInfo) -> String {
+        let name = raw_name(info);
         // Claude Code's native install runs an executable named for its
         // version — `~/.local/share/claude/versions/2.1.288` — so the system
         // calls it `2.1.288`. The program is the directory above `versions`.
@@ -622,12 +693,15 @@ mod sample {
         })
     }
 
-    /// `parent`'s children that are sessions, each with its tree summed.
+    /// `parent`'s children that are sessions, each with its tree summed —
+    /// and, under the window, Chromium's helpers, each the same way.
     ///
     /// Under the host that is its terminals. Under the window it is also what
     /// it starts [`Standing::Apart`], less the two such things that are not
     /// agents: ket itself and an emulator, which says so with a file named
-    /// after its pid.
+    /// after its pid. A Chromium helper is known by name before its standing
+    /// counts: it is in the window's group, where it would read as a helper
+    /// of the moment and be passed over.
     fn sessions(parent: i32, window: bool, budget: &mut usize) -> Vec<TreeRaw> {
         let Some(parent_lineage) = info(parent).as_ref().map(lineage_of) else {
             return Vec::new();
@@ -637,21 +711,25 @@ mod sample {
             .filter_map(|child| {
                 let info = info(child)?;
                 let kind = match standing(child, lineage_of(&info), parent_lineage) {
-                    Standing::Terminal => SessionKind::Terminal,
+                    Standing::Terminal => Walked::Session(SessionKind::Terminal),
+                    _ if window && super::chromium_helper(&raw_name(&info)) => Walked::Chromium,
                     Standing::Apart
                         if window
                             && !ket_itself(child)
                             && !u32::try_from(child).is_ok_and(crate::android::is_emulator) =>
                     {
-                        SessionKind::Agent
+                        Walked::Session(SessionKind::Agent)
                     }
                     Standing::Apart | Standing::Helper => return None,
                 };
-                let program = program(child, &info, kind);
+                let (program, cwd) = match kind {
+                    Walked::Session(session) => (program(child, &info, session), cwd(child)),
+                    Walked::Chromium => (String::new(), None),
+                };
                 tree(child, budget).map(|tree| TreeRaw {
                     kind,
                     program,
-                    cwd: cwd(child),
+                    cwd,
                     ..tree
                 })
             })
@@ -682,7 +760,7 @@ mod sample {
         *budget -= 1;
         let mut tree = TreeRaw {
             id: (root, first.ri_proc_start_abstime),
-            kind: SessionKind::Terminal,
+            kind: Walked::Session(SessionKind::Terminal),
             program: String::new(),
             cwd: None,
             memory: 0,
@@ -788,6 +866,39 @@ mod sample {
         }
 
         #[test]
+        fn a_chromium_helper_is_kets_whichever_group_it_is_in() {
+            use std::os::unix::process::CommandExt;
+
+            // `sleep`, under a helper's name: what the system calls a
+            // process is the name of the file it ran.
+            let dir = std::env::temp_dir().join(format!("ket-overhead-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).expect("a directory");
+            let binary = dir.join("ket Helper (Renderer)");
+            std::fs::copy("/bin/sleep", &binary).expect("a copy of sleep");
+            let pid = i32::try_from(std::process::id()).expect("a pid");
+            let mut found = Vec::new();
+            for apart in [false, true] {
+                let mut command = std::process::Command::new(&binary);
+                command.arg("5");
+                if apart {
+                    command.process_group(0);
+                }
+                let mut child = command.spawn().expect("the helper");
+                let child_pid = i32::try_from(child.id()).expect("a pid");
+                let mut budget = MOST;
+                let walked = sessions(pid, true, &mut budget)
+                    .into_iter()
+                    .find(|tree| tree.id.0 == child_pid)
+                    .map(|tree| tree.kind);
+                let _ = child.kill();
+                let _ = child.wait();
+                found.push(walked);
+            }
+            let _ = std::fs::remove_dir_all(&dir);
+            assert_eq!(found, [Some(Walked::Chromium), Some(Walked::Chromium)]);
+        }
+
+        #[test]
         fn a_shell_at_its_prompt_is_its_own_foreground() {
             assert_eq!(foreground(200, 200), None);
             assert_eq!(foreground(200, 0), None, "no terminal");
@@ -885,12 +996,24 @@ mod tests {
     fn tree(pid: i32, ns: u64) -> TreeRaw {
         TreeRaw {
             id: (pid, 1),
-            kind: SessionKind::Terminal,
+            kind: Walked::Session(SessionKind::Terminal),
             program: format!("job-{pid}"),
             cwd: Some(PathBuf::from(format!("/work/{pid}"))),
             memory: 1_000,
             ticks: ns * 3 / 125,
             processes: 3,
+        }
+    }
+
+    /// One of Chromium's helpers, as the window's children are walked.
+    fn helper(pid: i32, ns: u64) -> TreeRaw {
+        TreeRaw {
+            kind: Walked::Chromium,
+            program: String::new(),
+            cwd: None,
+            memory: 200,
+            processes: 1,
+            ..tree(pid, ns)
         }
     }
 
@@ -932,6 +1055,7 @@ mod tests {
                 memory: 400,
                 cpu: Some(0.3),
             },
+            chromium: None,
             host: Some(Reading {
                 memory: 60,
                 cpu: Some(0.1),
@@ -958,12 +1082,38 @@ mod tests {
     }
 
     #[test]
+    fn kets_own_takes_in_chromiums_helpers() {
+        let overhead = Overhead {
+            window: Reading {
+                memory: 400,
+                cpu: Some(0.3),
+            },
+            chromium: Some(Chromium {
+                reading: Reading {
+                    memory: 900,
+                    cpu: Some(2.0),
+                },
+                processes: 4,
+            }),
+            host: Some(Reading {
+                memory: 60,
+                cpu: Some(0.1),
+            }),
+            agents: Agents::default(),
+        };
+        assert_eq!(overhead.ket().memory, 1_360);
+        assert!(close(overhead.ket().cpu, 2.4));
+        assert_eq!(overhead.total().memory, 1_360, "and none of it the agents'");
+    }
+
+    #[test]
     fn the_total_is_ket_and_everything_it_runs() {
         let overhead = Overhead {
             window: Reading {
                 memory: 400,
                 cpu: Some(0.3),
             },
+            chromium: None,
             host: None,
             agents: Agents {
                 reading: Reading {
@@ -1142,6 +1292,86 @@ mod tests {
         let first = meter.history().front().expect("a point");
         assert_eq!(first.reading.memory, 100);
         assert_eq!(first.reading.cpu, None);
+    }
+
+    #[test]
+    fn chromiums_helpers_are_kets_and_not_the_agents() {
+        let mut meter = Meter::default();
+        let now = Instant::now();
+        let first = meter.advance(now, own(SECOND), None, &[tree(20, 0), helper(30, 0)]);
+        let chromium = first.chromium.expect("the helpers");
+        assert_eq!(chromium.reading.memory, 200);
+        assert_eq!(chromium.processes, 1);
+        assert_eq!(chromium.reading.cpu, None, "nothing to measure from yet");
+        assert_eq!(first.agents.sessions.len(), 1);
+        assert_eq!(first.agents.reading.memory, 1_000);
+        assert_eq!(first.agents.processes, 3);
+        assert_eq!(first.ket().memory, 300);
+        assert_eq!(first.total().memory, 1_300);
+    }
+
+    #[test]
+    fn a_new_renderer_adds_memory_and_no_cpu_and_keeps_the_figure() {
+        let mut meter = Meter::default();
+        let now = Instant::now();
+        meter.advance(now, own(SECOND), None, &[helper(30, 0), helper(31, 0)]);
+        let later = meter.advance(
+            now + Duration::from_secs(10),
+            own(2 * SECOND),
+            None,
+            // 31 ended; 32 is a renderer started since, with time behind it
+            // that is not this span's.
+            &[helper(30, 2 * SECOND), helper(32, 50 * SECOND)],
+        );
+        let chromium = later.chromium.expect("the helpers");
+        assert_eq!(chromium.reading.memory, 400);
+        assert_eq!(chromium.processes, 2);
+        assert!(close(chromium.reading.cpu, 20.0));
+        // The window's 10% and the helpers' 20%.
+        assert!(close(later.ket().cpu, 30.0));
+        assert_eq!(
+            later.agents,
+            Agents {
+                reading: Reading {
+                    memory: 0,
+                    cpu: Some(0.0),
+                },
+                sessions: Vec::new(),
+                processes: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn no_helpers_is_no_chromium_line() {
+        let mut meter = Meter::default();
+        let first = meter.advance(Instant::now(), own(SECOND), None, &[tree(20, 0)]);
+        assert_eq!(first.chromium, None);
+    }
+
+    #[test]
+    fn a_helper_is_known_by_its_bundles_name() {
+        for name in [
+            "ket Helper",
+            "ket Helper (GPU)",
+            "ket Helper (Renderer)",
+            "ket Helper (Plugin)",
+            "ket Helper (Alerts)",
+            // The sixteen-character spelling.
+            "ket Helper (Ren",
+        ] {
+            assert!(chromium_helper(name), "{name}");
+        }
+        for name in [
+            "ket",
+            "ket-host",
+            "ket Helpers",
+            "ket Helper2",
+            "Google Chrome Helper",
+            "",
+        ] {
+            assert!(!chromium_helper(name), "{name}");
+        }
     }
 
     #[test]

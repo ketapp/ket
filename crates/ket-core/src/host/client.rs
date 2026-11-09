@@ -59,6 +59,10 @@ static CONNECTION: Mutex<Option<Arc<Connection>>> = Mutex::new(None);
 pub(crate) static HOOK_REPORTS: Mutex<Vec<crate::agent_hooks::HookReport>> = Mutex::new(Vec::new());
 /// See [`HOOK_REPORTS`].
 pub(crate) static STATUS_LINES: Mutex<Vec<crate::agent_hooks::StatusLine>> = Mutex::new(Vec::new());
+/// Requests the network inspector logged, by worktree, until the window
+/// takes them — see [`super::take_network_requests`].
+pub(crate) static NETWORK_REQUESTS: Mutex<Vec<(String, crate::network::store::RequestSummary)>> =
+    Mutex::new(Vec::new());
 /// The host's newest status snapshot, until the window takes it — see
 /// [`super::take_agent_status`]. Each one replaces the last, unless it came
 /// over a connection older than the one the held snapshot came over: that
@@ -81,17 +85,33 @@ pub(crate) static PHONE_REVIEWS: Mutex<Vec<super::PhoneReview>> = Mutex::new(Vec
 /// Worktrees phones asked this window to delete — see
 /// [`super::take_phone_delete`].
 pub(crate) static PHONE_DELETES: Mutex<Vec<super::PhoneDelete>> = Mutex::new(Vec::new());
+/// Terminals phones asked this window to start fresh sessions beside — see
+/// [`super::take_phone_fresh`].
+pub(crate) static PHONE_FRESHES: Mutex<Vec<super::PhoneFresh>> = Mutex::new(Vec::new());
 /// Asleep tabs phones asked this window to wake, each with the host's
 /// request number — see [`super::take_phone_wake`].
 pub(crate) static PHONE_WAKES: Mutex<Vec<(u64, String)>> = Mutex::new(Vec::new());
+/// What `ket browser` asked of this window's browser tabs, each with the
+/// host's request number — see [`super::take_browser_asks`].
+pub(crate) static BROWSER_ASKS: Mutex<Vec<super::BrowserAsk>> = Mutex::new(Vec::new());
 /// Whether the host has said the store's worktrees changed since the window
 /// last looked — see [`super::take_worktrees_changed`].
 pub(crate) static WORKTREES_CHANGED: AtomicBool = AtomicBool::new(false);
 /// Whether a phone has asked this window for anything since the window last
-/// looked — work to start, a merge, a delete, a wake — see
+/// looked — work to start, a merge, a delete, a wake, or a terminal's `ket
+/// browser` — see
 /// [`super::take_phone_asked`]. The queues above hold what; this says to
 /// look at them now rather than on the next tick.
 pub(crate) static PHONE_ASKED: AtomicBool = AtomicBool::new(false);
+/// Wakes a window waiting in [`super::phone_asked`] the moment
+/// [`PHONE_ASKED`] is raised, rather than on its next tick.
+pub(crate) static PHONE_WAKE: tokio::sync::Notify = tokio::sync::Notify::const_new();
+
+/// Raises [`PHONE_ASKED`] and wakes the window to look.
+fn ask_window() {
+    PHONE_ASKED.store(true, Ordering::Release);
+    PHONE_WAKE.notify_one();
+}
 /// The serial the next [`Connection`] gets. See [`AGENT_STATUS`].
 static NEXT_SERIAL: AtomicU64 = AtomicU64::new(1);
 /// This window's worktrees, as last published — sent again on every new
@@ -169,15 +189,8 @@ fn establish() -> Result<Arc<Connection>> {
             }
             continue;
         };
-        let (stream, protocol, build, live) = hello(stream, &mine).map_err(host_error)?;
-        if protocol != wire::PROTOCOL || (build != mine && live == 0 && !replaced) {
-            if live > 0 {
-                return Err(host_error(format!(
-                    "the running host speaks protocol {protocol}, this build {}; \
-                     it has terminals running, so it stays",
-                    wire::PROTOCOL
-                )));
-            }
+        let (stream, build, live) = hello(stream, &mine).map_err(host_error)?;
+        if build != mine && live == 0 && !replaced {
             // An idle host from another build: ask it to go, and start ours.
             let conn = Connection::start(stream)?;
             conn.request(&Request::Shutdown { force: false })?;
@@ -225,7 +238,7 @@ pub(crate) fn peek() -> Result<Option<(UnixStream, String, usize)>> {
     let Ok(stream) = UnixStream::connect(super::socket_path()?) else {
         return Ok(None);
     };
-    let (stream, _, build, live) = hello(stream, &super::build_id()).map_err(host_error)?;
+    let (stream, build, live) = hello(stream, &super::build_id()).map_err(host_error)?;
     Ok(Some((stream, build, live)))
 }
 
@@ -273,6 +286,85 @@ pub(crate) fn ask<T>(
         {
             return Ok(answer);
         }
+    }
+}
+
+/// [`ask`], with `within` for the whole wait rather than for each read: the
+/// host sends a connection its broadcasts as well as the answer, so a request
+/// that is never answered — by a host from before it, which skips it — would
+/// otherwise be waited on for as long as anything else keeps arriving.
+/// `None` once `within` has passed with no answer — however far the request
+/// got out, or the frame being read got in, by then.
+pub(crate) fn ask_within<T>(
+    stream: UnixStream,
+    request: &Request,
+    within: Duration,
+    pick: impl Fn(Reply) -> Option<T>,
+) -> Result<Option<T>> {
+    let late = |error: &io::Error| {
+        matches!(
+            error.kind(),
+            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+        )
+    };
+    let mut bounded = Until {
+        stream: &stream,
+        deadline: Instant::now() + within,
+    };
+    match wire::send(&mut bounded, &wire::json(request).map_err(host_error)?) {
+        Ok(()) => {}
+        Err(error) if late(&error) => return Ok(None),
+        Err(error) => return Err(host_error(error)),
+    }
+    loop {
+        match wire::read(&mut bounded) {
+            Ok(Frame::Json(body)) => {
+                if let Ok(reply) = serde_json::from_slice(&body)
+                    && let Some(answer) = pick(reply)
+                {
+                    return Ok(Some(answer));
+                }
+            }
+            Ok(_) => {}
+            Err(error) if late(&error) => return Ok(None),
+            Err(error) => return Err(host_error(error)),
+        }
+    }
+}
+
+/// A stream whose every read and write is given only what is left before
+/// `deadline`, and fails as timed out once nothing is. A frame is many reads,
+/// so a socket timeout set once per frame bounds only the gap between bytes:
+/// a peer trickling one under it could hold the reader for as long as it
+/// liked, and one that never reads could hold a writer forever.
+struct Until<'a> {
+    stream: &'a UnixStream,
+    deadline: Instant,
+}
+
+impl Until<'_> {
+    fn left(&self) -> io::Result<Duration> {
+        Some(self.deadline.saturating_duration_since(Instant::now()))
+            .filter(|left| !left.is_zero())
+            .ok_or_else(|| io::ErrorKind::TimedOut.into())
+    }
+}
+
+impl io::Read for Until<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.stream.set_read_timeout(Some(self.left()?))?;
+        io::Read::read(&mut self.stream, buf)
+    }
+}
+
+impl io::Write for Until<'_> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.stream.set_write_timeout(Some(self.left()?))?;
+        io::Write::write(&mut self.stream, buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        io::Write::flush(&mut self.stream)
     }
 }
 
@@ -363,7 +455,7 @@ pub(crate) fn end_process(_pid: i32, _grace: Duration) -> bool {
 }
 
 /// Says hello and reads the welcome.
-fn hello(stream: UnixStream, build: &str) -> io::Result<(UnixStream, u32, String, usize)> {
+fn hello(stream: UnixStream, build: &str) -> io::Result<(UnixStream, String, usize)> {
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
     let mut writer = stream.try_clone()?;
     wire::send(
@@ -376,16 +468,11 @@ fn hello(stream: UnixStream, build: &str) -> io::Result<(UnixStream, u32, String
     let mut reader = &stream;
     match wire::read(&mut reader)? {
         Frame::Json(body) => match serde_json::from_slice(&body) {
-            Ok(Reply::Welcome {
-                protocol,
-                build,
-                live,
-            }) => {
-                // Fails with EINVAL on macOS if the host has already hung up —
-                // which it does after welcoming a window on another protocol.
-                // That window needs the welcome, not this error.
+            Ok(Reply::Welcome { build, live, .. }) => {
+                // Fails with EINVAL on macOS if the host has already hung up.
+                // The caller needs the welcome, not this error.
                 let _ = stream.set_read_timeout(None);
-                Ok((stream, protocol, build, live))
+                Ok((stream, build, live))
             }
             _ => Err(io::Error::other("expected a welcome")),
         },
@@ -658,6 +745,9 @@ fn route(conn: &Arc<Connection>, reply: Reply) {
         }
         Reply::Hook { report } => lock(&HOOK_REPORTS).push(*report),
         Reply::StatusLine { line } => lock(&STATUS_LINES).push(*line),
+        Reply::NetworkRequest { worktree, summary } => {
+            lock(&NETWORK_REQUESTS).push((worktree, *summary));
+        }
         Reply::StartWork {
             project,
             prompt,
@@ -682,10 +772,24 @@ fn route(conn: &Arc<Connection>, reply: Reply) {
                 worktree,
                 shell,
             });
-            PHONE_ASKED.store(true, Ordering::Release);
+            ask_window();
         }
         Reply::MergeWork { worktree } => {
             lock(&PHONE_MERGES).push(worktree);
+            ask_window();
+        }
+        Reply::StartFresh {
+            req,
+            key,
+            session,
+            since_ms,
+        } => {
+            lock(&PHONE_FRESHES).push(super::PhoneFresh {
+                req,
+                key,
+                session,
+                since_ms,
+            });
             PHONE_ASKED.store(true, Ordering::Release);
         }
         Reply::FixChecks {
@@ -694,7 +798,7 @@ fn route(conn: &Arc<Connection>, reply: Reply) {
             prompt,
         } => {
             lock(&PHONE_FIX_CHECKS).push((req, worktree, prompt));
-            PHONE_ASKED.store(true, Ordering::Release);
+            ask_window();
         }
         Reply::SendReview {
             req,
@@ -719,15 +823,27 @@ fn route(conn: &Arc<Connection>, reply: Reply) {
                 worktree,
                 force,
             });
-            PHONE_ASKED.store(true, Ordering::Release);
+            ask_window();
         }
         Reply::Wake { req, key } => {
             lock(&PHONE_WAKES).push((req, key));
-            PHONE_ASKED.store(true, Ordering::Release);
+            ask_window();
         }
         Reply::WorktreesChanged => {
             WORKTREES_CHANGED.store(true, Ordering::Release);
-            PHONE_ASKED.store(true, Ordering::Release);
+            ask_window();
+        }
+        Reply::BrowserAction {
+            req,
+            worktree,
+            action,
+        } => {
+            lock(&BROWSER_ASKS).push(super::BrowserAsk {
+                req,
+                worktree,
+                action,
+            });
+            ask_window();
         }
         Reply::Welcome { .. }
         | Reply::PairingCode { .. }
@@ -736,7 +852,8 @@ fn route(conn: &Arc<Connection>, reply: Reply) {
         | Reply::Phones { .. }
         | Reply::Pairings { .. }
         | Reply::PairingDecided { .. }
-        | Reply::WorkTaken { .. } => {}
+        | Reply::WorkTaken { .. }
+        | Reply::BrowserAnswer { .. } => {}
     }
 }
 
@@ -773,8 +890,7 @@ mod tests {
         let (a, b) = UnixStream::pair().expect("a socket pair");
         let server = std::thread::spawn(move || answer_hello(b, "host-build", 3));
 
-        let (_stream, protocol, build, live) = hello(a, "window-build").expect("a hello");
-        assert_eq!(protocol, wire::PROTOCOL);
+        let (_stream, build, live) = hello(a, "window-build").expect("a hello");
         assert_eq!(build, "host-build");
         assert_eq!(live, 3);
 
@@ -786,7 +902,11 @@ mod tests {
         let (a, mut b) = UnixStream::pair().expect("a socket pair");
         let server = std::thread::spawn(move || {
             let _ = next_frame(&mut b);
-            let frame = wire::json(&Reply::Devices { devices: None }).expect("encoded");
+            let frame = wire::json(&Reply::Devices {
+                devices: None,
+                hosted: None,
+            })
+            .expect("encoded");
             wire::send(&mut b, &frame).expect("sent");
         });
 
@@ -820,19 +940,132 @@ mod tests {
             wire::send(&mut b, &hook).expect("sent");
             let answer = wire::json(&Reply::Devices {
                 devices: Some(Vec::new()),
+                hosted: None,
             })
             .expect("encoded");
             wire::send(&mut b, &answer).expect("sent");
         });
 
         let devices = ask(a, &Request::Devices, |reply| match reply {
-            Reply::Devices { devices } => Some(devices),
+            Reply::Devices { devices, .. } => Some(devices),
             _ => None,
         })
         .expect("an answer");
         assert!(devices.is_some_and(|devices| devices.is_empty()));
 
         server.join().expect("the server thread");
+    }
+
+    #[test]
+    fn ask_within_gives_up_on_time_however_much_else_arrives() {
+        let (a, mut b) = UnixStream::pair().expect("a socket pair");
+        let server = std::thread::spawn(move || {
+            let _ = next_frame(&mut b);
+            // Broadcasts, never the answer: an older host skipping the request.
+            let other = wire::json(&Reply::WorktreesChanged).expect("encoded");
+            let until = Instant::now() + Duration::from_secs(2);
+            while Instant::now() < until && wire::send(&mut b, &other).is_ok() {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        });
+
+        let started = Instant::now();
+        let answer =
+            ask_within(
+                a,
+                &Request::Devices,
+                Duration::from_millis(300),
+                |reply| match reply {
+                    Reply::Devices { devices, .. } => Some(devices),
+                    _ => None,
+                },
+            )
+            .expect("no error, only no answer");
+        assert!(answer.is_none());
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "it gave up on time"
+        );
+
+        server.join().expect("the server thread");
+    }
+
+    /// The deadline once bounded only the gap between reads, so a host
+    /// trickling its answer a byte at a time — well inside that gap — held
+    /// the CLI until the last byte, however long that took.
+    #[test]
+    fn ask_within_gives_up_on_time_on_a_frame_trickled_in() {
+        let (a, mut b) = UnixStream::pair().expect("a socket pair");
+        let server = std::thread::spawn(move || {
+            let _ = next_frame(&mut b);
+            // The answer itself, a header and then a byte every 100 ms: three
+            // seconds and more in all.
+            let answer = wire::json(&Reply::Devices {
+                devices: Some(Vec::new()),
+                hosted: None,
+            })
+            .expect("encoded");
+            let (header, body) = answer.split_at(4);
+            wire::send(&mut b, header).expect("the header");
+            for byte in body.chunks(1) {
+                std::thread::sleep(Duration::from_millis(100));
+                // Stops once the CLI has given up and gone.
+                if wire::send(&mut b, byte).is_err() {
+                    return;
+                }
+            }
+        });
+
+        let started = Instant::now();
+
+        let answer =
+            ask_within(
+                a,
+                &Request::Devices,
+                Duration::from_millis(300),
+                |reply| match reply {
+                    Reply::Devices { devices, .. } => Some(devices),
+                    _ => None,
+                },
+            )
+            .expect("no error, only no answer");
+        assert!(answer.is_none(), "given up on, not waited out");
+        assert!(
+            started.elapsed() < Duration::from_millis(1500),
+            "it gave up on time, not after {:?}",
+            started.elapsed()
+        );
+
+        server.join().expect("the server thread");
+    }
+
+    /// Nor did anything bound the request going out, to a host that never
+    /// reads it.
+    #[test]
+    fn ask_within_gives_up_on_time_on_a_request_never_read() {
+        let (a, b) = UnixStream::pair().expect("a socket pair");
+        // Held open a while, never read: closing it at once would fail the
+        // write rather than stall it.
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(3));
+            drop(b);
+        });
+        // Far more than the socket's buffers hold.
+        let request = Request::Browser {
+            req: 1,
+            worktree: "w".repeat(4 * 1024 * 1024),
+            action: wire::BrowserAction::Tabs,
+        };
+
+        let started = Instant::now();
+        let answer = ask_within(a, &request, Duration::from_millis(300), |_| Some(()))
+            .expect("no error, only no answer");
+        assert!(answer.is_none());
+        assert!(
+            started.elapsed() < Duration::from_millis(1500),
+            "it gave up on time, not after {:?}",
+            started.elapsed()
+        );
     }
 
     #[test]
@@ -853,7 +1086,11 @@ mod tests {
         let (a, mut b) = UnixStream::pair().expect("a socket pair");
         let server = std::thread::spawn(move || {
             let _ = next_frame(&mut b);
-            let hook = wire::json(&Reply::Devices { devices: None }).expect("encoded");
+            let hook = wire::json(&Reply::Devices {
+                devices: None,
+                hosted: None,
+            })
+            .expect("encoded");
             wire::send(&mut b, &hook).expect("sent");
             let answer = wire::json(&Reply::PairingCode {
                 code: None,

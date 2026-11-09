@@ -1,0 +1,16 @@
+# Caddy in front of ket's relay: TLS for relay.ketapp.dev, with certificates
+# Caddy gets and renews itself, and WebSockets passed through to the relay on
+# loopback. Caddy writes X-Forwarded-For with the client's address, which the
+# relay counts sockets against (it trusts the header from loopback alone).
+# Install as /etc/caddy/Caddyfile.
+
+# No `log` directive, so Caddy keeps no access log: the relay keeps no record
+# of who connected, and nor should anything in front of it.
+relay.ketapp.dev {
+	reverse_proxy 127.0.0.1:7878 {
+		health_uri /
+		health_port 7879
+		health_interval 10s
+		health_timeout 2s
+	}
+}

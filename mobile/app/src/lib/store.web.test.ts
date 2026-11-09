@@ -44,6 +44,10 @@ describe('web storage', () => {
     expect(await store.getDesktop()).toBe(host.id);
     await store.saveCollapsed(host.id, ['project']);
     expect(await store.getCollapsed(host.id)).toEqual(['project']);
+    await store.saveHiddenProjects(host.id, ['project']);
+    expect(await store.getHiddenProjects(host.id)).toEqual(['project']);
+    await store.savePinnedProjects(host.id, ['project']);
+    expect(await store.getPinnedProjects(host.id)).toEqual(['project']);
     await store.saveNotify({ on: true, waiting: true, finished: false, checks: true });
     expect(await store.getNotify()).toEqual({ on: true, waiting: true, finished: false, checks: true });
 
@@ -57,6 +61,8 @@ describe('web storage', () => {
     await store.forgetHost(host.id);
     expect(await store.listHosts()).toEqual([]);
     expect(await store.getCollapsed(host.id)).toEqual([]);
+    expect(await store.getHiddenProjects(host.id)).toEqual([]);
+    expect(await store.getPinnedProjects(host.id)).toEqual([]);
     expect(await store.getLastWork(host.id)).toBeNull();
   });
 

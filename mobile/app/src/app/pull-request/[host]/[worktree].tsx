@@ -19,7 +19,7 @@ import { KeyboardAvoidingView } from 'react-native-keyboard-controller';
 
 import { ConnectionHelp } from '../../../components/ConnectionHelp';
 import { MicButton } from '../../../components/Mic';
-import { Bar, Button, Card, Figure, Prose, Screen, Toggle, field } from '../../../components/ui';
+import { Bar, Button, Card, Figure, Prose, Screen, Toggle, field, oneLine } from '../../../components/ui';
 import { everyWorktree } from '../../../lib/activity';
 import { useDictation } from '../../../lib/dictation';
 import { useHost } from '../../../lib/hosts';
@@ -160,6 +160,7 @@ export default function PullRequest() {
                   }}
                   placeholder="What this changes"
                   placeholderTextColor={t.faint}
+                  {...oneLine}
                   returnKeyType="next"
                   style={[field, styles.title]}
                 />

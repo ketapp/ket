@@ -51,8 +51,8 @@ export default function Layout() {
   // The desktop's theme, followed: a new one reloads the app to draw in it.
   useDesktopPalette();
   // News from the desktops, as banners while ket is not in front — see
-  // lib/notices.ts.
-  useNoticeFollowing();
+  // lib/notices.ts. A tap opens its screen once the stack is drawn.
+  useNoticeFollowing(loaded);
   // The sidebar, on a screen wide enough, once a desktop is paired: before
   // that there is no list to put in it. The paired desktops are read again
   // on every move, so pairing the first one brings the sidebar in.

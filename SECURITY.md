@@ -25,9 +25,27 @@ they are not operating-system sandboxes.
 
 The desktop host uses owner-only local IPC and validates local peers for
 privileged operations. Phone sessions use Noise encryption, pin the host key,
-require desktop-approved pairing, and receive an explicit role. The local relay
-can observe connection metadata and ciphertext sizes, but not application
-plaintext. Revoking a device invalidates its grant and active sessions.
+require desktop-approved pairing, and receive an explicit role. Revoking a
+device invalidates its grant and active sessions.
+
+Devices reach their Mac through a relay, which forwards Noise ciphertext and
+cannot read it. Each host runs its own on the Mac, for the local network and
+the tailnet. ket also runs one at `relay.ketapp.dev`, which a Mac links to
+only when Reach it from anywhere is turned on in Settings › Devices; it is
+off by default. Either relay can observe connection metadata: which host id
+a device asks for, when sockets open and close, and the size and timing of
+frames. ket's relay also sees each client's IP address, which it holds in
+memory for its rate and socket limits and does not log; it logs counts and
+reasons only, and Caddy in front of it keeps no access log.
+
+A host registers with ket's relay by proving it holds the static key its id
+is derived from: an X25519 agreement with a one-time key from the relay,
+over a fresh nonce. A device pins its host's key, so a relay that routed it
+to the wrong host would get nobody anything but a failed handshake. The
+proof does not name the relay it is for, so a relay a host links to could
+pass on its challenge to another relay and hold the host's place there,
+which denies the host's devices that route but reveals nothing; a host
+links only to its own relay and the one in its config.
 
 Residual risks include compromise of the user's account, malicious tools run
 by an already-authorized agent, denial of service within configured bounds,

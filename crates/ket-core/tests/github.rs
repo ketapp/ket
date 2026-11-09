@@ -164,6 +164,77 @@ fn the_repository_is_named_as_gh_resolves_it() {
 }
 
 #[test]
+fn an_unseen_repository_names_the_account_and_suggests_how_to_reach_it() {
+    let sandbox = Sandbox::new("gh-unseen-repo");
+    let gh = FakeGh::new(
+        &sandbox,
+        r#""repo view") printf "%s\n" "GraphQL: Could not resolve to a Repository with the name 'private/team-repo'. (repository)" >&2; exit 1 ;;"#,
+    );
+    for (account, who) in [(None, "The default account"), (Some("sam"), "@sam")] {
+        let error = repository(&gh.checkout(sandbox.root(), account)).unwrap_err();
+        assert!(matches!(error, ket_core::KetError::Conflict(_)));
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "{who} can't find `private/team-repo` on GitHub. If it's private, pick an account that can see it."
+            )
+        );
+    }
+}
+
+#[test]
+fn a_missing_github_remote_takes_precedence_over_the_suggestion_to_sign_in() {
+    let sandbox = Sandbox::new("gh-no-remote");
+    for diagnostic in [
+        "no git remotes found",
+        "none of the git remotes configured for this repository point to a known GitHub host",
+    ] {
+        let gh = FakeGh::new(
+            &sandbox,
+            &format!(
+                "\"repo view\") printf '%s\\n' '{diagnostic}' 'To add a new GitHub host, please use gh auth login' >&2; exit 1 ;;"
+            ),
+        );
+        assert_eq!(
+            repository(&gh.checkout(sandbox.root(), None))
+                .unwrap_err()
+                .to_string(),
+            "This project has no remote on GitHub, so there is no repository to use."
+        );
+    }
+}
+
+#[test]
+fn a_sign_in_error_still_explains_where_to_sign_in() {
+    let sandbox = Sandbox::new("gh-repo-sign-in");
+    let gh = FakeGh::new(
+        &sandbox,
+        r#""repo view") echo 'To get started with GitHub CLI, please run: gh auth login' >&2; exit 1 ;;"#,
+    );
+    assert_eq!(
+        repository(&gh.checkout(sandbox.root(), None))
+            .unwrap_err()
+            .to_string(),
+        "ket is not signed in to GitHub. Sign in in Settings → GitHub."
+    );
+}
+
+#[test]
+fn unrelated_repository_failures_keep_their_original_explanation() {
+    let sandbox = Sandbox::new("gh-repo-other-error");
+    let gh = FakeGh::new(
+        &sandbox,
+        r#""repo view") echo 'HTTP 502: Bad Gateway (https://api.github.com/graphql)' >&2; exit 1 ;;"#,
+    );
+    assert_eq!(
+        repository(&gh.checkout(sandbox.root(), Some("sam")))
+            .unwrap_err()
+            .to_string(),
+        "HTTP 502: Bad Gateway (https://api.github.com/graphql)"
+    );
+}
+
+#[test]
 fn a_picked_account_hands_its_token_to_each_call_and_nothing_else() {
     let sandbox = Sandbox::new("gh-account");
     let gh = FakeGh::new(&sandbox, "\"repo view\") echo 'o/r' ;;");

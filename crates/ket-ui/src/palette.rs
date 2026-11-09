@@ -364,6 +364,7 @@ impl Shell {
                 TabKind::IosSimulator => "simulator",
                 TabKind::Android => "android",
                 TabKind::Diff(_) => "diff",
+                TabKind::NetworkRequest(_) => "network",
             })
             .map(str::to_owned);
         CommandContext {

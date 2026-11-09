@@ -31,6 +31,7 @@ pub(crate) mod client;
 pub mod identity;
 mod phones;
 mod server;
+pub mod tailscale;
 pub mod wire;
 
 /// The argument that turns a ket binary into the host.
@@ -69,6 +70,49 @@ pub fn pairing_link(code: &str) -> String {
     }
 }
 
+/// A code an already-paired device scans to learn every address this Mac
+/// can be reached at, without pairing again:
+/// `ket://reach?host=<id>&at=<address>%20<address>` — the local network,
+/// the tailnet when Tailscale is on, and ket's relay when it is on (#88).
+/// The addresses are apart by spaces, which no address has, so the list
+/// reads the same however many times a link router has decoded it.
+///
+/// Nothing in it is secret, and a device still checks this Mac's key on
+/// every connection, so a wrong or forged code can only fail to connect.
+/// Fails when this data directory has no host identity yet.
+pub fn reach_link() -> Result<String> {
+    let Some(identity) = identity::load()? else {
+        return Err(host_error("no device has been paired with this Mac yet"));
+    };
+    let phones = crate::config::Config::load().unwrap_or_default().phones;
+    let mut addresses = vec![format!("ws://{}:{}", lan_name(), phones.port)];
+    if let Some(ip) = tailnet_ip() {
+        addresses.push(format!("ws://{ip}:{}", phones.port));
+    }
+    addresses.extend(phones.hosted_relay());
+    Ok(reach_code(&identity.id, &addresses))
+}
+
+/// See [`reach_link`].
+pub fn reach_code(host: &[u8; 16], addresses: &[String]) -> String {
+    use base64::Engine;
+    let host = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(host);
+    let at: Vec<String> = addresses.iter().map(|address| escape(address)).collect();
+    format!("ket://reach?host={host}&at={}", at.join("%20"))
+}
+
+/// `text` with everything but unreserved URL characters percent-encoded.
+fn escape(text: &str) -> String {
+    text.bytes()
+        .map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                char::from(byte).to_string()
+            }
+            _ => format!("%{byte:02X}"),
+        })
+        .collect()
+}
+
 /// The name a device on the same network reaches this desktop by, such as
 /// `Example-MacBook.local`. Asks the system, so it can take a moment.
 pub fn lan_name() -> String {
@@ -104,10 +148,22 @@ pub fn serves_phones() -> Result<Option<bool>> {
         return Ok(None);
     };
     client::ask(stream, &wire::Request::Devices, |reply| match reply {
-        wire::Reply::Devices { devices } => Some(devices.is_some()),
+        wire::Reply::Devices { devices, .. } => Some(devices.is_some()),
         _ => None,
     })
     .map(Some)
+}
+
+/// The relay elsewhere the running host links to beside its own, and how
+/// that link is doing; `None` when there is none, or no host is running.
+pub fn hosted_relay() -> Result<Option<HostedRelay>> {
+    let Some((stream, _, _)) = client::peek()? else {
+        return Ok(None);
+    };
+    client::ask(stream, &wire::Request::Devices, |reply| match reply {
+        wire::Reply::Devices { hosted, .. } => Some(hosted),
+        _ => None,
+    })
 }
 
 /// How long the host lingers with no terminal running and no window
@@ -170,8 +226,8 @@ fn fnv(bytes: &[u8]) -> u64 {
 ///
 /// Not a version number, because the case that matters is a developer
 /// rebuilding the same version all day. A host whose build differs from a window's is still
-/// spoken to while terminals are running in it — the protocol is what has to
-/// match — and asked to make way once it is idle.
+/// spoken to while terminals are running in it, and asked to make way once it
+/// is idle.
 pub fn build_id() -> String {
     let exe = std::env::current_exe().unwrap_or_default();
     let written = std::fs::metadata(&exe)
@@ -232,7 +288,7 @@ fn reset_process() {
     }
 }
 
-pub use wire::{DeviceEntry, DeviceRole, PhoneReviewComment, WorkSource};
+pub use wire::{DeviceEntry, DeviceRole, HostedRelay, PhoneReviewComment, WorkSource};
 
 /// The phones paired with this data directory's host.
 ///
@@ -241,7 +297,7 @@ pub use wire::{DeviceEntry, DeviceRole, PhoneReviewComment, WorkSource};
 pub fn devices() -> Result<Vec<DeviceEntry>> {
     if let Some((stream, _, _)) = client::peek()?
         && let Some(devices) = client::ask(stream, &wire::Request::Devices, |reply| match reply {
-            wire::Reply::Devices { devices } => Some(devices),
+            wire::Reply::Devices { devices, .. } => Some(devices),
             _ => None,
         })?
     {
@@ -367,6 +423,44 @@ pub fn start_work(
     }
 }
 
+pub use wire::{BrowserAction, BrowserAnswer, BrowserTab, ConsoleLine};
+
+/// How long [`browser`] waits for its answer in all: a little longer than
+/// the host waits for the window, so the host's word on why is what it
+/// hears.
+const BROWSER_ASK_WAIT: Duration = Duration::from_secs(25);
+
+/// Has the open ket window do `action` in `worktree`'s browser tab — the
+/// Chromium tab there in front, else the latest — and says what the page did.
+///
+/// Fails, in words for the terminal, when ket is not open, no window is,
+/// the window does not answer in time, or the page could not do it.
+pub fn browser(worktree: &str, action: BrowserAction) -> Result<BrowserAnswer> {
+    let Some((stream, _, _)) = client::peek()? else {
+        return Err(KetError::Conflict(
+            "ket is not open; open it, then try again".to_owned(),
+        ));
+    };
+    // One request per connection, so any number tells its answer apart.
+    const REQ: u64 = 1;
+    let request = wire::Request::Browser {
+        req: REQ,
+        worktree: worktree.to_owned(),
+        action,
+    };
+    let answer = client::ask_within(stream, &request, BROWSER_ASK_WAIT, |reply| match reply {
+        wire::Reply::BrowserAnswer { req: REQ, result } => Some(result),
+        _ => None,
+    })?;
+    match answer {
+        Some(Ok(answer)) => Ok(answer),
+        Some(Err(why)) => Err(KetError::Conflict(why)),
+        None => Err(KetError::Conflict(
+            "the ket window didn't answer in time".to_owned(),
+        )),
+    }
+}
+
 /// Stops accepting a phone, and ends its session if it has one. `false` if
 /// no phone by that id is paired.
 pub fn revoke(id: &str) -> Result<bool> {
@@ -475,6 +569,16 @@ pub fn take_hook_reports() -> Vec<crate::agent_hooks::HookReport> {
     )
 }
 
+/// Requests the network inspector has logged since the last call, each
+/// with the worktree it was filed under — see [`crate::network`].
+pub fn take_network_requests() -> Vec<(String, crate::network::store::RequestSummary)> {
+    std::mem::take(
+        &mut *client::NETWORK_REQUESTS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    )
+}
+
 /// New work a phone asked for: a worktree in `project`, its agent started on
 /// `prompt`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -510,6 +614,41 @@ pub fn take_phone_work() -> Vec<PhoneWork> {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner),
     )
+}
+
+/// A terminal a phone asked this window to start a fresh session beside,
+/// its own having gone cold — see [`take_phone_fresh`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PhoneFresh {
+    /// Answered with [`finish_phone_fresh`].
+    pub req: u64,
+    /// The terminal's pane key.
+    pub key: String,
+    /// The cold session the phone was shown.
+    pub session: String,
+    /// When that session's last request was, as the phone was shown it.
+    pub since_ms: u64,
+}
+
+/// The oldest terminal a phone asked this window to start a fresh session
+/// beside.
+pub fn take_phone_fresh() -> Option<PhoneFresh> {
+    let mut freshes = client::PHONE_FRESHES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    (!freshes.is_empty()).then(|| freshes.remove(0))
+}
+
+/// Tells the host which tab a phone's Start fresh opened, by its pane key,
+/// or why none was.
+pub fn finish_phone_fresh(req: u64, outcome: std::result::Result<String, String>) {
+    if let Some(conn) = client::current() {
+        let (key, error) = match outcome {
+            Ok(key) => (Some(key), None),
+            Err(why) => (None, Some(why)),
+        };
+        let _ = conn.request(&wire::Request::FreshResult { req, key, error });
+    }
 }
 
 /// The oldest worktree a phone asked this window to merge. Later requests
@@ -630,6 +769,36 @@ pub fn finish_phone_wake(req: u64, error: String) {
     }
 }
 
+/// Something `ket browser` asked of a browser tab in this window — see
+/// [`take_browser_asks`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrowserAsk {
+    /// Answered with [`finish_browser`].
+    pub req: u64,
+    /// The worktree whose tab it is for.
+    pub worktree: String,
+    /// What to do.
+    pub action: BrowserAction,
+}
+
+/// What `ket browser` has asked of this window's browser tabs since the last
+/// call, oldest first. The host sends each to one window only.
+pub fn take_browser_asks() -> Vec<BrowserAsk> {
+    std::mem::take(
+        &mut *client::BROWSER_ASKS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    )
+}
+
+/// Answers the host's waiting `ket browser`: what the page did, or why it
+/// could not, as the terminal is to print it.
+pub fn finish_browser(req: u64, result: std::result::Result<BrowserAnswer, String>) {
+    if let Some(conn) = client::current() {
+        let _ = conn.request(&wire::Request::BrowserResult { req, result });
+    }
+}
+
 /// Whether the host has said ket's store changed under this window's
 /// sidebar since the last call — a phone pinned a worktree — so the sidebar
 /// is to be read again.
@@ -639,10 +808,18 @@ pub fn take_worktrees_changed() -> bool {
 
 /// Whether a phone has asked this window for anything since the last call —
 /// work to start, a merge, a delete, a wake, or the store's worktrees
-/// changing. The window looks at the queues on its tick; this is for looking
+/// changing — or a terminal has asked something of a browser tab. The window looks at the queues on its tick; this is for looking
 /// sooner, so a task started from a phone is not left waiting out the tick.
 pub fn take_phone_asked() -> bool {
     client::PHONE_ASKED.swap(false, std::sync::atomic::Ordering::AcqRel)
+}
+
+/// Resolves as soon as something is asked of this window, for a window that
+/// waits on its tick and this together and looks at whichever comes first: a
+/// terminal's `ket browser` is then answered at once, not up to a tick later.
+/// It can resolve with nothing asked; [`take_phone_asked`] says.
+pub async fn phone_asked() {
+    client::PHONE_WAKE.notified().await;
 }
 
 /// The host's newest agent status snapshot, if one has arrived since the last

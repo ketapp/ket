@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, jest, test } from '@jest/globals';
-import { fireEvent, render, waitFor } from '@testing-library/react-native';
+import { act, fireEvent, render, waitFor } from '@testing-library/react-native';
 import { useEffect as mockUseEffect } from 'react';
 import { Alert, Linking } from 'react-native';
 import Needs from './app/(tabs)/needs';
@@ -13,6 +13,7 @@ import NewTask from './app/new/[host]';
 import Worktree from './app/worktree/[host]/[worktree]';
 import StartingTask from './app/starting/[host]/[at]';
 import { STARTING_FOR_MS } from './lib/connection';
+import { SETTLE_MS } from './lib/settling';
 import type { HostConnection } from './lib/connection';
 
 const mockNavigation = { setParams: jest.fn() };
@@ -31,6 +32,9 @@ let mockConns: HostConnection[] = [];
 let mockHost: HostConnection | null = null;
 const mockSaveDesktop = jest.fn(async (_id: string) => {});
 const mockSaveCollapsed = jest.fn(async (_host: string, _projects: string[]) => {});
+let mockHidden: string[] = [];
+const mockSaveHidden = jest.fn(async (_host: string, _projects: string[]) => {});
+const mockSavePinned = jest.fn(async (_host: string, _projects: string[]) => {});
 const mockConfirmIdentity = jest.fn(async (_reason: string) => true);
 
 jest.mock('expo-router', () => {
@@ -54,6 +58,8 @@ jest.mock('expo-router', () => {
   };
 });
 jest.mock('react-native-safe-area-context', () => ({ useSafeAreaInsets: () => ({ top: 0, bottom: 0 }) }));
+const mockMenuOpened = jest.fn();
+jest.mock('./lib/haptics', () => ({ menuOpened: () => mockMenuOpened() }));
 jest.mock('./components/Unpaired', () => ({ Unpaired: () => null }));
 // The terminal's chat a starting screen becomes: what it was handed.
 const mockChat = jest.fn((_props: object) => null);
@@ -85,9 +91,13 @@ jest.mock('./lib/hosts', () => ({
 jest.mock('./lib/store', () => ({
   getDesktop: jest.fn(async () => 'host'),
   getCollapsed: jest.fn(async () => []),
+  getHiddenProjects: jest.fn(async () => mockHidden),
+  getPinnedProjects: jest.fn(async () => []),
   getLastWork: jest.fn(async () => null),
   saveCollapsed: (host: string, projects: string[]) => mockSaveCollapsed(host, projects),
   saveDesktop: (id: string) => mockSaveDesktop(id),
+  saveHiddenProjects: (host: string, projects: string[]) => mockSaveHidden(host, projects),
+  savePinnedProjects: (host: string, projects: string[]) => mockSavePinned(host, projects),
   saveLastWork: jest.fn(async () => {}),
 }));
 const mockNotify = jest.fn(async () => true);
@@ -156,6 +166,7 @@ beforeEach(() => {
   mockPath = '/';
   mockConns = [];
   mockHost = null;
+  mockHidden = [];
 });
 
 describe('top-level screens', () => {
@@ -190,6 +201,65 @@ describe('top-level screens', () => {
     expect(mockSaveCollapsed).toHaveBeenCalled();
     await fireEvent.press(view.getByLabelText('Switch desktop'));
     await fireEvent.press(view.getByText('Other Mac'));
+    await view.unmount();
+  });
+
+  test('Worktrees holds a project for work in it, its backlog, a pin and hiding it; the hidden wait under the cards', async () => {
+    mockHidden = ['gone-from-the-mac'];
+    mockConns = [
+      Object.assign(
+        connection([
+          project([tree('quiet', 0)]),
+          { id: 'side', name: 'Side', color: '#3b82f6', backlog: 2, worktrees: [tree('later', 0)] },
+          { id: 'asks', name: 'Asks', color: '#ef4444', worktrees: [tree('asking', 4)] },
+        ]),
+        { hostMinor: 9 },
+      ),
+    ];
+    const view = await render(<Worktrees />);
+    const cards = () => view.getAllByText(/^(Project|Side|Asks)$/).map((node) => node.props.children);
+    const hold = async (name: string) => fireEvent(view.getByText(name), 'longPress');
+    // A key the desktop no longer has hides nothing.
+    await waitFor(() => expect(cards()).toEqual(['Project', 'Side', 'Asks']));
+    expect(view.queryByText(/hidden on this phone$/)).toBeNull();
+
+    await hold('Side');
+    expect(view.getByLabelText('Side actions')).toBeTruthy();
+    expect(mockMenuOpened).toHaveBeenCalledTimes(1);
+    await fireEvent.press(view.getByText('New task in Side'));
+    expect(mockRouter.push).toHaveBeenLastCalledWith('/new/host?project=side');
+    await hold('Side');
+    await fireEvent.press(view.getByText('Backlog'));
+    expect(mockRouter.push).toHaveBeenLastCalledWith('/backlog/host/side');
+
+    // Pinned, it leads the list; held again, it unpins.
+    await hold('Side');
+    await fireEvent.press(view.getByText('Pin to top'));
+    expect(mockSavePinned).toHaveBeenLastCalledWith('host', ['side']);
+    expect(cards()).toEqual(['Side', 'Project', 'Asks']);
+    expect(view.getAllByLabelText('Pinned')).toHaveLength(1);
+    await hold('Side');
+    await fireEvent.press(view.getByText('Unpin'));
+    expect(mockSavePinned).toHaveBeenLastCalledWith('host', []);
+    expect(view.queryByLabelText('Pinned')).toBeNull();
+
+    // Hidden, it leaves the cards for a line under them; one with an agent
+    // waiting on you stays until that is answered.
+    await hold('Side');
+    await fireEvent.press(view.getByText('Hide on this phone'));
+    expect(mockSaveHidden).toHaveBeenLastCalledWith('host', ['gone-from-the-mac', 'side']);
+    await hold('Asks');
+    await fireEvent.press(view.getByText('Hide on this phone'));
+    expect(mockSaveHidden).toHaveBeenLastCalledWith('host', ['gone-from-the-mac', 'side', 'asks']);
+    expect(cards()).toEqual(['Project', 'Asks']);
+
+    await fireEvent.press(view.getByText('1 hidden on this phone'));
+    expect(view.getByText('Hidden')).toBeTruthy();
+    expect(view.getByText('1 waiting · in the list until answered')).toBeTruthy();
+    await fireEvent.press(view.getByText('Side'));
+    expect(mockSaveHidden).toHaveBeenLastCalledWith('host', ['gone-from-the-mac', 'asks']);
+    await fireEvent.press(view.getByText('Show all 1'));
+    expect(mockSaveHidden).toHaveBeenLastCalledWith('host', ['gone-from-the-mac']);
     await view.unmount();
   });
 
@@ -241,6 +311,7 @@ describe('top-level screens', () => {
     };
     await holdAt('busy');
     expect(view.getByLabelText('busy actions')).toBeTruthy();
+    expect(mockMenuOpened).toHaveBeenCalled();
     expect(view.getByText('Pull request #21')).toBeTruthy();
     expect(view.queryByText('Address comments with agent')).toBeNull();
     await fireEvent.press(view.getByText('Fix checks with agent'));
@@ -388,6 +459,55 @@ describe('top-level screens', () => {
     await sidebar.unmount();
   });
 
+  test('Worktrees fills with a skeleton, never saying nothing runs, until the desktop’s list has settled', async () => {
+    // Welcomed, its list not here yet: no "nothing running", and no counts of
+    // nothing on the filters.
+    mockConns = [Object.assign(connection([]), { snapshot: null, snapshotAt: null, freshSince: Date.now() })];
+    const loading = await render(<Worktrees />);
+    expect(loading.getByLabelText('Loading worktrees')).toBeTruthy();
+    expect(loading.getByLabelText('Running')).toBeTruthy();
+    expect(loading.queryByText('Nothing running')).toBeNull();
+    await loading.unmount();
+
+    // A list with work in it shows the moment it is here.
+    mockConns = [Object.assign(connection([project([tree('busy', 2)])]), { freshSince: Date.now(), snapshotAt: Date.now() })];
+    const busy = await render(<Worktrees />);
+    expect(busy.queryByLabelText('Loading worktrees')).toBeNull();
+    expect(busy.getByText('busy')).toBeTruthy();
+    await busy.unmount();
+
+    // An empty one waits out the settle before it is believed.
+    jest.useFakeTimers({ now: 1_000_000 });
+    try {
+      mockConns = [Object.assign(connection([]), { freshSince: 1_000_000, snapshotAt: 1_000_100 })];
+      const quiet = await render(<Worktrees />);
+      expect(quiet.getByLabelText('Loading worktrees')).toBeTruthy();
+      expect(quiet.queryByText('Nothing running')).toBeNull();
+      await act(async () => {
+        jest.advanceTimersByTime(SETTLE_MS + 100);
+      });
+      expect(quiet.queryByLabelText('Loading worktrees')).toBeNull();
+      expect(quiet.getByText('Nothing running')).toBeTruthy();
+      expect(quiet.getByText('Agents and terminals you start on Studio Mac show up here.')).toBeTruthy();
+      expect(quiet.getByLabelText('Running, 0')).toBeTruthy();
+
+      // The desktop restarts long after, its list arriving empty with nothing
+      // having redrawn the screen's clock since: still settled on time.
+      const restarted = mockConns[0];
+      jest.setSystemTime(1_100_000);
+      Object.assign(restarted, { freshSince: 1_090_000, snapshotAt: 1_090_100 });
+      await quiet.rerender(<Worktrees />);
+      expect(quiet.getByLabelText('Loading worktrees')).toBeTruthy();
+      await act(async () => {
+        jest.advanceTimersByTime(100);
+      });
+      expect(quiet.getByText('Nothing running')).toBeTruthy();
+      await quiet.unmount();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   test('Needs shows empty, waiting, and failed states', async () => {
     const empty = await render(<Needs />);
     expect(empty.getByText('Nothing needs you.')).toBeTruthy();
@@ -408,6 +528,43 @@ describe('top-level screens', () => {
     expect(mockRouter.push).toHaveBeenCalledWith('/session/host/9');
     await fireEvent.press(view.getAllByText('failed')[0]);
     expect(mockRouter.push).toHaveBeenCalledWith('/worktree/host/failed');
+    await view.unmount();
+  });
+
+  test('Needs answers a permission and a question without opening the chat', async () => {
+    const permission = { id: 2n, terminalId: 7n, tool: 'Bash', subject: 'npm test', answerable: true, always: true, asks: [], plan: false };
+    const asks = [{ question: 'Which scope?', header: 'Scope', multiSelect: false, choices: [{ label: 'All', description: '' }, { label: 'One', description: '' }] }];
+    const question = { id: 3n, terminalId: 8n, tool: 'AskUserQuestion', subject: '', answerable: true, always: false, asks, plan: false };
+    const conn = connection([project([tree('waiting', 4, { question: permission, questions: [permission, question] })])]);
+    conn.respond = jest.fn(async () => null);
+    mockConns = [conn];
+    const view = await render(<Needs />);
+    expect(view.getByText('npm test')).toBeTruthy();
+    await fireEvent.press(view.getByText('Allow once'));
+    await waitFor(() => expect(conn.answer).toHaveBeenCalledWith(permission, 1));
+    expect(mockRouter.push).not.toHaveBeenCalled();
+
+    // One question, one pick: the tap is the answer.
+    expect(view.getByText('Asks · Scope')).toBeTruthy();
+    await fireEvent.press(view.getByText('One'));
+    await waitFor(() => expect(conn.respond).toHaveBeenCalledWith(question, { picks: [{ choices: [1], other: '' }] }));
+    expect(mockRouter.push).not.toHaveBeenCalled();
+    // The rest of the conversation, or words of your own: the chat.
+    await fireEvent.press(view.getByText('Write your own in the chat'));
+    expect(mockRouter.push).toHaveBeenCalledWith('/session/host/8');
+    await view.unmount();
+  });
+
+  test('Needs shows why the desktop refused an answer, with the buttons back', async () => {
+    const permission = { id: 4n, terminalId: 7n, tool: 'Bash', subject: 'npm test', answerable: true, always: true, asks: [], plan: false };
+    const conn = connection([project([tree('waiting', 4, { question: permission })])]);
+    conn.answer = jest.fn(async () => 'that prompt has changed — look again before answering');
+    mockConns = [conn];
+    const view = await render(<Needs />);
+    await fireEvent.press(view.getByText('Always'));
+    await waitFor(() => expect(mockConfirmIdentity).toHaveBeenCalledWith('Always allow Bash'));
+    await waitFor(() => expect(view.getByText('that prompt has changed — look again before answering')).toBeTruthy());
+    expect(view.getByText('Allow once')).toBeTruthy();
     await view.unmount();
   });
 
@@ -683,10 +840,10 @@ describe('work screens', () => {
     await draft.unmount();
   });
 
-  test('a worktree’s foot merges it or opens a pull request, and its menu holds the rest', async () => {
+  test('a worktree’s foot merges it or opens a pull request, its tabs open, and its menu holds the rest', async () => {
     mockParams = { host: 'host', worktree: 'work' };
     const conn = Object.assign(connection([project([tree('work', 2)])]), {
-      hostMinor: 16,
+      hostMinor: 20,
       changes: jest.fn(async () => ({
         base: 'main',
         error: '',
@@ -703,25 +860,97 @@ describe('work screens', () => {
     expect(view.getByText('crates/ket-remote/src')).toBeTruthy();
     // The lines are the listed files', not the worktree's uncommitted ones.
     expect(view.getByText(/1 commit ahead of main/)).toHaveTextContent('+1 −1 · 1 commit ahead of main');
-    // Gone from the page: the figure cards, and the buttons the chat header
-    // already has.
+    // Gone from the page: the figure cards.
     expect(view.queryByText('Sessions')).toBeNull();
-    expect(view.queryByText('Terminal')).toBeNull();
-    expect(view.queryByText('New session or shell')).toBeNull();
     await fireEvent.press(view.getByText('Merge into main'));
     await waitFor(() => expect(mockConfirmIdentity).toHaveBeenCalled());
     await waitFor(() => expect(conn.merge).toHaveBeenCalledWith('work'));
     await fireEvent.press(view.getByText('Pull request…'));
     expect(mockRouter.push).toHaveBeenCalledWith('/pull-request/host/work');
-    await fireEvent.press(view.getByLabelText('More'));
-    await fireEvent.press(await view.findByText('Open the terminal'));
-    expect(mockRouter.push).toHaveBeenCalledWith('/terminal/host/7');
-    await fireEvent.press(view.getByLabelText('More'));
-    // Opening one from the foot, the menu leaves out.
-    expect(view.queryByText('Open pull request…')).toBeNull();
-    await fireEvent.press(await view.findByText('New session or shell'));
+    // The agent's tab opens its chat, and a new one starts from the card.
+    await fireEvent.press(view.getByText('codex'));
+    expect(mockRouter.push).toHaveBeenCalledWith('/session/host/7');
+    await fireEvent.press(view.getByText('New session or shell'));
     expect(mockRouter.push).toHaveBeenCalledWith('/new/host?worktree=work');
+    await fireEvent.press(view.getByLabelText('More'));
+    expect(await view.findByText('Pin')).toBeTruthy();
+    // Opening one from the foot, the menu leaves out; the tabs and a new
+    // one are the card's.
+    expect(view.queryByText('Open pull request…')).toBeNull();
+    expect(view.queryByText('Open the terminal')).toBeNull();
+    expect(view.getAllByText('New session or shell')).toHaveLength(1);
     alert.mockRestore();
+    await view.unmount();
+  });
+
+  test('lists a worktree’s tabs, each saying what it is doing, and opens or wakes one', async () => {
+    mockParams = { host: 'host', worktree: 'tabs' };
+    const hour = 3_600_000;
+    const tabs = tree('tabs', 1, {
+      agent: '',
+      terminals: [
+        { id: 7n, agent: 'claude', title: '✳ Fix chat table scroll', closed: false, activity: 0 },
+        { id: 8n, agent: '', title: '', closed: false, activity: 1, running: 'npm start', runningSinceMs: BigInt(Date.now() - 10.5 * hour) },
+        { id: 10n, agent: 'codex', title: 'Review', closed: false, activity: 2 },
+        // Exited: no tab of the strip's.
+        { id: 11n, agent: '', title: 'make', closed: true, activity: 0 },
+      ],
+      asleep: [{ key: 'gate', title: 'Economy resume gate', agent: 'claude', sinceMs: 0n, freedBytes: 0n }],
+    });
+    const wakeTerminal = jest.fn(async (_worktree: string, _key: string) => ({ terminalId: 12n }));
+    mockHost = Object.assign(connection([project([tabs])]), {
+      hostMinor: 29,
+      wakeTerminal,
+      awaitTerminal: jest.fn(async () => {}),
+    });
+    const view = await render(<Worktree />);
+    expect(view.getByText('Tabs')).toBeTruthy();
+    expect(view.getByText('4')).toBeTruthy();
+    expect(view.queryByText('make')).toBeNull();
+
+    // A chat at rest says so; one at work wears its state.
+    expect(view.getByText('Fix chat table scroll')).toBeTruthy();
+    expect(view.getByText('Claude · ready')).toBeTruthy();
+    expect(view.getByText('Codex')).toBeTruthy();
+    expect(view.getByText('running')).toBeTruthy();
+    // A shell is named for its program, and how long it has run.
+    expect(view.getByText('npm start')).toBeTruthy();
+    expect(view.getByText('Terminal · running for 10 h')).toBeTruthy();
+    expect(view.getByText('busy')).toBeTruthy();
+    expect(view.getByText('asleep')).toBeTruthy();
+
+    await fireEvent.press(view.getByText('Fix chat table scroll'));
+    expect(mockRouter.push).toHaveBeenLastCalledWith('/session/host/7');
+    await fireEvent.press(view.getByText('npm start'));
+    expect(mockRouter.push).toHaveBeenLastCalledWith('/terminal/host/8');
+    await fireEvent.press(view.getByText('Economy resume gate'));
+    await waitFor(() => expect(mockRouter.push).toHaveBeenLastCalledWith('/session/host/12'));
+    expect(wakeTerminal).toHaveBeenCalledWith('tabs', 'gate');
+    await fireEvent.press(view.getByText('New session or shell'));
+    expect(mockRouter.push).toHaveBeenLastCalledWith('/new/host?worktree=tabs');
+    await view.unmount();
+  });
+
+  test('a desktop before 1.29 lists the tabs by what they are, not what they are doing', async () => {
+    mockParams = { host: 'host', worktree: 'tabs' };
+    mockHost = Object.assign(
+      connection([
+        project([
+          tree('tabs', 1, {
+            agent: '',
+            terminals: [terminal(7n, 'claude'), { id: 8n, agent: '', title: '', closed: false }],
+          }),
+        ]),
+      ]),
+      { hostMinor: 23 },
+    );
+    const view = await render(<Worktree />);
+    expect(view.getByText('Claude')).toBeTruthy();
+    expect(view.queryByText('Claude · ready')).toBeNull();
+    expect(view.getAllByText('Terminal')).toHaveLength(2);
+    expect(view.queryByText('busy')).toBeNull();
+    await fireEvent.press(view.getByText('claude'));
+    expect(mockRouter.push).toHaveBeenLastCalledWith('/session/host/7');
     await view.unmount();
   });
 

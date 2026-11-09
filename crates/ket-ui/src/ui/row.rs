@@ -6,7 +6,7 @@
 //! heights.
 
 use gpui::{Div, ElementId, Pixels, Stateful, div, prelude::*, px};
-use ket_core::theme::Theme;
+use ket_core::theme::{Color, Theme};
 
 use super::{ICON_GAP, LABEL, PAD_X, ROW_H};
 use crate::paint::paint;
@@ -97,6 +97,18 @@ pub(crate) const BLOCK_PAD_Y: Pixels = px(5.0);
 /// gets the same one. Hover is a lighter wash than that, so pointing at a
 /// row never looks like choosing it.
 pub(crate) fn block_row(id: impl Into<ElementId>, selected: bool, t: &Theme) -> Stateful<Div> {
+    block_row_with_rail(id, selected, t.marker, t)
+}
+
+/// A [`block_row`] whose rail, when selected, is `rail` rather than the
+/// theme's amber: a worktree's row wears its project's colour
+/// ([`crate::projects::rail_colour`]).
+pub(crate) fn block_row_with_rail(
+    id: impl Into<ElementId>,
+    selected: bool,
+    rail: Color,
+    t: &Theme,
+) -> Stateful<Div> {
     let el = div()
         .id(id)
         .relative()
@@ -111,7 +123,7 @@ pub(crate) fn block_row(id: impl Into<ElementId>, selected: bool, t: &Theme) -> 
         .text_color(paint(t.text.primary))
         .cursor_pointer()
         .when(selected, |el| {
-            el.bg(paint(t.hover)).child(super::chip::marker(t))
+            el.bg(paint(t.hover)).child(super::chip::marker(rail))
         });
     if selected {
         el

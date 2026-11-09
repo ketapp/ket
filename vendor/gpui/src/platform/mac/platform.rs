@@ -66,6 +66,8 @@ use util::ResultExt;
 const NSUTF8StringEncoding: NSUInteger = 4;
 
 const MAC_PLATFORM_IVAR: &str = "platform";
+// ket patch: backs CEF's isHandlingSendEvent / setHandlingSendEvent:.
+const HANDLING_SEND_EVENT_IVAR: &str = "handlingSendEvent";
 static mut APP_CLASS: *const Class = ptr::null();
 static mut APP_DELEGATE_CLASS: *const Class = ptr::null();
 
@@ -75,6 +77,25 @@ unsafe fn build_classes() {
         APP_CLASS = {
             let mut decl = ClassDecl::new("GPUIApplication", class!(NSApplication)).unwrap();
             decl.add_ivar::<*mut c_void>(MAC_PLATFORM_IVAR);
+            // ket patch: the methods of Chromium's CrAppProtocol and
+            // CrAppControlProtocol, which CEF requires of the application class.
+            // The protocols themselves are defined by the CEF framework, which
+            // is loaded at run time, so ket-chromium adds them to this class
+            // with class_addProtocol after loading it. Without CEF nothing
+            // reads the flag and sendEvent: behaves exactly as NSApplication's.
+            decl.add_ivar::<BOOL>(HANDLING_SEND_EVENT_IVAR);
+            decl.add_method(
+                sel!(isHandlingSendEvent),
+                is_handling_send_event as extern "C" fn(&Object, Sel) -> BOOL,
+            );
+            decl.add_method(
+                sel!(setHandlingSendEvent:),
+                set_handling_send_event as extern "C" fn(&mut Object, Sel, BOOL),
+            );
+            decl.add_method(
+                sel!(sendEvent:),
+                send_event as extern "C" fn(&mut Object, Sel, id),
+            );
             decl.register()
         }
     };
@@ -1481,6 +1502,28 @@ unsafe fn get_mac_platform(object: &mut Object) -> &MacPlatform {
         let platform_ptr: *mut c_void = *object.get_ivar(MAC_PLATFORM_IVAR);
         assert!(!platform_ptr.is_null());
         &*(platform_ptr as *const MacPlatform)
+    }
+}
+
+// ket patch: CrAppProtocol's isHandlingSendEvent.
+extern "C" fn is_handling_send_event(this: &Object, _: Sel) -> BOOL {
+    unsafe { *this.get_ivar::<BOOL>(HANDLING_SEND_EVENT_IVAR) }
+}
+
+// ket patch: CrAppControlProtocol's setHandlingSendEvent:.
+extern "C" fn set_handling_send_event(this: &mut Object, _: Sel, handling: BOOL) {
+    unsafe { this.set_ivar::<BOOL>(HANDLING_SEND_EVENT_IVAR, handling) }
+}
+
+// ket patch: mark the app as handling an event for the length of sendEvent:,
+// restoring the previous value afterwards so nested event loops (menus, modal
+// panels) unwind correctly. This is what CEF's CefScopedSendingEvent does.
+extern "C" fn send_event(this: &mut Object, _: Sel, event: id) {
+    unsafe {
+        let was_handling = *this.get_ivar::<BOOL>(HANDLING_SEND_EVENT_IVAR);
+        this.set_ivar::<BOOL>(HANDLING_SEND_EVENT_IVAR, YES);
+        let _: () = msg_send![super(this, class!(NSApplication)), sendEvent: event];
+        this.set_ivar::<BOOL>(HANDLING_SEND_EVENT_IVAR, was_handling);
     }
 }
 

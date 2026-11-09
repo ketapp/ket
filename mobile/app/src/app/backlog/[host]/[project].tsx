@@ -16,7 +16,7 @@ import { ActivityIndicator, Alert, Pressable, StyleSheet, Text, TextInput, View 
 import { KeyboardAwareScrollView } from 'react-native-keyboard-controller';
 
 import { Check, Chevron, ChevronDown, Plus, PriorityMark, Trash } from '../../../components/icons';
-import { Bar, Button, Card, Heading, IconButton, Prose, Screen, Segmented, Tag, field } from '../../../components/ui';
+import { Bar, Button, Card, Heading, IconButton, Prose, Screen, Segmented, Tag, field, oneLine } from '../../../components/ui';
 import type { BacklogChange } from '../../../lib/connection';
 import { useHost } from '../../../lib/hosts';
 import { font, size, t } from '../../../lib/theme';
@@ -195,6 +195,7 @@ export default function BacklogScreen() {
                 onChangeText={setCapture}
                 placeholder="Write down something to do"
                 placeholderTextColor={t.faint}
+                {...oneLine}
                 returnKeyType="done"
                 submitBehavior="submit"
                 onSubmitEditing={() => void add()}
@@ -439,6 +440,7 @@ function OpenNote({
           onChangeText={setTitle}
           placeholder="What the work is"
           placeholderTextColor={t.faint}
+          {...oneLine}
           editable={!starting}
           style={[field, styles.openTitle, styles.grow]}
         />

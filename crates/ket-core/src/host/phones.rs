@@ -48,7 +48,7 @@ mod tests;
 mod typing;
 
 use places::{BacklogCounts, FigureMap, Places};
-use relay::link_forever;
+use relay::{LinkStatus, Target, link_forever};
 use snapshot::snapshot;
 use typing::Typing;
 
@@ -239,7 +239,16 @@ pub(super) enum Relay {
         port: u16,
     },
     /// Somewhere else, dialled at this URL: `KET_RELAY_URL`, for development.
+    /// It replaces the host's own, and no relay elsewhere is linked beside it.
     External(String),
+}
+
+/// The link to a relay elsewhere, beside the host's own (#142): where, how it
+/// is doing, and the switch that ends it.
+struct Hosted {
+    url: String,
+    status: Arc<LinkStatus>,
+    stop: tokio::sync::watch::Sender<bool>,
 }
 
 impl Relay {
@@ -369,10 +378,9 @@ pub(super) struct Phones {
     approvals: Mutex<Vec<Approval>>,
     /// Names each approval, for deciding it.
     next_approval: AtomicU64,
-    /// The key this host claims its own relay with, made fresh each time
-    /// phones are turned on; `None` for a relay elsewhere, which is not told
-    /// it. See [`ket_relay::Own`].
-    claim: Option<[u8; 32]>,
+    /// The relay elsewhere linked to beside [`Self::relay`], when the config
+    /// names one.
+    hosted: Mutex<Option<Hosted>>,
     /// What phones have asked to be typed, waiting its turn in each terminal.
     typing: Typing,
 }
@@ -431,6 +439,89 @@ impl Phones {
         for feed in feeds {
             let _ = feed.send(Event::Snapshot(Box::new(snapshot.clone())));
         }
+    }
+
+    /// Every address a paired phone may try: the host's own relay on the
+    /// local network and the tailnet, then the relay elsewhere.
+    pub(super) fn addresses(&self) -> Vec<String> {
+        let mut addresses = self.relay.addresses();
+        if let Some(hosted) = lock(&self.hosted).as_ref() {
+            addresses.push(hosted.url.clone());
+        }
+        addresses
+    }
+
+    /// Links to the relay at `url` beside the host's own, or stops linking
+    /// to the one it had: in place, so phones connected some other way stay
+    /// connected. Nothing changes when `url` is the one already linked.
+    pub(super) fn set_hosted(self: &Arc<Self>, host: &Arc<Host>, url: Option<String>) {
+        let mut hosted = lock(&self.hosted);
+        if hosted.as_ref().map(|hosted| &hosted.url) == url.as_ref() {
+            return;
+        }
+        if let Some(old) = hosted.take() {
+            let _ = old.stop.send(true);
+            tracing::info!(relay = %old.url, "stopped linking to a relay elsewhere");
+        }
+        let Some(url) = url else {
+            return;
+        };
+        if self.stopped.load(Ordering::Acquire) {
+            return;
+        }
+        let status = Arc::new(LinkStatus::default());
+        let target = Target {
+            url: url.clone(),
+            claim: None,
+            status: status.clone(),
+        };
+        let (stop, mut stopping) = tokio::sync::watch::channel(false);
+        let mut phones_off = self.stop.subscribe();
+        let (host, phones) = (host.clone(), self.clone());
+        let spawned = std::thread::Builder::new()
+            .name("ket-host-relay-elsewhere".into())
+            .spawn(move || {
+                let runtime = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(runtime) => runtime,
+                    Err(error) => {
+                        tracing::warn!(%error, "ket host: no runtime for a relay elsewhere");
+                        return;
+                    }
+                };
+                runtime.block_on(async {
+                    tokio::select! {
+                        () = link_forever(&host, &phones, &target) => {}
+                        _ = stopping.wait_for(|stopped| *stopped) => {}
+                        _ = phones_off.wait_for(|stopped| *stopped) => {}
+                    }
+                });
+                // Dropping the runtime drops the socket, and the sessions of
+                // the phones that came through it end.
+            });
+        match spawned {
+            Ok(_) => *hosted = Some(Hosted { url, status, stop }),
+            Err(error) => tracing::warn!(%error, "ket host: could not link to a relay elsewhere"),
+        }
+    }
+
+    /// The relay elsewhere, and how its link is doing; `None` when there is
+    /// none.
+    pub(super) fn hosted_relay(&self) -> Option<super::wire::HostedRelay> {
+        lock(&self.hosted).as_ref().map(|hosted| {
+            let linked = hosted.status.linked.load(Ordering::Acquire);
+            super::wire::HostedRelay {
+                url: hosted.url.clone(),
+                linked,
+                error: if linked {
+                    None
+                } else {
+                    lock(&hosted.status.error).clone()
+                },
+            }
+        })
     }
 
     /// A one-time code to pair a phone with, good for [`PAIRING_TTL`].
@@ -559,7 +650,11 @@ pub(super) fn start(host: Arc<Host>, relay: Relay) -> Result<Arc<Phones>> {
         devices: Mutex::new(HashMap::new()),
         next_session: AtomicU64::new(1),
         live: Mutex::new(HashMap::new()),
-        activity: Mutex::new(Tracker::new(Vec::<String>::new())),
+        // The agents a window's tracker knows, so a terminal's foreground
+        // can name one here too — see the snapshot's foreground reading.
+        activity: Mutex::new(Tracker::new(crate::agents::known_agent_names(
+            &crate::config::Config::load().unwrap_or_default(),
+        ))),
         places: Mutex::new(None),
         figures: Mutex::new(None),
         backlogs: Mutex::new(None),
@@ -567,9 +662,14 @@ pub(super) fn start(host: Arc<Host>, relay: Relay) -> Result<Arc<Phones>> {
         pending: AtomicUsize::new(0),
         approvals: Mutex::new(Vec::new()),
         next_approval: AtomicU64::new(1),
-        claim,
+        hosted: Mutex::new(None),
         typing: Typing::default(),
     });
+    let own = Target {
+        url: phones.relay.dial(),
+        claim,
+        status: Arc::new(LinkStatus::default()),
+    };
     let (ticking, watched) = (phones.clone(), host.clone());
     std::thread::Builder::new()
         .name("ket-host-snapshots".into())
@@ -611,7 +711,7 @@ pub(super) fn start(host: Arc<Host>, relay: Relay) -> Result<Arc<Phones>> {
                 };
                 tokio::select! {
                     () = relay => {}
-                    () = link_forever(&host, &link) => {}
+                    () = link_forever(&host, &link, &own) => {}
                     _ = stopping.wait_for(|stopped| *stopped) => {}
                 }
             });

@@ -28,7 +28,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { CommandMenu } from '../../../components/Commands';
 import { TerminalView, type TerminalHandle } from '../../../components/TerminalView';
 import { AgentMark, Keyboard, Send, TerminalGlyph } from '../../../components/icons';
-import { Bar, Card, Dot, Marked, Prose, Screen, Segmented, TabStrip } from '../../../components/ui';
+import { Bar, Card, Dot, Marked, Prose, Screen, Segmented, TabStrip, oneLine } from '../../../components/ui';
 import { agentTerminal, everyWorktree, stateOf, terminalName } from '../../../lib/activity';
 import { type Command, commandsFor, matching } from '../../../lib/commands';
 import { useHost } from '../../../lib/hosts';
@@ -39,6 +39,18 @@ const ENTER_AFTER_MS = 80;
 
 /** What a terminal's Backspace sends. */
 const BACKSPACE = '\x7f';
+
+/** What the phone's keyboard meant, for a terminal: iOS's smart punctuation
+ * turns `--` into an em dash, `...` into an ellipsis and straight quotes into
+ * curly ones, none of which a shell or an agent's flags read as typed. No
+ * React Native prop turns it off, so it is undone here instead — at the
+ * cost of never sending a real em dash or curly quote from this screen. */
+const asTyped = (text: string) =>
+  text
+    .replace(/[\u2014\u2013]/g, '--')
+    .replace(/\u2026/g, '...')
+    .replace(/[\u201C\u201D]/g, '"')
+    .replace(/[\u2018\u2019]/g, "'");
 
 /** How far apart a key and the change it made are told of — see `unpaired`. */
 const PAIRED_MS = 100;
@@ -275,7 +287,7 @@ export default function TerminalScreen() {
       return;
     }
     let failed = false;
-    const sent = type(latch(text)).then((ok) => {
+    const sent = type(latch(asTyped(text))).then((ok) => {
       failed = !ok;
       return ok;
     });
@@ -319,8 +331,10 @@ export default function TerminalScreen() {
   // By character, not UTF-16 unit: an emoji is one Backspace, and a change
   // inside one never sends half of it.
   const changeLive = (text: string) => {
-    const was = Array.from(liveText.current);
-    const now = Array.from(text);
+    // Compared as typed, so a dash iOS folded into an em dash is a dash
+    // more rather than a dash replaced, and deleting it deletes both.
+    const was = Array.from(asTyped(liveText.current));
+    const now = Array.from(asTyped(text));
     let same = 0;
     while (same < was.length && same < now.length && was[same] === now[same]) same++;
     liveText.current = text;
@@ -470,6 +484,7 @@ export default function TerminalScreen() {
                   accessibilityLabel="Live keys"
                   placeholder="Each key goes straight in"
                   placeholderTextColor={t.faint}
+                  {...oneLine}
                   autoCapitalize="none"
                   autoCorrect={false}
                   spellCheck={false}
@@ -487,7 +502,8 @@ export default function TerminalScreen() {
                   onSubmitEditing={() => void send()}
                   placeholder={`Message ${agent || 'the terminal'}…`}
                   placeholderTextColor={t.faint}
-                  autoCapitalize="sentences"
+                  {...oneLine}
+                  autoCapitalize="none"
                   autoCorrect
                   spellCheck
                   returnKeyType="send"

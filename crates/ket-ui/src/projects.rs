@@ -36,7 +36,7 @@ use ket_core::KetError;
 use ket_core::id::ProjectId;
 use ket_core::keybinding::Chord;
 use ket_core::storage::format_bytes;
-use ket_core::theme::{Color, Theme};
+use ket_core::theme::{Color, Theme, contrast_ratio};
 use ket_core::workspace::Workspace;
 
 use crate::Shell;
@@ -84,6 +84,24 @@ pub(crate) const PROJECT_COLORS: [(&str, &str); 18] = [
 /// The colour a project has when none was chosen.
 pub(crate) fn default_color() -> Color {
     Color::from_hex(PROJECT_COLORS[0].1).expect("the default palette entry parses")
+}
+
+/// The rail a selected worktree wears: its project's colour, so the eye that
+/// finds where you are also learns whose it is.
+///
+/// A project left at the default keeps the theme's marker. Graphite is what
+/// "no colour" looks like, and a grey rail on a grey fill would lose the one
+/// thing the rail is for. A colour too dark to stand off the selected fill is
+/// moved towards the text until it clears 3:1, the bar WCAG sets for a
+/// non-text mark — Slate and Indigo both need it on the dark theme.
+pub(crate) fn rail_colour(project: Color, t: &Theme) -> Color {
+    if project == default_color() {
+        return t.marker;
+    }
+    (0..=10)
+        .map(|step| project.mix(t.text.primary, f64::from(step) / 10.0))
+        .find(|candidate| contrast_ratio(*candidate, t.hover) >= 3.0)
+        .unwrap_or(t.text.primary)
 }
 
 /// How the project menu names itself, so an opener can tell whose menu is up.
@@ -678,5 +696,39 @@ impl Shell {
             menu: project_menu(at, node.hide_discovered, facts, &self.theme)
                 .with_header(node.name.clone()),
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_project_left_at_the_default_keeps_the_theme_marker() {
+        for t in [Theme::dark(), Theme::light()] {
+            assert_eq!(rail_colour(default_color(), &t), t.marker);
+        }
+    }
+
+    #[test]
+    fn every_palette_colour_makes_a_rail_that_stands_off_the_selected_fill() {
+        for t in [Theme::dark(), Theme::light()] {
+            for (name, hex) in &PROJECT_COLORS[1..] {
+                let colour = Color::from_hex(hex).expect("palette entries parse");
+                let rail = rail_colour(colour, &t);
+                assert!(
+                    contrast_ratio(rail, t.hover) >= 3.0,
+                    "{name} rails at {:.2}:1",
+                    contrast_ratio(rail, t.hover)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_colour_that_already_stands_out_is_drawn_as_chosen() {
+        let t = Theme::dark();
+        let red = Color::from_hex("#ef4444").expect("parses");
+        assert_eq!(rail_colour(red, &t), red);
     }
 }

@@ -4,7 +4,7 @@
 
 use std::path::PathBuf;
 
-use ket_core::agent_hooks::{HookEvent, HookReport, PermissionQuestion};
+use ket_core::agent_hooks::{HookEvent, HookReport, PermissionQuestion, Prompt};
 use ket_core::agent_status::{AgentStatusSnapshot, CancelSource, StatusStore};
 use ket_core::event::AgentState;
 
@@ -217,6 +217,216 @@ fn a_permission_request_is_awaiting_and_a_denial_returns_to_thinking() {
     let pane = store.get("p1").unwrap();
     assert_eq!(pane.state, AgentState::Thinking);
     assert!(pane.question.is_none());
+}
+
+/// A permission prompt for `subject`, as `agent`'s hook reports it.
+fn permission(agent: &str, pane: &str, subject: &str, at_ms: u64) -> HookReport {
+    let mut r = report(HookEvent::PermissionRequest, pane, "w1", "s1", at_ms);
+    r.agent = agent.to_owned();
+    r.question = Some(Box::new(PermissionQuestion {
+        tool: "Bash".to_owned(),
+        subject: Some(subject.to_owned()),
+        id: 0,
+        prompt: None,
+    }));
+    r
+}
+
+/// `agent`'s tool event for a call of `tool` on `subject`.
+fn call(
+    agent: &str,
+    event: HookEvent,
+    pane: &str,
+    tool: &str,
+    subject: &str,
+    at_ms: u64,
+) -> HookReport {
+    let mut r = report(event, pane, "w1", "s1", at_ms);
+    r.agent = agent.to_owned();
+    r.tool_name = Some(tool.to_owned());
+    r.call = Some(Box::new(PermissionQuestion {
+        tool: tool.to_owned(),
+        subject: Some(subject.to_owned()),
+        id: 0,
+        prompt: None,
+    }));
+    r
+}
+
+#[test]
+fn a_call_starting_after_a_permission_went_up_means_it_was_answered_at_the_desk() {
+    // Codex, approved at the desk: the command it asked about yielded while
+    // still running, so no report ever came back for it. Its next call is
+    // the only word that the prompt is gone.
+    let mut store = StatusStore::new(1);
+    store.report(&permission("codex", "p1", "python3 - <<'PY'", 0), known_any);
+    assert_eq!(
+        store.get("p1").unwrap().state,
+        AgentState::AwaitingPermission
+    );
+
+    store.report(
+        &call(
+            "codex",
+            HookEvent::PreTool,
+            "p1",
+            "Bash",
+            "cargo fmt --all --check",
+            10_000,
+        ),
+        known_any,
+    );
+    let pane = store.get("p1").unwrap();
+    assert_eq!(pane.state, AgentState::ExecutingTool);
+    assert!(pane.question.is_none());
+    // Allowed or declined, nobody said: not remembered as either.
+    assert!(pane.answered.is_none());
+}
+
+#[test]
+fn a_call_starting_beside_a_permission_leaves_the_prompt_up() {
+    // Two calls dispatched together: the second's start lands just after the
+    // first's prompt, and says nothing about it.
+    let mut store = StatusStore::new(1);
+    store.report(
+        &permission("codex", "p1", "curl https://a.example", 0),
+        known_any,
+    );
+    store.report(
+        &call(
+            "codex",
+            HookEvent::PreTool,
+            "p1",
+            "Bash",
+            "curl https://b.example",
+            150,
+        ),
+        known_any,
+    );
+    let pane = store.get("p1").unwrap();
+    assert_eq!(pane.state, AgentState::AwaitingPermission);
+    assert_eq!(
+        pane.question.as_ref().and_then(|q| q.subject.as_deref()),
+        Some("curl https://a.example")
+    );
+}
+
+#[test]
+fn a_call_finishing_while_a_permission_waits_leaves_the_prompt_up() {
+    // The call beside the prompt can finish long after it went up, and the
+    // prompt is still on screen.
+    let mut store = StatusStore::new(1);
+    store.report(
+        &permission("codex", "p1", "curl https://a.example", 0),
+        known_any,
+    );
+    store.report(
+        &call(
+            "codex",
+            HookEvent::PostTool,
+            "p1",
+            "Bash",
+            "curl https://b.example",
+            60_000,
+        ),
+        known_any,
+    );
+    let pane = store.get("p1").unwrap();
+    assert_eq!(pane.state, AgentState::AwaitingPermission);
+    assert_eq!(
+        pane.question.as_ref().and_then(|q| q.subject.as_deref()),
+        Some("curl https://a.example")
+    );
+}
+
+#[test]
+fn a_question_or_plan_stays_up_while_another_call_starts_after_it() {
+    // A question and a plan are answered through their own hook, whose
+    // report comes back as the same tool; a stranger's start is no answer.
+    let mut store = StatusStore::new(1);
+    let mut r = report(HookEvent::PermissionRequest, "p1", "w1", "s1", 0);
+    r.question = Some(Box::new(PermissionQuestion {
+        tool: "ExitPlanMode".to_owned(),
+        subject: Some("Versioning".to_owned()),
+        id: 0,
+        prompt: Some(Prompt::Plan),
+    }));
+    store.report(&r, known_any);
+    store.report(
+        &call(
+            "codex",
+            HookEvent::PreTool,
+            "p1",
+            "Bash",
+            "git status",
+            10_000,
+        ),
+        known_any,
+    );
+    let pane = store.get("p1").unwrap();
+    assert_eq!(pane.state, AgentState::AwaitingPermission);
+    assert_eq!(
+        pane.question.as_ref().map(|q| q.tool.as_str()),
+        Some("ExitPlanMode")
+    );
+}
+
+#[test]
+fn an_answer_reported_as_the_call_starting_leaves_a_second_prompt_up() {
+    // OpenCode reports an allowed permission as its call starting. With two
+    // prompts outstanding, the older one's answer is not the model's next
+    // call, and the newer prompt is still up.
+    let mut store = StatusStore::new(1);
+    store.report(
+        &permission("opencode", "p1", "curl https://a.example", 0),
+        known_any,
+    );
+    store.report(
+        &permission("opencode", "p1", "curl https://b.example", 5_000),
+        known_any,
+    );
+    store.report(
+        &call(
+            "opencode",
+            HookEvent::PreTool,
+            "p1",
+            "Bash",
+            "curl https://a.example",
+            10_000,
+        ),
+        known_any,
+    );
+    let pane = store.get("p1").unwrap();
+    assert_eq!(pane.state, AgentState::AwaitingPermission);
+    assert_eq!(
+        pane.question.as_ref().and_then(|q| q.subject.as_deref()),
+        Some("curl https://b.example")
+    );
+}
+
+#[test]
+fn a_claude_pane_waits_for_the_approved_calls_own_report() {
+    // Claude reports the approved call's result itself, so a stranger's
+    // start says nothing about its prompt, however late it comes.
+    let mut store = StatusStore::new(1);
+    store.report(&permission("claude", "p1", "rm -rf /tmp/x", 0), known_any);
+    store.report(
+        &call(
+            "claude",
+            HookEvent::PreTool,
+            "p1",
+            "Bash",
+            "git status",
+            10_000,
+        ),
+        known_any,
+    );
+    let pane = store.get("p1").unwrap();
+    assert_eq!(pane.state, AgentState::AwaitingPermission);
+    assert_eq!(
+        pane.question.as_ref().and_then(|q| q.subject.as_deref()),
+        Some("rm -rf /tmp/x")
+    );
 }
 
 #[test]

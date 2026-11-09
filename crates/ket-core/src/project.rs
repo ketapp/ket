@@ -168,7 +168,7 @@ pub struct ProjectSettings {
     /// agent name, in place of the one in the config.
     ///
     /// What lets one folder run `claude-work` while every other runs
-    /// `claude-personal`. Only the terminal command is replaced — the same
+    /// `claude-alt`. Only the terminal command is replaced — the same
     /// field [`AgentSpec::launch`] holds — so the agent keeps its name, its
     /// transport and its ACP adapter, and the sessions it leaves behind still
     /// file under that name. An agent with no entry launches as configured.

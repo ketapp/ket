@@ -12,13 +12,14 @@ import {
   type AgentView,
   Answer_Choice,
   BackgroundSession_State,
+  type ColdCache,
   type Question,
   type Turn,
   Turn_Kind,
 } from '@ket/remote';
 import * as Clipboard from 'expo-clipboard';
 import { router, useFocusEffect, useLocalSearchParams, useNavigation } from 'expo-router';
-import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react';
+import { Fragment, type ReactNode, useCallback, useEffect, useRef, useState } from 'react';
 import {
   AppState,
   Linking,
@@ -40,11 +41,11 @@ import Animated, { useAnimatedStyle, useSharedValue, withTiming } from 'react-na
 import Svg, { Defs, LinearGradient, Rect, Stop as GradientStop } from 'react-native-svg';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { AttachMenu, FileChip, ImagesChip, SentFiles, type Source, Tray } from '../../../components/Attachments';
+import { FileChip, ImagesChip, SentFiles, type Source, Tray, attachSections } from '../../../components/Attachments';
 import { AgentViewList, backgroundState, terminalAt } from '../../../components/AgentView';
-import { Outgoing, StatusMark, Working } from '../../../components/ChatRows';
-import { CommandMenu } from '../../../components/Commands';
-import { ComposerMenu, PlusButton, SendButton, plusMenu, slashMenu } from '../../../components/Composer';
+import { Outgoing, type OutgoingStatus, StatusMark, Working } from '../../../components/ChatRows';
+import { commandRow } from '../../../components/Commands';
+import { PlusButton, SendButton, plusMenu, slashMenu } from '../../../components/Composer';
 import { FloatMenu, type Place, placeOf } from '../../../components/FloatMenu';
 import { KeyboardLift } from '../../../components/KeyboardLift';
 import { ModelSheet } from '../../../components/ModelSheet';
@@ -52,9 +53,9 @@ import { KeyCommands } from '../../../components/KeyCommands';
 import { MicButton } from '../../../components/Mic';
 import { RiskBadge } from '../../../components/Risk';
 import { Dim, Tucked, type Tuckable, useTuck } from '../../../components/Tuck';
-import { AgentMark, Bolt, Bookmark, Changes, Check, Chevron, ChevronDown, Close, Pause, Pencil, Shield, Sliders, TerminalWindow } from '../../../components/icons';
-import { Bar, Button, Choice, Dot, IconCluster, Prose, Screen, field } from '../../../components/ui';
-import { detail, everyWorktree, stateOf } from '../../../lib/activity';
+import { AgentMark, Bolt, Bookmark, Changes, Check, Chevron, ChevronDown, Close, Pause, Pencil, Send, Shield, Sliders, Snowflake, TerminalWindow } from '../../../components/icons';
+import { Bar, Button, Choice, Dot, IconCluster, Prose, Screen, field, oneLine } from '../../../components/ui';
+import { detail, everyWorktree, programBusy, promptKind, stateOf } from '../../../lib/activity';
 import {
   type Attachment,
   MAX_BYTES,
@@ -68,9 +69,10 @@ import {
   splitFiles,
 } from '../../../lib/attach';
 import { type Command, commandsFor, matching } from '../../../lib/commands';
-import { DesktopBusy, type PromptAnswer } from '../../../lib/connection';
+import { DesktopBusy, type PromptAnswer, STARTING_FOR_MS } from '../../../lib/connection';
 import { useHost } from '../../../lib/hosts';
-import type { Seed } from '../../../lib/starting';
+import { type Block, type Run, markdown } from '../../../lib/markdown';
+import { type Seed, reconcileTask, taskForTerminal } from '../../../lib/starting';
 import { useDictation } from '../../../lib/dictation';
 import { confirmIdentity } from '../../../lib/lock';
 import { Refused } from '../../../lib/refused';
@@ -88,6 +90,10 @@ const ENTER_AFTER_MS = 80;
 /** How long a sent message may go unseen — not in the conversation, not
  * waiting in the agent's queue — before it is shown as not delivered. */
 const UNSEEN_MS = 15_000;
+/** How long the working row waits, once a message of yours is in the
+ * conversation, for the desktop to say the agent is at work — see
+ * `handingOver`. */
+const HAND_OVER_MS = 8_000;
 
 /** What the desktop says of a conversation while the agent is still opening
  * in its tab — see `conversation` in ket-core's phones/requests.rs. Said
@@ -123,6 +129,7 @@ type Said = { words: string; images: number };
 type WaitingCard = Tuckable &
   (
     | { kind: 'background' }
+    | { kind: 'cold'; cold: ColdCache }
     | { kind: 'ask' | 'plan'; question: Question }
     | { kind: 'permission'; question: Question; chosen?: Answer_Choice }
   );
@@ -151,6 +158,14 @@ const REPLIES = ['Continue', 'Looks good', 'Run the tests', 'Commit it'];
  * runs: coming back to a chat draws it at once and reads on from where it
  * was, rather than starting over at "Loading the conversation…". */
 const kept = new Map<string, { turns: Turn[]; cursor: bigint; session: string }>();
+
+/** Cold spells already answered, by host, session and the request the spell
+ * began after, while the app runs: each is asked about once (1.28). */
+const coldAnswered = new Set<string>();
+
+/** A composer's words and files on their way to the chat Start fresh moves
+ * to, by host and terminal: taken once, by that chat as it opens. */
+const carried = new Map<string, { draft: string; files: Attachment[] }>();
 
 /** How long the conversation waits for the push to finish before painting
  * anyway: a screen that arrived without an animation, or a platform that
@@ -244,14 +259,32 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
   const keptKey = background ? `${hostId}:${terminal}:${background}` : `${hostId}:${terminal}`;
   const [turns, setTurns] = useState<Turn[]>(() => kept.get(keptKey)?.turns ?? []);
   // The task a new worktree was started on from this phone: see `started`.
-  const seed = started?.seed;
+  const task = background ? undefined : taskForTerminal(conn?.asked ?? [], terminalId);
+  const seed = task?.delivery ? undefined : (started?.seed ?? (task ? { text: task.prompt, draft: '' } : undefined));
+  // The normal hand-off starts a new delivery timer. Worktree creation and
+  // agent startup may already have taken longer than that timer allows.
+  const seedAt = started?.seed ? undefined : (task?.openedAt ?? task?.at);
+  const delivered = (text: string) => turns.some((turn) => turn.kind === Turn_Kind.USER && carries(saidIn(turn).words, text));
   // Sent from here and not in the conversation yet: shown at once, as
   // sending, then as queued while the agent's queue holds it.
   const [pending, setPending] = useState<Pending[]>(() =>
-    seed ? [{ key: 0, text: seed.text, at: Date.now(), behind: false, files: [] }] : [],
+    seed && !delivered(seed.text) ? [{ key: 0, text: seed.text, at: seedAt ?? Date.now(), behind: false, files: [] }] : [],
   );
+  const [seeded, setSeeded] = useState(seed !== undefined);
+  // useHost may resolve after the first render. Restore once, without
+  // sending again, and let the transcript confirm delivery as usual.
+  if (!seeded && seed) {
+    setSeeded(true);
+    if (!delivered(seed.text)) {
+      setPending((before) => [{ key: 0, text: seed.text, at: seedAt ?? Date.now(), behind: false, files: [] }, ...before]);
+    }
+  }
   const [queued, setQueued] = useState<string[]>([]);
   const [now, setNow] = useState(() => Date.now());
+  // When a message sent from here reached the conversation before the
+  // desktop said the agent was at work, and what the last draw saw of it.
+  const [handedAt, setHandedAt] = useState(0);
+  const [seen, setSeen] = useState({ yours: -1, sending: false });
   const sentCount = useRef(seed ? 1 : 0);
   const [unreadable, setUnreadable] = useState('');
   // Whether the desktop has answered once, and why it has not when asking
@@ -259,10 +292,16 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
   // desktop is refusing looked the same — blank.
   const [loaded, setLoaded] = useState(() => kept.has(keptKey));
   const [failing, setFailing] = useState('');
-  const [message, setMessage] = useState(seed?.draft ?? '');
+  // Whatever Start fresh carried here from the cold session's chat.
+  const [carriedIn] = useState(() => {
+    const brought = carried.get(keptKey);
+    carried.delete(keptKey);
+    return brought;
+  });
+  const [message, setMessage] = useState(carriedIn?.draft ?? seed?.draft ?? '');
   // The draft as it is this moment, for what reads it after a wait: Send
   // after the mic's last words, which arrive between renders.
-  const draft = useRef(seed?.draft ?? '');
+  const draft = useRef(carriedIn?.draft ?? seed?.draft ?? '');
   const write = (text: string) => {
     draft.current = text;
     setMessage(text);
@@ -271,7 +310,13 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
   // The note is about a permission that is off: Settings, under it.
   const [toSettings, setToSettings] = useState(false);
   // Photos and files for the next message, in the field above its words.
-  const [files, setFiles] = useState<Attachment[]>([]);
+  const [files, setFiles] = useState<Attachment[]>(carriedIn?.files ?? []);
+  // The files as they are this moment, for what reads them after a wait:
+  // Start fresh carries them to the fresh chat once it opens.
+  const filesNow = useRef(files);
+  useEffect(() => {
+    filesNow.current = files;
+  }, [files]);
   // The `/` chip's menu — see `menu` below.
   const [listing, setListing] = useState(false);
   // The + menu, open in place of the `/` one, and whether it offers a paste.
@@ -303,6 +348,10 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
   const [landed, setLanded] = useState<Landed | null>(null);
   // The session sheet — mode, model and effort — for an agent with models (1.26).
   const [sheet, setSheet] = useState(false);
+  // A cold session’s card (1.28): redrawn once it is answered, and held
+  // while its fresh session is on the way.
+  const [, setColdTick] = useState(0);
+  const [freshing, setFreshing] = useState(false);
   const modePill = useRef<ViewInstance>(null);
   const [snippets, setSnippets] = useState<{ name: string; body: string }[]>([]);
   const cursor = useRef(kept.get(keptKey)?.cursor ?? 0n);
@@ -335,16 +384,18 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
     ? located?.terminal?.agentView?.sessions.find((s) => s.session === background)
     : undefined;
   if (backgroundSession) sessionNames.set(keptKey, backgroundSession.name);
+  // A program busy in another of the worktree's tabs — a dev server, say —
+  // is not this conversation's agent at work, and says nothing here.
   const state = background
     ? backgroundState(backgroundSession?.state)
-    : worktree
+    : worktree && !programBusy(worktree)
       ? stateOf(worktree.activity)
       : undefined;
   // Working, as the desktop's sidebar sees it: the agent thinks for a while
   // before anything reaches its transcript, and this says so meanwhile.
   const working = background
     ? backgroundSession?.state === BackgroundSession_State.WORKING
-    : worktree?.activity === Activity.WORKING || worktree?.activity === Activity.RUNNING;
+    : worktree?.activity === Activity.WORKING || (worktree?.activity === Activity.RUNNING && !programBusy(worktree));
   const busy = useRef(false);
   const isBusy = working || pending.length > 0 || queued.length > 0;
   useEffect(() => {
@@ -366,10 +417,21 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
   // Mac, where a message from here would land in its prompt.
   const waiting = !!background && backgroundSession?.state === BackgroundSession_State.NEEDS_YOU;
   const asking = !!question && (question.answerable || prompt !== undefined);
+  // A session whose prompt cache has gone cold since it last ran (1.28):
+  // asked about once a spell, as the chat opens — never at Send, since a
+  // message always goes as typed, and sending one is the answer Continue.
+  const cold = !background && (conn?.hostMinor ?? 0) >= 28 ? located?.terminal?.cold : undefined;
+  const coldKey = cold ? `${hostId}:${cold.session}:${cold.sinceMs}` : '';
+  const askCold = cold !== undefined && !coldAnswered.has(coldKey);
+  const answerCold = () => {
+    if (!coldKey || coldAnswered.has(coldKey)) return;
+    coldAnswered.add(coldKey);
+    setColdTick((n) => n + 1);
+  };
   // The card over the conversation's foot while one of those waits on you.
   const card = ((): WaitingCard | undefined => {
     if (waiting) return { key: 'background', kind: 'background' };
-    if (!question) return undefined;
+    if (!question) return askCold && cold ? { key: `cold${cold.sinceMs}`, kind: 'cold', cold } : undefined;
     const key = `q${question.id}`;
     if (prompt) return { key, kind: prompt, question };
     if (!question.answerable) return undefined;
@@ -418,6 +480,13 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
             return;
           }
           setUnreadable('');
+          const task = background ? undefined : taskForTerminal(conn.asked ?? [], terminalId);
+          const taskSettled = task && reconcileTask(
+            task,
+            reply.session,
+            reply.turns.some((turn) => turn.kind === Turn_Kind.USER && carries(saidIn(turn).words, task.prompt)),
+            reply.turns.some((turn) => turn.kind === Turn_Kind.USER || turn.kind === Turn_Kind.TOOL),
+          );
           const restart = reply.fresh || reply.session !== session.current;
           session.current = reply.session;
           cursor.current = reply.next;
@@ -433,10 +502,14 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
           const arrived = (restart ? reply.turns.slice(-6) : reply.turns)
             .filter((turn) => turn.kind === Turn_Kind.USER)
             .map(saidIn);
-          if (arrived.length > 0) {
+          if (reply.turns.length > 0 || taskSettled) {
             setPending((before) => {
               const left = [...arrived];
               return before.filter((p) => {
+                if (p.key === 0 && taskSettled) return false;
+                // A recovered task can be older than the newest six turns
+                // used to match messages just sent from this chat.
+                if (p.key === 0 && reply.turns.some((turn) => turn.kind === Turn_Kind.USER && carries(saidIn(turn).words, p.text))) return false;
                 const at = left.findIndex((said) => fits(said, p));
                 if (at < 0) return true;
                 if (p.files.length > 0) carriedFiles.set(carriedKey(keptKey, left[at]), p.files);
@@ -586,6 +659,8 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
     const text = (said ?? draft.current).trim();
     const attached = said === undefined && !background ? files : [];
     if (!text && attached.length === 0) return;
+    // Sent as typed, cold or not: sending is the answer Continue.
+    answerCold();
     setLaunches((n) => n + 1);
     if (said === undefined) {
       write('');
@@ -724,7 +799,81 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
   const openTerminal = () => router.push(`/terminal/${hostId}/${terminal}`);
   // A card waiting on you, as `tuck` has it: the one asked, or the last one
   // as it tucks away.
+  // Start fresh: the desktop opens a fresh session beside the cold one, which
+  // stays open as it was; the chat follows to the fresh one.
+  const onScreen = useRef(false);
+  useFocusEffect(
+    useCallback(() => {
+      onScreen.current = true;
+      return () => {
+        onScreen.current = false;
+      };
+    }, []),
+  );
+  const startFresh = async (spell: ColdCache) => {
+    if (!conn || freshing) return;
+    setFreshing(true);
+    // A message sent here while the fresh one starts goes to this session,
+    // as typed, and this chat stays on it.
+    const sentBefore = sentCount.current;
+    let started: bigint | undefined;
+    await controlled(
+      async () => {
+        const outcome = await conn.startFresh(terminalId, spell.session, spell.sinceMs);
+        if (outcome === false) return false;
+        if ('why' in outcome) throw new Error(outcome.why);
+        started = outcome.terminalId;
+        return true;
+      },
+      (why) => `Not started fresh: ${why}`,
+    );
+    if (started === undefined) {
+      setFreshing(false);
+      return;
+    }
+    answerCold();
+    await conn.awaitTerminal(started);
+    setFreshing(false);
+    // Only from this chat, still on screen: one left meanwhile is not to
+    // pull the reader back, nor to replace whatever they went to.
+    if (!onScreen.current) return;
+    // The mic's last words land in the draft as it finishes, and leaving
+    // this chat would abandon them.
+    await dictation.finish();
+    if (!onScreen.current) return;
+    if (sentCount.current !== sentBefore) {
+      setNote('Your message went to this session, so the chat stays on it. The fresh one is open beside it on your Mac.');
+      return;
+    }
+    carried.set(`${hostId}:${started}`, { draft: draft.current, files: filesNow.current });
+    router.replace(`/session/${hostId}/${started}`);
+  };
   const drawCard = (c: WaitingCard) => {
+    if (c.kind === 'cold') {
+      return (
+        <View style={styles.cold}>
+          <View style={styles.coldTitle}>
+            <Snowflake size={18} color={t.dim} />
+            <Text style={styles.askTitle} numberOfLines={1}>
+              This session went cold
+            </Text>
+          </View>
+          <Text style={styles.askLead}>
+            {freshing ? 'Starting a fresh session on your Mac…' : `Continuing ${c.cold.summary}.`}
+          </Text>
+          <View style={styles.askButtons}>
+            <Button
+              kind="secondary"
+              title="Start fresh"
+              style={styles.grow}
+              disabled={freshing}
+              onPress={() => void startFresh(c.cold)}
+            />
+            <Button kind="primary" title="Continue" style={styles.grow} disabled={freshing} onPress={answerCold} />
+          </View>
+        </View>
+      );
+    }
     if (c.kind === 'background') {
       return (
         <View style={styles.ask}>
@@ -735,7 +884,12 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
             It’s asking something in agent view on your Mac. Answer it there; a message from here would land in its
             prompt.
           </Text>
-          <Button kind="primary" title="Answer in the terminal" onPress={openTerminal} />
+          <Button
+            kind="primary"
+            title="Answer in the terminal"
+            icon={<TerminalWindow size={16} color={t.onAccent} />}
+            onPress={openTerminal}
+          />
         </View>
       );
     }
@@ -914,8 +1068,17 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
     }
   }
 
+  // The agent's queue, each message with the photos and files it was sent
+  // with from here: the queue has only its words, and the paths the desktop
+  // listed under them for one typed there.
+  const left = [...pending];
+  const inQueue = queued.map((text) => {
+    const { words, files } = splitFiles(text);
+    const at = left.findIndex((p) => (p.text ? carries(words, p.text) : !words && files.length > 0 && p.files.length > 0));
+    return { words, named: files, files: at < 0 ? [] : left.splice(at, 1)[0].files };
+  });
   // Sent from here and in neither the conversation nor the agent's queue yet.
-  const unsent = pending.filter((p) => !(p.text && queued.some((q) => carries(splitFiles(q).words, p.text))));
+  const unsent = left;
   // Nothing kept paints at once; a kept conversation waits for the slide.
   const painted = settled || turns.length === 0;
   // The task this chat was started on, not in the conversation yet: its
@@ -923,7 +1086,13 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
   // loading, or the agent not yet reading — see STILL_OPENING — is that
   // message on its way, not news to put above it.
   const opening = seed !== undefined && pending.some((p) => p.key === 0);
-  const statusOf = (p: Pending) => (now - p.at > UNSEEN_MS && !working ? 'unseen' : 'sending');
+  const statusOf = (p: Pending): OutgoingStatus => {
+    const age = now - p.at;
+    if (age <= UNSEEN_MS) return 'sending';
+    if (p.key === 0 && age <= STARTING_FOR_MS) return 'held';
+    if (p.key === 0 && STILL_OPENING.includes(unreadable)) return 'unseen';
+    return working ? 'sending' : 'unseen';
+  };
   const outgoing = (p: Pending) => (
     <Outgoing
       key={p.key}
@@ -931,13 +1100,28 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
       files={p.files}
       status={statusOf(p)}
       onCopy={copy}
-      onDismiss={() => setPending((before) => before.filter((x) => x.key !== p.key))}
+      onDismiss={() => {
+        if (p.key === 0 && task) task.delivery = 'dismissed';
+        setPending((before) => before.filter((x) => x.key !== p.key));
+      }}
     />
   );
   // The working row from the moment a message goes, its dots alone until the
   // agent says what it is doing: it is where the agent's answer will start,
   // and adding it a beat after the message is what made the chat jump.
   const sending = unsent.some((p) => !p.behind && statusOf(p) === 'sending');
+  // The hand-over: a message reaches the conversation a moment before the
+  // desktop says the agent is at work. The row stays across it, as it was —
+  // gone with the sending ring and back with the agent's first word, it moved
+  // the chat twice for one message. It goes once the agent works, answers, or
+  // takes longer than it should.
+  if (seen.yours !== lastYours || seen.sending !== sending) {
+    setSeen({ yours: lastYours, sending });
+    if (lastYours > seen.yours && seen.sending && !sending && !working) setHandedAt(now);
+  }
+  if (handedAt > 0 && working) setHandedAt(0);
+  const replied = turns.slice(lastYours + 1).some((turn) => turn.kind === Turn_Kind.ASSISTANT);
+  const handingOver = handedAt > 0 && !working && !replied && now - handedAt < HAND_OVER_MS;
 
   return (
     <Screen>
@@ -1079,9 +1263,9 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
               indicator: the desktop says the agent is working a moment
               before its transcript has the message that set it off. */}
           {unsent.filter((p) => !p.behind).map(outgoing)}
-          {working || sending ? <Working agent={agent} what={working && worktree && !background ? detail(worktree) : ''} /> : null}
-          {queued.map((text, index) => (
-            <Outgoing key={`q${index}`} text={text} status="queued" onCopy={copy} />
+          {working || sending || handingOver ? <Working key={keptKey} agent={agent} what={working && worktree && !background ? detail(worktree) : ''} details /> : null}
+          {inQueue.map(({ words, named, files }, index) => (
+            <Outgoing key={`q${index}`} text={words} files={files} named={files.length > 0 ? [] : named} status="queued" onCopy={copy} />
           ))}
           {unsent.filter((p) => p.behind).map(outgoing)}
         </KeyboardChatScrollView>
@@ -1193,16 +1377,24 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
         <KeyCommands title="Send" onSend={() => void send()} style={[styles.composer, { paddingBottom: rest }]}>
           {/* The + and / menus: floats hung from the composer's top edge,
               over the chat and the chips, which stay put under them. */}
-          <ComposerMenu open={attaching} style={plusMenu}>
-            <AttachMenu
-              older={canAttach ? undefined : (conn?.host.name ?? 'your Mac')}
-              pasteable={pasteable}
-              onPick={(source) => void attach(source)}
-            />
-          </ComposerMenu>
-          <ComposerMenu open={!attaching && menu.length > 0} style={slashMenu(!tooOld && !background)}>
-            <CommandMenu commands={menu} onPick={(command) => void pick(command)} />
-          </ComposerMenu>
+          <FloatMenu
+            inline={plusMenu}
+            open={attaching}
+            onClose={() => setAttaching(false)}
+            label="Attach"
+            sections={attachSections({
+              older: canAttach ? undefined : (conn?.host.name ?? 'your Mac'),
+              pasteable,
+              onPick: (source) => void attach(source),
+            })}
+          />
+          <FloatMenu
+            inline={slashMenu(!tooOld && !background)}
+            open={!attaching && menu.length > 0}
+            onClose={() => setListing(false)}
+            label="Commands"
+            sections={[{ items: menu.map((command) => ({ ...commandRow(command), onPress: () => void pick(command) })) }]}
+          />
           {!tooOld && !background ? <PlusButton open={attaching} onPress={openAttach} /> : null}
           <View style={[styles.field, files.length > 0 && styles.fieldTray, hearing && styles.fieldHearing]}>
             {files.length > 0 ? (
@@ -1356,18 +1548,6 @@ function join(before: Turn[], more: Turn[]): Turn[] {
   return [...before, ...more];
 }
 
-/** Which card a prompt takes, when it is not a permission. */
-function promptKind(tool: string): 'ask' | 'plan' | undefined {
-  if (tool === 'AskUserQuestion') return 'ask';
-  // Codex's own question form.
-  if (tool === 'request_user_input') return 'ask';
-  // A dialog the desktop read off the agent's screen, with its options —
-  // Codex's "Implement this plan?" among them.
-  if (tool === 'Dialog') return 'ask';
-  if (tool === 'ExitPlanMode') return 'plan';
-  return undefined;
-}
-
 /** A question the agent asks with options, or a plan it wants to go ahead
  * with: answered here and handed to the agent by the desktop. When the
  * desktop cannot take the answer — an older ket, or a wait that ran out —
@@ -1409,7 +1589,12 @@ function Asking({
             {question.subject}
           </Text>
         ) : null}
-        <Button kind="primary" title="Answer in the terminal" onPress={onTerminal} />
+        <Button
+          kind="primary"
+          title="Answer in the terminal"
+          icon={<TerminalWindow size={16} color={t.onAccent} />}
+          onPress={onTerminal}
+        />
       </View>
     );
   }
@@ -1509,6 +1694,7 @@ function Asking({
                   onChangeText={(text) => write(i, text)}
                   placeholder="Or write your own"
                   placeholderTextColor={t.faint}
+                  {...oneLine}
                   editable={idle}
                   style={field}
                 />
@@ -1522,13 +1708,19 @@ function Asking({
           kind="primary"
           title={question.asks.length > 1 ? 'Send answers' : 'Send answer'}
           mark={sentMark}
+          icon={<Send size={16} color={t.onAccent} weight={2.3} />}
           disabled={!idle || !answered}
           onPress={() =>
             void send({ picks: question.asks.map((_, i) => ({ choices: picks[i], other: others[i].trim() })) })
           }
           style={styles.grow}
         />
-        <Button kind="ghost" title="In the terminal" onPress={onTerminal} />
+        <Button
+          title="In the terminal"
+          icon={<TerminalWindow size={16} color={t.text} />}
+          onPress={onTerminal}
+          style={styles.grow}
+        />
       </View>
     </View>
   );
@@ -1590,16 +1782,18 @@ function sentence(text: string): string {
   return /[.!?]$/.test(s) ? s : `${s}.`;
 }
 
-/** The conversation as it is drawn: a run of two or more tool lines as one
- * group, every other turn on its own. Each is keyed by the turn it starts
- * at, so a group the agent is still adding to stays as open as it was. */
+/** The conversation as it is drawn: a run of tool lines — one alone too —
+ * as one group, shut, every other turn on its own. Each is keyed by the turn
+ * it starts at, so a group the agent is still adding to stays as open as it
+ * was, and its first line does not open out and shut again as the second
+ * arrives. */
 function grouped(turns: Turn[]): { at: number; tools?: Turn[] }[] {
   const items: { at: number; tools?: Turn[] }[] = [];
   let at = 0;
   while (at < turns.length) {
     let end = at;
     while (end < turns.length && turns[end].kind === Turn_Kind.TOOL) end += 1;
-    if (end - at >= 2) {
+    if (end > at) {
       items.push({ at, tools: turns.slice(at, end) });
       at = end;
     } else {
@@ -1615,7 +1809,7 @@ function grouped(turns: Turn[]): { at: number; tools?: Turn[] }[] {
  * the whole of it, as it ran, in the terminal. */
 function Tools({ turns, onCopy }: { turns: Turn[]; onCopy: (text: string) => void }) {
   const [open, setOpen] = useState(false);
-  const count = `${turns.length} tool calls`;
+  const count = turns.length === 1 ? '1 tool call' : `${turns.length} tool calls`;
   const names = [...new Set(turns.map((turn) => turn.tool).filter(Boolean))].join(', ');
   return (
     <View style={styles.tools}>
@@ -1734,104 +1928,61 @@ function TurnView({
   }
 }
 
-/** An agent's words: fenced code as a block of its own, inline code in the
- * mono face, the rest as prose — its markdown headings, bullets and emphasis
- * drawn rather than shown as marks. */
+/** An agent's words, read as markdown — see lib/markdown.ts: fenced code as
+ * a block of its own, tables sideways, the rest as prose with its headings,
+ * lists, quotes and emphasis drawn rather than shown as marks. */
 function Words({ text, onCopy }: { text: string; onCopy: (text: string) => void }) {
-  const parts = text.split('```');
-  return (
-    <>
-      {parts.map((part, index) => {
-        if (index % 2 === 1) {
-          const code = part.replace(/^[a-zA-Z0-9_+-]*\n/, '').replace(/\n$/, '');
-          return (
-            <View key={index} style={styles.codeBlock}>
-              <ScrollView horizontal contentContainerStyle={styles.codeBlockInner}>
-                <Text style={styles.codeText}>{code}</Text>
-              </ScrollView>
-              <Pressable
-                accessibilityRole="button"
-                accessibilityLabel="Copy code"
-                hitSlop={6}
-                onPress={() => onCopy(code)}
-                style={({ pressed }) => [styles.codeCopy, pressed && { backgroundColor: t.selection }]}
-              >
-                <Text style={styles.codeCopyText}>Copy</Text>
-              </Pressable>
-            </View>
-          );
-        }
-        return blocks(part).map((block, at) =>
-          block.kind === 'table' ? (
-            <Table key={`${index}-${at}`} table={block} />
-          ) : (
-            <View key={`${index}-${at}`} style={styles.prose}>
-              {lines(block.text).map((line, n) => (
-                <Line key={n} line={line} />
-              ))}
-            </View>
-          ),
-        );
-      })}
-    </>
-  );
+  // Prose in a run of its own, so its lines keep their spacing; code and
+  // tables between.
+  const out: ReactNode[] = [];
+  let prose: Block[] = [];
+  const flush = () => {
+    if (prose.length === 0) return;
+    out.push(
+      <View key={out.length} style={styles.prose}>
+        {prose.map((block, n) => (
+          <Line key={n} block={block} />
+        ))}
+      </View>,
+    );
+    prose = [];
+  };
+  for (const block of markdown(text)) {
+    if (block.kind === 'code') {
+      flush();
+      out.push(<Code key={out.length} code={block.text} onHold={() => onCopy(text)} onCopy={onCopy} />);
+    } else if (block.kind === 'table') {
+      flush();
+      out.push(<Table key={out.length} table={block} onHold={() => onCopy(text)} />);
+    } else {
+      prose.push(block);
+    }
+  }
+  flush();
+  return <>{out}</>;
 }
 
-/** One line of prose, as markdown means it. */
-type ProseLine =
-  | { kind: 'heading'; level: number; text: string }
-  | { kind: 'item'; depth: number; marker: string; text: string }
-  | { kind: 'task'; depth: number; done: boolean; text: string }
-  | { kind: 'quote'; text: string }
-  | { kind: 'rule' }
-  | { kind: 'para'; text: string };
-
-/** The leading spaces before a list marker, as nesting: two to a level. */
-const depthOf = (spaces: string) => Math.min(4, Math.floor(spaces.replace(/\t/g, '  ').length / 2));
-
-/** Reads prose into headings, list items, task items, quotes, rules and
- * paragraphs. A line that carries on a list item or a quote, without a
- * marker of its own, joins it; lines in a row are one paragraph. */
-function lines(text: string): ProseLine[] {
-  const out: ProseLine[] = [];
-  let open: ProseLine | null = null;
-  for (const raw of text.split('\n')) {
-    const line = raw.trimEnd();
-    if (!line.trim()) {
-      open = null;
-      continue;
-    }
-    let m: RegExpMatchArray | null;
-    let next: ProseLine;
-    if ((m = line.match(/^\s*(#{1,6})\s+(.+)$/))) {
-      next = { kind: 'heading', level: m[1].length, text: m[2].replace(/\s+#+$/, '') };
-    } else if (/^\s*([-*_])(\s*\1){2,}\s*$/.test(line)) {
-      next = { kind: 'rule' };
-    } else if ((m = line.match(/^(\s*)[-*+]\s+\[([ xX])\]\s+(.*)$/))) {
-      next = { kind: 'task', depth: depthOf(m[1]), done: m[2] !== ' ', text: m[3] };
-    } else if ((m = line.match(/^(\s*)[-*+]\s+(.*)$/))) {
-      next = { kind: 'item', depth: depthOf(m[1]), marker: '\u2022', text: m[2] };
-    } else if ((m = line.match(/^(\s*)(\d+)[.)]\s+(.*)$/))) {
-      next = { kind: 'item', depth: depthOf(m[1]), marker: `${m[2]}.`, text: m[3] };
-    } else if ((m = line.match(/^\s*>\s?(.*)$/))) {
-      if (open?.kind === 'quote') {
-        open.text += `\n${m[1]}`;
-        continue;
-      }
-      next = { kind: 'quote', text: m[1] };
-    } else if (open && (open.kind === 'item' || open.kind === 'task') && /^\s/.test(line)) {
-      open.text += ` ${line.trim()}`;
-      continue;
-    } else if (open?.kind === 'para') {
-      open.text += `\n${line}`;
-      continue;
-    } else {
-      next = { kind: 'para', text: line };
-    }
-    out.push(next);
-    open = next;
-  }
-  return out;
+/** A fenced block of code, sideways to scroll, with its own Copy. */
+function Code({ code, onHold, onCopy }: { code: string; onHold: () => void; onCopy: (text: string) => void }) {
+  return (
+    <View style={styles.codeBlock}>
+      <ScrollView horizontal>
+        {/* The hold that copies the turn, inside the scroller — see `Table`. */}
+        <Pressable accessibilityHint="Hold to copy" delayLongPress={350} onLongPress={onHold} style={styles.codeBlockInner}>
+          <Text style={styles.codeText}>{code}</Text>
+        </Pressable>
+      </ScrollView>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel="Copy code"
+        hitSlop={6}
+        onPress={() => onCopy(code)}
+        style={({ pressed }) => [styles.codeCopy, pressed && { backgroundColor: t.selection }]}
+      >
+        <Text style={styles.codeCopyText}>Copy</Text>
+      </Pressable>
+    </View>
+  );
 }
 
 /** A heading's size, by level: the body's for the fourth and below. */
@@ -1841,203 +1992,118 @@ const HEADING = [
   { fontSize: 15, lineHeight: 22 },
 ];
 
-/** One line of prose, drawn. A list item hangs its wrapped lines under its
- * words, not its marker. */
-function Line({ line }: { line: ProseLine }) {
-  switch (line.kind) {
+/** One block of prose, drawn; dim inside a quote. A list item hangs its
+ * wrapped lines under its words, not its marker. */
+function Line({ block, dim }: { block: Block; dim?: boolean }) {
+  const color = dim ? { color: t.dim } : null;
+  switch (block.kind) {
     case 'heading':
       return (
-        <Text style={[styles.agentText, styles.strong, HEADING[Math.min(line.level, 3) - 1], line.level <= 2 && styles.headingGap]}>
-          <Inline text={line.text} />
+        <Text style={[styles.agentText, styles.strong, HEADING[Math.min(block.level, 3) - 1], block.level <= 2 && styles.headingGap, color]}>
+          <Runs runs={block.runs} />
         </Text>
       );
     case 'item':
       return (
-        <View style={[styles.item, { paddingLeft: line.depth * 16 }]}>
-          <Text style={[styles.agentText, styles.marker]}>{line.marker}</Text>
-          <Text style={[styles.agentText, styles.itemText]}>
-            <Inline text={line.text} />
+        <View style={[styles.item, { paddingLeft: Math.min(block.depth, 4) * 16 }]}>
+          <Text style={[styles.agentText, styles.marker]}>{block.marker}</Text>
+          <Text style={[styles.agentText, styles.itemText, color]}>
+            <Runs runs={block.runs} />
           </Text>
         </View>
       );
     case 'task':
       return (
-        <View style={[styles.item, { paddingLeft: line.depth * 16 }]}>
-          <View style={[styles.box, line.done && styles.boxDone]}>
-            {line.done ? <Check size={11} color={t.onAccent} weight={3} /> : null}
+        <View style={[styles.item, { paddingLeft: Math.min(block.depth, 4) * 16 }]}>
+          <View style={[styles.box, block.done && styles.boxDone]}>
+            {block.done ? <Check size={11} color={t.onAccent} weight={3} /> : null}
           </View>
-          <Text style={[styles.agentText, styles.itemText, line.done && { color: t.dim }]}>
-            <Inline text={line.text} />
+          <Text style={[styles.agentText, styles.itemText, (block.done || dim) && { color: t.dim }]}>
+            <Runs runs={block.runs} />
           </Text>
         </View>
       );
     case 'quote':
       return (
-        <View style={styles.quote}>
-          <Text style={[styles.agentText, { color: t.dim }]}>
-            <Inline text={line.text} />
-          </Text>
+        <View style={[styles.quote, styles.prose]}>
+          {block.blocks.map((inner, n) =>
+            inner.kind === 'code' ? (
+              <Text key={n} style={[styles.codeText, { color: t.dim }]}>
+                {inner.text}
+              </Text>
+            ) : (
+              <Line key={n} block={inner} dim />
+            ),
+          )}
         </View>
       );
     case 'rule':
       return <View style={styles.rule} />;
-    default:
+    case 'para':
       return (
-        <Text style={styles.agentText}>
-          <Inline text={line.text} />
+        <Text style={[styles.agentText, color]}>
+          <Runs runs={block.runs} />
         </Text>
       );
+    default:
+      // A table in a quote, as its cells' words.
+      return block.kind === 'table' ? (
+        <Text style={[styles.agentText, color]}>
+          {[block.head, ...block.rows].map((row) => row.map(plain).join(' · ')).join('\n')}
+        </Text>
+      ) : null;
   }
 }
 
-/** A line's own markdown: `code`, **strong**, *emphasis* and links. */
-function Inline({ text }: { text: string }) {
+/** Runs of text as markdown marked them: `code`, **strong**, *emphasis*,
+ * ~~struck~~ and links, nested as written. On one line — in a table's cell —
+ * a break is a space. */
+function Runs({ runs, flat }: { runs: Run[]; flat?: boolean }) {
   return (
     <>
-      {text.split(/(`[^`\n]+`)/).map((piece, at) =>
-        piece.startsWith('`') && piece.endsWith('`') && piece.length > 2 ? (
-          <Text key={at} style={styles.inlineCode}>
-            {piece.slice(1, -1)}
-          </Text>
-        ) : (
-          <Emphasis key={at} text={piece} />
-        ),
-      )}
-    </>
-  );
-}
-
-/** A markdown table, read out of the words around it. */
-type TableBlock = { kind: 'table'; head: string[]; align: ('left' | 'center' | 'right')[]; rows: string[][] };
-
-/** A run of an agent's words outside code: prose, or a table. */
-type Block = { kind: 'prose'; text: string } | TableBlock;
-
-/** The rule under a table's header: `|---|:--:|--:|`. */
-const TABLE_RULE = /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?\s*$/;
-
-/** A table row's cells, without the pipes around them. An escaped `\|` is
- * a pipe in a cell; `<br>`, which agents put in cells, keeps it on a line. */
-function cells(line: string): string[] {
-  let row = line.trim().replace(/\\\|/g, '\u0000');
-  if (row.startsWith('|')) row = row.slice(1);
-  if (row.endsWith('|')) row = row.slice(0, -1);
-  return row.split('|').map((cell) =>
-    cell
-      .trim()
-      .replace(/\u0000/g, '|')
-      .replace(/<br\s*\/?>/gi, ' '),
-  );
-}
-
-/** Splits words outside code into prose and tables: a table is a header row,
- * the rule under it, and the rows that follow, each with a pipe in it. */
-function blocks(text: string): Block[] {
-  const lines = text.split('\n');
-  const out: Block[] = [];
-  let prose: string[] = [];
-  const flush = () => {
-    const words = prose.join('\n').trim();
-    if (words) out.push({ kind: 'prose', text: words });
-    prose = [];
-  };
-  for (let at = 0; at < lines.length; at++) {
-    const line = lines[at];
-    if (line.includes('|') && at + 1 < lines.length && TABLE_RULE.test(lines[at + 1])) {
-      const head = cells(line);
-      const align = cells(lines[at + 1]).map((rule) =>
-        rule.startsWith(':') && rule.endsWith(':') ? 'center' : rule.endsWith(':') ? 'right' : 'left',
-      );
-      const rows: string[][] = [];
-      at += 2;
-      while (at < lines.length && lines[at].includes('|') && lines[at].trim()) {
-        const row = cells(lines[at]);
-        rows.push(head.map((_, col) => row[col] ?? ''));
-        at++;
-      }
-      at--;
-      flush();
-      out.push({ kind: 'table', head, align: head.map((_, col) => align[col] ?? 'left'), rows });
-      continue;
-    }
-    prose.push(line);
-  }
-  flush();
-  return out;
-}
-
-/** A table, column by column so each column takes its widest cell, and
- * sideways to scroll when it is wider than the phone. Cells stay on one line,
- * which keeps the rows of every column level with each other.
- *
- * The frame and its rounded clip are on a view around the scroller, not on the
- * scroller itself: `overflow: 'hidden'` on a ScrollView replaces the `scroll`
- * its layout depends on, and the columns are then squeezed to the phone's
- * width and cut off instead of running past it. */
-function Table({ table }: { table: TableBlock }) {
-  return (
-    <View style={styles.table}>
-    <ScrollView horizontal contentContainerStyle={styles.tableInner}>
-      {table.head.map((title, col) => {
-        const align = { textAlign: table.align[col] };
-        return (
-          <View key={col} style={[styles.tableColumn, col > 0 && styles.tableColumnRule]}>
-            <View style={[styles.tableCell, styles.tableHead]}>
-              <Text style={[styles.tableText, styles.strong, align]} numberOfLines={1}>
-                <Inline text={title} />
+      {runs.map((piece, at) => {
+        switch (piece.kind) {
+          case 'text':
+            return <Fragment key={at}>{flat ? piece.text.replace(/\n/g, ' ') : piece.text}</Fragment>;
+          case 'code':
+            return (
+              <Text key={at} style={styles.inlineCode}>
+                {piece.text}
               </Text>
-            </View>
-            {table.rows.map((row, at) => (
-              <View key={at} style={[styles.tableCell, styles.tableRowRule]}>
-                <Text style={[styles.tableText, align]} numberOfLines={1}>
-                  <Inline text={row[col]} />
-                </Text>
-              </View>
-            ))}
-          </View>
-        );
+            );
+          case 'strong':
+          case 'em':
+          case 'struck':
+            return (
+              <Text key={at} style={piece.kind === 'strong' ? styles.strong : piece.kind === 'em' ? styles.emphasis : styles.struck}>
+                <Runs runs={piece.runs} flat={flat} />
+              </Text>
+            );
+          case 'link':
+            return (
+              <Text key={at} style={styles.link} onPress={() => void Linking.openURL(piece.url)}>
+                <Runs runs={piece.runs} flat={flat} />
+              </Text>
+            );
+          case 'break':
+            return <Fragment key={at}>{flat ? ' ' : '\n'}</Fragment>;
+        }
       })}
-    </ScrollView>
-    </View>
-  );
-}
-
-/** Markdown's `**strong**` and `*emphasis*`, drawn without their stars. */
-function Emphasis({ text }: { text: string }) {
-  return (
-    <>
-      {text.split(/(\*\*\*[^*\n]+\*\*\*|\*\*[^*\n]+\*\*|__[^_\n]+__|~~[^~\n]+~~|\*[^*\s][^*\n]*\*)/).map((piece, at) =>
-        piece.length > 6 && piece.startsWith('***') && piece.endsWith('***') ? (
-          <Text key={at} style={[styles.strong, styles.emphasis]}>
-            <Linked text={piece.slice(3, -3)} />
-          </Text>
-        ) : piece.length > 4 && piece.startsWith('~~') && piece.endsWith('~~') ? (
-          <Text key={at} style={styles.struck}>
-            <Linked text={piece.slice(2, -2)} />
-          </Text>
-        ) : piece.length > 4 &&
-          ((piece.startsWith('**') && piece.endsWith('**')) || (piece.startsWith('__') && piece.endsWith('__'))) ? (
-          <Text key={at} style={styles.strong}>
-            <Linked text={piece.slice(2, -2)} />
-          </Text>
-        ) : piece.length > 2 && piece.startsWith('*') && piece.endsWith('*') ? (
-          <Text key={at} style={styles.emphasis}>
-            <Linked text={piece.slice(1, -1)} />
-          </Text>
-        ) : (
-          <Linked key={at} text={piece} />
-        ),
-      )}
     </>
   );
 }
 
-/** A markdown link, `[words](https://…)`, or a bare web address. */
+/** Runs as their words alone. */
+function plain(runs: Run[]): string {
+  return runs.map((piece) => ('runs' in piece ? plain(piece.runs) : piece.kind === 'break' ? ' ' : piece.text)).join('');
+}
+
+/** A web address in a message of yours, `[words](https://…)` or bare. */
 const LINK = /\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)|(https?:\/\/[^\s<>"'`]+)/g;
 
-/** Text with its links made tappable, opened in the phone's browser. A bare
- * address leaves the punctuation that ends its sentence, and markdown's
- * emphasis around it, outside it. */
+/** Your own words with their links made tappable, opened in the phone's
+ * browser, and otherwise as you typed them. A bare address leaves the
+ * punctuation that ends its sentence outside it. */
 function Linked({ text }: { text: string }) {
   const out: ReactNode[] = [];
   let from = 0;
@@ -2062,6 +2128,51 @@ function Linked({ text }: { text: string }) {
   }
   if (from < text.length) out.push(text.slice(from));
   return <>{out}</>;
+}
+
+/** A table, column by column so each column takes its widest cell, and
+ * sideways to scroll when it is wider than the phone. Cells stay on one line,
+ * which keeps the rows of every column level with each other.
+ *
+ * The frame and its rounded clip are on a view around the scroller, not on the
+ * scroller itself: `overflow: 'hidden'` on a ScrollView replaces the `scroll`
+ * its layout depends on, and the columns are then squeezed to the phone's
+ * width and cut off instead of running past it.
+ *
+ * The hold that copies the turn is here, inside the scroller, and not only on
+ * the turn around it. On iOS a scroll view will not start a drag while a view
+ * above it holds the touch, and the turn's Pressable takes every touch as it
+ * lands: a sideways drag only got through when it beat that to the main
+ * thread. A press inside the scroller takes the touch instead, and the scroll
+ * view is free to cancel it and scroll. */
+function Table({ table, onHold }: { table: Extract<Block, { kind: 'table' }>; onHold: () => void }) {
+  return (
+    <View style={styles.table}>
+    <ScrollView horizontal>
+      <Pressable accessibilityHint="Hold to copy" delayLongPress={350} onLongPress={onHold} style={styles.tableInner}>
+      {table.head.map((title, col) => {
+        const align = { textAlign: table.align[col] ?? 'left' };
+        return (
+          <View key={col} style={[styles.tableColumn, col > 0 && styles.tableColumnRule]}>
+            <View style={[styles.tableCell, styles.tableHead]}>
+              <Text style={[styles.tableText, styles.strong, align]} numberOfLines={1}>
+                <Runs runs={title} flat />
+              </Text>
+            </View>
+            {table.rows.map((row, at) => (
+              <View key={at} style={[styles.tableCell, styles.tableRowRule]}>
+                <Text style={[styles.tableText, align]} numberOfLines={1}>
+                  <Runs runs={row[col] ?? []} flat />
+                </Text>
+              </View>
+            ))}
+          </View>
+        );
+      })}
+      </Pressable>
+    </ScrollView>
+    </View>
+  );
 }
 
 /** A message of yours: round all over but the corner nearest the composer,
@@ -2174,6 +2285,19 @@ const styles = StyleSheet.create({
     borderColor: blend(t.backdrop, t.attention, 0.35),
   },
   askTitle: { fontFamily: font.proseSemibold, fontSize: size.body, color: t.text },
+  // A cold session's card: a fact to weigh rather than something waiting on
+  // you, so the float's own ground, not the attention tint.
+  cold: {
+    marginHorizontal: size.gutter,
+    marginBottom: 8,
+    padding: 12,
+    gap: 8,
+    borderRadius: size.radiusCard,
+    backgroundColor: t.elevated,
+    borderWidth: 1,
+    borderColor: t.border,
+  },
+  coldTitle: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   askSubject: { fontFamily: font.code, fontSize: 12.5, lineHeight: 18, color: t.text },
   askLead: { fontFamily: font.prose, fontSize: size.label, lineHeight: 19, color: t.dim },
   askHeader: { fontFamily: font.chrome, fontSize: size.caption, color: t.attention },

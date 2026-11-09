@@ -4,18 +4,22 @@ import {
   forgetHost,
   getCollapsed,
   getDesktop,
+  getHiddenProjects,
   getHost,
   getLastWork,
   getLock,
   getNotify,
+  getPinnedProjects,
   listHosts,
   phoneKey,
   saveCollapsed,
   saveDesktop,
+  saveHiddenProjects,
   saveHost,
   saveLastWork,
   saveLock,
   saveNotify,
+  savePinnedProjects,
   toPaired,
   type LockConfig,
   type SavedHost,
@@ -71,9 +75,13 @@ describe('secure mobile storage', () => {
 
     await saveCollapsed('one', ['project']);
     await saveLastWork('one', { project: 'project', agent: '' });
+    await saveHiddenProjects('one', ['project']);
+    await savePinnedProjects('one', ['project']);
     await forgetHost('one');
     expect(await listHosts()).toEqual([]);
     expect(await getCollapsed('one')).toEqual([]);
+    expect(await getHiddenProjects('one')).toEqual([]);
+    expect(await getPinnedProjects('one')).toEqual([]);
     expect(await getLastWork('one')).toBeNull();
   });
 
@@ -90,6 +98,11 @@ describe('secure mobile storage', () => {
     expect(await getCollapsed('h')).toEqual([]);
     await saveCollapsed('h', ['a', 'b']);
     expect(await getCollapsed('h')).toEqual(['a', 'b']);
+    await saveHiddenProjects('h', ['a', 'elsewhere']);
+    expect(await getHiddenProjects('h')).toEqual(['a', 'elsewhere']);
+    expect(await getPinnedProjects('h')).toEqual([]);
+    await savePinnedProjects('h', ['b']);
+    expect(await getPinnedProjects('h')).toEqual(['b']);
 
     expect(await getNotify()).toEqual(DEFAULT_NOTIFY);
     await saveNotify({ ...DEFAULT_NOTIFY, on: true, checks: false });

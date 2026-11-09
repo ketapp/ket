@@ -271,7 +271,7 @@ fn an_impostor_host_cannot_read_a_paired_phones_handshake() {
 fn a_granted_phone_survives_the_host_restarting() {
     let device = phone();
     let host = paired(&device);
-    let restored = Host::restore(host.id, host.keys().clone(), host.grants().to_vec());
+    let restored = Host::restore(host.keys().clone(), host.grants().to_vec());
     let (host_id, host_public) = (restored.id, restored.public());
     let (_, accepted, phone) = meet(restored, resume_phone(device, host_id, host_public));
     accepted.expect("a restored host still knows the phone");
@@ -282,7 +282,7 @@ fn a_granted_phone_survives_the_host_restarting() {
 fn offers_do_not_survive_the_host_restarting() {
     let mut host = host();
     let offer = host.offer(RELAY, TTL);
-    let restored = Host::restore(host.id, host.keys().clone(), Vec::new());
+    let restored = Host::restore(host.keys().clone(), Vec::new());
     let (_, accepted, phone) = meet(restored, pair_phone(self::phone(), offer));
     assert!(matches!(accepted, Err(Error::OfferGone)));
     assert!(matches!(phone, Err(Error::Refused)));

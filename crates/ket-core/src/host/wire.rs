@@ -9,7 +9,9 @@
 //! This is the local protocol between a window and the host on one machine,
 //! not the phone's. Epic 5b.2 defines that one, encrypted and versioned for
 //! clients that update on their own schedule; this one only ever talks to a
-//! build of ket, and [`PROTOCOL`] is bumped whenever it changes.
+//! build of ket. A window talks to whatever host is running, whichever build
+//! it is: each side logs and skips a message it cannot read, so a message one
+//! side doesn't know costs that feature, never the connection.
 
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
@@ -22,12 +24,11 @@ use crate::agent_status::AgentStatusSnapshot;
 use crate::rate_limits::ProviderSnapshot;
 use crate::terminal::{StopOutcome, TerminalSize, TerminalSpec};
 
-/// Bumped on every incompatible change. A window and a host that disagree do
-/// not talk; hosted terminal opens fail rather than silently losing their
-/// crash-survival guarantee.
+/// Sent in [`Request::Hello`] and [`Reply::Welcome`] and checked by nothing.
 ///
-/// A new request is not an incompatible change: a host logs and skips one it
-/// cannot read, so a window asking an older host for it just gets no answer.
+/// Never change it: hosts built before the check was removed drop a window
+/// whose hello carries anything but 6, and they live as long as their
+/// terminals do.
 pub const PROTOCOL: u32 = 6;
 
 /// Authority granted to a paired phone. Roles are hierarchical.
@@ -83,6 +84,19 @@ pub struct AsleepTab {
     pub since_ms: u64,
     /// How much memory stopping it freed, as the window measured it.
     pub freed_bytes: u64,
+}
+
+/// A relay elsewhere the host links to beside its own, for devices away from
+/// this Mac's networks — see [`crate::config::PhonesConfig::relay`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostedRelay {
+    /// Where it is, as configured.
+    pub url: String,
+    /// Whether the host is registered with it now.
+    pub linked: bool,
+    /// Why the last attempt to link failed, while it is not linked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// A window asking the host for something.
@@ -230,6 +244,18 @@ pub enum Request {
         /// once the window has started waking it.
         error: Option<String>,
     },
+    /// The answer to [`Reply::StartFresh`]: the key of the tab opened beside
+    /// the cold one, sent once its agent has reported itself started, or
+    /// why none was. The host then finds that tab's terminal to answer the
+    /// phone with.
+    FreshResult {
+        /// The request named in [`Reply::StartFresh`].
+        req: u64,
+        /// The fresh tab's pane key, once it is opening.
+        key: Option<String>,
+        /// Why there is none, as the desktop would say it.
+        error: Option<String>,
+    },
     /// The result of handing a phone's failed checks to an agent. The host
     /// waits for this before answering the phone.
     FixChecksResult {
@@ -288,6 +314,330 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         note: Option<String>,
     },
+    /// Something for a worktree's browser tab to do, asked from a terminal
+    /// — `ket browser` — and handed to one window as
+    /// [`Reply::BrowserAction`]. Answered with [`Reply::BrowserAnswer`].
+    Browser {
+        /// Echoed in the answer.
+        req: u64,
+        /// The worktree's id.
+        worktree: String,
+        /// What to do.
+        action: BrowserAction,
+    },
+    /// What a window made of a [`Reply::BrowserAction`]. The host waits for
+    /// this before answering the terminal.
+    BrowserResult {
+        /// The request named in [`Reply::BrowserAction`].
+        req: u64,
+        /// What the page did, or why it could not be done, as the terminal
+        /// is to print it.
+        result: Result<BrowserAnswer, String>,
+    },
+}
+
+/// What `ket browser` asks of a worktree's browser tab — see
+/// [`Request::Browser`]. The tab is the worktree's active Chromium tab, else
+/// its most recent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum BrowserAction {
+    /// Load `url` and wait for it, opening a tab when the worktree has none;
+    /// with no URL, only say what the tab shows.
+    Open {
+        /// Where to go; `None` to stay.
+        #[serde(default)]
+        url: Option<String>,
+    },
+    /// List the worktree's browser tabs.
+    Tabs,
+    /// Go back a page, and wait for it.
+    Back,
+    /// Go forward a page, and wait for it.
+    Forward,
+    /// Load the page again, and wait for it.
+    Reload,
+    /// Save a PNG of the page, and say where.
+    Screenshot {
+        /// The whole page rather than what fits in the tab.
+        #[serde(default)]
+        full_page: bool,
+    },
+    /// What the page has logged to its console, oldest first.
+    Console {
+        /// Only errors.
+        #[serde(default)]
+        errors_only: bool,
+        /// Only what was logged in the last this many milliseconds.
+        #[serde(default)]
+        since_ms: Option<u64>,
+        /// At most this many, the latest.
+        lines: u32,
+    },
+    /// Run JavaScript in the page, and say what it came to.
+    Eval {
+        /// The JavaScript. A promise it comes to is awaited.
+        expression: String,
+    },
+    /// The page's accessibility tree, a node a line, each with a ref the
+    /// actions below take — see [`BrowserTarget::Ref`].
+    Snapshot {
+        /// Only what can be acted on: buttons, links, fields and the like.
+        #[serde(default)]
+        interactive: bool,
+        /// At most this many lines, the first.
+        max: u32,
+    },
+    /// Click an element with the mouse, as a person would: trusted events
+    /// at its centre, once it is scrolled into view and nothing covers it.
+    Click {
+        /// The element.
+        target: BrowserTarget,
+        /// Twice, as a double-click.
+        #[serde(default)]
+        double: bool,
+        /// With the right button.
+        #[serde(default)]
+        right: bool,
+    },
+    /// Put text in a field, in place of what it holds, as typing would; or
+    /// pick a `<select>`'s option by its text or value.
+    Fill {
+        /// The field.
+        target: BrowserTarget,
+        /// What it is to hold.
+        text: String,
+    },
+    /// Type text into whatever has focus.
+    Type {
+        /// What to type.
+        text: String,
+        /// A key down and up for each character, for pages that listen to
+        /// keys rather than to input.
+        #[serde(default)]
+        keys: bool,
+    },
+    /// Press a key, with any modifiers: `Enter`, `Shift+Tab`, `Meta+A`.
+    Press {
+        /// The key, as the person asked for it.
+        key: String,
+    },
+    /// Scroll the page, or an element in it, with the mouse wheel.
+    Scroll {
+        /// The element whose centre the wheel turns at; `None` for the
+        /// page's.
+        #[serde(default)]
+        target: Option<BrowserTarget>,
+        /// Which way, and how far.
+        by: BrowserScroll,
+    },
+    /// Wait until something is true of the page, looking every tenth of a
+    /// second.
+    Wait {
+        /// What.
+        until: BrowserWait,
+        /// How long to wait before saying it never happened, in
+        /// milliseconds.
+        timeout_ms: u64,
+    },
+    /// Start recording the tab to a video, which [`BrowserAction::RecordStop`]
+    /// finishes. A worktree records one tab at a time.
+    RecordStart {
+        /// The longest the video may run, in seconds: it stops itself
+        /// then, and the next stop says what it made.
+        max_seconds: u32,
+    },
+    /// Stop the worktree's recording, and say what it made — see
+    /// [`BrowserAnswer::Recording`].
+    RecordStop,
+    /// Answer the JavaScript dialog the page has open — `alert`, `confirm`,
+    /// `prompt`, or `beforeunload`'s question — and wait for whatever that
+    /// starts.
+    Dialog {
+        /// OK, or Cancel.
+        accept: bool,
+        /// What to put in a prompt's field; `None` leaves it as the page
+        /// filled it in.
+        #[serde(default)]
+        text: Option<String>,
+    },
+}
+
+/// The element a [`BrowserAction`] is aimed at.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserTarget {
+    /// `@eN`: the node [`BrowserAnswer::Snapshot`] gave this number, in the
+    /// document it was taken of.
+    Ref(u32),
+    /// The first element a CSS selector matches.
+    Selector(String),
+}
+
+impl std::fmt::Display for BrowserTarget {
+    /// As the terminal writes it in a message: `@e6`, or `"#save"`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Ref(n) => write!(f, "@e{n}"),
+            Self::Selector(selector) => write!(f, "\"{selector}\""),
+        }
+    }
+}
+
+/// Which way [`BrowserAction::Scroll`] goes, and how far.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserScroll {
+    /// Down this many CSS pixels; `None` for one screen.
+    Down(Option<u32>),
+    /// Up this many CSS pixels; `None` for one screen.
+    Up(Option<u32>),
+    /// All the way down.
+    Bottom,
+    /// All the way up.
+    Top,
+}
+
+/// What [`BrowserAction::Wait`] waits for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserWait {
+    /// The element to be on the page and visible.
+    Shown(BrowserTarget),
+    /// The element to be off the page, or hidden.
+    Gone(BrowserTarget),
+    /// The page to show this text.
+    Text(String),
+    /// The page's address to contain this.
+    Url(String),
+    /// The page to finish loading.
+    Load,
+}
+
+/// What a worktree's browser tab did — see [`Request::BrowserResult`].
+/// Not `Eq`: a recording's length is a float.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum BrowserAnswer {
+    /// The page the tab shows now, once it has loaded or the window has
+    /// stopped waiting for it to.
+    Done {
+        /// Its address.
+        url: String,
+        /// Its title.
+        title: String,
+    },
+    /// The worktree's browser tabs, in the window's order.
+    Tabs {
+        /// Each tab.
+        tabs: Vec<BrowserTab>,
+    },
+    /// Where the window saved the page's PNG — see
+    /// [`crate::capture::save_screenshot`]. The image itself never crosses
+    /// the socket.
+    Screenshot {
+        /// The file, absolute.
+        path: String,
+    },
+    /// What the page logged, oldest first.
+    Console {
+        /// Each message.
+        lines: Vec<ConsoleLine>,
+    },
+    /// What the expression came to: a string as it is, anything else as
+    /// JSON.
+    Value {
+        /// The text, cut short when it was long.
+        value: String,
+        /// How many bytes it was before it was cut; `None` when it was not.
+        #[serde(default)]
+        cut_from: Option<u64>,
+    },
+    /// The page's accessibility tree, in document order.
+    Snapshot {
+        /// The page's address.
+        url: String,
+        /// Its title.
+        title: String,
+        /// Each node shown, a line each.
+        nodes: Vec<SnapshotNode>,
+        /// How many more lines there were past the most asked for.
+        #[serde(default)]
+        cut: u32,
+    },
+    /// The tab is being recorded; [`BrowserAction::RecordStop`] finishes
+    /// the video.
+    RecordingStarted,
+    /// What a recording made, in the files the window wrote — see
+    /// [`crate::capture::new_recording`]. The video itself never crosses the
+    /// socket.
+    Recording {
+        /// The MP4, absolute.
+        video: String,
+        /// A few frames of it as PNGs beside it, in order, the last its
+        /// final frame: for an agent that reads images but not video.
+        frames: Vec<String>,
+        /// How long the video runs.
+        seconds: f64,
+    },
+}
+
+/// A line of [`BrowserAnswer::Snapshot`]: one node of the page's
+/// accessibility tree.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SnapshotNode {
+    /// How far in it is under the lines above it; `0` for the outermost.
+    pub depth: u16,
+    /// What it is: `button`, `link`, `textbox`, `heading`, or `text` for
+    /// text on its own.
+    pub role: String,
+    /// Its accessible name, or the text; empty when it has none.
+    #[serde(default)]
+    pub name: String,
+    /// The number of its ref, `@eN`, which the actions take; `None` for a
+    /// node with no element of its own.
+    #[serde(default)]
+    pub r#ref: Option<u32>,
+    /// What a field holds, when it holds something.
+    #[serde(default)]
+    pub value: Option<String>,
+    /// Its states, each a word: `checked`, `disabled`, `expanded`,
+    /// `level=2`.
+    #[serde(default)]
+    pub states: Vec<String>,
+}
+
+/// A message a page logged to its console, for `ket browser console`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConsoleLine {
+    /// When, in milliseconds since the epoch.
+    pub at_ms: u64,
+    /// When, as `HH:MM:SS` on the Mac's clock: the window knows the time
+    /// zone, and the CLI reads no clock of its own.
+    pub time: String,
+    /// `debug`, `info`, `warning` or `error`.
+    pub level: String,
+    /// What it logged.
+    pub text: String,
+    /// The script it came from.
+    pub source: String,
+    /// The line in that script; `0` when there is none.
+    pub line: u32,
+}
+
+/// One of a worktree's browser tabs, for `ket browser tabs`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserTab {
+    /// What it shows.
+    pub url: String,
+    /// The page's title.
+    pub title: String,
+    /// Whether it is the tab `ket browser` acts on.
+    pub active: bool,
+    /// The JavaScript dialog its page has open, as a terminal says it: `a
+    /// confirm: "Delete 3 files?"`. Every command but `dialog` waits on it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dialog: Option<String>,
 }
 
 /// Who asked for work a window is handed: who its messages name.
@@ -391,6 +741,18 @@ pub enum Reply {
         /// How the program exited, if it has been reaped.
         status: Option<Exit>,
     },
+    /// The network inspector logged a request — see [`crate::network`].
+    ///
+    /// Sent to every window as each request's reply ends, so a Network
+    /// panel showing the worktree adds the row without reading the log
+    /// again. The summary only: a body is read from disk when a tab wants
+    /// it.
+    NetworkRequest {
+        /// The worktree the request's pane belongs to.
+        worktree: String,
+        /// The request, as the log has it.
+        summary: Box<crate::network::store::RequestSummary>,
+    },
     /// An agent in one of the host's terminals reported through its hook.
     ///
     /// Agents the host starts report to the host's own listener, because the
@@ -417,6 +779,11 @@ pub enum Reply {
     Devices {
         /// The paired phones.
         devices: Option<Vec<DeviceEntry>>,
+        /// The relay elsewhere the host links to as well, and how that
+        /// link is doing; absent when there is none, and from a host older
+        /// than #142.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hosted: Option<HostedRelay>,
     },
     /// The answer to [`Request::Revoke`].
     Revoked {
@@ -465,6 +832,22 @@ pub enum Reply {
     WorkTaken {
         /// Whether a window was open to hand it to.
         taken: bool,
+    },
+    /// A phone asked for a fresh session beside a terminal whose session
+    /// went cold, as the window's own Start fresh does — see
+    /// `crate::cold`. Sent to the window showing that terminal, which
+    /// answers with [`Request::FreshResult`].
+    StartFresh {
+        /// Names the request in the answer.
+        req: u64,
+        /// The terminal's pane key.
+        key: String,
+        /// The cold session the phone was shown, which the window checks is
+        /// still the one in the tab.
+        session: String,
+        /// When that session's last request was, which the window checks it
+        /// has made none since.
+        since_ms: u64,
     },
     /// A phone asked for a worktree to be merged, as ket's Merge does. Sent to
     /// one window, which runs its own merge on it.
@@ -554,6 +937,24 @@ pub enum Reply {
         serving: bool,
         /// Why the switch did not take.
         error: Option<String>,
+    },
+    /// `ket browser` asked something of a worktree's browser tab. Sent to
+    /// one window — the one showing the worktree's agent, else the first —
+    /// which does it and answers with [`Request::BrowserResult`].
+    BrowserAction {
+        /// Used to return the result.
+        req: u64,
+        /// The worktree's id.
+        worktree: String,
+        /// What to do.
+        action: BrowserAction,
+    },
+    /// The answer to [`Request::Browser`].
+    BrowserAnswer {
+        /// From the request.
+        req: u64,
+        /// What the page did, or why it could not be done.
+        result: Result<BrowserAnswer, String>,
     },
     /// What has a terminal's foreground changed.
     Foreground {
@@ -751,4 +1152,176 @@ pub fn read(reader: &mut impl Read) -> io::Result<Frame> {
 pub fn send(writer: &mut impl Write, frame: &[u8]) -> io::Result<()> {
     writer.write_all(frame)?;
     writer.flush()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Whether each of `actions` reads back as itself.
+    fn round_trip(actions: &[BrowserAction]) {
+        for action in actions {
+            let json = serde_json::to_string(action).unwrap();
+            let back: BrowserAction = serde_json::from_str(&json).unwrap();
+            assert_eq!(&back, action, "{json}");
+        }
+    }
+
+    #[test]
+    fn a_device_list_from_a_host_before_relays_elsewhere_still_reads() {
+        let old = r#"{"type":"devices","devices":[]}"#;
+        let Reply::Devices { devices, hosted } = serde_json::from_str(old).unwrap() else {
+            panic!("not a device list");
+        };
+        assert_eq!(devices.map(|devices| devices.len()), Some(0));
+        assert!(hosted.is_none());
+
+        let hosted = HostedRelay {
+            url: "wss://relay.example.test".into(),
+            linked: false,
+            error: Some("no answer".into()),
+        };
+        let json = serde_json::to_string(&Reply::Devices {
+            devices: None,
+            hosted: Some(hosted.clone()),
+        })
+        .unwrap();
+        let Reply::Devices { hosted: back, .. } = serde_json::from_str(&json).unwrap() else {
+            panic!("not a device list");
+        };
+        assert_eq!(back, Some(hosted));
+    }
+
+    #[test]
+    fn a_snapshot_crosses_the_wire_intact() {
+        round_trip(&[BrowserAction::Snapshot {
+            interactive: true,
+            max: 400,
+        }]);
+        let answer = BrowserAnswer::Snapshot {
+            url: "http://localhost:3000/".to_owned(),
+            title: "Sign in".to_owned(),
+            nodes: vec![SnapshotNode {
+                depth: 1,
+                role: "checkbox".to_owned(),
+                name: "Remember me".to_owned(),
+                r#ref: Some(3),
+                value: None,
+                states: vec!["checked".to_owned()],
+            }],
+            cut: 12,
+        };
+        let json = serde_json::to_string(&answer).unwrap();
+        assert!(json.contains(r#""ref":3"#), "{json}");
+        assert_eq!(
+            serde_json::from_str::<BrowserAnswer>(&json).unwrap(),
+            answer
+        );
+    }
+
+    #[test]
+    fn clicks_and_fills_cross_the_wire_intact() {
+        round_trip(&[
+            BrowserAction::Click {
+                target: BrowserTarget::Ref(6),
+                double: true,
+                right: false,
+            },
+            BrowserAction::Fill {
+                target: BrowserTarget::Selector("#email".to_owned()),
+                text: "brad@example.com".to_owned(),
+            },
+        ]);
+        assert_eq!(BrowserTarget::Ref(6).to_string(), "@e6");
+        assert_eq!(
+            BrowserTarget::Selector("#save".to_owned()).to_string(),
+            "\"#save\""
+        );
+    }
+
+    #[test]
+    fn keys_cross_the_wire_intact() {
+        round_trip(&[
+            BrowserAction::Type {
+                text: "hello".to_owned(),
+                keys: true,
+            },
+            BrowserAction::Press {
+                key: "Shift+Tab".to_owned(),
+            },
+        ]);
+    }
+
+    #[test]
+    fn recordings_cross_the_wire_intact() {
+        round_trip(&[
+            BrowserAction::RecordStart { max_seconds: 120 },
+            BrowserAction::RecordStop,
+        ]);
+        for answer in [
+            BrowserAnswer::RecordingStarted,
+            BrowserAnswer::Recording {
+                video: "/cache/recordings/recording-1-0.mp4".to_owned(),
+                frames: vec!["/cache/recordings/recording-1-0-1.png".to_owned()],
+                seconds: 4.25,
+            },
+        ] {
+            let json = serde_json::to_string(&answer).unwrap();
+            assert_eq!(
+                serde_json::from_str::<BrowserAnswer>(&json).unwrap(),
+                answer,
+                "{json}"
+            );
+        }
+    }
+
+    #[test]
+    fn scrolls_and_waits_cross_the_wire_intact() {
+        round_trip(&[
+            BrowserAction::Scroll {
+                target: None,
+                by: BrowserScroll::Down(None),
+            },
+            BrowserAction::Scroll {
+                target: Some(BrowserTarget::Ref(2)),
+                by: BrowserScroll::Up(Some(300)),
+            },
+            BrowserAction::Scroll {
+                target: None,
+                by: BrowserScroll::Bottom,
+            },
+            BrowserAction::Wait {
+                until: BrowserWait::Gone(BrowserTarget::Selector(".spinner".to_owned())),
+                timeout_ms: 10_000,
+            },
+            BrowserAction::Wait {
+                until: BrowserWait::Load,
+                timeout_ms: 500,
+            },
+        ]);
+    }
+
+    #[test]
+    fn dialogs_cross_the_wire_intact() {
+        round_trip(&[
+            BrowserAction::Dialog {
+                accept: true,
+                text: Some("Sam".to_owned()),
+            },
+            BrowserAction::Dialog {
+                accept: false,
+                text: None,
+            },
+        ]);
+        // A tab from a window that names no dialog has none.
+        let tab: BrowserTab =
+            serde_json::from_str(r#"{"url":"about:blank","title":"","active":true}"#).unwrap();
+        assert_eq!(tab.dialog, None);
+        let open = BrowserTab {
+            dialog: Some("an alert: \"Saved\"".to_owned()),
+            ..tab
+        };
+        let json = serde_json::to_string(&open).unwrap();
+        assert_eq!(serde_json::from_str::<BrowserTab>(&json).unwrap(), open);
+    }
 }

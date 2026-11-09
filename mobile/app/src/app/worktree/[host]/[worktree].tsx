@@ -1,14 +1,15 @@
 'use no memo'; // Reads a live HostConnection — see lib/hosts.ts.
 
-// One worktree: what it has changed since its base, and how to land it —
-// merged from here, or pushed and opened as a pull request — docked at the
-// foot. Once a pull request is open, where it stands sits over the changes
-// and the foot hands its checks or comments to the agent. What the agent is
-// waiting on, when it is waiting, and the comments on its diff waiting to go
-// to the agent, each have their card above. Everything else the worktree
-// offers — its terminal, a new session, pinning, deleting, the rest of the
-// pull request's actions — waits in the bar's menu, as the desktop's
-// worktree menu has it.
+// One worktree: its tabs, what it has changed since its base, and how to
+// land it — merged from here, or pushed and opened as a pull request —
+// docked at the foot. The tabs come first, as the desktop's tab strip has
+// them: each chat, each shell, each asleep tab, and a new session or shell.
+// Once a pull request is open, where it stands sits over the changes and the
+// foot hands its checks or comments to the agent. What the agent is waiting
+// on, when it is waiting, and the comments on its diff waiting to go to the
+// agent, each have their card above. Everything else the worktree offers —
+// pinning, deleting, the rest of the pull request's actions — waits in the
+// bar's menu, as the desktop's worktree menu has it.
 
 import {
   Activity,
@@ -19,13 +20,14 @@ import {
   type PullRequestMergeMethod,
   type PullRequestSummary,
   PullRequestSummary_State,
+  type WorktreeSummary,
 } from '@ket/remote';
 import { router, useIsFocused, useLocalSearchParams } from 'expo-router';
 import { useEffect, useRef, useState } from 'react';
 import { Alert, Linking, Pressable, ScrollView, StyleSheet, Text, View, type ViewInstance } from 'react-native';
 
 import { ConnectionHelp } from '../../../components/ConnectionHelp';
-import { FloatMenu, type MenuItem, type MenuSection, type Place, placeOf } from '../../../components/FloatMenu';
+import { FloatMenu, type MenuSection, type Place, placeOf } from '../../../components/FloatMenu';
 import { RiskBadge } from '../../../components/Risk';
 import { worktreeMenu } from '../../../components/WorktreeList';
 import {
@@ -40,8 +42,31 @@ import {
   PullRequestGlyph,
   TerminalWindow,
 } from '../../../components/icons';
-import { Banner, Bar, Button, Card, Heading, IconButton, IconCluster, Prose, Row, Screen } from '../../../components/ui';
-import { ASLEEP, WAKING, agentTerminal, asleepName, detail, everyWorktree } from '../../../lib/activity';
+import {
+  Banner,
+  Bar,
+  Button,
+  Card,
+  Heading,
+  IconButton,
+  IconCluster,
+  MARK_GAP,
+  MARK_SLOT,
+  Prose,
+  ROW_INSET,
+  Row,
+  Screen,
+} from '../../../components/ui';
+import {
+  ASLEEP,
+  WAKING,
+  agentTerminal,
+  asleepName,
+  detail,
+  everyWorktree,
+  stateOf,
+  terminalName,
+} from '../../../lib/activity';
 import { checkWord, checksInOrder, prLine } from '../../../lib/checks';
 import type { HostConnection } from '../../../lib/connection';
 import { useHost } from '../../../lib/hosts';
@@ -49,6 +74,7 @@ import { confirmIdentity } from '../../../lib/lock';
 import { askMerge, prActions } from '../../../lib/pr-actions';
 import { commentsSaid, review, sendReview, useReview } from '../../../lib/review';
 import { agentLabel, font, size, t } from '../../../lib/theme';
+import { useNow } from '../../../lib/usage';
 
 export default function Worktree() {
   const { host: hostId, worktree: raw } = useLocalSearchParams<{ host: string; worktree: string }>();
@@ -132,9 +158,7 @@ export default function Worktree() {
     await conn.awaitTerminal(woke.terminalId);
     router.push(`/session/${hostId}/${woke.terminalId.toString()}`);
   };
-  const canWake = conn !== null && conn.hostMinor >= 23;
   const agentName = worktree.agent ? agentLabel(worktree.agent) : 'The agent';
-  const live = worktree.terminals.filter((x) => !x.closed);
   const blocked = worktree.activity === Activity.BLOCKED;
   const failed = worktree.activity === Activity.FAILED;
   // The newest prompt; the list since 1.13, the single field from older desktops.
@@ -260,29 +284,10 @@ export default function Worktree() {
     );
   }
 
-  // The bar's menu: into the worktree's terminal or a new one first, then
-  // what holding its row on Worktrees offers, less what the foot already has.
+  // The bar's menu: what holding its row on Worktrees offers, less what the
+  // foot already has. Its tabs and a new one are in their card.
   const sections: MenuSection[] = [];
   if (conn) {
-    const first: MenuItem[] = [];
-    const terminal = agentTerm ?? live[0];
-    if (terminal) {
-      first.push({
-        key: 'terminal',
-        label: 'Open the terminal',
-        icon: <TerminalWindow size={17} color={t.dim} />,
-        onPress: () => open(terminal.id),
-      });
-    }
-    if (conn.hostMinor >= 15) {
-      first.push({
-        key: 'new',
-        label: 'New session or shell',
-        icon: <Plus size={17} color={t.dim} />,
-        onPress: () => router.push(`/new/${hostId}?worktree=${encodeURIComponent(id)}`),
-      });
-    }
-    if (first.length > 0) sections.push({ items: first });
     // Deleted from here: this screen has nothing left to show, so it goes
     // back at once; a refusal is said in its alert wherever that lands.
     const going = (_id: string, away: boolean) => {
@@ -375,28 +380,7 @@ export default function Worktree() {
           </Banner>
         ) : null}
 
-        {worktree.asleep.length > 0 ? (
-          <Card>
-            <Heading count={worktree.asleep.length}>Asleep</Heading>
-            {worktree.asleep.map((tab) => (
-              <Row
-                key={tab.key}
-                mark={tab.agent ? <AgentMark agent={tab.agent} size={16} /> : null}
-                title={asleepName(tab)}
-                detail={
-                  waking === tab.key
-                    ? 'Waking on your Mac…'
-                    : tab.sinceMs > 0n
-                      ? `Asleep since ${new Date(Number(tab.sinceMs)).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })} · ${Math.round(Number(tab.freedBytes) / 1_048_576)} MB freed`
-                      : 'Stopped with ket’s host · tap to start it again'
-                }
-                state={waking === tab.key ? WAKING : ASLEEP}
-                chevron={canWake}
-                onPress={canWake ? () => void wake(tab.key) : undefined}
-              />
-            ))}
-          </Card>
-        ) : null}
+        {conn ? <Tabs conn={conn} worktree={worktree} waking={waking} onWake={(key) => void wake(key)} /> : null}
 
         {pr ? <PullRequest pr={pr} said={actions.said} /> : null}
 
@@ -460,6 +444,108 @@ export default function Worktree() {
       />
     </Screen>
   );
+}
+
+/** The worktree's tabs, in the desktop's order: each chat opens its
+ * conversation, each shell its terminal, and an asleep tab is woken first.
+ * Then a new session or shell. What each is doing is said from desktop
+ * 1.29; before that, only what it is. */
+function Tabs({
+  conn,
+  worktree,
+  waking,
+  onWake,
+}: {
+  conn: HostConnection;
+  worktree: WorktreeSummary;
+  waking: string;
+  onWake: (key: string) => void;
+}) {
+  const now = useNow();
+  const hostId = conn.host.id;
+  const live = worktree.terminals.filter((x) => !x.closed);
+  const knows = conn.hostMinor >= 29;
+  const canWake = conn.hostMinor >= 23;
+  const adds = conn.hostMinor >= 15;
+  const count = live.length + worktree.asleep.length;
+  if (count === 0 && !adds) return null;
+
+  return (
+    <Card style={styles.list}>
+      <Heading count={count > 0 ? count : undefined}>Tabs</Heading>
+      {live.map((terminal) => {
+        const state = knows ? stateOf(terminal.activity) : undefined;
+        // Claude's agent view typed into a shell is Claude's all the same:
+        // its sessions are in the chat.
+        if (terminal.agent || terminal.agentView) {
+          const agent = terminal.agent || 'claude';
+          return (
+            <Row
+              key={terminal.id.toString()}
+              mark={<AgentMark agent={agent} size={16} />}
+              title={terminalName(terminal)}
+              detail={knows && !state ? `${agentLabel(agent)} · ready` : agentLabel(agent)}
+              state={state}
+              chevron
+              onPress={() => router.push(`/session/${hostId}/${terminal.id.toString()}`)}
+            />
+          );
+        }
+        const since = terminal.runningSinceMs > 0n ? ` for ${runningFor(terminal.runningSinceMs, now)}` : '';
+        return (
+          <Row
+            key={terminal.id.toString()}
+            mark={<TerminalWindow size={17} color={t.dim} />}
+            title={terminal.running || terminalName(terminal)}
+            detail={terminal.running ? `Terminal · running${since}` : 'Terminal'}
+            state={state}
+            chevron
+            onPress={() => router.push(`/terminal/${hostId}/${terminal.id.toString()}`)}
+          />
+        );
+      })}
+      {worktree.asleep.map((tab) => (
+        <Row
+          key={tab.key}
+          faded
+          mark={tab.agent ? <AgentMark agent={tab.agent} size={16} /> : null}
+          title={asleepName(tab)}
+          detail={
+            waking === tab.key
+              ? 'Waking on your Mac…'
+              : tab.sinceMs > 0n
+                ? `Asleep since ${new Date(Number(tab.sinceMs)).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })} · ${Math.round(Number(tab.freedBytes) / 1_048_576)} MB freed`
+                : 'Stopped with ket’s host · tap to start it again'
+          }
+          detailColor={t.faint}
+          state={waking === tab.key ? WAKING : ASLEEP}
+          chevron={canWake}
+          onPress={canWake ? () => onWake(tab.key) : undefined}
+        />
+      ))}
+      {adds ? (
+        <Pressable
+          accessibilityRole="button"
+          onPress={() => router.push(`/new/${hostId}?worktree=${encodeURIComponent(worktree.id)}`)}
+          style={({ pressed }) => [styles.add, pressed && { backgroundColor: t.selection }]}
+        >
+          <View style={styles.addMark}>
+            <Plus size={16} color={t.dim} />
+          </View>
+          <Text style={styles.addText}>New session or shell</Text>
+        </Pressable>
+      ) : null}
+    </Card>
+  );
+}
+
+/** How long a program has been running, in a few characters. */
+function runningFor(since: bigint, now: number): string {
+  const seconds = Math.max(0, Math.floor((now - Number(since)) / 1000));
+  if (seconds < 60) return 'under a minute';
+  if (seconds < 3600) return `${Math.floor(seconds / 60)} min`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)} h`;
+  return `${Math.floor(seconds / 86400)} d`;
 }
 
 /** A pull request's actions, as the foot offers them: what is being done,
@@ -682,5 +768,17 @@ const styles = StyleSheet.create({
   // In from the edge a row's name starts at.
   more: { minHeight: size.rowSm, justifyContent: 'center', paddingHorizontal: 14, borderRadius: size.radiusRow },
   moreText: { fontFamily: font.prose, fontSize: size.detail, color: t.dim },
+  // A row's mark and name, a little shorter: an action, not a tab.
+  add: {
+    minHeight: 46,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: MARK_GAP,
+    paddingLeft: ROW_INSET,
+    paddingRight: 12,
+    borderRadius: size.radiusRow,
+  },
+  addMark: { width: MARK_SLOT, alignItems: 'center' },
+  addText: { fontFamily: font.prose, fontSize: size.body, color: t.dim },
   fileLines: { fontFamily: font.chrome, fontSize: 12, marginLeft: 8 },
 });

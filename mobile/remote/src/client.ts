@@ -30,7 +30,7 @@ import {
 import { Session } from './session.ts';
 
 export const MAJOR = 1;
-export const MINOR = 26;
+export const MINOR = 29;
 
 const MAGIC = new TextEncoder().encode('KET1');
 const MODE_PAIR = 1;

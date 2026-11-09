@@ -1,0 +1,125 @@
+[package]
+name = "ket-chromium"
+description = "Chromium, embedded: the Chromium Embedded Framework loaded into ket.app, each browser a native child view, and its DevTools protocol reached in process."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+# Off by default, so CI's `cargo check/clippy/test --workspace` and a plain
+# build never download CEF or compile its C++ wrapper (that needs cmake and
+# Ninja). Without it this crate is empty. ket-ui turns it on with its own
+# `chromium` feature.
+cef = [
+    "dep:cef",
+    "dep:block2",
+    "dep:chromiumoxide_cdp",
+    "dep:chromiumoxide_types",
+    "dep:image",
+    "dep:objc2",
+    "dep:objc2-app-kit",
+    "dep:objc2-av-foundation",
+    "dep:objc2-core-foundation",
+    "dep:objc2-core-media",
+    "dep:objc2-core-video",
+    "dep:objc2-foundation",
+    "dep:serde",
+    "dep:serde_json",
+    "dep:tokio",
+    "dep:tracing",
+]
+
+[dependencies]
+chromiumoxide_cdp = { workspace = true, optional = true }
+chromiumoxide_types = { workspace = true, optional = true }
+# A recording's frames: the screencast's JPEGs decoded, its key frames written
+# as PNG. The version ket-ui and gpui already have, with only those two codecs.
+image = { version = "0.25", default-features = false, optional = true, features = [
+    "jpeg",
+    "png",
+] }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
+
+# The same objc2 crates and versions as ket-ui's, so the `NSView` a caller
+# hands in is the type this crate takes. All already in the tree.
+[target.'cfg(target_os = "macos")'.dependencies]
+cef = { workspace = true, optional = true }
+block2 = { version = "0.6.2", optional = true }
+# `exception`, as ket-ui has it: AVFoundation reports misuse by throwing, and
+# `record` catches what it throws rather than letting it take ket down.
+objc2 = { version = "0.6.3", optional = true, features = ["exception"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, optional = true, features = [
+    "std",
+    "NSApplication",
+    "NSResponder",
+    "NSView",
+] }
+objc2-foundation = { version = "0.3.2", default-features = false, optional = true, features = [
+    "std",
+    "NSArray",
+    "NSGeometry",
+    # From here on, `record`'s: the writer's settings and file URL, its
+    # errors, the CoreVideo keys bridged, and the screencast's base64.
+    "objc2-core-foundation",
+    "NSData",
+    "NSDictionary",
+    "NSError",
+    "NSObject",
+    "NSString",
+    "NSURL",
+    "NSValue",
+] }
+# The run-loop timer that pumps CEF's message loop; see `src/pump.rs`.
+objc2-core-foundation = { version = "0.3.2", default-features = false, optional = true, features = [
+    "std",
+    "block2",
+    "CFDate",
+    "CFRunLoop",
+] }
+# Recording a page to MP4 with macOS's own H.264 encoder: AVFoundation's
+# asset writer, fed CoreVideo pixel buffers stamped with CoreMedia times. See
+# `src/record/writer.rs`. `AVAsset` and `AVAssetTrack` are for its test, which
+# reads the file back the way a player would.
+objc2-av-foundation = { version = "0.3.2", default-features = false, optional = true, features = [
+    "std",
+    "block2",
+    "objc2-core-foundation",
+    "objc2-core-media",
+    "objc2-core-video",
+    "AVAsset",
+    "AVAssetTrack",
+    "AVAssetWriter",
+    "AVAssetWriterInput",
+    "AVMediaFormat",
+    "AVVideoSettings",
+] }
+objc2-core-media = { version = "0.3.2", default-features = false, optional = true, features = [
+    "std",
+    "CMTime",
+] }
+objc2-core-video = { version = "0.3.2", default-features = false, optional = true, features = [
+    "std",
+    "CVBase",
+    "CVBuffer",
+    "CVImageBuffer",
+    "CVPixelBuffer",
+    "CVPixelBufferPool",
+    "CVReturn",
+] }
+
+# What runs inside `ket Helper.app` and its GPU, Renderer, Plugin and Alerts
+# variants: Chromium's subprocesses, sandboxed. macOS requires them to be
+# separate bundles; the binary in each is this one.
+[[bin]]
+name = "ket-chromium-helper"
+path = "src/bin/ket-chromium-helper.rs"
+required-features = ["cef"]
+
+[lints]
+workspace = true

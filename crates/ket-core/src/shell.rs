@@ -2,7 +2,7 @@
 //!
 //! An agent used to be spawned directly: `exec` the binary, hand it the pty,
 //! done. That is correct only for commands that are files on `PATH`, and a
-//! surprising share of what people actually type is not. `claude-personal` may
+//! surprising share of what people actually type is not. `claude-alt` may
 //! be a zsh alias; `claude` may be a function, or an `nvm`/`mise`/`asdf` shim
 //! that only exists once a shell has sourced its own configuration. Spawning
 //! those directly fails with "no such file or directory", and no amount of
@@ -342,8 +342,8 @@ pub fn find_on_login_path(binary: &str) -> Option<PathBuf> {
 /// login shell's prompt.
 ///
 /// What [`probe`] cannot answer. A launch line is shell text, and shell text
-/// can set variables on its way to the binary: `claude-personal` may be an
-/// alias for `CLAUDE_CONFIG_DIR=~/.claude-personal claude`, after which every
+/// can set variables on its way to the binary: `claude-alt` may be an
+/// alias for `CLAUDE_CONFIG_DIR=~/.claude-alt claude`, after which every
 /// session that agent writes lands in a directory ket's own environment never
 /// names. Parsing the alias would be a guess at shell syntax. Asking the
 /// shell is the answer — and the shell inherits ket's environment, so a value

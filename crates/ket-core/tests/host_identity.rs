@@ -60,7 +60,6 @@ fn save_then_load_restores_every_grant() {
         paired_at: 1_700_000_100,
     };
     let host = Host::restore(
-        generated.id,
         generated.keys().clone(),
         vec![phone_a.clone(), phone_b.clone()],
     );
@@ -125,4 +124,53 @@ fn saved_files_are_owner_only() {
         .mode()
         & 0o777;
     assert_eq!(mode, 0o600);
+}
+
+#[test]
+fn an_identity_saved_with_a_random_id_takes_the_one_its_key_gives_and_keeps_its_phones() {
+    let sandbox = Sandbox::new("identity-random-id");
+    let dir = sandbox.path("remote");
+    let generated = Host::generate().expect("generate");
+    let phone = Grant {
+        device: vec![1, 2, 3, 4],
+        name: "My iPhone".to_owned(),
+        paired_at: 1_700_000_000,
+    };
+    save_in(
+        &dir,
+        &Host::restore(generated.keys().clone(), vec![phone.clone()]),
+    )
+    .unwrap();
+    // As ket wrote it before ids came from the key.
+    let path = dir.join("identity.json");
+    let mut stored: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    stored["id"] = "AAAAAAAAAAAAAAAAAAAAAA".into();
+    std::fs::write(&path, serde_json::to_vec(&stored).unwrap()).unwrap();
+
+    let host = load_or_create_in(&dir).unwrap();
+    assert_eq!(host.id, ket_remote::host_id(&host.public()));
+    assert_eq!(host.keys().public, generated.keys().public);
+    assert_eq!(host.grants()[0].device, phone.device);
+    // And written back, so the file agrees with the host.
+    let rewritten: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_ne!(rewritten["id"], "AAAAAAAAAAAAAAAAAAAAAA");
+    assert_eq!(load_in(&dir).unwrap().unwrap().id, host.id);
+}
+
+#[test]
+fn a_reach_code_names_the_host_and_every_address_escaped() {
+    let code = ket_core::host::reach_code(
+        &[0xfb; 16],
+        &[
+            "ws://Studio.local:7979".to_owned(),
+            "wss://relay.example.test/a,b".to_owned(),
+        ],
+    );
+    assert_eq!(
+        code,
+        "ket://reach?host=-_v7-_v7-_v7-_v7-_v7-w\
+         &at=ws%3A%2F%2FStudio.local%3A7979%20wss%3A%2F%2Frelay.example.test%2Fa%2Cb"
+    );
 }

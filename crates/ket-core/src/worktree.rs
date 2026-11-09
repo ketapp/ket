@@ -500,6 +500,8 @@ pub struct EconomyPolicy {
     /// Whether a successful command's output is filtered before the model
     /// reads it — see `crate::filter`.
     pub command_filter: Option<bool>,
+    /// Which of ket's styles the session writes in — see `crate::style`.
+    pub style: Option<String>,
 }
 
 impl TokenReduction {
@@ -572,6 +574,7 @@ impl TokenReduction {
         if provider.command_filter.is_some() {
             policy.command_filter = provider.command_filter;
         }
+        overlay!(style);
         // A local agent's name already says which model it runs, and a
         // second `--model` from the pack would replace it with one this Mac
         // may not have.
@@ -910,6 +913,16 @@ pub fn economy_launch(
         if let Some(window) = compact {
             launch.args.extend(autocompact_args(window));
         }
+        // Named by path, and only a style ket has: the pack loader refuses
+        // any other, and a file that is not there would stop the session
+        // starting. Whoever launches writes it first — see
+        // `crate::style::ensure`.
+        if let Some(style) = policy.style.as_deref().filter(|s| crate::style::exists(s)) {
+            launch.args.extend([
+                "--append-system-prompt-file".to_owned(),
+                crate::style::path(style).display().to_string(),
+            ]);
+        }
         if let Some(model) = policy.subagent_model {
             launch
                 .env
@@ -960,6 +973,7 @@ pub fn apply_economy(spec: &mut crate::config::AgentSpec, worktree: &Worktree) {
         worktree.token_reduction_pack_id.as_deref(),
     );
     let level = token_reduction(resolved);
+    ensure_style(&spec.name, level);
     let launch = economy_launch(&spec.name, level, None, None, None);
     // Grok's model and effort flags belong to `grok agent`, and `stdio`
     // rejects them, so they go in before the transport.
@@ -970,6 +984,20 @@ pub fn apply_economy(spec: &mut crate::config::AgentSpec, worktree: &Worktree) {
         spec.args.extend(launch.args);
     }
     spec.env.extend(launch.env);
+}
+
+/// Writes the style `level` asks `agent` to write in, before a launch names
+/// its file.
+///
+/// A failure is logged rather than returned: the launch still goes, and
+/// Claude Code says plainly that the file is missing, which is a better
+/// failure than a session that silently never started.
+pub fn ensure_style(agent: &str, level: &TokenReduction) {
+    if let Some(style) = level.policy_for(agent).style
+        && let Err(error) = crate::style::ensure(&style)
+    {
+        tracing::warn!(%error, style, "economy: could not write the style file");
+    }
 }
 
 /// A worktree git knows about that ket's registry does not.
@@ -1587,6 +1615,62 @@ mod tests {
                 .env
                 .contains_key(crate::filter::ENV)
         );
+    }
+
+    #[test]
+    fn a_style_is_appended_to_claudes_system_prompt_by_path() {
+        let mut level = level_with_everything();
+        assert!(
+            !economy_launch("claude", &level, None, None, None)
+                .args
+                .iter()
+                .any(|a| a == "--append-system-prompt-file")
+        );
+
+        level.claude.style = Some(crate::style::TERSE.to_owned());
+        let launch = economy_launch("claude", &level, None, None, None);
+        let at = launch
+            .args
+            .iter()
+            .position(|a| a == "--append-system-prompt-file")
+            .expect("the style flag");
+        assert_eq!(
+            launch.args[at + 1],
+            crate::style::path(crate::style::TERSE)
+                .display()
+                .to_string()
+        );
+    }
+
+    #[test]
+    fn a_style_ket_does_not_have_names_no_file() {
+        // The loader refuses one, but a level built some other way must
+        // still never point a session at a file that will not exist.
+        let mut level = level_with_everything();
+        level.claude.style = Some("caveman".to_owned());
+        let launch = economy_launch("claude", &level, None, None, None);
+        assert!(
+            !launch
+                .args
+                .iter()
+                .any(|a| a == "--append-system-prompt-file")
+        );
+    }
+
+    #[test]
+    fn a_style_reaches_no_agent_but_claude() {
+        let mut level = level_with_everything();
+        level.claude.style = Some(crate::style::TERSE.to_owned());
+        level.codex.style = Some(crate::style::TERSE.to_owned());
+        for agent in ["codex", "grok", "opencode"] {
+            assert!(
+                !economy_launch(agent, &level, None, None, None)
+                    .args
+                    .iter()
+                    .any(|a| a.contains("append-system-prompt")),
+                "{agent}"
+            );
+        }
     }
 
     #[test]

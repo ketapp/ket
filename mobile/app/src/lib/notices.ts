@@ -23,7 +23,7 @@ import { router } from 'expo-router';
 import { useEffect, useState } from 'react';
 import { AppState, Linking, Platform } from 'react-native';
 
-import { agentOf, everyWorktree } from './activity';
+import { agentOf, agentTerminal, everyWorktree } from './activity';
 import { connection, type HostConnection } from './connection';
 import { DEFAULT_NOTIFY, type NotifyConfig, getNotify, listHosts, saveNotify } from './store';
 import { agentLabel } from './theme';
@@ -158,8 +158,13 @@ export function compare(
     const subtitle = named ? host.name : undefined;
     const who = agent ? agentLabel(agent) : 'An agent';
     const question = worktree.question;
-    const path = question?.terminalId
-      ? `/session/${host.id}/${question.terminalId.toString()}`
+    // A tap opens the chat: the newest prompt's — a dialog read off the
+    // screen is only in the list — else the agent's, the one that finished.
+    // The worktree's own screen only with no agent's terminal to open.
+    const asking = worktree.questions[0] ?? question;
+    const chat = asking?.terminalId || agentTerminal(worktree)?.id;
+    const path = chat
+      ? `/session/${host.id}/${chat.toString()}`
       : `/worktree/${host.id}/${encodeURIComponent(worktree.id)}`;
     if (worktree.activity === Activity.BLOCKED && was?.activity !== Activity.BLOCKED) {
       const subject = question?.subject ? `: ${question.subject}` : '.';
@@ -245,10 +250,19 @@ async function look(conn: HostConnection, named: boolean): Promise<void> {
   await refreshBadge();
 }
 
+/** The tapped notices already opened: the listener and the last response
+ * both hand over the same tap, and a second push stacked a second chat. */
+const opened = new Set<string>();
+
 /** A tapped notice opens what it is about. */
 function open(response: Notifications.NotificationResponse | null | undefined): void {
-  const path = response?.notification.request.content.data?.path;
-  if (typeof path === 'string' && path.startsWith('/')) router.push(path);
+  if (!response) return;
+  const tap = `${response.notification.request.identifier}@${response.notification.date}`;
+  if (opened.has(tap)) return;
+  const path = response.notification.request.content.data?.path;
+  if (typeof path !== 'string' || !path.startsWith('/')) return;
+  opened.add(tap);
+  router.push(path);
 }
 
 /** How often the paired desktops are listed again, so one paired since the
@@ -285,12 +299,14 @@ export function startNotices(): void {
 }
 
 /** Follows the paired desktops' snapshots for news, and opens what a tapped
- * notice is about — the one the app was opened with, too. */
-export function useNoticeFollowing(): void {
+ * notice is about — the one the app was opened with, too, once `ready`: a
+ * push before the app's screens are there is dropped, and it opened on
+ * whatever screen it started with. */
+export function useNoticeFollowing(ready: boolean): void {
   const response = Notifications.useLastNotificationResponse();
   useEffect(() => {
-    if (response) open(response);
-  }, [response]);
+    if (ready) open(response);
+  }, [response, ready]);
   useEffect(() => {
     let live = true;
     let ids = '';

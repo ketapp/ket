@@ -471,7 +471,7 @@ fn micro_cents<'de, D: serde::Deserializer<'de>>(
 /// An RFC 3339 timestamp — `2026-09-27T01:00:00.000Z`, or with an offset —
 /// as milliseconds since the epoch. `None` for anything else, which leaves
 /// the window without a reset rather than with a wrong one.
-pub(super) fn parse_rfc3339_ms(text: &str) -> Option<u64> {
+pub(crate) fn parse_rfc3339_ms(text: &str) -> Option<u64> {
     let text = text.trim();
     let number = |range: std::ops::Range<usize>| -> Option<i64> {
         let part = text.get(range)?;
@@ -638,20 +638,13 @@ impl OpenCodeRateLimitSource {
             // A genuine refusal of the console session, not a page: the
             // cookie is what the console declined.
             401 | 403 => {
-                return Err(
-                    "opencode.ai rejected the session cookie — sign in again and re-paste it"
-                        .to_owned(),
-                );
+                return Err("Sign-in needed".to_owned());
             }
             other => return Err(format!("opencode.ai answered {other}")),
         }
         // A sign-in page where JSON was asked for: the session is gone.
         if body.trim_start().starts_with('<') {
-            return Err(
-                "opencode.ai does not recognise the session cookie — sign in again and paste \
-                 a fresh one"
-                    .to_owned(),
-            );
+            return Err("Sign-in needed".to_owned());
         }
         serde_json::from_str(&body)
             .map_err(|e| format!("opencode.ai's {path} answer was not understood ({e})"))

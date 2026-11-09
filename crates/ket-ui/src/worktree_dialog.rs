@@ -164,6 +164,7 @@ fn policy(level: &ket_core::worktree::TokenReduction, agent: Option<&str>) -> Ve
             .command_filter
             .filter(|on| *on)
             .map(|_| "filtered output".to_owned()),
+        worded(&policy.style, |v| format!("{v} replies")),
     ]
     .into_iter()
     .flatten()

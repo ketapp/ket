@@ -300,6 +300,41 @@ impl TerminalSpec {
             adopt_only: false,
         }
     }
+
+    /// The command the pane's shell runs at its first prompt, if it runs one.
+    pub fn startup(&self) -> Option<&str> {
+        if let Some(line) = self.env.get(crate::shell::STARTUP_COMMAND_ENV) {
+            return Some(line);
+        }
+        match self.args.as_slice() {
+            [interactive, run, line] if interactive == "-i" && run == "-c" => Some(line),
+            _ => None,
+        }
+    }
+
+    /// Adds `arguments` to the end of that command, each quoted as one word.
+    /// `false` for a spec that runs none.
+    ///
+    /// For the host, which learns what to add only once a window has sent
+    /// the spec, by when the command is already the shell's line — see
+    /// [`crate::shell::launch`].
+    pub fn append_to_startup(&mut self, arguments: &[String]) -> bool {
+        let words: String = arguments
+            .iter()
+            .map(|argument| format!(" {}", crate::shell::quote(argument)))
+            .collect();
+        if let Some(line) = self.env.get_mut(crate::shell::STARTUP_COMMAND_ENV) {
+            line.push_str(&words);
+            return true;
+        }
+        match self.args.as_mut_slice() {
+            [interactive, run, line] if interactive == "-i" && run == "-c" => {
+                line.push_str(&words);
+                true
+            }
+            _ => false,
+        }
+    }
 }
 
 /// Bytes one allocated grid row costs at this width.
@@ -357,9 +392,13 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 /// per *change* of foreground, not per poll, so the spawn is not the cost it
 /// would be on a hot path — and it keeps `ket-core` from growing a dependency
 /// on a platform API for one string.
-fn command_name(pid: i32) -> Option<String> {
+///
+/// With it, when the process started, in epoch milliseconds: `etime=` asked
+/// in the same spawn, so a phone can say how long a dev server has been up.
+/// `None` when `ps` gave no time it could read.
+fn command_name(pid: i32) -> Option<(String, Option<u64>)> {
     let output = std::process::Command::new("ps")
-        .args(["-o", "args=", "-p", &pid.to_string()])
+        .args(["-o", "etime=,args=", "-p", &pid.to_string()])
         .output()
         .ok()?;
 
@@ -367,8 +406,24 @@ fn command_name(pid: i32) -> Option<String> {
         return None;
     }
 
-    let name = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    (!name.is_empty()).then_some(name)
+    let line = String::from_utf8_lossy(&output.stdout);
+    let (elapsed, name) = line.trim().split_once(char::is_whitespace)?;
+    let name = name.trim().to_owned();
+    let started = elapsed_secs(elapsed).map(|secs| crate::now_ms().saturating_sub(secs * 1000));
+    (!name.is_empty()).then_some((name, started))
+}
+
+/// `ps`'s elapsed time, `[[dd-]hh:]mm:ss`, in seconds.
+fn elapsed_secs(elapsed: &str) -> Option<u64> {
+    let (days, clock) = match elapsed.split_once('-') {
+        Some((days, clock)) => (days.parse::<u64>().ok()?, clock),
+        None => (0, elapsed),
+    };
+    let mut secs = 0;
+    for part in clock.split(':') {
+        secs = secs * 60 + part.parse::<u64>().ok()?;
+    }
+    Some(days * 86_400 + secs)
 }
 
 /// What the reader thread hands the parser.
@@ -507,14 +562,14 @@ pub struct LocalTerminal {
     killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
     /// The child's pid, which `setsid` also makes its process group id.
     pid: Option<u32>,
-    /// The last foreground process group seen, and the command name resolved
-    /// for it.
+    /// The last foreground process group seen, the command name resolved
+    /// for it, and when it started.
     ///
     /// Resolving a pid to a name costs a process spawn, and the shell polls
     /// this every few seconds per terminal. The foreground changes when a
     /// person runs something, which is rare next to how often it is asked —
     /// so the answer is kept until the pid underneath it does change.
-    foreground: Mutex<Option<(i32, String)>>,
+    foreground: Mutex<Option<(i32, String, Option<u64>)>>,
     /// Identifies this terminal in errors. The worktree, in ket's own use.
     cwd: PathBuf,
     /// Keystrokes and replies, on their way to the pty.
@@ -912,15 +967,26 @@ impl LocalTerminal {
         }
 
         let mut cached = lock(&self.foreground);
-        if let Some((pid, name)) = cached.as_ref()
+        if let Some((pid, name, _)) = cached.as_ref()
             && *pid == leader
         {
             return Some(Foreground::Running(name.clone()));
         }
 
-        let name = command_name(leader)?;
-        *cached = Some((leader, name.clone()));
+        let (name, started) = command_name(leader)?;
+        *cached = Some((leader, name.clone(), started));
         Some(Foreground::Running(name))
+    }
+
+    /// When the program [`Self::foreground`] last found running started, in
+    /// epoch milliseconds — while it is still the one in front. `None` for a
+    /// shell at its prompt, or a time `ps` would not give.
+    pub fn running_since(&self) -> Option<u64> {
+        let leader = self.foreground_group()?;
+        lock(&self.foreground)
+            .as_ref()
+            .filter(|(pid, _, _)| *pid == leader)
+            .and_then(|(_, _, started)| *started)
     }
 
     /// The process group in the terminal's foreground, by its leader's pid;
@@ -1574,6 +1640,21 @@ mod tests {
         let size = TerminalSize::new(0, 0);
         assert_eq!(size.columns(), usize::from(MIN_COLS));
         assert_eq!(size.screen_lines(), usize::from(MIN_ROWS));
+    }
+
+    #[test]
+    fn ps_elapsed_times_read_as_seconds() {
+        assert_eq!(elapsed_secs("00:00"), Some(0));
+        assert_eq!(elapsed_secs("05:07"), Some(5 * 60 + 7));
+        assert_eq!(elapsed_secs("10:02:33"), Some(10 * 3600 + 2 * 60 + 33));
+        assert_eq!(
+            elapsed_secs("1-02:03:04"),
+            Some(86_400 + 2 * 3600 + 3 * 60 + 4)
+        );
+        // Not a time: no start is better than a wrong one.
+        for garbage in ["", "npm", "1:xx", "-01:02", "1-"] {
+            assert_eq!(elapsed_secs(garbage), None, "{garbage:?}");
+        }
     }
 
     #[test]

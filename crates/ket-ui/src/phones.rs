@@ -11,9 +11,10 @@
 //! Phones are one switch at the top of the pane, off until turned on. On,
 //! the ket host runs the relay itself on the Mac and phones on the same
 //! Wi-Fi reach it — no restart, and no terminal ends; off, every phone is
-//! disconnected and nothing listens. Paired phones are listed either way:
-//! with no host to ask, `devices` reads the identity files, and revoking
-//! edits them.
+//! disconnected and nothing listens. A second switch under it links the host
+//! to ket's relay as well, so phones reach it from anywhere. Paired phones
+//! are listed either way: with no host to ask, `devices` reads the identity
+//! files, and revoking edits them.
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -22,7 +23,9 @@ use gpui::{
     AnyElement, ClipboardItem, Context, Pixels, SharedString, Task, WeakEntity, Window, div,
     prelude::*, px,
 };
-use ket_core::host::{self, DeviceEntry, DeviceRole, PendingPairing};
+use ket_core::config::HOSTED_RELAY;
+use ket_core::host::tailscale::Tailscale;
+use ket_core::host::{self, DeviceEntry, DeviceRole, HostedRelay, PendingPairing};
 use ket_core::theme::Theme;
 
 use crate::Shell;
@@ -40,6 +43,9 @@ use crate::ui::row::sized_row;
 use crate::ui::toast::Tone;
 use crate::ui::toggle::switch;
 use crate::ui::{CAPTION, CONTROL_H, ICON_GAP, LABEL, PAD_X, RADIUS_MD, RADIUS_SM, TITLE};
+
+/// Where Tailscale is downloaded, for a Mac without it.
+const TAILSCALE_DOWNLOAD: &str = "https://tailscale.com/download";
 
 /// How often the pane wakes while it is showing, to swap a code that is
 /// about to run out for a fresh one.
@@ -112,8 +118,15 @@ pub(crate) struct PhonesPane {
     pairing_open: bool,
     /// This desktop's name on the network, once asked.
     desktop: Option<String>,
-    /// The current Tailscale address, when there is one.
-    tailnet: Option<String>,
+    /// How Tailscale stands on this Mac, once asked.
+    tailscale: Option<Tailscale>,
+    /// The code an already-paired device scans for this Mac's addresses,
+    /// once asked for, or why there is none.
+    reach: Option<Result<Option<Arc<QrModules>>, String>>,
+    /// Whether the popover with that code is open.
+    reach_open: bool,
+    /// The relay elsewhere the host links to, and how that link is doing.
+    hosted: Option<HostedRelay>,
     /// Wakes the pane every [`TICK`] while the settings view is open.
     /// Dropping it — closing the view — stops it.
     ticker: Option<Task<()>>,
@@ -155,8 +168,10 @@ struct Snapshot {
     scoped_roles: bool,
     /// This desktop's name on the network, asked along with a code.
     desktop: Option<String>,
-    /// The current Tailscale address, when there is one.
-    tailnet: Option<String>,
+    /// How Tailscale stands on this Mac, asked while devices are served.
+    tailscale: Option<Tailscale>,
+    /// The relay elsewhere the host links to, and how that link is doing.
+    hosted: Option<HostedRelay>,
 }
 
 /// Asks the host everything the pane shows. Blocks; run it in the
@@ -191,10 +206,10 @@ fn fetch(want_code: bool) -> Snapshot {
     } else {
         (Vec::new(), false)
     };
-    let tailnet = (host == HostState::Serving)
-        .then(host::tailnet_ip)
-        .flatten()
-        .map(|ip| ip.to_string());
+    let tailscale = (host == HostState::Serving).then(host::tailscale::state);
+    let hosted = (host == HostState::Serving)
+        .then(|| host::hosted_relay().ok().flatten())
+        .flatten();
     Snapshot {
         host,
         pairing,
@@ -202,8 +217,19 @@ fn fetch(want_code: bool) -> Snapshot {
         pairings,
         scoped_roles,
         desktop: want_code.then(host::lan_name),
-        tailnet,
+        tailscale,
+        hosted,
     }
+}
+
+/// A relay's name, from its URL: `relay.ketapp.dev` from
+/// `wss://relay.ketapp.dev/`.
+fn relay_name(url: &str) -> String {
+    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+    rest.split(['/', '?', '#'])
+        .next()
+        .unwrap_or(rest)
+        .to_owned()
 }
 
 /// Unix seconds now.
@@ -323,7 +349,8 @@ impl Shell {
         if let Some(desktop) = snapshot.desktop {
             pane.desktop = Some(desktop);
         }
-        pane.tailnet = snapshot.tailnet;
+        pane.tailscale = snapshot.tailscale;
+        pane.hosted = snapshot.hosted;
         // A phone that has scanned the code waits here, and the code it used
         // is spent: the pane shows the phone to approve in its place.
         if !snapshot.pairings.is_empty() && pane.pairings.is_empty() {
@@ -397,6 +424,53 @@ impl Shell {
                     shell.toast_detail(Tone::Error, title, why, cx);
                 }
                 shell.refresh_phones(enabled, cx);
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Links the host to ket's relay as well, or stops: saved first, then,
+    /// while phones are on, taken up by the running host in place, so no
+    /// phone on the local network is disconnected.
+    fn set_hosted_relay(&mut self, on: bool, cx: &mut Context<Self>) {
+        let Some(view) = self.preferences.as_mut() else {
+            return;
+        };
+        if !view.writable || view.phones.switching {
+            return;
+        }
+        view.config.phones.relay = if on {
+            HOSTED_RELAY.to_owned()
+        } else {
+            String::new()
+        };
+        view.error = view.config.save().err().map(|error| error.to_string());
+        view.phones.hosted = None;
+        if view.phones.host != Some(HostState::Serving) {
+            cx.notify();
+            return;
+        }
+        view.phones.switching = true;
+        let work = cx
+            .background_executor()
+            .spawn(async move { host::set_phones(true).map_err(|why| why.to_string()) });
+        cx.spawn(async move |shell: WeakEntity<Shell>, cx| {
+            let outcome = work.await;
+            let _ = shell.update(cx, |shell, cx| {
+                if let Some(pane) = shell.phones_pane() {
+                    pane.switching = false;
+                }
+                if let Err(why) = outcome {
+                    let title = if on {
+                        "Could not link to ket's relay"
+                    } else {
+                        "Could not stop using ket's relay"
+                    };
+                    shell.toast_detail(Tone::Error, title, why, cx);
+                }
+                shell.refresh_phones(false, cx);
                 cx.notify();
             });
         })
@@ -618,6 +692,23 @@ impl Shell {
                 .child(group_label("Desktop", None, t))
                 .child(group_box(t).child(self.desktop_row(pane, t, cx))),
         )];
+        if pane.host == Some(HostState::Serving) {
+            out.push(Entry::setting(
+                "Away from home Tailscale tailnet relay anywhere cellular remote outside VPN",
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.0))
+                    .pt(px(16.0))
+                    .child(group_label("Away from home", None, t))
+                    .child(
+                        group_box(t)
+                            .child(self.tailscale_row(pane, t))
+                            .child(self.hosted_row(pane, t, cx))
+                            .children(self.reach_row(pane, window, t, cx)),
+                    ),
+            ));
+        }
 
         let trigger = (!first && pane.host == Some(HostState::Serving)).then(|| {
             let open = pane.pairing_open;
@@ -696,8 +787,9 @@ impl Shell {
         out.push(Entry::layout(div().pt(px(16.0)).child(banner(
             "phones-note",
             Tone::Info,
-            "Only devices you pair can connect. On Tailscale, they can also reach this Mac away \
-             from home. Everything between them is end-to-end encrypted, and revoking one \
+            "Only devices you pair can connect. Away from home they reach this Mac over \
+             Tailscale, or through ket's relay when it is on, which passes along what it \
+             cannot read. Everything between them is end-to-end encrypted, and revoking one \
              disconnects it at once.",
             t,
         ))));
@@ -768,12 +860,259 @@ impl Shell {
             .child(div().flex_1())
             .child(state)
             .child(control);
+        row.into_any_element()
+    }
+
+    /// Tailscale on this Mac: how it stands, and the next step towards a
+    /// phone reaching the Mac over it away from home.
+    fn tailscale_row(&self, pane: &PhonesPane, t: &Theme) -> AnyElement {
+        let Some(state) = pane.tailscale.as_ref() else {
+            return working("Checking Tailscale…".to_owned(), CAPTION, t).into_any_element();
+        };
+        /// What the row's button does.
+        enum Act {
+            Download,
+            Open,
+        }
+        let (status, step, act) = match state {
+            Tailscale::On(ip) => (
+                tinted_tag("On", paint(t.status.running)),
+                format!(
+                    "Your phone reaches this Mac at {ip} with Tailscale on, signed in to the same \
+                     account. Install Tailscale on the phone if it isn't there yet."
+                ),
+                None,
+            ),
+            Tailscale::SignedOut => (
+                tag("Signed out", t),
+                "Sign in to Tailscale on this Mac, then on your phone with the same account."
+                    .to_owned(),
+                Some(("Open Tailscale", Act::Open)),
+            ),
+            Tailscale::Off => (
+                tag("Off", t),
+                "Tailscale is installed but not connected. Turn it on from its icon in the menu \
+                 bar."
+                    .to_owned(),
+                Some(("Open Tailscale", Act::Open)),
+            ),
+            Tailscale::NotInstalled => (
+                tag("Not installed", t),
+                "Install Tailscale on this Mac and your phone, signed in to the same account, \
+                 and your phone reaches this Mac over it away from home with no relay between."
+                    .to_owned(),
+                Some(("Get Tailscale", Act::Download)),
+            ),
+        };
+        let action = act.map(|(label, act)| {
+            button("phones-tailscale-action", label)
+                .render(t)
+                .on_click(move |_, _, cx| match act {
+                    Act::Download => cx.open_url(TAILSCALE_DOWNLOAD),
+                    Act::Open => {
+                        if let Err(error) = std::process::Command::new("open")
+                            .args(["-a", "Tailscale"])
+                            .spawn()
+                        {
+                            tracing::warn!(%error, "could not open Tailscale");
+                        }
+                    }
+                })
+        });
+        let row = div()
+            .flex()
+            .items_center()
+            .gap(ICON_GAP)
+            .h(px(40.0))
+            .px(PAD_X)
+            .child(icon(Icon::Network, paint(t.text.primary)))
+            .child(
+                div()
+                    .font_family(self.font_family.clone())
+                    .text_size(LABEL)
+                    .text_color(paint(t.text.primary))
+                    .child("Tailscale"),
+            )
+            .child(div().flex_1())
+            .child(status)
+            .children(action);
         div()
             .flex()
             .flex_col()
             .child(row)
-            .children(pane.tailnet.iter().map(|ip| {
-                caption(format!("Reachable over Tailscale at {ip}"), t)
+            .child(caption(step, t).px(PAD_X).pb(px(8.0)))
+            .into_any_element()
+    }
+
+    /// For a device paired before Tailscale or ket's relay was on, which only
+    /// knows this Mac's local address: a code that hands it the rest without
+    /// pairing again. `None` while there is nothing more to hand it.
+    fn reach_row(
+        &self,
+        pane: &PhonesPane,
+        window: &Window,
+        t: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let view = self.preferences.as_ref()?;
+        let tailnet = matches!(pane.tailscale, Some(Tailscale::On(_)));
+        if !tailnet && view.config.phones.hosted_relay().is_none() {
+            return None;
+        }
+        let trigger = button("phones-reach", "Show code")
+            .render(t)
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.show_reach_code(cx);
+                cx.notify();
+            }))
+            .into_any_element();
+        let content = pane.reach_open.then(|| {
+            let body = match &pane.reach {
+                None => working("Making the code…".to_owned(), CAPTION, t).into_any_element(),
+                Some(Err(why)) => error(why.clone(), t).into_any_element(),
+                Some(Ok(None)) => caption("This code is too long to draw.", t).into_any_element(),
+                Some(Ok(Some(modules))) => qr_code(modules.clone(), QR, t),
+            };
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(12.0))
+                .p(POPOVER_PAD)
+                .child(body)
+                .child(caption(
+                    "Scan it with the phone's Camera, or in ket under Pair a desktop. The phone \
+                     adds these ways to reach this Mac to the pairing it has.",
+                    t,
+                ))
+                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                    if let Some(pane) = this.phones_pane() {
+                        pane.reach_open = false;
+                    }
+                    cx.notify();
+                }))
+                .into_any_element()
+        });
+        let trigger = popup::anchored(
+            "phones-reach-popup",
+            trigger,
+            content,
+            Placement::BelowEnd,
+            POPOVER_W,
+            window,
+            t,
+        );
+        let row = div()
+            .flex()
+            .items_center()
+            .gap(ICON_GAP)
+            .min_h(px(40.0))
+            .px(PAD_X)
+            .child(icon(Icon::Smartphone, paint(t.text.primary)))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .font_family(self.font_family.clone())
+                            .text_size(LABEL)
+                            .text_color(paint(t.text.primary))
+                            .child("Paired a device before these were on?"),
+                    )
+                    .child(caption(
+                        "It only knows this Mac's local address. Show it a code, no new pairing.",
+                        t,
+                    )),
+            )
+            .child(trigger);
+        Some(row.into_any_element())
+    }
+
+    /// Opens the reach code's popover, making the code in the background.
+    fn show_reach_code(&mut self, cx: &mut Context<Self>) {
+        let Some(pane) = self.phones_pane() else {
+            return;
+        };
+        pane.reach_open = true;
+        pane.reach = None;
+        let work = cx.background_executor().spawn(async move {
+            host::reach_link()
+                .map(|link| QrModules::encode(&link))
+                .map_err(|why| why.to_string())
+        });
+        cx.spawn(async move |shell: WeakEntity<Shell>, cx| {
+            let made = work.await;
+            let _ = shell.update(cx, |shell, cx| {
+                if let Some(pane) = shell.phones_pane() {
+                    pane.reach = Some(made);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Reaching this desktop from anywhere, through ket's relay: a switch,
+    /// and once it is on, how the host's link to the relay is doing.
+    fn hosted_row(&self, pane: &PhonesPane, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let Some(view) = self.preferences.as_ref() else {
+            return div().into_any_element();
+        };
+        let configured = view.config.phones.hosted_relay();
+        let on = configured.is_some();
+        let writable = view.writable && !pane.switching;
+        let control = switch("phones-hosted-relay", on, t).when(writable, |el| {
+            el.cursor_pointer()
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.set_hosted_relay(!on, cx);
+                    cx.notify();
+                }))
+        });
+        let linked = pane.hosted.as_ref().is_some_and(|hosted| hosted.linked);
+        let state = if !on {
+            tag("Off", t).into_any_element()
+        } else if linked {
+            tinted_tag("Connected", paint(t.status.running)).into_any_element()
+        } else {
+            caption("Connecting…", t).into_any_element()
+        };
+        let name = relay_name(configured.as_deref().unwrap_or(HOSTED_RELAY));
+        let why = pane
+            .hosted
+            .as_ref()
+            .filter(|hosted| on && !hosted.linked)
+            .and_then(|hosted| hosted.error.clone());
+
+        let row = div()
+            .flex()
+            .items_center()
+            .gap(ICON_GAP)
+            .h(px(40.0))
+            .px(PAD_X)
+            .child(icon(Icon::Cloud, paint(t.text.primary)))
+            .child(
+                div()
+                    .flex()
+                    .gap(px(4.0))
+                    .min_w_0()
+                    .truncate()
+                    .font_family(self.font_family.clone())
+                    .text_size(LABEL)
+                    .text_color(paint(t.text.primary))
+                    .child("Reach it from anywhere")
+                    .child(div().text_color(paint(t.text.dim)).child(name.clone())),
+            )
+            .child(div().flex_1())
+            .child(state)
+            .child(control);
+        div()
+            .flex()
+            .flex_col()
+            .child(row)
+            .children(why.map(|why| {
+                caption(format!("Can't reach {name} yet: {why}"), t)
                     .px(PAD_X)
                     .pb(px(8.0))
             }))
@@ -1266,5 +1605,18 @@ async fn tick(shell: WeakEntity<Shell>, cx: &mut gpui::AsyncApp) {
         if !matches!(showing, Ok(true)) {
             return;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::relay_name;
+
+    #[test]
+    fn a_relay_is_named_by_its_host() {
+        assert_eq!(relay_name("wss://relay.ketapp.dev"), "relay.ketapp.dev");
+        assert_eq!(relay_name("wss://relay.ketapp.dev/"), "relay.ketapp.dev");
+        assert_eq!(relay_name("ws://10.0.0.2:7979/x?y"), "10.0.0.2:7979");
+        assert_eq!(relay_name("relay.example.test"), "relay.example.test");
     }
 }

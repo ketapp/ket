@@ -131,6 +131,25 @@ objc2-avf-audio = { version = "0.3.2", default-features = false, features = [
     "AVAudioTime",
     "AVAudioTypes",
 ] }
+# Chromium in browser tabs in place of WebKit, behind `chromium` below. See
+# `crates/ket-chromium` and `src/chromium.rs`. Neither git nor a filesystem
+# crate: Chromium keeps its own profiles, under the directory ket names.
+ket-chromium = { workspace = true, optional = true }
+# A Chromium page's still arrives from the DevTools protocol as base64 PNG.
+# Already in the tree at this version, through ket-core; only `chromium`
+# turns it on here.
+base64 = { workspace = true, optional = true }
+
+[features]
+default = ["chromium"]
+# Browser tabs on embedded Chromium, which is what ket ships. Building it
+# downloads CEF's distribution (~135 MB, into CEF_PATH when that is set, else
+# once per profile into cargo's build directory) and compiles its C++ wrapper
+# with cmake and Ninja, and Chromium only runs from an app bundle with its
+# framework and helpers inside, which ./ket-dev.sh and ./ket-prod.sh build and
+# run. Without it (--no-default-features, or KET_CHROMIUM=0 for those
+# scripts) browser tabs are WebKit. macOS only.
+chromium = ["dep:ket-chromium", "ket-chromium/cef", "dep:base64"]
 
 [lints]
 workspace = true

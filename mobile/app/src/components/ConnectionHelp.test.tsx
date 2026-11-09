@@ -43,11 +43,31 @@ describe('ConnectionHelp', () => {
     expect(getByText('Can’t reach Studio Mac')).toBeTruthy();
     expect(getByText('Connection refused.')).toBeTruthy();
     expect(getByText('studio.local:7979')).toBeTruthy();
-    expect(getByText(/Tailscale/)).toBeTruthy();
+    // Only the Mac's local address is known: the help says so, and what to do.
+    expect(getByText(/only knows how to reach Studio Mac on its own network/)).toBeTruthy();
+    expect(getByText(/scan Show code there/)).toBeTruthy();
     await fireEvent.press(getByText('Retry now'));
     await fireEvent.press(getByText('Pair again'));
     expect(conn.retry).toHaveBeenCalled();
     expect(mockPush).toHaveBeenCalledWith('/pair');
+    await view.unmount();
+  });
+
+  test('once a way from off the network is known, says to keep it on', async () => {
+    const conn = connection({
+      status: 'offline',
+      host: {
+        id: 'mac',
+        name: 'Studio Mac',
+        relay: 'ws://studio.local:7979',
+        addresses: ['ws://studio.local:7979', 'ws://100.101.102.103:7979'],
+        hostPublic: '',
+        pairedAt: 0,
+      },
+    });
+    const view = await render(<ConnectionHelp conn={conn} />);
+    expect(view.getByText(/keep Tailscale on, on both/)).toBeTruthy();
+    expect(view.queryByText(/only knows how to reach/)).toBeNull();
     await view.unmount();
   });
 

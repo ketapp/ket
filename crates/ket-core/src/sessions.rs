@@ -1421,7 +1421,7 @@ fn encode_uri_component(text: &str) -> String {
 /// follows, except that the agent reads `CLAUDE_CONFIG_DIR` from *its*
 /// environment and ket used to read it from its own. Getting this wrong is
 /// invisible and total: ket looked in `~/.claude` while every agent it
-/// launched was reading and writing `~/.claude-personal`, so no session was
+/// launched was reading and writing `~/.claude-alt`, so no session was
 /// ever found and no hook ever ran. Nothing errored, because an empty
 /// directory and a directory of sessions look the same to code that only
 /// counts what it finds. [`configured_claude_config_dir`] is where the answer
@@ -1435,7 +1435,7 @@ pub fn claude_config_dir() -> PathBuf {
 /// Asked of the login shell rather than read from ket's environment. ket
 /// launches an agent by typing its configured line at a real prompt (see
 /// [`crate::shell`]), and that line can carry its own `CLAUDE_CONFIG_DIR`:
-/// `claude-personal` as an alias for `CLAUDE_CONFIG_DIR=~/.claude-personal
+/// `claude-alt` as an alias for `CLAUDE_CONFIG_DIR=~/.claude-alt
 /// claude` is the shape that bit. A variable exported to ket reaches the
 /// shell too, so it is still honoured — the shell reports it unless the line
 /// overrides it. Only when the shell cannot be asked does ket's own
@@ -1461,7 +1461,7 @@ pub fn configured_claude_config_dir() -> Option<PathBuf> {
 /// command points at (see [`crate::project::ProjectSettings::agents`]).
 ///
 /// What lets a project that runs `claude-work` while every other runs
-/// `claude-personal` still have its sessions found and its hooks installed:
+/// `claude-alt` still have its sessions found and its hooks installed:
 /// without it, ket looks in one account's directory while that project's
 /// agents write to another's — the same invisible, total failure
 /// [`claude_config_dir`] describes. Each line is one cached shell probe.
@@ -1485,7 +1485,7 @@ pub fn claude_config_dirs() -> Vec<PathBuf> {
     // probes above can come back empty — the host runs with no terminal and
     // a shell that may not expand the alias naming the directory — and a
     // Claude launched through that alias still writes under
-    // `~/.claude-personal`. Found by looking rather than asking, so a probe
+    // `~/.claude-alt`. Found by looking rather than asking, so a probe
     // that fails costs a lookup its order, never its answer.
     for dir in sibling_claude_dirs(&home()) {
         if !dirs.contains(&dir) {
@@ -1496,7 +1496,7 @@ pub fn claude_config_dirs() -> Vec<PathBuf> {
 }
 
 /// Every `.claude*` directory under `home` that holds Claude's `projects`
-/// folder — `~/.claude-personal`, `~/.claude-work` — in name order.
+/// folder — `~/.claude-alt`, `~/.claude-work` — in name order.
 fn sibling_claude_dirs(home: &Path) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(home) else {
         return Vec::new();
@@ -1734,14 +1734,14 @@ mod tests {
     #[test]
     fn claudes_default_directory_is_searched_after_the_configured_one() {
         let dirs = claude_dirs_in_order(
-            PathBuf::from("/home/me/.claude-personal"),
+            PathBuf::from("/home/me/.claude-alt"),
             [],
             Path::new("/home/me"),
         );
         assert_eq!(
             dirs,
             [
-                PathBuf::from("/home/me/.claude-personal"),
+                PathBuf::from("/home/me/.claude-alt"),
                 PathBuf::from("/home/me/.claude"),
             ]
         );
@@ -1757,10 +1757,10 @@ mod tests {
     #[test]
     fn a_projects_own_directory_comes_before_the_default_and_repeats_are_dropped() {
         let dirs = claude_dirs_in_order(
-            PathBuf::from("/home/me/.claude-personal"),
+            PathBuf::from("/home/me/.claude-alt"),
             [
                 PathBuf::from("/home/me/.claude-work"),
-                PathBuf::from("/home/me/.claude-personal"),
+                PathBuf::from("/home/me/.claude-alt"),
                 PathBuf::from("/home/me/.claude-work"),
             ],
             Path::new("/home/me"),
@@ -1768,7 +1768,7 @@ mod tests {
         assert_eq!(
             dirs,
             [
-                PathBuf::from("/home/me/.claude-personal"),
+                PathBuf::from("/home/me/.claude-alt"),
                 PathBuf::from("/home/me/.claude-work"),
                 PathBuf::from("/home/me/.claude"),
             ]
@@ -1785,17 +1785,14 @@ mod claude_dirs_tests {
         let home = std::env::temp_dir().join(format!("ket-claude-dirs-{}", std::process::id()));
         for dir in [
             ".claude/projects",
-            ".claude-personal/projects",
+            ".claude-alt/projects",
             ".claude-work/other",
             "other/projects",
         ] {
             std::fs::create_dir_all(home.join(dir)).unwrap();
         }
         let found = sibling_claude_dirs(&home);
-        assert_eq!(
-            found,
-            vec![home.join(".claude"), home.join(".claude-personal")]
-        );
+        assert_eq!(found, vec![home.join(".claude"), home.join(".claude-alt")]);
         let _ = std::fs::remove_dir_all(&home);
     }
 }

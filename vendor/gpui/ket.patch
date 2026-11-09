@@ -728,7 +728,42 @@ diff -ruN a/src/platform/app_menu.rs b/src/platform/app_menu.rs
 diff -ruN a/src/platform/mac/platform.rs b/src/platform/mac/platform.rs
 --- a/src/platform/mac/platform.rs
 +++ b/src/platform/mac/platform.rs
-@@ -128,6 +128,14 @@
+@@ -66,6 +66,8 @@
+ const NSUTF8StringEncoding: NSUInteger = 4;
+ 
+ const MAC_PLATFORM_IVAR: &str = "platform";
++// ket patch: backs CEF's isHandlingSendEvent / setHandlingSendEvent:.
++const HANDLING_SEND_EVENT_IVAR: &str = "handlingSendEvent";
+ static mut APP_CLASS: *const Class = ptr::null();
+ static mut APP_DELEGATE_CLASS: *const Class = ptr::null();
+ 
+@@ -75,6 +77,25 @@
+         APP_CLASS = {
+             let mut decl = ClassDecl::new("GPUIApplication", class!(NSApplication)).unwrap();
+             decl.add_ivar::<*mut c_void>(MAC_PLATFORM_IVAR);
++            // ket patch: the methods of Chromium's CrAppProtocol and
++            // CrAppControlProtocol, which CEF requires of the application class.
++            // The protocols themselves are defined by the CEF framework, which
++            // is loaded at run time, so ket-chromium adds them to this class
++            // with class_addProtocol after loading it. Without CEF nothing
++            // reads the flag and sendEvent: behaves exactly as NSApplication's.
++            decl.add_ivar::<BOOL>(HANDLING_SEND_EVENT_IVAR);
++            decl.add_method(
++                sel!(isHandlingSendEvent),
++                is_handling_send_event as extern "C" fn(&Object, Sel) -> BOOL,
++            );
++            decl.add_method(
++                sel!(setHandlingSendEvent:),
++                set_handling_send_event as extern "C" fn(&mut Object, Sel, BOOL),
++            );
++            decl.add_method(
++                sel!(sendEvent:),
++                send_event as extern "C" fn(&mut Object, Sel, id),
++            );
+             decl.register()
+         }
+     };
+@@ -128,6 +149,14 @@
                  handle_menu_item as extern "C" fn(&mut Object, Sel, id),
              );
              decl.add_method(
@@ -743,7 +778,7 @@ diff -ruN a/src/platform/mac/platform.rs b/src/platform/mac/platform.rs
                  sel!(validateMenuItem:),
                  validate_menu_item as extern "C" fn(&mut Object, Sel, id) -> bool,
              );
-@@ -135,7 +143,12 @@
+@@ -135,7 +164,12 @@
                  sel!(menuWillOpen:),
                  menu_will_open as extern "C" fn(&mut Object, Sel, id),
              );
@@ -756,7 +791,7 @@ diff -ruN a/src/platform/mac/platform.rs b/src/platform/mac/platform.rs
                  sel!(applicationDockMenu:),
                  handle_dock_menu as extern "C" fn(&mut Object, Sel, id) -> id,
              );
-@@ -171,7 +184,15 @@
+@@ -171,7 +205,15 @@
      menu_command: Option<Box<dyn FnMut(&dyn Action)>>,
      validate_menu_command: Option<Box<dyn FnMut(&dyn Action) -> bool>>,
      will_open_menu: Option<Box<dyn FnMut()>>,
@@ -773,7 +808,7 @@ diff -ruN a/src/platform/mac/platform.rs b/src/platform/mac/platform.rs
      open_urls: Option<Box<dyn FnMut(Vec<String>)>>,
      finish_launching: Option<Box<dyn FnOnce()>>,
      dock_menu: Option<id>,
-@@ -179,6 +200,53 @@
+@@ -179,6 +221,53 @@
      keyboard_mapper: Rc<MacKeyboardMapper>,
  }
  
@@ -827,7 +862,7 @@ diff -ruN a/src/platform/mac/platform.rs b/src/platform/mac/platform.rs
  impl Default for MacPlatform {
      fn default() -> Self {
          Self::new(false)
-@@ -213,6 +281,11 @@
+@@ -213,6 +302,11 @@
              validate_menu_command: None,
              will_open_menu: None,
              menu_actions: Default::default(),
@@ -839,7 +874,7 @@ diff -ruN a/src/platform/mac/platform.rs b/src/platform/mac/platform.rs
              open_urls: None,
              finish_launching: None,
              dock_menu: None,
-@@ -241,7 +314,9 @@
+@@ -241,7 +335,9 @@
          menus: &Vec<Menu>,
          delegate: id,
          actions: &mut Vec<Box<dyn Action>>,
@@ -849,7 +884,7 @@ diff -ruN a/src/platform/mac/platform.rs b/src/platform/mac/platform.rs
      ) -> id {
          unsafe {
              let application_menu = NSMenu::new(nil).autorelease();
-@@ -258,7 +333,9 @@
+@@ -258,7 +354,9 @@
                          item_config,
                          delegate,
                          actions,
@@ -859,7 +894,7 @@ diff -ruN a/src/platform/mac/platform.rs b/src/platform/mac/platform.rs
                      ));
                  }
  
-@@ -282,7 +359,9 @@
+@@ -282,7 +380,9 @@
          menu_items: Vec<MenuItem>,
          delegate: id,
          actions: &mut Vec<Box<dyn Action>>,
@@ -869,7 +904,7 @@ diff -ruN a/src/platform/mac/platform.rs b/src/platform/mac/platform.rs
      ) -> id {
          unsafe {
              let dock_menu = NSMenu::new(nil);
-@@ -292,7 +371,9 @@
+@@ -292,7 +392,9 @@
                      &item_config,
                      delegate,
                      actions,
@@ -879,7 +914,7 @@ diff -ruN a/src/platform/mac/platform.rs b/src/platform/mac/platform.rs
                  ));
              }
  
-@@ -304,7 +385,9 @@
+@@ -304,7 +406,9 @@
          item: &MenuItem,
          delegate: id,
          actions: &mut Vec<Box<dyn Action>>,
@@ -889,7 +924,7 @@ diff -ruN a/src/platform/mac/platform.rs b/src/platform/mac/platform.rs
      ) -> id {
          static DEFAULT_CONTEXT: OnceLock<Vec<KeyContext>> = OnceLock::new();
  
-@@ -315,6 +398,9 @@
+@@ -315,6 +419,9 @@
                      name,
                      action,
                      os_action,
@@ -899,7 +934,7 @@ diff -ruN a/src/platform/mac/platform.rs b/src/platform/mac/platform.rs
                  } => {
                      // Note that this is intentionally using earlier bindings, whereas typically
                      // later ones take display precedence. See the discussion on
-@@ -344,61 +430,60 @@
+@@ -344,61 +451,60 @@
                          Some(crate::OsAction::Copy) => selector("copy:"),
                          Some(crate::OsAction::Paste) => selector("paste:"),
                          Some(crate::OsAction::SelectAll) => selector("selectAll:"),
@@ -1008,7 +1043,7 @@ diff -ruN a/src/platform/mac/platform.rs b/src/platform/mac/platform.rs
                      } else {
                          item = NSMenuItem::alloc(nil)
                              .initWithTitle_action_keyEquivalent_(
-@@ -409,9 +494,12 @@
+@@ -409,9 +515,12 @@
                              .autorelease();
                      }
  
@@ -1022,7 +1057,7 @@ diff -ruN a/src/platform/mac/platform.rs b/src/platform/mac/platform.rs
                      item
                  }
                  MenuItem::Submenu(Menu { name, items }) => {
-@@ -419,7 +507,7 @@
+@@ -419,7 +528,7 @@
                      let submenu = NSMenu::new(nil).autorelease();
                      submenu.setDelegate_(delegate);
                      for item in items {
@@ -1031,7 +1066,7 @@ diff -ruN a/src/platform/mac/platform.rs b/src/platform/mac/platform.rs
                      }
                      item.setSubmenu_(submenu);
                      item.setTitle_(ns_string(name));
-@@ -915,8 +1003,33 @@
+@@ -915,8 +1024,33 @@
          unsafe {
              let app: id = msg_send![APP_CLASS, sharedApplication];
              let mut state = self.0.lock();
@@ -1067,7 +1102,7 @@ diff -ruN a/src/platform/mac/platform.rs b/src/platform/mac/platform.rs
              drop(state);
              app.setMainMenu_(menu);
          }
-@@ -931,8 +1044,12 @@
+@@ -931,8 +1065,12 @@
          unsafe {
              let app: id = msg_send![APP_CLASS, sharedApplication];
              let mut state = self.0.lock();
@@ -1082,7 +1117,36 @@ diff -ruN a/src/platform/mac/platform.rs b/src/platform/mac/platform.rs
              if let Some(old) = state.dock_menu.replace(new) {
                  CFRelease(old as _)
              }
-@@ -1468,16 +1585,49 @@
+@@ -1364,6 +1502,28 @@
+         let platform_ptr: *mut c_void = *object.get_ivar(MAC_PLATFORM_IVAR);
+         assert!(!platform_ptr.is_null());
+         &*(platform_ptr as *const MacPlatform)
++    }
++}
++
++// ket patch: CrAppProtocol's isHandlingSendEvent.
++extern "C" fn is_handling_send_event(this: &Object, _: Sel) -> BOOL {
++    unsafe { *this.get_ivar::<BOOL>(HANDLING_SEND_EVENT_IVAR) }
++}
++
++// ket patch: CrAppControlProtocol's setHandlingSendEvent:.
++extern "C" fn set_handling_send_event(this: &mut Object, _: Sel, handling: BOOL) {
++    unsafe { this.set_ivar::<BOOL>(HANDLING_SEND_EVENT_IVAR, handling) }
++}
++
++// ket patch: mark the app as handling an event for the length of sendEvent:,
++// restoring the previous value afterwards so nested event loops (menus, modal
++// panels) unwind correctly. This is what CEF's CefScopedSendingEvent does.
++extern "C" fn send_event(this: &mut Object, _: Sel, event: id) {
++    unsafe {
++        let was_handling = *this.get_ivar::<BOOL>(HANDLING_SEND_EVENT_IVAR);
++        this.set_ivar::<BOOL>(HANDLING_SEND_EVENT_IVAR, YES);
++        let _: () = msg_send![super(this, class!(NSApplication)), sendEvent: event];
++        this.set_ivar::<BOOL>(HANDLING_SEND_EVENT_IVAR, was_handling);
+     }
+ }
+ 
+@@ -1468,16 +1628,49 @@
      }
  }
  
@@ -1136,7 +1200,7 @@ diff -ruN a/src/platform/mac/platform.rs b/src/platform/mac/platform.rs
                  callback(&*action);
              }
              platform.0.lock().menu_command.get_or_insert(callback);
-@@ -1492,10 +1642,9 @@
+@@ -1492,10 +1685,9 @@
          let mut lock = platform.0.lock();
          if let Some(mut callback) = lock.validate_menu_command.take() {
              let tag: NSInteger = msg_send![item, tag];
@@ -1150,7 +1214,7 @@ diff -ruN a/src/platform/mac/platform.rs b/src/platform/mac/platform.rs
                  result = callback(action.as_ref());
              }
              platform
-@@ -1512,6 +1661,8 @@
+@@ -1512,6 +1704,8 @@
      unsafe {
          let platform = get_mac_platform(this);
          let mut lock = platform.0.lock();
@@ -1159,7 +1223,7 @@ diff -ruN a/src/platform/mac/platform.rs b/src/platform/mac/platform.rs
          if let Some(mut callback) = lock.will_open_menu.take() {
              drop(lock);
              callback();
-@@ -1520,6 +1671,27 @@
+@@ -1520,6 +1714,27 @@
      }
  }
  
@@ -1187,7 +1251,7 @@ diff -ruN a/src/platform/mac/platform.rs b/src/platform/mac/platform.rs
  extern "C" fn handle_dock_menu(this: &mut Object, _: Sel, _: id) -> id {
      unsafe {
          let platform = get_mac_platform(this);
-@@ -1664,6 +1836,21 @@
+@@ -1664,6 +1879,21 @@
      use crate::ClipboardItem;
  
      use super::*;

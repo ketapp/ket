@@ -1,6 +1,6 @@
 import { describe, expect, test } from '@jest/globals';
 
-import { branchStem, elapsed, firstLine, progressOf, segments, stageText, startingAt, worktreeOf } from './starting';
+import { bindTasks, branchStem, elapsed, firstLine, progressOf, reconcileTask, segments, stageText, startingAt, taskForTerminal, worktreeOf } from './starting';
 import type { Starting } from './connection';
 
 const work: Starting = { project: 'proj', prompt: 'Fix the login redirect\nKeep the path', agent: 'claude', at: 1000, before: ['old'] };
@@ -57,6 +57,49 @@ describe('worktreeOf and progressOf', () => {
       ],
     };
     expect(progressOf(work, snapshot([made]))).toMatchObject({ step: 'ready', terminal: 4n });
+  });
+});
+
+describe('taskForTerminal', () => {
+  test('binds once and never moves a task to a replacement terminal', () => {
+    const made = snapshot([{
+      id: 'new', branch: 'fix-the-login-redirect-keep-k3f9',
+      terminals: [{ id: 3n, agent: '' }, { id: 4n, agent: 'claude' }, { id: 5n, agent: 'codex' }],
+    }]);
+    const bound = bindTasks([work], made, 20_000);
+    expect(bound[0]).toMatchObject({ terminal: 4n, openedAt: 20_000 });
+    expect(taskForTerminal(bound, 4n)?.prompt).toBe(work.prompt);
+    expect(taskForTerminal(bound, 3n)).toBeUndefined();
+    expect(taskForTerminal(bound, 5n)).toBeUndefined();
+    const replaced = snapshot([{ id: 'new', branch: 'fix-the-login-redirect-keep-k3f9', terminals: [{ id: 5n, agent: 'codex' }] }]);
+    expect(taskForTerminal(bindTasks(bound, replaced, 30_000), 5n)).toBeUndefined();
+    expect(bindTasks(bound, null)[0]).toBe(bound[0]);
+  });
+
+  test('agrees with navigation and does not bind expired requests', () => {
+    const made = snapshot([{
+      id: 'new', branch: 'fix-the-login-redirect-keep-k3f9',
+      terminals: [{ id: 4n, agent: 'codex', closed: true }, { id: 5n, agent: 'codex', closed: false }],
+    }]);
+    expect(bindTasks([work], made, 20_000)[0].terminal).toBe(5n);
+    expect(progressOf(work, made)).toMatchObject({ terminal: 5n });
+    expect(bindTasks([work], made, work.at + 120_001)[0].terminal).toBeUndefined();
+  });
+
+  test('remembers delivery, dismissal and a change of conversation', () => {
+    const pending: Starting = { ...work };
+    expect(reconcileTask(pending, 'first', false)).toBe(false);
+    expect(reconcileTask(pending, 'second', false)).toBe(true);
+    expect(pending).toMatchObject({ session: 'first', delivery: 'superseded' });
+    const delivered: Starting = { ...work };
+    expect(reconcileTask(delivered, 'first', true)).toBe(true);
+    expect(delivered.delivery).toBe('delivered');
+    const dismissed: Starting = { ...work, delivery: 'dismissed' };
+    expect(reconcileTask(dismissed, 'first', false)).toBe(true);
+    expect(dismissed.delivery).toBe('dismissed');
+    const windowed: Starting = { ...work };
+    expect(reconcileTask(windowed, 'first', false, true)).toBe(true);
+    expect(windowed.delivery).toBe('superseded');
   });
 });
 

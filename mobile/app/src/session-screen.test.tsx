@@ -4,7 +4,7 @@ import { useEffect as mockUseEffect } from 'react';
 import { Linking } from 'react-native';
 import Session, { Chat } from './app/session/[host]/[terminal]';
 
-const mockRouter = { push: jest.fn() };
+const mockRouter = { push: jest.fn(), replace: jest.fn() };
 const mockConfirmIdentity = jest.fn(async (_reason: string) => true);
 let mockConn: any;
 let mockParams = { host: 'host', terminal: '7' };
@@ -17,7 +17,7 @@ const mockNavigation = {
   },
 };
 jest.mock('expo-router', () => ({
-  router: { push: (path: string) => mockRouter.push(path) },
+  router: { push: (path: string) => mockRouter.push(path), replace: (path: string) => mockRouter.replace(path) },
   useFocusEffect: (callback: () => void) => mockUseEffect(callback, [callback]),
   useLocalSearchParams: () => mockParams,
   useNavigation: () => mockNavigation,
@@ -35,6 +35,12 @@ jest.mock('./components/FloatMenu', () => ({
   placeOf: (_view: unknown, then: (place: object) => void) => then({ x: 10, y: 200, width: 120, height: 40 }),
 }));
 jest.mock('./lib/lock', () => ({ confirmIdentity: (reason: string) => mockConfirmIdentity(reason) }));
+// What a hold puts on the clipboard.
+const mockCopied = jest.fn(async (_text: string) => true);
+jest.mock('expo-clipboard', () => ({
+  ...(jest.requireActual('expo-clipboard') as object),
+  setStringAsync: (text: string) => mockCopied(text),
+}));
 
 // Photos as the pickers would hand them over, and a mic that hears what a
 // test says.
@@ -279,6 +285,7 @@ describe('Session', () => {
     await waitFor(() => expect(view.getByText('Read file')).toBeTruthy());
     expect(view.getByText('queued request')).toBeTruthy();
     expect(view.getByLabelText(/queued request.*Queued/)).toBeTruthy();
+    await fireEvent.press(view.getByLabelText('Codex is working: Running checks. Show details'));
     expect(view.getByText('Running checks')).toBeTruthy();
     expect(view.getByText('const ok = true;')).toBeTruthy();
     expect(view.getByText('Ship')).toBeTruthy();
@@ -290,6 +297,55 @@ describe('Session', () => {
     expect(mockRouter.push.mock.calls).toEqual(expect.arrayContaining([
       ['/terminal/host/7'], ['/worktree/host/tree'],
     ]));
+    await view.unmount();
+  });
+
+  test('a program busy in another tab neither spins nor reads busy here, where the agent starting does', async () => {
+    // npm start in a shell beside Codex at rest: busy, and the host names no agent.
+    mockConn = connection(
+      tree({
+        activity: 1,
+        agent: '',
+        terminals: [
+          { id: 7n, agent: 'codex', title: 'Codex', closed: false, modes },
+          { id: 8n, agent: '', title: '', closed: false },
+        ],
+      }),
+    );
+    const view = await render(<Session />);
+    await waitFor(() => expect(view.getByText(/^Nothing in this session yet/)).toBeTruthy());
+    expect(view.queryByText('busy')).toBeNull();
+    expect(view.queryByLabelText(/is working/)).toBeNull();
+    await view.unmount();
+
+    // Codex starting up lights the same, but the host names it: its own.
+    mockConn = connection(tree({ activity: 1, agent: 'codex', agentState: 'starting' }));
+    const starting = await render(<Session />);
+    await waitFor(() => expect(starting.getByLabelText(/^Codex is working: Starting/)).toBeTruthy());
+    expect(starting.getByText('busy')).toBeTruthy();
+    await starting.unmount();
+  });
+
+  test('holding a table or a code block copies its turn, from inside the scroller it drags in', async () => {
+    const text = 'Two ways:\n\n| Way | Cost |\n|---|---|\n| Cache | low |\n\n```sh\ncargo check\n```';
+    mockConn = connection(tree(), {
+      conversation: jest.fn(async () => ({
+        supported: true, reason: '', fresh: true, session: 'one', next: 4n, queued: [], turns: [{ kind: 2, text }],
+      })),
+    });
+    const view = await render(<Session />);
+    await waitFor(() => expect(view.getByText('cargo check')).toBeTruthy());
+    // The turn's own hold, and one inside each sideways scroller: a hold
+    // only on the turn kept the scroll view from starting a drag.
+    expect(view.getAllByHintText('Hold to copy')).toHaveLength(3);
+    await fireEvent(view.getByText('Cache'), 'longPress');
+    expect(mockCopied).toHaveBeenLastCalledWith(text);
+    await fireEvent(view.getByText('cargo check'), 'longPress');
+    expect(mockCopied).toHaveBeenCalledTimes(2);
+    expect(mockCopied).toHaveBeenLastCalledWith(text);
+    expect(view.getByText('Copied')).toBeTruthy();
+    // Said a moment, then gone.
+    await waitFor(() => expect(view.queryByText('Copied')).toBeNull(), { timeout: 2500 });
     await view.unmount();
   });
 
@@ -546,6 +602,125 @@ describe('Session', () => {
     // A host of its own each time: chats are kept by host and terminal.
     const fresh = () => `started-${(hosts += 1)}`;
 
+    test('starts the hand-off timer afresh after slow worktree creation', async () => {
+      mockParams = { host: fresh(), terminal: '7' };
+      mockConn = connection(agentTree('codex'), {
+        asked: [{ project: 'project', prompt: 'Fix the login', agent: 'codex', at: Date.now() - 180_000, terminal: 7n, before: [] }],
+        conversation: jest.fn(async () => reply(opening[0])),
+      });
+      const view = await render(<Chat started={started(mockParams.host)} />);
+      await waitFor(() => expect(mockConn.conversation).toHaveBeenCalled());
+      expect(view.getByLabelText('Fix the login. Sending.')).toBeTruthy();
+      await view.unmount();
+    });
+
+    test('holds a slow agent startup instead of declaring the prompt undelivered', async () => {
+      mockParams = { host: fresh(), terminal: '7' };
+      mockConn = connection(agentTree('codex'), {
+        asked: [{ project: 'project', prompt: 'Fix the login', agent: 'codex', at: Date.now() - 180_000, openedAt: Date.now() - 30_000, terminal: 7n, before: [] }],
+        conversation: jest.fn(async () => reply(opening[0])),
+      });
+      const view = await render(<Session />);
+      await waitFor(() => expect(view.getByLabelText('Fix the login. Waiting on your Mac.')).toBeTruthy());
+      await view.unmount();
+    });
+
+    test('does not restore a dismissed task when the chat is reopened', async () => {
+      mockParams = { host: fresh(), terminal: '7' };
+      mockConn = connection(agentTree('codex'), {
+        asked: [{ project: 'project', prompt: 'Fix the login', agent: 'codex', at: Date.now() - 180_000, terminal: 7n, before: [] }],
+        conversation: jest.fn(async () => reply(opening[0])),
+      });
+      const view = await render(<Session />);
+      await waitFor(() => expect(view.getByLabelText('Fix the login. Not in the conversation, check the terminal.')).toBeTruthy());
+      await fireEvent.press(view.getByLabelText('Fix the login. Not in the conversation, check the terminal.'));
+      expect(mockConn.asked[0].delivery).toBe('dismissed');
+      await view.unmount();
+      const reopened = await render(<Session />);
+      await waitFor(() => expect(reopened.getByText('No agent has reported from this terminal yet.')).toBeTruthy());
+      expect(reopened.queryByText('Fix the login')).toBeNull();
+      await reopened.unmount();
+    });
+
+    test('allows startup time even when an empty transcript is already readable', async () => {
+      mockParams = { host: fresh(), terminal: '7' };
+      mockConn = connection(agentTree('codex'), {
+        asked: [{ project: 'project', prompt: 'Fix the login', agent: 'codex', at: Date.now() - 30_000, openedAt: Date.now() - 30_000, terminal: 7n, before: [] }],
+        conversation: jest.fn(async () => ({ supported: true, reason: '', fresh: true, session: 'readying', next: 10n, queued: [], turns: [] })),
+      });
+      const view = await render(<Session />);
+      await waitFor(() => expect(view.getByLabelText('Fix the login. Waiting on your Mac.')).toBeTruthy());
+      await view.unmount();
+    });
+
+    test('does not infer non-delivery from a recent transcript window', async () => {
+      mockParams = { host: fresh(), terminal: '7' };
+      mockConn = connection(agentTree('codex'), {
+        asked: [{ project: 'project', prompt: 'Fix the login', agent: 'codex', at: Date.now() - 180_000, terminal: 7n, before: [] }],
+        conversation: jest.fn(async () => ({ supported: true, reason: '', fresh: true, session: 'long-running', next: 5_000_000n, queued: [], turns: [{ kind: 3, text: 'Later work', tool: 'Read' }] })),
+      });
+      const view = await render(<Session />);
+      await waitFor(() => expect(mockConn.asked[0].delivery).toBe('superseded'));
+      expect(view.queryByText('Fix the login')).toBeNull();
+      await view.unmount();
+      const reopened = await render(<Session />);
+      expect(reopened.queryByText('Fix the login')).toBeNull();
+      await reopened.unmount();
+    });
+
+    test('retires the task if the same terminal moves to another conversation', async () => {
+      mockParams = { host: fresh(), terminal: '7' };
+      let current = { supported: true, reason: '', fresh: true, session: 'first', next: 0n, queued: [], turns: [] as object[] };
+      mockConn = connection(agentTree('codex'), {
+        asked: [{ project: 'project', prompt: 'Fix the login', agent: 'codex', at: Date.now(), terminal: 7n, before: [] }],
+        conversation: jest.fn(async () => current),
+      });
+      const view = await render(<Session />);
+      await waitFor(() => expect(mockConn.asked[0].session).toBe('first'));
+      current = { ...current, session: 'second', turns: [{ kind: 1, text: 'A different task' }] };
+      await waitFor(() => expect(view.getByText('A different task')).toBeTruthy(), { timeout: 3000 });
+      expect(view.queryByText('Fix the login')).toBeNull();
+      expect(mockConn.asked[0].delivery).toBe('superseded');
+      await view.unmount();
+      const reopened = await render(<Session />);
+      expect(reopened.queryByText('Fix the login')).toBeNull();
+      await reopened.unmount();
+    });
+
+    test('recovers an unreported task when its chat is reopened, without sending it again', async () => {
+      mockParams = { host: fresh(), terminal: '7' };
+      const prompt = 'Look into the status of\na long task that must stay copyable.';
+      mockConn = connection(agentTree('codex', {}), {
+        asked: [{ project: 'project', prompt, agent: 'codex', at: Date.now() - 180_000, before: [], terminal: 7n }],
+        conversation: jest.fn(async () => reply(opening[0])),
+      });
+      mockConn.snapshot.projects[0].worktrees[0].branch = 'look-into-the-status-of-k3f9';
+      const view = await render(<Session />);
+      await waitFor(() => expect(view.getByLabelText(`${prompt}. Not in the conversation, check the terminal.`)).toBeTruthy());
+      expect(mockConn.type).not.toHaveBeenCalled();
+      expect(mockConn.sendFiles).not.toHaveBeenCalled();
+      expect(view.queryByText('No agent has reported from this terminal yet.')).toBeNull();
+      await view.unmount();
+    });
+
+    test('does not mark an older initial task as undelivered when a long transcript arrives', async () => {
+      mockParams = { host: fresh(), terminal: '7' };
+      const prompt = 'Look into the status of the project';
+      mockConn = connection(agentTree('codex'), {
+        asked: [{ project: 'project', prompt, agent: 'codex', at: Date.now() - 180_000, before: [], terminal: 7n }],
+        conversation: jest.fn(async () => ({
+          supported: true, reason: '', fresh: true, session: 'started', next: 20n, queued: [],
+          turns: [{ kind: 1, text: prompt }, ...Array.from({ length: 8 }, (_, i) => ({ kind: 2, text: `Reply ${i}` }))],
+        })),
+      });
+      mockConn.snapshot.projects[0].worktrees[0].branch = 'look-into-the-status-of-k3f9';
+      const view = await render(<Session />);
+      await waitFor(() => expect(view.getByText('Reply 7')).toBeTruthy());
+      expect(view.queryByLabelText(`${prompt}. Not in the conversation, check the terminal.`)).toBeNull();
+      expect(view.getAllByText(prompt)).toHaveLength(1);
+      await view.unmount();
+    });
+
     test.each(
       ['claude', 'codex', 'grok', 'opencode'].flatMap((agent) => opening.map((reason) => [agent, reason] as const)),
     )('shows only the task on its way for %s while the desktop says "%s"', async (agent, reason) => {
@@ -639,6 +814,43 @@ describe('Session', () => {
     await view.unmount();
   });
 
+  test('keeps a photo on its message while the agent’s queue holds it', async () => {
+    mockParams = { host: 'queued-photo', terminal: '7' };
+    let queued: string[] = [];
+    mockConn = connection(tree({ activity: 2 }), {
+      conversation: jest.fn(async () => ({ supported: true, reason: '', fresh: true, session: 'one', next: 4n, queued, turns: [] })),
+    });
+    const view = await render(<Session />);
+    await fireEvent.press(view.getByLabelText('Attach a photo or file'));
+    await fireEvent.press(view.getByText('Photos'));
+    await waitFor(() => expect(view.getByLabelText('Remove IMG_1.jpg')).toBeTruthy());
+    await fireEvent.changeText(view.getByPlaceholderText('Message Codex'), 'the tab bar');
+    await fireEvent.press(view.getByLabelText('Send'));
+    await waitFor(() => expect(mockConn.sendFiles).toHaveBeenCalled());
+
+    queued = ['the tab bar'];
+    await waitFor(() => expect(view.getByLabelText('the tab bar. Queued, read when the agent finishes this step.')).toBeTruthy(), { timeout: 3000 });
+    expect(view.getByLabelText('IMG_1.jpg')).toBeTruthy();
+    expect(view.getAllByText('the tab bar')).toHaveLength(1);
+    await view.unmount();
+  });
+
+  test('shows the files a message queued at the desktop carries as chips', async () => {
+    mockParams = { host: 'queued-files', terminal: '7' };
+    mockConn = connection(tree({ activity: 2 }), {
+      conversation: jest.fn(async () => ({
+        supported: true, reason: '', fresh: true, session: 'one', next: 4n, turns: [],
+        queued: ['Look at this\n\nAttached files:\n- /up/1/console.txt', 'Attached files:\n- /up/2/trace.json'],
+      })),
+    });
+    const view = await render(<Session />);
+    await waitFor(() => expect(view.getByText('console.txt')).toBeTruthy());
+    expect(view.getByLabelText('Look at this. Queued, read when the agent finishes this step.')).toBeTruthy();
+    expect(view.getByLabelText('trace.json. Queued, read when the agent finishes this step.')).toBeTruthy();
+    expect(view.queryByText(/Attached files/)).toBeNull();
+    await view.unmount();
+  });
+
   test('puts photos back in the field when they could not be sent', async () => {
     mockConn = connection(tree(), { sendFiles: jest.fn(async () => { throw new Error('the connection to the desktop dropped'); }) });
     const view = await render(<Session />);
@@ -709,5 +921,135 @@ describe('Session', () => {
     await waitFor(() => expect(mockConn.type).toHaveBeenCalledWith(7n, 'run the tests'));
     expect(view.queryByText('Listening')).toBeNull();
     await view.unmount();
+  });
+
+  describe('a session gone cold', () => {
+    const spell = { session: 'cold-one', sinceMs: 1000n, tokens: 312000n, costMicros: 6240000n, summary: 're-caches 312k tokens, about $6.24 at API prices' };
+    const coldTree = (sinceMs = spell.sinceMs) =>
+      tree({ agent: 'claude', terminals: [{ id: 7n, agent: 'claude', title: 'Claude', closed: false, cold: { ...spell, sinceMs } }] });
+
+    test('asks once as the chat opens, and Continue leaves the session as it is', async () => {
+      mockConn = connection(coldTree(2000n), { hostMinor: 28, startFresh: jest.fn(async () => true) });
+      const view = await render(<Chat />);
+      expect(view.getByText('This session went cold')).toBeTruthy();
+      expect(view.getByText('Continuing re-caches 312k tokens, about $6.24 at API prices.')).toBeTruthy();
+      await fireEvent.press(view.getByText('Continue'));
+      await waitFor(() => expect(view.queryByText('This session went cold')).toBeNull());
+      expect(mockConn.startFresh).not.toHaveBeenCalled();
+      await view.unmount();
+      // Answered for this spell: opening the chat again does not ask again.
+      const again = await render(<Chat />);
+      expect(again.queryByText('This session went cold')).toBeNull();
+      await again.unmount();
+    });
+
+    test('Start fresh asks the desktop, then follows the terminal it names', async () => {
+      const startFresh = jest.fn(
+        async (_terminal: bigint, _session: string, _since: bigint): Promise<{ terminalId: bigint } | { why: string } | false> => ({
+          terminalId: 9n,
+        }),
+      );
+      const awaitTerminal = jest.fn(async (_id: bigint) => {});
+      mockConn = connection(coldTree(3000n), { hostMinor: 28, startFresh, awaitTerminal });
+      const view = await render(<Chat />);
+      await fireEvent.press(view.getByText('Start fresh'));
+      await waitFor(() => expect(startFresh).toHaveBeenCalledWith(7n, 'cold-one', 3000n));
+      await waitFor(() => expect(mockRouter.replace).toHaveBeenCalledWith('/session/host/9'));
+      expect(awaitTerminal).toHaveBeenCalledWith(9n);
+      await view.unmount();
+    });
+
+    test('Start fresh carries what was being written to the fresh chat', async () => {
+      const startFresh = jest.fn(async (): Promise<{ terminalId: bigint } | { why: string } | false> => ({ terminalId: 9n }));
+      mockConn = connection(
+        tree({
+          agent: 'claude',
+          terminals: [
+            { id: 7n, agent: 'claude', title: 'Claude', closed: false, cold: { ...spell, sinceMs: 3700n } },
+            { id: 9n, agent: 'claude', title: 'Claude', closed: false },
+          ],
+        }),
+        { hostMinor: 28, startFresh, awaitTerminal: jest.fn(async () => {}) },
+      );
+      const view = await render(<Chat />);
+      await fireEvent.changeText(view.getByPlaceholderText('Message Claude'), 'half a thought');
+      await fireEvent.press(view.getByText('Start fresh'));
+      await waitFor(() => expect(mockRouter.replace).toHaveBeenCalledWith('/session/host/9'));
+      await view.unmount();
+      mockParams = { host: 'host', terminal: '9' };
+      const fresh = await render(<Chat />);
+      expect(fresh.getByPlaceholderText('Message Claude').props.value).toBe('half a thought');
+      await fresh.unmount();
+    });
+
+    test('a chat left while its fresh session starts does not move whatever is on screen', async () => {
+      let resolve: (outcome: { terminalId: bigint }) => void = () => {};
+      const startFresh = jest.fn(
+        () => new Promise<{ terminalId: bigint } | { why: string } | false>((done) => (resolve = done)),
+      );
+      mockConn = connection(coldTree(3800n), { hostMinor: 28, startFresh, awaitTerminal: jest.fn(async () => {}) });
+      const view = await render(<Chat />);
+      await fireEvent.press(view.getByText('Start fresh'));
+      await waitFor(() => expect(startFresh).toHaveBeenCalled());
+      expect(view.getByText('Starting a fresh session on your Mac…')).toBeTruthy();
+      await view.unmount();
+      await act(async () => resolve({ terminalId: 9n }));
+      expect(mockRouter.replace).not.toHaveBeenCalled();
+    });
+
+    test('a message sent while the fresh session starts goes as typed, and the chat stays', async () => {
+      let resolve: (outcome: { terminalId: bigint }) => void = () => {};
+      const startFresh = jest.fn(
+        () => new Promise<{ terminalId: bigint } | { why: string } | false>((done) => (resolve = done)),
+      );
+      mockConn = connection(coldTree(3900n), { hostMinor: 28, startFresh, awaitTerminal: jest.fn(async () => {}) });
+      const view = await render(<Chat />);
+      await fireEvent.press(view.getByText('Start fresh'));
+      await waitFor(() => expect(startFresh).toHaveBeenCalled());
+      await fireEvent.changeText(view.getByPlaceholderText('Message Claude'), 'one more thing');
+      await fireEvent.press(view.getByLabelText('Send'));
+      await waitFor(() => expect(mockConn.type).toHaveBeenCalledWith(7n, 'one more thing'));
+      await act(async () => resolve({ terminalId: 9n }));
+      await waitFor(() =>
+        expect(view.getByText('Your message went to this session, so the chat stays on it. The fresh one is open beside it on your Mac.')).toBeTruthy(),
+      );
+      expect(mockRouter.replace).not.toHaveBeenCalled();
+      await view.unmount();
+    });
+
+    test('a Start fresh the desktop refuses says why and stays in this session', async () => {
+      const startFresh = jest.fn(async (): Promise<{ terminalId: bigint } | { why: string } | false> => ({
+        why: "it's working — start fresh once this turn is done",
+      }));
+      mockConn = connection(coldTree(3500n), { hostMinor: 28, startFresh, awaitTerminal: jest.fn(async () => {}) });
+      const view = await render(<Chat />);
+      await fireEvent.press(view.getByText('Start fresh'));
+      await waitFor(() =>
+        expect(view.getByText("Not started fresh: it's working — start fresh once this turn is done")).toBeTruthy(),
+      );
+      expect(mockRouter.replace).not.toHaveBeenCalled();
+      // Still cold, and still asked about.
+      expect(view.getByText('This session went cold')).toBeTruthy();
+      await view.unmount();
+    });
+
+    test('sending a message is the answer Continue, and goes as typed', async () => {
+      mockConn = connection(coldTree(4000n), { hostMinor: 28, startFresh: jest.fn(async () => true) });
+      const view = await render(<Chat />);
+      expect(view.getByText('This session went cold')).toBeTruthy();
+      await fireEvent.changeText(view.getByPlaceholderText('Message Claude'), 'carry on');
+      await fireEvent.press(view.getByLabelText('Send'));
+      await waitFor(() => expect(mockConn.type).toHaveBeenCalledWith(7n, 'carry on'));
+      await waitFor(() => expect(view.queryByText('This session went cold')).toBeNull());
+      expect(mockConn.startFresh).not.toHaveBeenCalled();
+      await view.unmount();
+    });
+
+    test('a desktop older than 1.28 is never asked', async () => {
+      mockConn = connection(coldTree(5000n), { hostMinor: 27 });
+      const view = await render(<Chat />);
+      expect(view.queryByText('This session went cold')).toBeNull();
+      await view.unmount();
+    });
   });
 });

@@ -55,6 +55,11 @@ const SHOT_H: Pixels = px(286.0);
 const SHOT_SMALL_W: Pixels = px(62.0);
 const SHOT_SMALL_H: Pixels = px(134.0);
 
+/// A web page's screenshot, one to a row at the column's width: wider than
+/// it is tall, where a phone's is the other way about.
+#[cfg(feature = "chromium")]
+const SHOT_PAGE_H: Pixels = px(84.0);
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum QuickTarget {
     AnyFree,
@@ -784,9 +789,8 @@ impl Shell {
     }
 
     /// The screenshots going with the prompt, as a column beside the draft:
-    /// one at the column's width, two or more in pairs. Each can be taken
-    /// off again.
-    fn quick_prompt_shots(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// one at the column's width, two or more in pairs.
+    fn quick_prompt_shots(&self) -> Option<AnyElement> {
         let dialog = self.quick_prompt.as_ref()?;
         if dialog.attachments.is_empty() {
             return None;
@@ -797,9 +801,13 @@ impl Shell {
             true => (SHOTS_W, SHOT_H),
             false => (SHOT_SMALL_W, SHOT_SMALL_H),
         };
-        let thumbs = dialog.attachments.iter().enumerate().map(|(index, path)| {
+        #[cfg(feature = "chromium")]
+        let (width, height) = match dialog.source {
+            Some(DeviceKind::Browser(_)) => (SHOTS_W, SHOT_PAGE_H),
+            _ => (width, height),
+        };
+        let thumbs = dialog.attachments.iter().map(|path| {
             div()
-                .relative()
                 .flex_none()
                 .w(width)
                 .h(height)
@@ -812,22 +820,6 @@ impl Shell {
                     gpui::img(path.clone())
                         .size_full()
                         .object_fit(gpui::ObjectFit::Contain),
-                )
-                .child(
-                    div().absolute().top(px(4.0)).right(px(4.0)).child(
-                        icon_button(("quick-shot-remove", index), Icon::Close)
-                            .small()
-                            .render(t)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if let Some(dialog) = this.quick_prompt.as_mut()
-                                    && index < dialog.attachments.len()
-                                {
-                                    dialog.attachments.remove(index);
-                                }
-                                cx.stop_propagation();
-                                cx.notify();
-                            })),
-                    ),
                 )
         });
         Some(
@@ -1096,7 +1088,7 @@ impl Shell {
             .child(mic)
             .child(div().flex_grow())
             .child(send);
-        let shots = self.quick_prompt_shots(cx);
+        let shots = self.quick_prompt_shots();
         let prompt = {
             let area = textarea("quick-prompt-draft", editor, EDITOR_HEIGHT)
                 .active(writing || listening)

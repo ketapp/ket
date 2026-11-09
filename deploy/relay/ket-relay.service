@@ -1,0 +1,45 @@
+# ket's relay for many Macs, behind Caddy on the same machine (see README.md).
+# Install as /etc/systemd/system/ket-relay.service.
+
+[Unit]
+Description=ket relay: forwards ciphertext between devices and ket hosts
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/ket-relay 127.0.0.1:7878 --health 127.0.0.1:7879
+Environment=RUST_LOG=info
+Restart=always
+RestartSec=2
+# SIGTERM: every device and host is told its connection has ended, and the
+# relay exits once their sockets have closed, within a few seconds.
+KillSignal=SIGTERM
+TimeoutStopSec=15
+# Two sockets per connected device and one per host.
+LimitNOFILE=65536
+
+# It needs the network and nothing else: no files, no other users' anything.
+DynamicUser=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

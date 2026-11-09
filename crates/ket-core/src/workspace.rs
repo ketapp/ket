@@ -210,6 +210,10 @@ pub struct Workspace {
     /// The `gh` a pull request is opened with, when it is not the real one —
     /// see [`crate::github::Checkout::program`]. `None` everywhere but a test.
     gh_program: Option<PathBuf>,
+    /// Chromium's roots, where a removed worktree's browser profiles are
+    /// deleted from — see [`Workspace::remove_browser_profiles`]. Empty but
+    /// for [`Workspace::open`], so a test touches none of the owner's.
+    chromium_roots: Vec<PathBuf>,
     /// Sessions this process is driving.
     ///
     /// In memory rather than in the store, and deliberately so: a permission
@@ -254,6 +258,7 @@ impl Workspace {
             config,
             hooks: HookRunner::real(),
             gh_program: None,
+            chromium_roots: paths::chromium_roots().map(Vec::from).unwrap_or_default(),
             live: std::sync::Mutex::new(std::collections::HashMap::new()),
         })
     }
@@ -294,6 +299,7 @@ impl Workspace {
             config,
             hooks,
             gh_program: None,
+            chromium_roots: Vec::new(),
             live: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
@@ -306,6 +312,13 @@ impl Workspace {
     /// cannot reach into. See [`crate::github::Checkout::program`].
     pub fn with_gh_program(mut self, program: impl Into<PathBuf>) -> Self {
         self.gh_program = Some(program.into());
+        self
+    }
+
+    /// The same workspace, deleting a removed worktree's browser profiles
+    /// from beneath `roots` rather than from Chromium's own — a test's seam.
+    pub fn with_chromium_roots(mut self, roots: Vec<PathBuf>) -> Self {
+        self.chromium_roots = roots;
         self
     }
 
@@ -398,6 +411,7 @@ impl Workspace {
     /// orphaning worktrees would leave directories nothing knows how to clean up.
     pub fn remove_project(&self, id: &ProjectId, force: bool) -> Result<()> {
         let id = id.clone();
+        let mut dropped: Vec<WorktreeId> = Vec::new();
 
         self.store.update(|state| {
             if !state.projects.iter().any(|p| p.id == id) {
@@ -415,6 +429,12 @@ impl Workspace {
                 )));
             }
 
+            dropped = state
+                .worktrees
+                .iter()
+                .filter(|w| w.project_id == id)
+                .map(|w| w.id.clone())
+                .collect();
             state.projects.retain(|p| p.id != id);
             state.worktrees.retain(|w| w.project_id != id);
             state.project_state.remove(&id);
@@ -429,6 +449,10 @@ impl Workspace {
         // starts with none. A failure here is not a reason to keep the project.
         if let Err(e) = crate::permissions::prune_project(id.as_str()) {
             tracing::warn!(%e, "permissions: could not drop a removed project's rules");
+        }
+        // So do the network logs of the worktrees forced out with it.
+        for worktree in &dropped {
+            crate::network::store::remove_worktree(worktree.as_str());
         }
         self.bus.publish(Event::ProjectRemoved { project_id: id });
         Ok(())
@@ -1465,6 +1489,9 @@ impl Workspace {
         })?;
 
         self.prune_empty_project_dir(&worktree_path);
+        self.remove_browser_profiles(&id, None);
+        // What the network inspector saw in it goes with it.
+        crate::network::store::remove_worktree(id.as_str());
 
         self.bus.publish(Event::WorktreeRemoved { worktree_id: id });
         self.announce_project_state(&project_id)?;
@@ -1605,6 +1632,32 @@ impl Workspace {
             }
             Ok(())
         })
+    }
+
+    /// Deletes what a removed worktree's browser tabs kept — its sign-ins,
+    /// cookies and site data — under each of Chromium's roots, in the
+    /// background, the way a removed checkout is deleted.
+    ///
+    /// Not under a root a running Chromium holds: it may still have pages
+    /// open in the profile, with its files open, and the ket running it
+    /// deletes the profile itself once they have closed — passing that root
+    /// as `closed`, which is deleted under whoever holds it.
+    pub fn remove_browser_profiles(&self, worktree: &WorktreeId, closed: Option<&Path>) {
+        let name = paths::chromium_profile_name(worktree);
+        for root in &self.chromium_roots {
+            let profile = root.join(&name);
+            if !profile.is_dir() || (closed != Some(root.as_path()) && chromium_holds(root)) {
+                continue;
+            }
+            match worktree_trash::move_to_trash(&profile) {
+                Some(trash) => worktree_trash::schedule_deletion(trash),
+                None => {
+                    if let Err(e) = fs::remove_dir_all(&profile) {
+                        tracing::warn!(%e, path = %profile.display(), "could not delete a browser profile");
+                    }
+                }
+            }
+        }
     }
 
     /// Removes a worktree's per-project directory once it holds nothing.
@@ -2130,6 +2183,10 @@ impl Workspace {
 
         for worktree in state.worktrees.iter().filter(|w| gone.contains(&w.id)) {
             self.prune_empty_project_dir(&worktree.path);
+            self.remove_browser_profiles(&worktree.id, None);
+        }
+        for id in &gone {
+            crate::network::store::remove_worktree(id.as_str());
         }
 
         for id in &gone {
@@ -2952,6 +3009,57 @@ fn delete_branch_after_removal(git: &Git, branch: &str, force: bool) -> Option<S
 ///
 /// Matches the path itself or anything beneath it, and tolerates the trailing
 /// slash a collapsed untracked directory carries.
+/// Whether a running Chromium holds the root cache `root`: its singleton
+/// lock is a link to `<host>-<pid>`, and that process is alive. A lock left
+/// by a Chromium that crashed holds nothing.
+fn chromium_holds(root: &Path) -> bool {
+    let Ok(lock) = fs::read_link(root.join("SingletonLock")) else {
+        return false;
+    };
+    let pid = lock
+        .to_str()
+        .and_then(|lock| lock.rsplit_once('-'))
+        .and_then(|(_, pid)| pid.parse::<i32>().ok());
+    match pid {
+        Some(pid) => process_alive(pid),
+        // Not a lock Chromium writes: someone's, so left alone.
+        None => true,
+    }
+}
+
+/// Whether a Chromium in another process holds the root cache `root`: one
+/// running in this process doesn't count — its pages say for themselves
+/// which profiles they have open. For deleting a profile, which must not
+/// happen under another ket's live browser.
+pub fn chromium_held_elsewhere(root: &Path) -> bool {
+    let Ok(lock) = fs::read_link(root.join("SingletonLock")) else {
+        return false;
+    };
+    let pid = lock
+        .to_str()
+        .and_then(|lock| lock.rsplit_once('-'))
+        .and_then(|(_, pid)| pid.parse::<i32>().ok());
+    match pid {
+        Some(pid) => u32::try_from(pid).ok() != Some(std::process::id()) && process_alive(pid),
+        // Not a lock Chromium writes: someone's, so left alone.
+        None => true,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn process_alive(pid: i32) -> bool {
+    use nix::sys::signal::kill;
+    use nix::unistd::Pid;
+    // Signal 0 checks without sending; `ESRCH` is the process gone.
+    pid > 0 && kill(Pid::from_raw(pid), None) != Err(nix::errno::Errno::ESRCH)
+}
+
+/// Chromium runs in ket on macOS only.
+#[cfg(not(target_os = "macos"))]
+fn process_alive(_pid: i32) -> bool {
+    false
+}
+
 fn was_provisioned(path: &str, provisioned: &[String]) -> bool {
     let path = path.trim_end_matches('/');
 
@@ -2962,4 +3070,65 @@ fn was_provisioned(path: &str, provisioned: &[String]) -> bool {
                 .strip_prefix(created)
                 .is_some_and(|rest| rest.starts_with('/'))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A workspace whose state, worktrees and Chromium roots live in a
+    /// throwaway directory.
+    fn sandboxed(tag: &str) -> (PathBuf, Workspace) {
+        let root = std::env::temp_dir().join(format!("ket-ws-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let workspace = Workspace::with_paths(Store::at(root.join("state.json")), root.join("wt"))
+            .with_chromium_roots(vec![root.join("chromium"), root.join("chromium-dev")]);
+        (root, workspace)
+    }
+
+    // macOS: a live lock is told by asking whether its process is alive.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_removed_worktrees_browser_profiles_go_unless_chromium_holds_them() {
+        let (root, workspace) = sandboxed("profiles");
+        let worktree = WorktreeId::new("demo-site/1a2b");
+        let name = paths::chromium_profile_name(&worktree);
+        let [release, dev] = [root.join("chromium"), root.join("chromium-dev")];
+        for profile in [release.join(&name), dev.join(&name), release.join("other")] {
+            fs::create_dir_all(profile.join("Local Storage")).unwrap();
+        }
+        // A release ket is running, this process standing in for it.
+        std::os::unix::fs::symlink(
+            format!("host-{}", std::process::id()),
+            release.join("SingletonLock"),
+        )
+        .unwrap();
+
+        workspace.remove_browser_profiles(&worktree, None);
+        assert!(
+            release.join(&name).is_dir(),
+            "a running Chromium's profile stays"
+        );
+        assert!(!dev.join(&name).exists());
+        assert!(release.join("other").is_dir(), "another worktree's stays");
+
+        // That ket has closed the worktree's pages, and deletes its own.
+        workspace.remove_browser_profiles(&worktree, Some(&release));
+        assert!(!release.join(&name).exists());
+        assert!(release.join("other").is_dir());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_lock_whose_chromium_has_gone_holds_nothing() {
+        let (root, _) = sandboxed("lock");
+        assert!(!chromium_holds(&root));
+        // No process has pid i32::MAX.
+        std::os::unix::fs::symlink(format!("host-{}", i32::MAX), root.join("SingletonLock"))
+            .unwrap();
+        assert!(!chromium_holds(&root));
+        let _ = fs::remove_dir_all(&root);
+    }
 }

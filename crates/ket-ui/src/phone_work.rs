@@ -8,6 +8,9 @@
 //! `ket_core::host::take_phone_work` — and this is that window doing it, so a
 //! worktree started from a phone is the same as one started here: in the
 //! store, in the sidebar, with its agent's session in a tab.
+//!
+//! A terminal's `ket browser` comes the same way, for a worktree's Chromium
+//! tab: see `browser_agent`.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -22,6 +25,9 @@ use crate::Shell;
 use crate::terminal::SessionLaunch;
 use crate::ui::toast::Tone;
 
+#[cfg(feature = "chromium")]
+mod browser_agent;
+
 /// How long a new agent is given to start before its prompt is typed. Its
 /// input is read from the terminal once its interface is up; typed sooner,
 /// the prompt lands in the shell it is starting from.
@@ -33,6 +39,9 @@ const TERMINAL_OPEN: Duration = Duration::from_secs(15);
 
 /// How often landing looks again while they open.
 const LANDING_POLL: Duration = Duration::from_millis(100);
+
+/// How long Codex may take to show its input before the prompt is held back.
+const CODEX_START_WAIT: Duration = Duration::from_secs(120);
 
 impl Shell {
     /// Starts whatever work phones have asked for since the last look.
@@ -50,6 +59,11 @@ impl Shell {
         while let Some((req, key)) = ket_core::host::take_phone_wake() {
             self.wake_from_phone(req, key, cx);
         }
+        let asks = ket_core::host::take_browser_asks();
+        if !asks.is_empty() {
+            self.answer_browser_asks(asks, cx);
+        }
+        self.take_phone_freshes(cx);
         // A phone pinned a worktree: the store has it, the sidebar does not.
         if ket_core::host::take_worktrees_changed() {
             self.reload(cx);
@@ -82,6 +96,22 @@ impl Shell {
             }
             self.toast(Tone::Info, "Merging from your phone…", cx);
             self.merge_worktree_now(id, false, cx);
+        }
+    }
+
+    /// `ket browser`, in a ket built without Chromium: there is no page to
+    /// drive, and the terminal is told so at once rather than left to wait.
+    #[cfg(not(feature = "chromium"))]
+    fn answer_browser_asks(
+        &mut self,
+        asks: Vec<ket_core::host::BrowserAsk>,
+        _cx: &mut Context<Self>,
+    ) {
+        for ask in asks {
+            ket_core::host::finish_browser(
+                ask.req,
+                Err("this ket was built without Chromium".to_owned()),
+            );
         }
     }
 
@@ -338,7 +368,9 @@ impl Shell {
                     cx.background_executor().timer(LANDING_POLL).await;
                     waited += LANDING_POLL;
                 }
-                cx.background_executor().timer(AGENT_START).await;
+                if !wait_for_agent_input(&shell, terminal, cx).await {
+                    return;
+                }
                 let _ = shell.update(cx, |shell, cx| shell.submit_or_queue(terminal, &prompt, cx));
             })
             .detach();
@@ -422,7 +454,9 @@ impl Shell {
                 });
                 return;
             };
-            cx.background_executor().timer(AGENT_START).await;
+            if !wait_for_agent_input(&shell, terminal, cx).await {
+                return;
+            }
             let (before, left) = shell
                 .update(cx, |shell, cx| {
                     let before = shell.images_shown(terminal);
@@ -474,6 +508,82 @@ impl Shell {
             });
         })
         .detach();
+    }
+}
+
+/// Codex can take longer than a fixed delay to start, and can stop on a
+/// trust or welcome screen. Wait for its actual empty composer; a prompt
+/// never goes into its launch arguments or the shell's history.
+async fn wait_for_agent_input(
+    shell: &WeakEntity<Shell>,
+    terminal: crate::terminal::TerminalId,
+    cx: &mut gpui::AsyncApp,
+) -> bool {
+    let codex = shell
+        .update(cx, |shell, _| {
+            shell.terminals.get(&terminal).map(|handle| {
+                handle.agent.as_deref().is_some_and(|name| {
+                    ket_core::agents::harness(name).eq_ignore_ascii_case("codex")
+                })
+            })
+        })
+        .ok()
+        .flatten();
+    let Some(codex) = codex else {
+        let _ = shell.update(cx, |shell, cx| {
+            shell.toast(
+                Tone::Error,
+                "Could not open the terminal. Your prompt has not been sent.",
+                cx,
+            );
+        });
+        return false;
+    };
+    if !codex {
+        cx.background_executor().timer(AGENT_START).await;
+        return true;
+    }
+    let mut waited = Duration::ZERO;
+    loop {
+        let ready = shell
+            .update(cx, |shell, _| {
+                shell.terminals.get(&terminal).and_then(|handle| {
+                    (!handle.term.is_closed()).then(|| {
+                        handle
+                            .term
+                            .with_term(|term| ket_core::screen::codex_prompt_ready(term))
+                    })
+                })
+            })
+            .ok()
+            .flatten();
+        match ready {
+            Some(true) => return true,
+            None => {
+                let _ = shell.update(cx, |shell, cx| {
+                    shell.toast(
+                        Tone::Error,
+                        "Codex closed before receiving your prompt. Check its terminal.",
+                        cx,
+                    );
+                });
+                return false;
+            }
+            Some(false) if waited < CODEX_START_WAIT => {
+                cx.background_executor().timer(LANDING_POLL).await;
+                waited += LANDING_POLL;
+            }
+            Some(false) => {
+                let _ = shell.update(cx, |shell, cx| {
+                    shell.toast(
+                        Tone::Error,
+                        "Codex hasn't opened its input. Your prompt has not been sent; check its terminal.",
+                        cx,
+                    );
+                });
+                return false;
+            }
+        }
     }
 }
 

@@ -43,16 +43,12 @@ use crate::ui::{LABEL, RADIUS_MD};
 use private::Control;
 
 const APPLE_DEVELOPER_TEAM: &str = "59GAB85EFG";
-/// The SimulatorKit builds ket's private Swift calls are known to match,
-/// each with the Xcode that ships it. Every symbol `private` loads, with the
-/// same mangling, is in each (checked 09-29; 27.1 on 10-28). A new Xcode is a
+/// The Xcode releases the simulator tab takes, by major version, any point
+/// release of each. Every symbol `private` loads, with the same mangling, was
+/// in each release checked (26.6, 27.0, 27.1 and 27.2), and every class and
+/// selector it uses is checked again as the tab attaches. A new major is a
 /// new row, once it has been checked the same way.
-const SUPPORTED_SIMULATOR_KITS: &[(&str, &str)] =
-    &[("1005.3", "27.1"), ("1005.2", "27.0"), ("955.7", "26.6")];
-/// CoreSimulator is installed once per Mac — by the newest Xcode — not per
-/// Xcode, so it has a list of its own. Every class and selector `private`
-/// uses is in each (1174.9.2 checked 10-28).
-const SUPPORTED_CORE_SIMULATORS: &[&str] = &["1174.9.2", "1171.7"];
+const SUPPORTED_XCODES: &[&str] = &["27", "26"];
 /// Where SimulatorKit sits inside an Xcode's Contents: Xcode 27 moved it to
 /// SharedFrameworks; Xcode 26 keeps it in the developer directory.
 const SIMULATOR_KITS: &[&str] = &[
@@ -854,30 +850,14 @@ fn discover() -> Result<Discovery, Problem> {
             .detail(error)
         })?;
     }
-    let versions = framework_version(&simulator_kit)
-        .and_then(|kit| framework_version(&core_simulator).map(|core| (kit, core)));
-    match versions {
-        Ok((kit, core))
-            if SUPPORTED_SIMULATOR_KITS
-                .iter()
-                .any(|(known, _)| *known == kit)
-                && SUPPORTED_CORE_SIMULATORS.contains(&core.as_str()) => {}
-        Ok((kit, core)) => {
-            let kits: Vec<_> = SUPPORTED_SIMULATOR_KITS
-                .iter()
-                .map(|(kit, _)| *kit)
-                .collect();
-            return Err(unsupported_xcode(
-                &developer_dir,
-                format!(
-                    "SimulatorKit {kit}, CoreSimulator {core}; ket supports SimulatorKit {} \
-                     with CoreSimulator {}",
-                    either(&kits),
-                    either(SUPPORTED_CORE_SIMULATORS),
-                ),
-            ));
-        }
-        Err(error) => return Err(unsupported_xcode(&developer_dir, error)),
+    if !supported_xcode(xcode_version(&developer_dir).as_deref()) {
+        let detail = framework_version(&simulator_kit)
+            .and_then(|kit| framework_version(&core_simulator).map(|core| (kit, core)))
+            .map_or_else(
+                |error| error,
+                |(kit, core)| format!("SimulatorKit {kit}, CoreSimulator {core}"),
+            );
+        return Err(unsupported_xcode(&developer_dir, detail));
     }
 
     let simctl = developer_dir.join("usr/bin/simctl");
@@ -1079,13 +1059,17 @@ fn installed_xcode() -> Option<PathBuf> {
     found.pop()
 }
 
-/// "Xcode 27.1, 27.0 or 26.6", from the table.
+/// Whether Xcode `version` — "27.2" — is a major the tab takes. An Xcode
+/// whose version can't be read is not.
+fn supported_xcode(version: Option<&str>) -> bool {
+    version
+        .and_then(|version| version.split('.').next())
+        .is_some_and(|major| SUPPORTED_XCODES.contains(&major))
+}
+
+/// "Xcode 27 or 26", from the table.
 fn supported_xcodes() -> String {
-    let versions: Vec<_> = SUPPORTED_SIMULATOR_KITS
-        .iter()
-        .map(|(_, xcode)| *xcode)
-        .collect();
-    format!("Xcode {}", either(&versions))
+    format!("Xcode {}", either(SUPPORTED_XCODES))
 }
 
 /// "a, b or c".
@@ -1104,7 +1088,7 @@ fn unsupported_xcode(developer_dir: &Path, detail: String) -> Problem {
     Problem::new(
         "This version of Xcode isn't supported yet",
         format!(
-            "ket's simulator tab works with {}, and this Mac has {this}. Each new Xcode needs \
+            "ket's simulator tab works with {}, and this Mac has {this}. Each new major Xcode needs \
              a ket update.",
             supported_xcodes()
         ),
@@ -2553,6 +2537,45 @@ mod tests {
             device("Apple Vision Pro", "Apple-Vision-Pro-4K", true),
         );
         assert!(listed_names(&json).is_empty());
+    }
+
+    #[test]
+    fn every_point_release_of_a_supported_xcode_is_taken() {
+        for version in ["27", "27.0", "27.1", "27.2", "27.2.1", "26.0", "26.6"] {
+            assert!(supported_xcode(Some(version)), "Xcode {version}");
+        }
+    }
+
+    #[test]
+    fn other_majors_and_an_unread_version_are_refused() {
+        for version in ["28.0", "25.4", "2.7", "270.1", "", "beta"] {
+            assert!(!supported_xcode(Some(version)), "Xcode {version:?}");
+        }
+        assert!(!supported_xcode(None));
+    }
+
+    #[test]
+    fn an_unsupported_xcode_is_told_which_majors_work() {
+        let problem = unsupported_xcode(
+            Path::new("/nonexistent/Xcode.app/Contents/Developer"),
+            "SimulatorKit 1100.1, CoreSimulator 1200.4".to_owned(),
+        );
+        assert_eq!(
+            problem.title.to_string(),
+            "This version of Xcode isn't supported yet"
+        );
+        assert_eq!(
+            problem.why.to_string(),
+            "ket's simulator tab works with Xcode 27 or 26, and this Mac has a different \
+             version. Each new major Xcode needs a ket update."
+        );
+    }
+
+    #[test]
+    fn choices_read_as_a_list_ending_in_or() {
+        assert_eq!(either(&["27"]), "27");
+        assert_eq!(either(&["27", "26"]), "27 or 26");
+        assert_eq!(either(&["28", "27", "26"]), "28, 27 or 26");
     }
 
     #[test]

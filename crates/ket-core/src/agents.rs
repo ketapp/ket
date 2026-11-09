@@ -746,13 +746,13 @@ mod tests {
             .iter_mut()
             .find(|spec| spec.name == "claude")
             .expect("claude is a shipped agent");
-        spec.command = "claude-personal".to_owned();
+        spec.command = "claude-alt".to_owned();
 
         let catalogue = Catalogue::detect(&config, &Fake(vec![]));
         let claude = catalogue.get("claude").expect("still listed");
 
         assert!(!claude.installed);
-        assert_eq!(claude.spec.command, "claude-personal");
+        assert_eq!(claude.spec.command, "claude-alt");
         assert!(claude.is_overridden());
     }
 

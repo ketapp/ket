@@ -2,13 +2,15 @@
 // wiped: erased from its right end, then drawn back in from the left with
 // the new text, as if a cursor passed over it. The state word at the end of
 // the row only fades out and in. Both run off one value, so the word is gone
-// while the line is, and back as it is. Under Reduce Motion neither moves:
-// the new text is simply there.
+// while the line is, and back as it is. The working row's newest words rise
+// straight into place. Under Reduce Motion none moves: the new text is
+// simply there.
 
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { StyleSheet, View, type StyleProp, type ViewStyle } from 'react-native';
 import Animated, {
   Easing,
+  FadeInUp,
   ReduceMotion,
   runOnJS,
   useAnimatedStyle,
@@ -24,6 +26,11 @@ const GO = Easing.bezier(0.5, 0, 1, 1);
 /** Coming: fast off the mark, settling at the right end. */
 const COME = Easing.bezier(0, 0, 0.3, 1);
 const motion = { reduceMotion: ReduceMotion.System };
+/** New working words rise from just below their line, with no wait to erase. */
+const WORDS_IN = FadeInUp.duration(220)
+  .easing(Easing.bezier(0.2, 0.8, 0.2, 1))
+  .withInitialValues({ opacity: 0, transform: [{ translateY: 5 }] })
+  .reduceMotion(ReduceMotion.System);
 
 /** What a swap draws from: the words as data, and a token naming them. */
 interface SwapProps<T> {
@@ -31,7 +38,7 @@ interface SwapProps<T> {
   token: string;
   item: T;
   style?: StyleProp<ViewStyle>;
-  /** Draws an item: the one on screen while it is erased, the newest after. */
+  /** Draws an item: held through an erase, or the newest arriving at once. */
   children: (item: T) => ReactNode;
 }
 
@@ -120,6 +127,17 @@ export function Fade<T>({ token, item, style, children }: SwapProps<T>) {
     return <View style={style}>{children(shown)}</View>;
   }
   return <Animated.View style={[style, fade]}>{children(shown)}</Animated.View>;
+}
+
+/** The newest words arrive at once, rising into place as they become visible. */
+export function Slide<T>({ token, item, style, children }: SwapProps<T>) {
+  const still = useReducedMotion();
+  if (still) return <View style={style}>{children(item)}</View>;
+  return (
+    <Animated.View key={token} entering={WORDS_IN} style={style}>
+      {children(item)}
+    </Animated.View>
+  );
 }
 
 const styles = StyleSheet.create({

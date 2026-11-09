@@ -67,6 +67,7 @@ import {
   RespondSchema,
   Signal_Kind,
   SignalSchema,
+  StartFreshSchema,
   SubscribeSchema,
   UnsubscribeSchema,
   create,
@@ -79,7 +80,7 @@ import {
 import { phoneKey, saveHost, type SavedHost, toPaired } from './store';
 import { addManualAddress, dialAddresses, removeManualAddress } from './addresses';
 import { versionLabel } from './version';
-import { worktreeOf } from './starting';
+import { bindTasks, worktreeOf } from './starting';
 
 export type Status = 'connecting' | 'connected' | 'offline';
 
@@ -173,6 +174,14 @@ export interface Starting {
   /** The base, model and effort picked for it, when any were: what asking
    * again asks for. */
   choices?: StartChoices;
+  /** Bound once, so removing a tab cannot move the prompt to another one. */
+  terminal?: bigint;
+  /** When that terminal first appeared; delivery does not time worktree creation. */
+  openedAt?: number;
+  /** The first conversation read in that terminal. */
+  session?: string;
+  /** A settled prompt is retained as history, but no longer restored as unsent. */
+  delivery?: 'delivered' | 'dismissed' | 'superseded';
 }
 
 /** A phone's picks for new work, each empty for the desktop's default. */
@@ -219,8 +228,17 @@ export class HostConnection {
   /** What each saved address said the last time none of them answered,
    * by address; empty while connected or after a failure past the dial. */
   failures: Record<string, string> = {};
+  /** When the phone first heard from the desktop as it is now: this
+   * connection's first welcome, or the first after the desktop restarted.
+   * Its list can still be filling for a moment after — see lib/settling. */
+  freshSince: number | null = null;
+  /** When the snapshot came; `null` before the first. */
+  snapshotAt: number | null = null;
 
   private remote: Remote | null = null;
+  /** The epoch of the desktop the last session was welcomed by, to tell
+   * when it restarted. */
+  private hostEpoch: bigint | null = null;
   private nextRequest = 10n;
   /** Requests waiting for their answer: each fails at once if the session
    * ends, rather than waiting out its timeout on a socket that is gone. */
@@ -381,6 +399,8 @@ export class HostConnection {
           this.hostMinor = message.minor;
           if (message.payload.value.hostEpoch !== epoch) seq = message.seq;
           epoch = message.payload.value.hostEpoch;
+          if (this.hostEpoch !== epoch) this.freshSince = Date.now();
+          this.hostEpoch = epoch;
           this.status = 'connected';
           this.error = null;
           this.failures = {};
@@ -401,6 +421,7 @@ export class HostConnection {
             }
           }
           this.snapshot = message.payload.value;
+          this.snapshotAt = Date.now();
           this.settleStarting();
           this.notify();
           break;
@@ -646,7 +667,7 @@ export class HostConnection {
     const picked = Object.values(choices).some((value) => value);
     const work: Starting = { project: projectId, prompt, agent, at: Date.now(), before, ...(picked ? { choices } : {}) };
     this.starting = [...this.starting, work];
-    this.asked = [...this.asked, work].slice(-ASKED_KEPT);
+    this.asked = bindTasks([...this.asked, work].slice(-ASKED_KEPT), this.snapshot);
     setTimeout(() => {
       this.settleStarting();
       this.notify();
@@ -673,6 +694,9 @@ export class HostConnection {
   /** Lets go of the rows standing in for work that has arrived, or that
    * has taken too long to. */
   private settleStarting(): void {
+    // A worktree can appear before its terminal, after its starting row has
+    // already gone. Keep binding the retained requests on later snapshots.
+    this.asked = bindTasks(this.asked, this.snapshot);
     if (this.starting.length === 0) return;
     const now = Date.now();
     this.starting = this.starting.filter((work) => {
@@ -899,6 +923,46 @@ export class HostConnection {
       if (reply.payload.case === 'error') return { why: reply.payload.value.message };
       if (reply.payload.case === 'terminalWoken') return { terminalId: reply.payload.value.terminalId };
       return { why: 'the desktop did not say whether the tab woke' };
+    }
+  }
+
+  /** Since 1.28: opens a fresh session on the desktop beside terminal
+   * `terminalId`, whose session went cold, as its own Start fresh does, and
+   * leaves the old one open — `session` and `sinceMs` are the terminal's
+   * `cold`, so a session used since is left alone — and resolves with the
+   * terminal the fresh one is, or why not.
+   * `false` when the phone turns out not to have control. Asked again from
+   * the next session under the same key if the connection drops meanwhile,
+   * so one tap starts one session. */
+  async startFresh(
+    terminalId: bigint,
+    session: string,
+    sinceMs: bigint,
+  ): Promise<{ terminalId: bigint } | { why: string } | false> {
+    const payload: Envelope['payload'] = {
+      case: 'startFresh',
+      value: create(StartFreshSchema, { terminalId, session, sinceMs }),
+    };
+    const idempotency = newKey();
+    const until = Date.now() + WAKE_WAIT_MS;
+    for (;;) {
+      let reply: Envelope;
+      try {
+        reply = await this.request(payload, idempotency, Math.max(until - Date.now(), 1));
+      } catch (error) {
+        const dropped = error instanceof Error && error.message === DROPPED;
+        if (dropped && (await this.reconnected(until))) continue;
+        throw error;
+      }
+      if (reply.payload.case === 'freshStarted') return { terminalId: reply.payload.value.terminalId };
+      if (reply.payload.case !== 'error') return { why: 'the desktop did not say whether it started fresh' };
+      if (reply.payload.value.code === ErrorCode.NOT_CONTROLLER) {
+        const renew = this.leases.get(terminalId);
+        if (renew) clearInterval(renew);
+        this.leases.delete(terminalId);
+        return false;
+      }
+      return { why: reply.payload.value.message };
     }
   }
 

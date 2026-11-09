@@ -3,7 +3,7 @@
 //! the relay will hold. The phone protocol's own tests are in
 //! `ket-remote/tests/protocol.rs`.
 
-use ket_relay_protocol::{Control, Error, Frame, HEADER, Kind, MAX_FRAME, VERSION};
+use ket_relay_protocol::{Control, Error, Frame, HEADER, Kind, MAX_FRAME, VERSION, proof_message};
 
 /// A small deterministic generator, so a fuzz case that fails fails again.
 struct Rng(u64);
@@ -85,12 +85,25 @@ fn an_unknown_version_or_kind_is_refused() {
 fn every_control_round_trips() {
     let host = [7u8; 16];
     for control in [
-        Control::Register { host },
         Control::Connect { host },
         Control::Opened,
         Control::Connected,
         Control::Closed,
         Control::Refused { reason: 2 },
+        Control::Claim {
+            host,
+            key: [8u8; 32],
+        },
+        Control::Identify {
+            host,
+            public: [9u8; 32],
+        },
+        Control::Challenge {
+            nonce: [10u8; 32],
+            ephemeral: [11u8; 32],
+        },
+        Control::Prove { tag: [12u8; 32] },
+        Control::Registered,
     ] {
         let frame = control.frame(42);
         assert_eq!(frame.kind, Kind::Control);
@@ -104,15 +117,33 @@ fn every_control_round_trips() {
 fn a_control_with_the_wrong_shape_is_refused() {
     assert!(matches!(Control::parse(&[]), Err(Error::Short)));
     // A host id one byte short, and one byte long.
-    assert!(Control::parse(&[1; 16]).is_err());
+    assert!(Control::parse(&[2; 16]).is_err());
     assert!(Control::parse(&[2; 18]).is_err());
     // A bare op that takes nothing, with something after it.
-    for op in [3u8, 4, 5] {
+    for op in [3u8, 4, 5, 11] {
         assert!(Control::parse(&[op, 0]).is_err(), "op {op}");
     }
     assert!(Control::parse(&[6]).is_err());
     assert!(Control::parse(&[6, 1, 1]).is_err());
+    // A claim, an identification, a challenge and a proof each a byte off.
+    for (op, len) in [(7u8, 48usize), (8, 48), (9, 64), (10, 32)] {
+        assert!(Control::parse(&vec![op; len]).is_err(), "op {op} short");
+        assert!(Control::parse(&vec![op; len + 2]).is_err(), "op {op} long");
+        assert!(Control::parse(&vec![op; len + 1]).is_ok(), "op {op} right");
+    }
+    // The retired registration op is no op at all now.
+    assert!(matches!(Control::parse(&[1; 17]), Err(Error::Kind(1))));
     assert!(matches!(Control::parse(&[0xee]), Err(Error::Kind(0xee))));
+}
+
+#[test]
+fn a_proof_message_binds_the_label_the_nonce_and_the_host() {
+    let (nonce, host) = ([1u8; 32], [2u8; 16]);
+    let message = proof_message(&nonce, &host);
+    assert!(message.starts_with(b"ket relay host proof v1"));
+    assert!(message.ends_with(&[&nonce[..], &host[..]].concat()));
+    assert_ne!(message, proof_message(&[3u8; 32], &host));
+    assert_ne!(message, proof_message(&nonce, &[3u8; 16]));
 }
 
 #[test]

@@ -14,10 +14,13 @@
 //!
 //! **When the provider can't be reached**, the agent gets the provider's own
 //! error shape with a 502, which its retries already know what to do with.
+//!
+//! **A WebSocket** is handed to [`super::socket`] once its token checks out.
 
 use std::convert::Infallible;
 use std::net::{Ipv4Addr, TcpListener};
 use std::pin::Pin;
+use std::sync::mpsc;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
@@ -33,13 +36,17 @@ use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 
-use super::{Binding, NetworkBindings, Route};
+use super::{Binding, NetworkBindings, Observed, Route, Target};
 
 /// The pooled HTTPS client requests go on through.
-type Upstream = Client<HttpsConnector<HttpConnector>, Full<Bytes>>;
+pub(super) type Upstream = Client<HttpsConnector<HttpConnector>, Full<Bytes>>;
 
 /// What goes back to the agent.
-type Reply = Response<BoxBody<Bytes, hyper::Error>>;
+pub(super) type Reply = Response<BoxBody<Bytes, hyper::Error>>;
+
+/// The most of a reply held for reading its usage from. A reply is passed
+/// back as it arrives whatever its size; past this, only counted.
+const REPLY_KEPT: usize = 4 * 1024 * 1024;
 
 /// The running proxy. It lives as long as the host does.
 pub struct Proxy {
@@ -51,7 +58,8 @@ impl Proxy {
     ///
     /// Fails when there is no port to have or the system's root certificates
     /// cannot be read: the host then launches agents as it would without it.
-    pub fn start(bindings: NetworkBindings) -> std::io::Result<Self> {
+    pub fn start(bindings: NetworkBindings, told: super::Told) -> std::io::Result<Self> {
+        let log = super::sink(bindings.clone(), told)?;
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
         listener.set_nonblocking(true)?;
         let port = listener.local_addr()?.port();
@@ -73,7 +81,7 @@ impl Proxy {
                         return;
                     }
                 };
-                runtime.block_on(serve(listener, bindings, https));
+                runtime.block_on(serve(listener, bindings, https, log));
             })?;
         Ok(Self { port })
     }
@@ -94,6 +102,7 @@ async fn serve(
     listener: TcpListener,
     bindings: NetworkBindings,
     https: HttpsConnector<HttpConnector>,
+    log: mpsc::Sender<Observed>,
 ) {
     let listener = match tokio::net::TcpListener::from_std(listener) {
         Ok(listener) => listener,
@@ -114,17 +123,18 @@ async fn serve(
                 continue;
             }
         };
-        let (bindings, client) = (bindings.clone(), client.clone());
+        let (bindings, client, log) = (bindings.clone(), client.clone(), log.clone());
         tokio::spawn(async move {
             let service = service_fn(move |request| {
-                let (bindings, client) = (bindings.clone(), client.clone());
-                async move { Ok::<_, Infallible>(forward(request, &bindings, &client).await) }
+                let (bindings, client, log) = (bindings.clone(), client.clone(), log.clone());
+                async move { Ok::<_, Infallible>(forward(request, &bindings, &client, log).await) }
             });
             // Kept alive: an agent sends its next request down the same
             // connection, and a new one per request would be a handshake per
             // turn on this side for nothing.
             if let Err(error) = http1::Builder::new()
                 .serve_connection(TokioIo::new(stream), service)
+                .with_upgrades()
                 .await
             {
                 tracing::debug!(%error, "network inspector: connection ended");
@@ -138,6 +148,7 @@ async fn forward(
     request: Request<Incoming>,
     bindings: &NetworkBindings,
     client: &Upstream,
+    log: mpsc::Sender<Observed>,
 ) -> Reply {
     let (mut parts, body) = request.into_parts();
     let target = parts
@@ -150,14 +161,18 @@ async fn forward(
     let Some(binding) = bindings.lookup(token) else {
         return refused();
     };
-    let rest = rest.to_owned();
+    let target = binding.route.target(&parts.headers);
+    let rest = format!("{}{rest}", target.base);
+    if super::socket::asked(&parts.headers) {
+        return super::socket::forward(parts, &rest, binding, target, client, log).await;
+    }
     let body = match body.collect().await {
         Ok(collected) => collected.to_bytes(),
-        Err(error) => return unreachable(binding.route, &error.to_string()),
+        Err(error) => return unreachable(binding.route, target, &error.to_string()),
     };
-    let uri: Uri = match format!("https://{}{rest}", binding.route.upstream()).parse() {
+    let uri: Uri = match format!("https://{}{rest}", target.host).parse() {
         Ok(uri) => uri,
-        Err(error) => return unreachable(binding.route, &error.to_string()),
+        Err(error) => return unreachable(binding.route, target, &error.to_string()),
     };
     strip_hop_by_hop(&mut parts.headers);
     // The client writes the provider's own, and the length of what it sends.
@@ -165,15 +180,7 @@ async fn forward(
     parts.headers.remove(header::CONTENT_LENGTH);
     parts.uri = uri;
     parts.version = Version::HTTP_11;
-    let mut seen = Seen {
-        binding,
-        path: rest.split('?').next().unwrap_or_default().to_owned(),
-        request: body.clone(),
-        status: 0,
-        received: 0,
-        started: Instant::now(),
-        done: false,
-    };
+    let mut seen = Seen::new(binding, target, &rest, body.clone(), log);
     match client
         .request(Request::from_parts(parts, Full::new(body)))
         .await
@@ -182,6 +189,11 @@ async fn forward(
             let (mut parts, body) = response.into_parts();
             strip_hop_by_hop(&mut parts.headers);
             seen.status = parts.status.as_u16();
+            seen.encoding = parts
+                .headers
+                .get(header::CONTENT_ENCODING)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned);
             // Nothing to come — a 204, or an empty body of known length:
             // hyper never polls it, so it is whole now.
             if body.is_end_stream() {
@@ -193,7 +205,7 @@ async fn forward(
             // Said as unreachable instead: whether any of it left is not
             // known, and a request that may not have is not logged as sent.
             seen.done = true;
-            unreachable(seen.binding.route, &error.to_string())
+            unreachable(seen.binding.route, target, &error.to_string())
         }
     }
 }
@@ -212,7 +224,7 @@ fn split_token(target: &str) -> Option<(&str, &str)> {
 /// The headers that describe one connection rather than the request, and
 /// so stop at this hop: the standard ones, and any the `Connection` header
 /// names.
-fn strip_hop_by_hop(headers: &mut HeaderMap) {
+pub(super) fn strip_hop_by_hop(headers: &mut HeaderMap) {
     let named: Vec<HeaderName> = headers
         .get_all(header::CONNECTION)
         .iter()
@@ -239,7 +251,7 @@ fn strip_hop_by_hop(headers: &mut HeaderMap) {
 }
 
 /// A request without a token the host issued: nothing here for it.
-fn refused() -> Reply {
+pub(super) fn refused() -> Reply {
     let mut reply = Response::new(empty());
     *reply.status_mut() = StatusCode::NOT_FOUND;
     reply
@@ -247,16 +259,21 @@ fn refused() -> Reply {
 
 /// The provider could not be reached: said in its own error shape, so the
 /// agent shows it and retries as it would any network failure.
-fn unreachable(route: Route, why: &str) -> Reply {
-    tracing::warn!(upstream = route.upstream(), %why, "network inspector: provider unreachable");
+pub(super) fn unreachable(route: Route, target: Target, why: &str) -> Reply {
+    tracing::warn!(upstream = target.host, %why, "network inspector: provider unreachable");
     let message = format!(
         "ket's network inspector could not reach {}: {why}",
-        route.upstream()
+        target.host
     );
-    let body = serde_json::json!({
-        "type": "error",
-        "error": { "type": "api_error", "message": message },
-    });
+    let body = match route {
+        Route::Anthropic => serde_json::json!({
+            "type": "error",
+            "error": { "type": "api_error", "message": message },
+        }),
+        Route::OpenAi => serde_json::json!({
+            "error": { "type": "server_error", "message": message },
+        }),
+    };
     let mut reply = Response::new(full(body.to_string().into()));
     *reply.status_mut() = StatusCode::BAD_GATEWAY;
     reply.headers_mut().insert(
@@ -270,45 +287,84 @@ fn full(bytes: Bytes) -> BoxBody<Bytes, hyper::Error> {
     Full::new(bytes).map_err(|never| match never {}).boxed()
 }
 
-fn empty() -> BoxBody<Bytes, hyper::Error> {
+pub(super) fn empty() -> BoxBody<Bytes, hyper::Error> {
     full(Bytes::new())
 }
 
 /// One request on its way through: said once its reply has ended, or been
 /// cut off.
-struct Seen {
+pub(super) struct Seen {
     binding: Binding,
+    upstream: &'static str,
     /// The provider's path, without the query.
     path: String,
     /// What was sent, as it was sent.
     request: Bytes,
-    status: u16,
+    /// When, in milliseconds since the Unix epoch.
+    at: u64,
+    pub status: u16,
     /// Bytes of reply passed back so far.
-    received: usize,
+    pub received: usize,
+    /// The reply so far, up to [`REPLY_KEPT`].
+    reply: Vec<u8>,
+    encoding: Option<String>,
     started: Instant,
     done: bool,
+    /// Where it is written down once it is done.
+    log: mpsc::Sender<Observed>,
 }
 
 impl Seen {
-    fn finish(&mut self, complete: bool) {
+    /// `request`, sent now to `target` at `target_path` — its query, if it
+    /// has one, left off what is written down.
+    pub fn new(
+        binding: Binding,
+        target: Target,
+        target_path: &str,
+        request: Bytes,
+        log: mpsc::Sender<Observed>,
+    ) -> Self {
+        Self {
+            binding,
+            upstream: target.host,
+            path: target_path.split('?').next().unwrap_or_default().to_owned(),
+            request,
+            at: super::store::now_ms(),
+            status: 0,
+            received: 0,
+            reply: Vec::new(),
+            encoding: None,
+            started: Instant::now(),
+            done: false,
+            log,
+        }
+    }
+
+    /// Keeps `data`, more of the reply, as far as [`REPLY_KEPT`] allows.
+    pub fn keep(&mut self, data: &[u8]) {
+        let room = REPLY_KEPT.saturating_sub(self.reply.len());
+        self.reply.extend_from_slice(&data[..data.len().min(room)]);
+    }
+
+    pub fn finish(&mut self, complete: bool) {
         if std::mem::replace(&mut self.done, true) {
             return;
         }
-        let model = serde_json::from_slice::<serde_json::Value>(&self.request)
-            .ok()
-            .and_then(|request| request.get("model")?.as_str().map(str::to_owned))
-            .unwrap_or_default();
-        tracing::info!(
-            pane = %self.binding.pane,
-            path = %self.path,
-            %model,
-            status = self.status,
-            sent = self.request.len(),
-            received = self.received,
-            ms = self.started.elapsed().as_millis() as u64,
+        // The writer goes only with the host; a send that fails has
+        // nowhere to go.
+        let _ = self.log.send(Observed {
+            binding: self.binding.clone(),
+            upstream: self.upstream,
+            path: std::mem::take(&mut self.path),
+            request: self.request.clone(),
+            at: self.at,
+            status: self.status,
+            received: self.received,
+            reply: std::mem::take(&mut self.reply),
+            encoding: self.encoding.take(),
+            ms: self.started.elapsed().as_millis() as u64,
             complete,
-            "network inspector: observed"
-        );
+        });
     }
 }
 
@@ -340,6 +396,7 @@ impl Body for Tee {
             Poll::Ready(Some(Ok(frame))) => {
                 if let Some(data) = frame.data_ref() {
                     this.seen.received += data.len();
+                    this.seen.keep(data);
                 }
                 // A reply of known length ends with its last frame: hyper
                 // stops there, and never polls for the `None` after it.

@@ -80,7 +80,13 @@ pub const CLI_NOTE_ENV: &str = "KET_CLI_NOTE";
 pub const CLI_NOTE: &str = "You are running inside ket, which manages this project's worktrees \
      and agents. The `ket` command on your PATH drives it: `ket backlog list` reads the \
      project's backlog, `ket backlog start <note>` or `ket start '<prompt>'` starts work in a \
-     new worktree as a tab in the ket window, and `ket --help` lists the rest.";
+     new worktree as a tab in the ket window, and `ket --help` lists the rest. `ket browser` \
+     drives this worktree's browser tab in ket: `open <url>`, then `snapshot -i` lists what \
+     can be acted on with refs like @e3 for `click @e3`, `fill @e3 '<text>'` and `press \
+     Enter`, `screenshot` or `console` shows how it went, `dialog accept` or `dismiss` \
+     answers an alert or confirm the page opens, and `record start` then `record stop` saves \
+     a video and stills for showing a person what happened; `ket browser --help` lists the \
+     rest.";
 
 /// The hook contract's version. Bumped when the payload's shape changes.
 pub const HOOK_VERSION: &str = "1";
@@ -703,6 +709,15 @@ pub trait HookInstaller: Send + Sync {
     /// Whether ket's hooks are currently registered.
     fn is_installed(&self) -> Result<bool>;
 
+    /// Whether any of ket's entries is there, from this version or an older
+    /// one. Not [`is_installed`](Self::is_installed): that asks whether this
+    /// version's full set is, and a set an older ket wrote is still ket's to
+    /// take out.
+    fn has_any(&self) -> Result<bool>;
+
+    /// Where these hooks go, as [`record_installed`] notes it.
+    fn place(&self) -> Place;
+
     /// Registers them, merging into whatever is already configured.
     fn install(&self, script: &Path) -> Result<()>;
 
@@ -825,6 +840,14 @@ impl HookInstaller for ClaudeHooks {
         Ok(ours == HookEvent::CLAUDE_EVENTS.into_iter().collect())
     }
 
+    fn has_any(&self) -> Result<bool> {
+        Ok(has_kets_entry(&self.read()?))
+    }
+
+    fn place(&self) -> Place {
+        Place::new("claude", &self.settings)
+    }
+
     fn install(&self, script: &Path) -> Result<()> {
         let mut document = self.read()?;
 
@@ -933,6 +956,21 @@ fn kets_entry(event: &str, script: &Path) -> serde_json::Value {
     } else {
         serde_json::json!({ "hooks": hooks })
     }
+}
+
+/// Whether a hooks document — Claude's settings or Codex's `hooks.json` —
+/// holds any entry of ket's, under any event.
+fn has_kets_entry(document: &serde_json::Value) -> bool {
+    document
+        .get("hooks")
+        .and_then(|hooks| hooks.as_object())
+        .is_some_and(|hooks| {
+            hooks
+                .values()
+                .filter_map(|entries| entries.as_array())
+                .flatten()
+                .any(is_kets)
+        })
 }
 
 /// Whether an entry is one ket added.
@@ -1075,6 +1113,14 @@ impl HookInstaller for CodexHooks {
         write_settings(&self.settings, &document)
     }
 
+    fn has_any(&self) -> Result<bool> {
+        Ok(has_kets_entry(&read_settings(&self.settings)?))
+    }
+
+    fn place(&self) -> Place {
+        Place::new("codex", &self.settings)
+    }
+
     fn remove(&self) -> Result<()> {
         let mut document = read_settings(&self.settings)?;
         let Some(hooks) = document
@@ -1194,6 +1240,18 @@ impl HookInstaller for OpenCodeHooks {
             std::fs::create_dir_all(dir).map_err(|e| KetError::io(dir, e))?;
         }
         std::fs::write(&self.plugin, OPENCODE_PLUGIN).map_err(|e| KetError::io(&self.plugin, e))
+    }
+
+    fn place(&self) -> Place {
+        Place::new("opencode", &self.plugin)
+    }
+
+    fn has_any(&self) -> Result<bool> {
+        match std::fs::read_to_string(&self.plugin) {
+            Ok(text) => Ok(text.starts_with(OPENCODE_PLUGIN_MARK)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(KetError::io(&self.plugin, e)),
+        }
     }
 
     /// Deletes the plugin — only if it is ket's.
@@ -1748,6 +1806,19 @@ impl HookInstaller for GrokHooks {
         crate::config::write_atomically(&file, &grok_document(script), false)
     }
 
+    fn place(&self) -> Place {
+        Place::new("grok", &self.home)
+    }
+
+    fn has_any(&self) -> Result<bool> {
+        let file = self.file();
+        match std::fs::read_to_string(&file) {
+            Ok(text) => Ok(text.contains(OWNER_MARK)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(KetError::io(&file, e)),
+        }
+    }
+
     /// Deletes the file — only if it is ket's.
     fn remove(&self) -> Result<()> {
         let file = self.file();
@@ -1895,6 +1966,11 @@ impl ClaudeStatusLine {
         Self { settings, chain }
     }
 
+    /// Where this status line goes, as [`record_installed`] notes it.
+    pub fn place(&self) -> Place {
+        Place::new(STATUSLINE_PLACE, &self.settings)
+    }
+
     /// The command currently configured, if there is one.
     fn configured(&self) -> Result<Option<String>> {
         let document = read_settings(&self.settings)?;
@@ -1953,6 +2029,14 @@ impl ClaudeStatusLine {
     /// Gives the displaced command back, or takes the status line away
     /// entirely when ket displaced nothing.
     pub fn remove(&self) -> Result<()> {
+        self.give_back()?;
+        let _ = std::fs::remove_file(&self.chain);
+        Ok(())
+    }
+
+    /// [`remove`](Self::remove), keeping the chain file for another
+    /// directory's line to be given back from.
+    fn give_back(&self) -> Result<()> {
         if !self.is_installed()? {
             return Ok(());
         }
@@ -1974,9 +2058,7 @@ impl ClaudeStatusLine {
             }
         }
 
-        write_settings(&self.settings, &document)?;
-        let _ = std::fs::remove_file(&self.chain);
-        Ok(())
+        write_settings(&self.settings, &document)
     }
 }
 
@@ -2010,25 +2092,40 @@ pub struct Removed {
 /// whatever it displaced. Only ket's own entries go — everything else in
 /// those files stays as it was.
 ///
+/// Looked for where this process's environment says each agent keeps its
+/// settings, and wherever [`record_installed`] noted the window put them:
+/// Homebrew runs the uninstall with `CLAUDE_CONFIG_DIR`, `XDG_CONFIG_HOME`
+/// and `GROK_HOME` filtered out, and the window may have had any of them.
+///
 /// A ket still running puts them back the next time it starts; this is for
 /// the last thing done before it is deleted.
 pub fn remove_everywhere() -> Vec<Removed> {
+    let recorded = read_places(&installed_record_path());
     let usual = crate::sessions::claude_config_dir();
+    let dirs = crate::sessions::claude_config_dirs();
     let mut installers: Vec<(Box<dyn HookInstaller>, Option<String>)> = Vec::new();
-    for dir in crate::sessions::claude_config_dirs() {
-        let detail = (dir != usual).then(|| dir.display().to_string());
+    for dir in &dirs {
+        let detail = (*dir != usual).then(|| dir.display().to_string());
         installers.push((Box::new(ClaudeHooks::at(dir.join("settings.json"))), detail));
     }
     installers.push((Box::new(CodexHooks::default()), None));
     installers.push((Box::new(OpenCodeHooks::default()), None));
     installers.push((Box::new(GrokHooks::default()), None));
+    for place in &recorded {
+        if installers.iter().any(|(known, _)| known.place() == *place) {
+            continue;
+        }
+        if let Some(installer) = place.installer() {
+            installers.push((installer, Some(place.at.display().to_string())));
+        }
+    }
 
     let mut removed: Vec<Removed> = installers
         .iter()
         .map(|(installer, detail)| Removed {
             agent: installer.agent().to_owned(),
             detail: detail.clone(),
-            outcome: match installer.is_installed() {
+            outcome: match installer.has_any() {
                 Ok(false) => Removal::NotThere,
                 Ok(true) => match installer.remove() {
                     Ok(()) => Removal::Removed,
@@ -2039,20 +2136,140 @@ pub fn remove_everywhere() -> Vec<Removed> {
         })
         .collect();
 
-    let status_line = ClaudeStatusLine::default();
-    removed.push(Removed {
-        agent: "claude".to_owned(),
-        detail: Some("status line".to_owned()),
-        outcome: match status_line.is_installed() {
+    // Every directory is looked in, and one other than the usual is only
+    // mentioned when ket's line was there. There is one chain file for all
+    // of them — a window that moved directories left its line in both — so
+    // it goes once they are all done, and each gets the command back rather
+    // than the second none.
+    let mut status_settings = vec![usual.join("settings.json")];
+    let recorded_lines = recorded
+        .iter()
+        .filter(|place| place.kind == STATUSLINE_PLACE)
+        .map(|place| place.at.clone());
+    for settings in dirs
+        .iter()
+        .map(|dir| dir.join("settings.json"))
+        .chain(recorded_lines)
+    {
+        if !status_settings.contains(&settings) {
+            status_settings.push(settings);
+        }
+    }
+    for (index, settings) in status_settings.into_iter().enumerate() {
+        let status_line = ClaudeStatusLine::at(settings.clone(), statusline_chain_path());
+        let outcome = match status_line.is_installed() {
             Ok(false) => Removal::NotThere,
-            Ok(true) => match status_line.remove() {
+            Ok(true) => match status_line.give_back() {
                 Ok(()) => Removal::Removed,
                 Err(why) => Removal::Failed(why.to_string()),
             },
             Err(why) => Removal::Failed(why.to_string()),
-        },
-    });
+        };
+        if index > 0 && outcome == Removal::NotThere {
+            continue;
+        }
+        let dir = settings.parent().unwrap_or(&settings);
+        removed.push(Removed {
+            agent: "claude".to_owned(),
+            detail: Some(if index == 0 {
+                "status line".to_owned()
+            } else {
+                format!("status line in {}", dir.display())
+            }),
+            outcome,
+        });
+    }
+
+    // Everything recorded has been looked at: the record goes with it, unless
+    // something could not be changed and a second try needs to find it.
+    if !removed
+        .iter()
+        .any(|entry| matches!(entry.outcome, Removal::Failed(_)))
+    {
+        let _ = std::fs::remove_file(statusline_chain_path());
+        let _ = std::fs::remove_file(installed_record_path());
+    }
     removed
+}
+
+/// One place ket puts itself, as the records in `~/.ket/agent-hooks` name
+/// it: what kind of install, and the file or directory it went into.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Place {
+    /// `claude`, `codex`, `opencode` or `grok` for that agent's hooks, or
+    /// [`STATUSLINE_PLACE`] for Claude's status line.
+    pub kind: String,
+    /// The settings file, OpenCode's plugin, or Grok's home.
+    pub at: PathBuf,
+}
+
+/// The [`Place::kind`] of Claude's status line.
+pub const STATUSLINE_PLACE: &str = "statusline";
+
+impl Place {
+    fn new(kind: &str, at: &Path) -> Self {
+        Self {
+            kind: kind.to_owned(),
+            at: at.to_path_buf(),
+        }
+    }
+
+    /// The installer for these hooks, or `None` for the status line and for
+    /// a kind this version does not know.
+    fn installer(&self) -> Option<Box<dyn HookInstaller>> {
+        let at = self.at.clone();
+        Some(match self.kind.as_str() {
+            "claude" => Box::new(ClaudeHooks::at(at)),
+            "codex" => Box::new(CodexHooks::at(at)),
+            "opencode" => Box::new(OpenCodeHooks::at(at)),
+            "grok" => Box::new(GrokHooks::at(at)),
+            _ => return None,
+        })
+    }
+}
+
+/// Where [`record_installed`] keeps the places the window put ket.
+pub fn installed_record_path() -> PathBuf {
+    home().join(".ket").join("agent-hooks").join("installed")
+}
+
+/// The places in a record: one per line, kind and path apart by a tab.
+fn read_places(path: &Path) -> Vec<Place> {
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| {
+            let (kind, at) = line.split_once('\t')?;
+            (!kind.is_empty() && !at.is_empty()).then(|| Place::new(kind, Path::new(at)))
+        })
+        .collect()
+}
+
+fn write_places(path: &Path, places: &[Place]) -> Result<()> {
+    let text: String = places
+        .iter()
+        .filter_map(|place| {
+            let at = place.at.to_str()?;
+            (!at.contains(['\t', '\n'])).then(|| format!("{}\t{at}\n", place.kind))
+        })
+        .collect();
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| KetError::io(dir, e))?;
+    }
+    std::fs::write(path, text).map_err(|e| KetError::io(path, e))
+}
+
+/// Notes that ket is in `place`, so [`remove_everywhere`] finds it from an
+/// environment that would look elsewhere. The window calls this for each
+/// place it installs into or finds itself already in.
+pub fn record_installed(place: Place) -> Result<()> {
+    let path = installed_record_path();
+    let mut places = read_places(&path);
+    if places.contains(&place) {
+        return Ok(());
+    }
+    places.push(place);
+    write_places(&path, &places)
 }
 
 /// How ket recognises its own status line command.

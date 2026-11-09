@@ -3,9 +3,11 @@ import { fireEvent, render, waitFor } from '@testing-library/react-native';
 import { ScrollView, StyleSheet, Text, View } from 'react-native';
 import type { Risk } from '@ket/remote';
 import { CommandMenu } from './Commands';
-import { ComposerMenu, PlusButton, SendButton } from './Composer';
+import { PlusButton, SendButton } from './Composer';
+import { FloatMenu } from './FloatMenu';
 import * as Icons from './icons';
 import { RiskBadge } from './Risk';
+import { GLYPHS } from '../lib/glyphs';
 import { READABLE_WIDTH, SplitContext } from '../lib/layout';
 import {
   Badge,
@@ -43,6 +45,45 @@ jest.mock('expo-router', () => ({
   },
 }));
 jest.mock('react-native-safe-area-context', () => ({ useSafeAreaInsets: () => ({ top: 12, bottom: 24 }) }));
+
+describe('project badge', () => {
+  // The desktop sends a project's icon from 1.27: a glyph it names is drawn,
+  // text typed there is shown, and anything else falls back to the initial.
+  test('draws the glyph the desktop gave the project', async () => {
+    const view = await render(<Badge name="clinic-api" color="#14b8a6" icon="glyph:stethoscope" />);
+    expect(view.getByTestId('badge-glyph')).toBeTruthy();
+    expect(view.queryByText('D')).toBeNull();
+  });
+
+  test('shows a typed icon, and the initial for none or a glyph this phone lacks', async () => {
+    const typed = await render(<Badge name="ket" color="#ef4444" icon="KT" />);
+    expect(typed.getByText('KT')).toBeTruthy();
+    const none = await render(<Badge name="ket" color="#ef4444" icon="" />);
+    expect(none.getByText('K')).toBeTruthy();
+    const unknown = await render(<Badge name="ket" color="#ef4444" icon="glyph:unicorn" />);
+    expect(unknown.getByText('K')).toBeTruthy();
+    expect(unknown.queryByTestId('badge-glyph')).toBeNull();
+  });
+
+  test('a name the table inherits is not a glyph', async () => {
+    for (const icon of ['glyph:constructor', 'glyph:toString', 'glyph:__proto__']) {
+      const view = await render(<Badge name="ket" color="#ef4444" icon={icon} />);
+      expect(view.getByText('K')).toBeTruthy();
+      expect(view.queryByTestId('badge-glyph')).toBeNull();
+    }
+  });
+
+  test('every glyph the desktop has is one the phone can draw', () => {
+    // The table is generated from the desktop's files; a shape the phone
+    // cannot draw would be dropped silently, so each kind is checked here.
+    const kinds = new Set(['path', 'circle', 'ellipse', 'rect', 'line', 'polyline', 'polygon']);
+    expect(Object.keys(GLYPHS).length).toBe(47);
+    for (const [name, parts] of Object.entries(GLYPHS)) {
+      expect(parts.length).toBeGreaterThan(0);
+      for (const part of parts) expect(kinds.has(part.kind) ? name : `${name}: ${part.kind}`).toBe(name);
+    }
+  });
+});
 
 describe('shared UI controls', () => {
   test('renders layout, content, states, and optional decorations', async () => {
@@ -247,37 +288,23 @@ describe('small components', () => {
     await view.unmount();
   });
 
-  test('+ says what it does either way, and a closed float is out of the tree', async () => {
+  test('+ says what it does either way, and a closed menu in place is out of the tree', async () => {
     const press = jest.fn();
-    const view = await render(
+    const photos = [{ items: [{ key: 'photos', label: 'Photos', onPress: jest.fn() }] }];
+    const menu = (open: boolean) => (
       <>
-        <PlusButton open={false} onPress={press} />
-        <ComposerMenu open={false}>
-          <Text>Photos</Text>
-        </ComposerMenu>
-      </>,
+        <PlusButton open={open} onPress={press} />
+        <FloatMenu inline={{ left: 0 }} open={open} onClose={jest.fn()} label="Attach" sections={photos} />
+      </>
     );
+    const view = await render(menu(false));
     expect(view.queryByText('Photos')).toBeNull();
     await fireEvent.press(view.getByLabelText('Attach a photo or file'));
     expect(press).toHaveBeenCalled();
-    await view.rerender(
-      <>
-        <PlusButton open onPress={press} />
-        <ComposerMenu open>
-          <Text>Photos</Text>
-        </ComposerMenu>
-      </>,
-    );
+    await view.rerender(menu(true));
     expect(view.getByLabelText('Close the attach menu')).toBeTruthy();
     expect(view.getByText('Photos')).toBeTruthy();
-    await view.rerender(
-      <>
-        <PlusButton open={false} onPress={press} />
-        <ComposerMenu open={false}>
-          <Text>Photos</Text>
-        </ComposerMenu>
-      </>,
-    );
+    await view.rerender(menu(false));
     // Gone once its close has played.
     await waitFor(() => expect(view.queryByText('Photos')).toBeNull());
     await view.unmount();

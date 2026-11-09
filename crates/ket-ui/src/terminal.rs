@@ -695,6 +695,85 @@ impl Shell {
         self.wake_terminal(terminal, cx);
     }
 
+    /// Notes that `terminal` is about to resume `session`, whatever Economy
+    /// did since the conversation began.
+    ///
+    /// A chat is always picked up again: refusing was how a pack update
+    /// dropped every conversation ket had at once. A session that began under
+    /// another level or pack is left out of Economy's figures instead. Only
+    /// when its *level* changed is the reader told, with a button that starts
+    /// a new chat beside it for the new level to be measured in. A pack
+    /// update that left the level where it was says nothing.
+    fn resume_across_economy(
+        &mut self,
+        worktree: &WorktreeId,
+        terminal: TerminalId,
+        session: &str,
+        agent: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if session.is_empty() {
+            return;
+        }
+        let level = self.token_reduction_for(worktree);
+        if self.usage_history.keeps_economy(session, level) {
+            return;
+        }
+        let began = self
+            .usage_history
+            .record(session)
+            .map(|record| record.level);
+        self.usage_history.exclude_from_economy(session);
+        if began.is_none_or(|began| began == level) {
+            return;
+        }
+        let agent = agent.to_owned();
+        self.alert(
+            Tone::Info,
+            "Economy changed since this chat started",
+            "Its savings aren't counted. A new chat measures the new level.",
+            crate::toasts::Alert {
+                subject: format!("economy-resume-{session}").into(),
+                action: Some((
+                    "New chat".into(),
+                    std::rc::Rc::new(move |shell: &mut Shell, cx: &mut Context<Shell>| {
+                        shell.new_chat_beside(terminal, &agent, cx);
+                    }),
+                )),
+            },
+            cx,
+        );
+    }
+
+    /// Opens a new `agent` session in the pane `terminal` is in, leaving
+    /// `terminal` as it is. Its worktree is selected first when it is not
+    /// on screen, since a tab opens in the worktree that is.
+    fn new_chat_beside(&mut self, terminal: TerminalId, agent: &str, cx: &mut Context<Self>) {
+        let Some((worktree, pane)) = self.spaces.iter().find_map(|(worktree, space)| {
+            space
+                .root
+                .find_tab(&TabKind::Terminal(terminal))
+                .map(|(pane, _)| (worktree.clone(), pane))
+        }) else {
+            self.toast(Tone::Error, "That chat's tab isn't open any more", cx);
+            return;
+        };
+        if self.selected_id().as_ref() != Some(&worktree) {
+            let Some(selection) = self.position_of(&worktree) else {
+                self.toast(
+                    Tone::Error,
+                    "That worktree isn't in the sidebar any more",
+                    cx,
+                );
+                return;
+            };
+            self.suppress_auto_session = true;
+            self.select(selection, cx);
+            self.suppress_auto_session = false;
+        }
+        self.open_agent_tab_in(pane, agent, cx);
+    }
+
     /// A wake that did not happen: the tab says why, and so does the phone
     /// that asked for it, if one did.
     fn wake_failed(&mut self, terminal: TerminalId, why: SharedString, cx: &mut Context<Self>) {
@@ -847,15 +926,11 @@ impl Shell {
             };
             let agent_name = agent.name.clone();
             let spec = this
-                .update(cx, |shell, _| {
-                    if !shell.asleep_terminals.contains_key(&terminal)
-                        || !shell.usage_history.can_resume_with_economy(
-                            &resume.0,
-                            shell.token_reduction_for(&worktree),
-                        )
-                    {
+                .update(cx, |shell, cx| {
+                    if !shell.asleep_terminals.contains_key(&terminal) {
                         return None;
                     }
+                    shell.resume_across_economy(&worktree, terminal, &resume.0, &agent_name, cx);
                     Some(shell.terminal_spec(
                         &worktree,
                         cwd,
@@ -870,11 +945,7 @@ impl Shell {
                 .flatten();
             let Some(mut spec) = spec else {
                 let _ = this.update(cx, |shell, cx| {
-                    shell.wake_failed(
-                        terminal,
-                        "Economy prevents resuming this session".into(),
-                        cx,
-                    );
+                    shell.wake_failed(terminal, "That tab isn't asleep any more".into(), cx);
                 });
                 return;
             };
@@ -946,17 +1017,6 @@ impl Shell {
         let resume = Sessions::new().resume_args(ket_core::agents::harness(&agent), &session);
         if resume.is_none_or(|args| args.is_empty()) {
             return Err(format!("{agent} cannot resume a session"));
-        }
-        let worktree = self
-            .spaces
-            .iter()
-            .find_map(|(id, space)| space.terminal_ids().contains(&terminal).then_some(id))
-            .ok_or("terminal has no worktree")?;
-        if !self
-            .usage_history
-            .can_resume_with_economy(&session, self.token_reduction_for(worktree))
-        {
-            return Err("Economy prevents resuming this session".to_owned());
         }
         self.refresh_overhead();
         let freed_bytes = term
@@ -1343,18 +1403,24 @@ impl Shell {
                 None => {
                     let (settings, resume, opencode_agents) = prepared.await;
                     let spec = this
-                        .update(cx, |shell, _| {
-                            shell.terminal_notes.contains_key(&terminal).then(|| {
-                                shell.terminal_spec(
-                                    &id,
-                                    cwd,
-                                    agent,
-                                    resume,
-                                    settings.as_ref(),
-                                    terminal,
-                                    session_launch,
-                                )
-                            })
+                        .update(cx, |shell, cx| {
+                            if !shell.terminal_notes.contains_key(&terminal) {
+                                return None;
+                            }
+                            if let (Some((session, _)), Some(name)) =
+                                (resume.as_ref(), agent_name.as_deref())
+                            {
+                                shell.resume_across_economy(&id, terminal, session, name, cx);
+                            }
+                            Some(shell.terminal_spec(
+                                &id,
+                                cwd,
+                                agent,
+                                resume,
+                                settings.as_ref(),
+                                terminal,
+                                session_launch,
+                            ))
                         })
                         .ok()
                         .flatten();
@@ -1508,12 +1574,6 @@ impl Shell {
         // reason. It is only ever added for a metered account — see
         // `worktree::cache_ttl_for`, which returns nothing at all until some
         // session has said which kind of account this is.
-        let level = self.token_reduction_for(worktree);
-        let resume = resume.and_then(|(session, args)| {
-            self.usage_history
-                .can_resume_with_economy(&session, level)
-                .then_some((session, args))
-        });
         // The session being resumed, for the host to bind to the pane before
         // the agent has reported a thing: a phone reads the session by it,
         // and a Codex report that names the pane saved in the session still
@@ -1542,6 +1602,7 @@ impl Shell {
             let compact = settings
                 .and_then(|agent| agent.autocompact.clone())
                 .or_else(|| policy.autocompact.clone());
+            ket_core::worktree::ensure_style(&agent.name, level);
             let launch = ket_core::worktree::economy_launch(
                 &agent.name,
                 level,
@@ -1623,10 +1684,11 @@ impl Shell {
         spec.env.extend(self.hook_env(worktree, name, id));
         spec.env.extend(economy_env);
         expose_cli(&mut spec);
-        // The network inspector, while it is still being built: asked for
-        // by launching the window with `KET_NETWORK_INSPECTOR=1`. The host
-        // takes the word out and points the agent at its proxy.
-        if agent.is_some() && std::env::var_os("KET_NETWORK_INSPECTOR").is_some() {
+        // The network inspector, when Settings → Network has it on: a word
+        // to the host, which takes it out and points the agent at its proxy.
+        // Read at launch, so a session already running is left as it
+        // started, and only one started from now on is logged.
+        if agent.is_some() && settings.is_some_and(|agent| agent.network.log) {
             spec.env
                 .insert(ket_core::network::LOG_ENV.to_owned(), "1".to_owned());
         }

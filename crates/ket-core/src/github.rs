@@ -1390,8 +1390,30 @@ pub fn repository(at: &Checkout) -> Result<String> {
             ".nameWithOwner",
         ],
         None,
-    )?;
+    )
+    .map_err(|e| match e {
+        KetError::Conflict(why) => match unseen_repository(&why) {
+            Some(name) => failed(format!(
+                "{} can't find `{name}` on GitHub. If it's private, pick an account that \
+                 can see it.",
+                at.account.as_deref().map_or_else(
+                    || "The default account".to_owned(),
+                    |login| format!("@{login}")
+                )
+            )),
+            None => failed(why),
+        },
+        e => e,
+    })?;
     Ok(name.trim().to_owned())
+}
+
+/// The `owner/name` in `gh`'s answer when the account cannot see that
+/// repository — private to people it is not one of, or not there at all,
+/// which GitHub does not tell apart.
+fn unseen_repository(why: &str) -> Option<&str> {
+    let rest = why.strip_prefix("GraphQL: Could not resolve to a Repository with the name '")?;
+    rest.split('\'').next().filter(|name| !name.is_empty())
 }
 
 /// Installs `gh` with Homebrew. Fails, saying where to get it, on a Mac
@@ -1584,6 +1606,16 @@ fn run(at: &Checkout, args: &[&str], input: Option<&str>) -> Result<String> {
         .map(|token| vec![("GH_TOKEN", token)])
         .unwrap_or_default();
     run_program(&gh, args, &at.root, input, TIMEOUT, &env).map_err(|e| match e {
+        // Ahead of the sign-in arm: with remotes on another host, `gh` says
+        // to run `gh auth login` too, meaning to add that host.
+        KetError::Conflict(why)
+            if why.contains("no git remotes found") || why.contains("none of the git remotes") =>
+        {
+            failed(
+                "This project has no remote on GitHub, so there is no repository to use."
+                    .to_owned(),
+            )
+        }
         KetError::Conflict(why) if why.contains("gh auth login") => failed(
             "ket is not signed in to GitHub. Sign in in Settings \u{2192} GitHub.".to_owned(),
         ),

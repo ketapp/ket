@@ -6,6 +6,8 @@
 //!
 //! - `identity.json` — the host's id and its Curve25519 key pair. The private
 //!   half is the one secret here: whoever has it can be this host to a phone.
+//!   The id comes from the public half (`ket_remote::host_id`), so the one
+//!   stored is a copy; an older random one is replaced when it is read.
 //! - `devices.json` — the phones granted, by public key, with the name each
 //!   gave itself. Nothing secret, but nobody else's business.
 //!
@@ -83,7 +85,17 @@ pub fn load_or_create() -> Result<ket_remote::Host> {
 pub fn load_or_create_in(dir: &Path) -> Result<ket_remote::Host> {
     let identity = dir.join("identity.json");
     let host = match std::fs::read(&identity) {
-        Ok(bytes) => restore(&bytes, &dir.join("devices.json"))?,
+        Ok(bytes) => {
+            let (host, stored_id) = restore_with_stored_id(&bytes, &dir.join("devices.json"))?;
+            if stored_id != host.id {
+                // Ids were random before a relay elsewhere had to check them
+                // (#141). Phones paired under the old one dial an id no relay
+                // routes for any more, and pair again.
+                tracing::info!("host id now comes from its key; phones paired before pair again");
+                save_preserving_roles_in(dir, &host)?;
+            }
+            host
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             let host = ket_remote::Host::generate().map_err(host_error)?;
             save_in(dir, &host)?;
@@ -95,6 +107,12 @@ pub fn load_or_create_in(dir: &Path) -> Result<ket_remote::Host> {
 }
 
 fn restore(identity: &[u8], devices: &Path) -> Result<ket_remote::Host> {
+    restore_with_stored_id(identity, devices).map(|(host, _)| host)
+}
+
+/// The host, and the id `identity.json` had for it — which differs from the
+/// host's own when the file predates ids that come from the key.
+fn restore_with_stored_id(identity: &[u8], devices: &Path) -> Result<(ket_remote::Host, [u8; 16])> {
     let stored: StoredIdentity = serde_json::from_slice(identity).map_err(host_error)?;
     let decode = |text: &str| B64.decode(text).map_err(host_error);
     let id: [u8; 16] = decode(&stored.id)?
@@ -118,7 +136,7 @@ fn restore(identity: &[u8], devices: &Path) -> Result<ket_remote::Host> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
         Err(error) => return Err(host_error(error)),
     };
-    Ok(ket_remote::Host::restore(id, keys, grants))
+    Ok((ket_remote::Host::restore(keys, grants), id))
 }
 
 /// Writes the identity and the device list. Call it after pairing, naming or
@@ -232,7 +250,6 @@ mod tests {
         let dir = temp_dir("roles-roundtrip");
         let generated = ket_remote::Host::generate().unwrap();
         let host = ket_remote::Host::restore(
-            generated.id,
             generated.keys().clone(),
             vec![ket_remote::Grant {
                 device: vec![1, 2, 3],
@@ -258,7 +275,6 @@ mod tests {
         let dir = temp_dir("roles-absent");
         let generated = ket_remote::Host::generate().unwrap();
         let host = ket_remote::Host::restore(
-            generated.id,
             generated.keys().clone(),
             vec![ket_remote::Grant {
                 device: vec![9, 9],
@@ -300,7 +316,6 @@ mod tests {
         let dir = temp_dir("save-propagates-error");
         let generated = ket_remote::Host::generate().unwrap();
         let host = ket_remote::Host::restore(
-            generated.id,
             generated.keys().clone(),
             vec![ket_remote::Grant {
                 device: vec![4, 5, 6],

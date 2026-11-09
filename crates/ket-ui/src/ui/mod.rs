@@ -24,6 +24,7 @@ pub(crate) mod cluster;
 pub(crate) mod dialog;
 pub(crate) mod field;
 pub(crate) mod filetype;
+pub(crate) mod glyph;
 pub(crate) mod group;
 pub(crate) mod icon;
 pub(crate) mod markdown;

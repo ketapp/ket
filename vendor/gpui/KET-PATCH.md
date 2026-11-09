@@ -1,7 +1,8 @@
 # gpui 0.2.2, patched for ket
 
-This is gpui 0.2.2 exactly as published on crates.io, with four changes
-applied: frame pacing, movable traffic lights, a text truncation fix, and native menu state.
+This is gpui 0.2.2 exactly as published on crates.io, with five changes
+applied: frame pacing, movable traffic lights, a text truncation fix, native
+menu state, and the application methods embedded Chromium needs.
 `Cargo.toml` at the workspace root points `gpui` here through
 `[patch.crates-io]`, and excludes this directory from the workspace so ket's
 own lints do not apply to Zed's code. `ket.patch` is the whole change as a
@@ -82,3 +83,29 @@ replacements because AppKit can deliver a click after `menuDidClose:`. Only the
 current and preceding menu action sets are retained, so repeated rebuilds do
 not grow the command list. Undo and Redo dispatch GPUI actions instead of
 being swallowed by the window's empty native undo history.
+
+## Embedded Chromium application methods
+
+### Why
+
+CEF on macOS requires the application's `NSApplication` subclass to conform
+to Chromium's `CrAppProtocol` and `CrAppControlProtocol` (CEF's
+`CefAppProtocol` adds nothing to them); `CefInitialize` CHECK-fails otherwise.
+The subclass is gpui's `GPUIApplication`, so the methods are added where gpui
+declares it rather than swizzled in at run time.
+
+### What changed
+
+- **`GPUIApplication` gains a `handlingSendEvent` BOOL ivar** with
+  `isHandlingSendEvent` and `setHandlingSendEvent:` to read and write it
+  (`src/platform/mac/platform.rs`, `build_classes`).
+- **`sendEvent:` is overridden** to set the flag for the length of
+  `[super sendEvent:]` and then restore its previous value, so nested event
+  loops such as menu tracking and modal panels unwind correctly. This matches
+  CEF's `CefScopedSendingEvent`.
+- **The protocols themselves are not declared here.** They are defined by the
+  CEF framework, which ket loads at run time; `ket-chromium` adds them to
+  `GPUIApplication` with `class_addProtocol` after loading it.
+
+An app that never loads CEF sees no change: nothing reads the flag, and
+`sendEvent:` forwards straight to `NSApplication`'s.

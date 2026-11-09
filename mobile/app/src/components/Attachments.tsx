@@ -9,15 +9,14 @@ import Svg, { Circle } from 'react-native-svg';
 
 import { type Attachment, bytesLabel } from '../lib/attach';
 import { font, size, t, tint } from '../lib/theme';
-import { Stagger } from './Composer';
+import type { MenuItem, MenuSection } from './FloatMenu';
 import { Camera, Clipboard, Close, FileGlyph, Info, Picture } from './icons';
-import { Row } from './ui';
 
 export type Source = 'photos' | 'camera' | 'files' | 'paste';
 
-/** The + menu: where a photo or a file comes from, in a float over the chat
- * in place of the `/` menu. A desktop too old to take files says so instead. */
-export function AttachMenu({
+/** The + menu's rows: where a photo or a file comes from, for the menu in
+ * place over the composer. A desktop too old to take files says so instead. */
+export function attachSections({
   older,
   pasteable,
   onPick,
@@ -27,60 +26,56 @@ export function AttachMenu({
   /** Whether a copied image is there to paste. */
   pasteable: boolean;
   onPick: (source: Source) => void;
-}) {
+}): MenuSection[] {
   if (older !== undefined) {
-    return (
-      <View style={styles.menu}>
-        <View style={styles.older}>
-          <View style={styles.mark}>
-            <Info size={17} color={t.dim} weight={2} />
-          </View>
-          <Text style={styles.olderText}>
-            ket on <Text style={{ color: t.text }}>{older}</Text> is older than this app. Update it, rebuild ket and start a
-            new host, to send photos and files. Dictation works as it is.
-          </Text>
-        </View>
-      </View>
-    );
+    return [
+      {
+        items: [],
+        message: {
+          mark: <Info size={17} color={t.dim} weight={2} />,
+          text: (
+            <>
+              ket on <Text style={{ color: t.text }}>{older}</Text> is older than this app. Update it, rebuild ket and start
+              a new host, to send photos and files. Dictation works as it is.
+            </>
+          ),
+        },
+      },
+    ];
   }
-  return (
-    <ScrollView style={styles.menu} contentContainerStyle={styles.menuInner} keyboardShouldPersistTaps="handled">
-      <Stagger index={0}>
-        <Row
-          mark={<Picture size={17} color={t.text} weight={2} />}
-          title="Photos"
-          detail="Screenshots and pictures on this iPhone"
-          onPress={() => onPick('photos')}
-        />
-      </Stagger>
-      <Stagger index={1}>
-        <Row
-          mark={<Camera size={17} color={t.text} weight={2} />}
-          title="Camera"
-          detail="Take a photo, of a whiteboard or a screen"
-          onPress={() => onPick('camera')}
-        />
-      </Stagger>
-      <Stagger index={2}>
-        <Row
-          mark={<FileGlyph size={17} color={t.text} weight={2} />}
-          title="Files"
-          detail="From Files, iCloud Drive or another app"
-          onPress={() => onPick('files')}
-        />
-      </Stagger>
-      {pasteable ? (
-        <Stagger index={3}>
-          <Row
-            mark={<Clipboard size={17} color={t.text} weight={2} />}
-            title="Paste image"
-            detail="The image you copied"
-            onPress={() => onPick('paste')}
-          />
-        </Stagger>
-      ) : null}
-    </ScrollView>
-  );
+  const items: MenuItem[] = [
+    {
+      key: 'photos',
+      mark: <Picture size={17} color={t.text} weight={2} />,
+      label: 'Photos',
+      detail: 'Screenshots and pictures on this iPhone',
+      onPress: () => onPick('photos'),
+    },
+    {
+      key: 'camera',
+      mark: <Camera size={17} color={t.text} weight={2} />,
+      label: 'Camera',
+      detail: 'Take a photo, of a whiteboard or a screen',
+      onPress: () => onPick('camera'),
+    },
+    {
+      key: 'files',
+      mark: <FileGlyph size={17} color={t.text} weight={2} />,
+      label: 'Files',
+      detail: 'From Files, iCloud Drive or another app',
+      onPress: () => onPick('files'),
+    },
+  ];
+  if (pasteable) {
+    items.push({
+      key: 'paste',
+      mark: <Clipboard size={17} color={t.text} weight={2} />,
+      label: 'Paste image',
+      detail: 'The image you copied',
+      onPress: () => onPick('paste'),
+    });
+  }
+  return [{ items }];
 }
 
 /** What is attached, inside the field above the words: each with its ×. */
@@ -208,13 +203,6 @@ function Spinner() {
 }
 
 const styles = StyleSheet.create({
-  // In a float, which draws the card — see components/Composer.tsx.
-  menu: { flexGrow: 0, maxHeight: 248 },
-  menuInner: { padding: 6, gap: 2 },
-  // A row of the menu's, as `Row` lays one out, with room for its sentence.
-  older: { flexDirection: 'row', alignItems: 'center', gap: 11, minHeight: size.row, margin: 6, paddingVertical: 9, paddingLeft: 14, paddingRight: 12 },
-  mark: { width: 16, alignItems: 'center' },
-  olderText: { flex: 1, minWidth: 0, fontFamily: font.prose, fontSize: size.label, lineHeight: 19, color: t.dim },
   tray: { flexGrow: 0 },
   // Room above for the × badges, which hang over each tile's corner.
   trayInner: { gap: 10, paddingTop: 12, paddingHorizontal: 12, paddingBottom: 2 },

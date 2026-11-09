@@ -83,6 +83,40 @@ pub fn bottom_rows<T>(term: &Term<T>, n: usize) -> Vec<String> {
         .collect()
 }
 
+/// Whether Codex is ready for a first prompt: a visible cursor just after
+/// its empty `›` composer and its normal footer below, with paste enabled.
+/// Placeholder text after the cursor is allowed. A menu, trust screen,
+/// shell prompt or a draft someone has already typed is not an empty input.
+pub fn codex_prompt_ready<T>(term: &Term<T>) -> bool {
+    use alacritty_terminal::term::TermMode;
+
+    if !term
+        .mode()
+        .contains(TermMode::BRACKETED_PASTE | TermMode::SHOW_CURSOR)
+    {
+        return false;
+    }
+    let grid = term.grid();
+    let cursor = grid.cursor.point;
+    let Ok(row) = usize::try_from(cursor.line.0) else {
+        return false;
+    };
+    if row >= grid.screen_lines() || cursor.column.0 >= grid.columns() {
+        return false;
+    }
+    let prefix: String = (0..cursor.column.0)
+        .map(|col| grid[cursor.line][Column(col)].c)
+        .collect();
+    if prefix.trim() != "›" {
+        return false;
+    }
+    let rows = bottom_rows(term, usize::MAX);
+    rows.iter().skip(row + 1).any(|line| {
+        let line = line.trim();
+        line.starts_with("? for shortcuts") || line.contains("context left")
+    })
+}
+
 /// Codex's notice that a usage limit is near, as Codex CLI 0.156 draws it:
 ///
 /// ```text
@@ -259,6 +293,36 @@ fn grok_option(row: &str) -> Option<(u8, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn codex_input_requires_an_empty_live_composer_not_a_menu_or_draft() {
+        use alacritty_terminal::event::VoidListener;
+        use alacritty_terminal::vte::ansi::Processor;
+
+        let ready = "\x1b[?2004h\x1b[?25h\x1b[22;1H› Explain this codebase\x1b[24;1H? for shortcuts\x1b[22;3H";
+        let check = |ansi: &str| {
+            let mut term = Term::new(
+                Default::default(),
+                &crate::terminal::TerminalSize::new(80, 24),
+                VoidListener,
+            );
+            let mut processor: Processor = Processor::new();
+            processor.advance(&mut term, ansi.as_bytes());
+            codex_prompt_ready(&term)
+        };
+        assert!(check(ready));
+        assert!(check(
+            &ready.replace("? for shortcuts", "100% context left")
+        ));
+        assert!(!check("shell prompt › "));
+        assert!(!check(&ready.replace(
+            "? for shortcuts",
+            "Enter to confirm or Esc to cancel"
+        )));
+        assert!(!check(&format!("{ready}\x1b[?25l")));
+        assert!(!check(&format!("{ready}\x1b[?2004l")));
+        assert!(!check(&format!("{ready}Already typing")));
+    }
 
     fn rows(text: &str) -> Vec<String> {
         text.lines().map(|row| row.trim_end().to_owned()).collect()

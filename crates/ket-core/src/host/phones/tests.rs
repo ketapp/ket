@@ -11,14 +11,16 @@
 use std::net::TcpStream;
 use std::process::Command;
 
+use futures::{SinkExt, StreamExt};
 use ket_relay_protocol::{Control, Frame, Kind, REFUSED_HOST_OFFLINE};
 use ket_remote::proto::envelope::Payload;
 use ket_remote::{Keypair, Offer};
+use tokio_tungstenite::Connector;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_tungstenite::tungstenite::{self, WebSocket, stream::MaybeTlsStream};
 
 use super::keys::answer_keys;
-use super::relay::broken;
+use super::relay::{broken, dial};
 use super::requests::decision;
 use super::snapshot::snapshot;
 use super::*;
@@ -71,6 +73,8 @@ fn rerun_sandboxed(name: &str) -> bool {
         // Snippets and settings are read from the config directory;
         // the sandbox's own, so the person's never are.
         .env("XDG_CONFIG_HOME", data.join("config"))
+        .env("HOME", data.join("home"))
+        .env("CLAUDE_CONFIG_DIR", data.join("home/.claude"))
         .env_remove(super::super::RELAY_ENV)
         .output()
         .expect("the test runs again");
@@ -109,7 +113,9 @@ fn rig() -> Rig {
         devices: Mutex::new(HashMap::new()),
         next_session: AtomicU64::new(1),
         live: Mutex::new(HashMap::new()),
-        activity: Mutex::new(Tracker::new(Vec::<String>::new())),
+        activity: Mutex::new(Tracker::new(crate::agents::known_agent_names(
+            &crate::config::Config::default(),
+        ))),
         places: Mutex::new(None),
         figures: Mutex::new(None),
         backlogs: Mutex::new(None),
@@ -117,9 +123,14 @@ fn rig() -> Rig {
         pending: AtomicUsize::new(0),
         approvals: Mutex::new(Vec::new()),
         next_approval: AtomicU64::new(1),
-        claim: None,
+        hosted: Mutex::new(None),
         typing: Typing::default(),
     });
+    let own = Target {
+        url: relay.clone(),
+        claim: None,
+        status: Arc::new(LinkStatus::default()),
+    };
     let (serving, linked) = (host.clone(), phones.clone());
     std::thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -130,7 +141,7 @@ fn rig() -> Rig {
             let listener = tokio::net::TcpListener::from_std(listener).expect("a listener");
             tokio::select! {
                 () = ket_relay::serve(listener, None) => {}
-                () = link_forever(&serving, &linked) => {}
+                () = link_forever(&serving, &linked, &own) => {}
             }
         });
     });
@@ -246,11 +257,21 @@ fn resume(
     device: &Keypair,
     hello: &proto::Envelope,
 ) -> ket_remote::Result<PhoneSession> {
+    resume_through(&rig.relay, rig, device, hello)
+}
+
+/// [`resume`], through the relay at `relay`.
+fn resume_through(
+    relay: &str,
+    rig: &Rig,
+    device: &Keypair,
+    hello: &proto::Envelope,
+) -> ket_remote::Result<PhoneSession> {
     let (id, public) = {
         let identity = lock(&rig.phones.identity);
         (identity.id, identity.public())
     };
-    let pipe = PhonePipe::connect(&rig.relay, id);
+    let pipe = PhonePipe::connect(relay, id);
     let mut session = ket_remote::resume(device, &id, &public, pipe)?;
     session.send_envelope(hello)?;
     Ok(session)
@@ -665,6 +686,206 @@ fn a_terminate_signal_from_a_phone_ends_the_program() {
 }
 
 #[test]
+fn starting_fresh_leaves_a_session_that_is_not_cold_alone() {
+    if rerun_sandboxed("starting_fresh_leaves_a_session_that_is_not_cold_alone") {
+        return;
+    }
+    let rig = rig();
+    let (unkeyed, _) = terminal(&rig, "/bin/sleep", &["30"]);
+    let spec = TerminalSpec {
+        command: "/bin/sleep".into(),
+        args: vec!["30".to_owned()],
+        cwd: std::env::temp_dir(),
+        env: std::collections::BTreeMap::new(),
+        env_remove: Vec::new(),
+        size: TerminalSize::new(80, 24),
+        key: None,
+        adopt: false,
+        adopt_only: false,
+    };
+    let id = rig.host.file_keyed_for_tests(
+        LocalTerminal::open(&spec).expect("a terminal"),
+        Some("worktree|claude|1-1".to_owned()),
+    );
+    let terminal = rig.host.find(id).expect("filed");
+    let (mut session, _) = paired(&rig, &Keypair::generate().unwrap());
+
+    let fresh = |terminal_id: u64| {
+        Payload::StartFresh(proto::StartFresh {
+            terminal_id,
+            session: "a-session-it-never-ran".to_owned(),
+            since_ms: 1,
+        })
+    };
+    // Ending a session takes control of its terminal, as typing into it does.
+    let refused = change(&mut session, 1, fresh(id));
+    assert_eq!(error_code(&refused), Some(proto::ErrorCode::NotController));
+    for (at, terminal_id) in [(2, unkeyed), (3, id)] {
+        let lease = Payload::Lease(proto::Lease {
+            terminal_id,
+            action: proto::lease::Action::Acquire as i32,
+        });
+        assert!(is_ack(&ask(&mut session, at, lease)));
+    }
+    let gone = change(&mut session, 4, fresh(unkeyed));
+    assert!(message(&gone).contains("closed"), "{}", message(&gone));
+    // No session of that name, so no cold spell to end: the phone is told,
+    // and nothing is handed to a window.
+    let warm = change(&mut session, 5, fresh(id));
+    assert!(message(&warm).contains("isn't cold"), "{}", message(&warm));
+    assert!(!terminal.is_closed());
+    terminal.kill();
+}
+
+/// An idle Claude tab with a real transcript, entirely in the child test's
+/// home directory. No user's transcripts or agent settings are consulted.
+fn cold_tab(rig: &Rig) -> (u64, Arc<LocalTerminal>, crate::agent_hooks::HookReport) {
+    let path = std::path::PathBuf::from(std::env::var_os("HOME").unwrap())
+        .join(".claude/projects/test/cold-session.jsonl");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &path,
+        serde_json::json!({
+            "type": "assistant",
+            "timestamp": "2001-01-01T00:00:00Z",
+            "message": {
+                "model": "claude-fable-5-1",
+                "usage": {
+                    "input_tokens": 100,
+                    "cache_read_input_tokens": 299800,
+                    "output_tokens": 100,
+                    "cache_creation": { "ephemeral_1h_input_tokens": 1 }
+                }
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let spec = TerminalSpec {
+        command: "/bin/sleep".into(),
+        args: vec!["30".to_owned()],
+        cwd: std::env::temp_dir(),
+        env: Default::default(),
+        env_remove: Vec::new(),
+        size: TerminalSize::new(80, 24),
+        key: None,
+        adopt: false,
+        adopt_only: false,
+    };
+    let id = rig.host.file_keyed_for_tests(
+        LocalTerminal::open(&spec).unwrap(),
+        Some("cold-wt|claude|1".to_owned()),
+    );
+    let mut report = asked_long_ago("cold-wt|claude|1", "cold-wt");
+    report.event = crate::agent_hooks::HookEvent::Idle;
+    report.session = Some("cold-session".to_owned());
+    report.question = None;
+    report.tool_name = None;
+    report.at_ms = crate::now_ms();
+    assert!(rig.host.report_for_tests(&report));
+    (id, rig.host.find(id).unwrap(), report)
+}
+
+#[test]
+fn a_phones_cold_session_figures_follow_the_desktops_threshold_and_opt_out() {
+    if rerun_sandboxed("a_phones_cold_session_figures_follow_the_desktops_threshold_and_opt_out") {
+        return;
+    }
+    let rig = rig();
+    let (id, terminal, _) = cold_tab(&rig);
+    let read = || {
+        shown(&rig, "cold-wt")
+            .terminals
+            .into_iter()
+            .find(|terminal| terminal.id == id)
+            .unwrap()
+            .cold
+    };
+    let cold = read().expect("cold at the default threshold");
+    assert_eq!(cold.session, "cold-session");
+    assert_eq!(
+        cold.since_ms,
+        crate::rate_limits::parse_rfc3339_ms("2001-01-01T00:00:00Z").unwrap()
+    );
+    assert_eq!(cold.tokens, 300_000);
+    assert_eq!(cold.cost_micros, 6_000_000);
+    assert_eq!(
+        cold.summary,
+        "re-caches 300k tokens, about $6.00 at API prices"
+    );
+
+    let mut config = crate::config::Config::default();
+    config.agent.cold_resume_min_tokens = Some(300_001);
+    config.save().unwrap();
+    assert!(read().is_none());
+    config.agent.cold_resume_min_tokens = Some(300_000);
+    config.save().unwrap();
+    assert_eq!(read(), Some(cold));
+    config.agent.cold_resume = Some(false);
+    config.save().unwrap();
+    assert!(read().is_none());
+    terminal.kill();
+}
+
+#[test]
+fn a_phone_cannot_start_fresh_during_a_turn_or_from_a_stale_cold_spell() {
+    if rerun_sandboxed("a_phone_cannot_start_fresh_during_a_turn_or_from_a_stale_cold_spell") {
+        return;
+    }
+    use crate::agent_hooks::HookEvent;
+    let rig = rig();
+    let (id, terminal, mut report) = cold_tab(&rig);
+    let (mut session, _) = paired(&rig, &Keypair::generate().unwrap());
+    assert!(is_ack(&ask(
+        &mut session,
+        1,
+        Payload::Lease(proto::Lease {
+            terminal_id: id,
+            action: proto::lease::Action::Acquire as i32,
+        })
+    )));
+    let since_ms = crate::rate_limits::parse_rfc3339_ms("2001-01-01T00:00:00Z").unwrap();
+    let fresh = |session: &str, since_ms| {
+        Payload::StartFresh(proto::StartFresh {
+            terminal_id: id,
+            session: session.to_owned(),
+            since_ms,
+        })
+    };
+    for (request, event) in [
+        (2, HookEvent::UserPrompt),
+        (3, HookEvent::PreTool),
+        (4, HookEvent::PermissionRequest),
+    ] {
+        report.event = event;
+        report.at_ms += 1;
+        report.tool_name = Some("Bash".to_owned());
+        assert!(rig.host.report_for_tests(&report));
+        let reply = change(&mut session, request, fresh("cold-session", since_ms));
+        assert_eq!(
+            message(&reply),
+            "it's working — start fresh once this turn is done"
+        );
+        assert!(shown(&rig, "cold-wt").terminals[0].cold.is_none());
+    }
+    report.event = HookEvent::Idle;
+    report.at_ms += 1;
+    assert!(rig.host.report_for_tests(&report));
+    for (request, payload) in [
+        (5, fresh("another-session", since_ms)),
+        (6, fresh("cold-session", since_ms + 1)),
+    ] {
+        let reply = change(&mut session, request, payload);
+        assert_eq!(
+            message(&reply),
+            "that session has been used since — it isn't cold any more"
+        );
+    }
+    assert!(!terminal.is_closed());
+    terminal.kill();
+}
+
+#[test]
 fn malformed_input_from_a_phone_ends_only_its_own_session() {
     if rerun_sandboxed("malformed_input_from_a_phone_ends_only_its_own_session") {
         return;
@@ -916,6 +1137,16 @@ fn the_first_snapshot_lists_the_desktops_projects_and_worktrees() {
         return;
     }
     let (project, worktree, _) = place();
+    // The badge's glyph rides along, as the desktop stores it (1.27).
+    let data = std::path::PathBuf::from(std::env::var_os("XDG_DATA_HOME").expect("sandboxed"));
+    let workspace = crate::workspace::Workspace::with_paths(
+        crate::store::Store::open_default().unwrap(),
+        data.join("worktrees"),
+    );
+    let id = crate::id::ProjectId::new(project.clone());
+    let mut settings = workspace.project_settings(&id).unwrap();
+    settings.icon = Some("glyph:leaf".to_owned());
+    workspace.set_project_settings(&id, settings).unwrap();
     let rig = rig();
     // A phone sees active terminals and idle worktrees it could open one in.
     let spec = TerminalSpec {
@@ -949,6 +1180,7 @@ fn the_first_snapshot_lists_the_desktops_projects_and_worktrees() {
         .find(|p| p.id == project)
         .unwrap_or_else(|| panic!("the project is listed: {:?}", snapshot.projects));
     assert_eq!(listed.name, "repo");
+    assert_eq!(listed.icon, "glyph:leaf");
     let shown = listed
         .worktrees
         .iter()
@@ -1061,6 +1293,222 @@ fn a_worktrees_pull_request_is_sent_with_its_checks_as_a_window_read_them() {
     assert!(open.squash_merge_allowed);
     assert!(open.rebase_merge_allowed);
     rig.host.find(filed).unwrap().kill();
+}
+
+/// A program at `dir/name` that only waits, so a command line running it
+/// says `name`.
+fn stand_in(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+    std::fs::create_dir_all(dir).expect("a directory");
+    let program = dir.join(name);
+    std::fs::write(&program, "#!/bin/sh\nsleep 30\n").expect("the stand-in");
+    std::fs::set_permissions(
+        &program,
+        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755),
+    )
+    .expect("made runnable");
+    program
+}
+
+/// `program` in a terminal of the rig's host filed under `key`, run by a
+/// shell as a job of its own the way a person's shell runs one, once it is
+/// the terminal's foreground.
+fn job(rig: &Rig, key: &str, program: &std::path::Path) -> (u64, Arc<LocalTerminal>) {
+    use crate::activity::Foreground;
+    let spec = TerminalSpec {
+        command: "/bin/sh".into(),
+        args: vec!["-c".to_owned(), format!("set -m; {}; :", program.display())],
+        cwd: std::env::temp_dir(),
+        env: std::collections::BTreeMap::new(),
+        env_remove: Vec::new(),
+        size: TerminalSize::new(80, 24),
+        key: None,
+        adopt: false,
+        adopt_only: false,
+    };
+    let id = rig
+        .host
+        .file_keyed_for_tests(LocalTerminal::open(&spec).unwrap(), Some(key.to_owned()));
+    let terminal = rig.host.find(id).unwrap();
+    let name = program.display().to_string();
+    eventually(
+        "the program is in the foreground",
+        || matches!(terminal.foreground(), Some(Foreground::Running(command)) if command.contains(&name)),
+    );
+    (id, terminal)
+}
+
+/// Pane `key` of `worktree` saying it waits on Claude's question, eleven
+/// minutes ago, and nothing heard from it since.
+fn asked_long_ago(key: &str, worktree: &str) -> crate::agent_hooks::HookReport {
+    use crate::agent_hooks::{Asked, HookEvent, HookReport, Offered, PermissionQuestion};
+    let question = PermissionQuestion {
+        tool: "AskUserQuestion".to_owned(),
+        subject: Some("Which mobile path?".to_owned()),
+        id: 0,
+        prompt: Some(Prompt::Ask {
+            questions: vec![Asked {
+                question: "Which mobile path?".to_owned(),
+                header: "Mobile path".to_owned(),
+                options: ["Expo", "PWA"]
+                    .map(|label| Offered {
+                        label: label.to_owned(),
+                        description: String::new(),
+                    })
+                    .to_vec(),
+                multi_select: false,
+            }],
+        }),
+    };
+    HookReport {
+        agent: "claude".to_owned(),
+        event: HookEvent::PermissionRequest,
+        worktree: Some(worktree.to_owned()),
+        cwd: None,
+        pane: Some(key.to_owned()),
+        session: Some("s1".to_owned()),
+        tool_name: Some("AskUserQuestion".to_owned()),
+        note: None,
+        mutating_git: false,
+        command: None,
+        at_ms: crate::now_ms() - crate::activity::REPORT_LINGERS_MS - 60_000,
+        subagent: None,
+        subagent_type: None,
+        subagent_description: None,
+        subagent_model: None,
+        tool_use_id: None,
+        call: None,
+        ruling: None,
+        teammate: None,
+        fresh_session: false,
+        background: None,
+        question: Some(Box::new(question)),
+    }
+}
+
+/// `worktree` as a phone's snapshot of the rig's host shows it.
+fn shown(rig: &Rig, worktree: &str) -> proto::WorktreeSummary {
+    snapshot(&rig.host, &rig.phones)
+        .projects
+        .into_iter()
+        .flat_map(|project| project.worktrees)
+        .find(|shown| shown.id == worktree)
+        .expect("the worktree with a terminal is listed")
+}
+
+#[test]
+fn a_question_nobody_has_answered_for_ten_minutes_still_waits_on_the_phone() {
+    let rig = rig();
+    let dir = std::env::temp_dir().join(format!("ket-phones-agent-{}", std::process::id()));
+    let (filed, agent) = job(&rig, "wt-ask|claude|1", &stand_in(&dir, "claude"));
+    assert!(
+        rig.host
+            .report_for_tests(&asked_long_ago("wt-ask|claude|1", "wt-ask"))
+    );
+
+    let shown = shown(&rig, "wt-ask");
+    assert_eq!(shown.activity, proto::Activity::Blocked as i32);
+    assert_eq!(shown.questions.len(), 1);
+    assert_eq!(shown.questions[0].tool, "AskUserQuestion");
+    assert_eq!(shown.questions[0].terminal_id, filed);
+
+    agent.kill();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_question_still_waits_on_the_phone_beside_a_tab_running_something_else() {
+    let rig = rig();
+    let dir = std::env::temp_dir().join(format!("ket-phones-beside-{}", std::process::id()));
+    // A dev server in the worktree's first tab, and the agent asking in
+    // its second.
+    let (_, server) = job(&rig, "wt-beside|shell|1", &stand_in(&dir, "dev-server"));
+    let (filed, agent) = job(&rig, "wt-beside|claude|2", &stand_in(&dir, "claude"));
+    assert!(
+        rig.host
+            .report_for_tests(&asked_long_ago("wt-beside|claude|2", "wt-beside"))
+    );
+
+    let shown = shown(&rig, "wt-beside");
+    assert_eq!(shown.activity, proto::Activity::Blocked as i32);
+    assert_eq!(shown.questions.len(), 1);
+    assert_eq!(shown.questions[0].terminal_id, filed);
+
+    server.kill();
+    agent.kill();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn each_tab_says_what_it_is_doing_and_a_shell_what_it_runs() {
+    use crate::activity::Foreground;
+    let rig = rig();
+    let dir = std::env::temp_dir().join(format!("ket-phones-tabs-{}", std::process::id()));
+    // A dev server in a shell, the agent asking in its own tab, and a shell
+    // at its prompt.
+    let (server_id, server) = job(&rig, "wt-tabs|shell|1", &stand_in(&dir, "dev-server"));
+    let (agent_id, agent) = job(&rig, "wt-tabs|claude|2", &stand_in(&dir, "claude"));
+    assert!(
+        rig.host
+            .report_for_tests(&asked_long_ago("wt-tabs|claude|2", "wt-tabs"))
+    );
+    let idle_id = rig.host.file_keyed_for_tests(
+        LocalTerminal::open(&TerminalSpec {
+            command: "/bin/sh".into(),
+            args: vec!["-c".to_owned(), "sleep 30".to_owned()],
+            cwd: std::env::temp_dir(),
+            env: std::collections::BTreeMap::new(),
+            env_remove: Vec::new(),
+            size: TerminalSize::new(80, 24),
+            key: None,
+            adopt: false,
+            adopt_only: false,
+        })
+        .unwrap(),
+        Some("wt-tabs|shell|3".to_owned()),
+    );
+    let idle = rig.host.find(idle_id).unwrap();
+    eventually("the shell is its own foreground", || {
+        idle.foreground() == Some(Foreground::Shell)
+    });
+
+    let shown = shown(&rig, "wt-tabs");
+    let tab = |id: u64| {
+        shown
+            .terminals
+            .iter()
+            .find(|terminal| terminal.id == id)
+            .expect("the tab is listed")
+    };
+    let now = crate::now_ms();
+
+    let server_tab = tab(server_id);
+    assert_eq!(server_tab.activity, proto::Activity::Running as i32);
+    assert!(
+        server_tab.running.contains("dev-server"),
+        "{}",
+        server_tab.running
+    );
+    // When it started, as `ps` told it: a moment ago, not the epoch.
+    assert!(
+        (now - 60_000..=now).contains(&server_tab.running_since_ms),
+        "started at {}, now {now}",
+        server_tab.running_since_ms
+    );
+
+    // The agent's own report, and no program: the agent is its tab's.
+    let agent_tab = tab(agent_id);
+    assert_eq!(agent_tab.activity, proto::Activity::Blocked as i32);
+    assert!(agent_tab.running.is_empty());
+    assert_eq!(agent_tab.running_since_ms, 0);
+
+    let idle_tab = tab(idle_id);
+    assert_eq!(idle_tab.activity, proto::Activity::Quiet as i32);
+    assert!(idle_tab.running.is_empty());
+
+    server.kill();
+    agent.kill();
+    idle.kill();
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -1240,7 +1688,7 @@ fn fixing_checks_is_answered_once_the_agent_has_them_even_across_a_reconnect() {
         prompt.contains("clippy's log is at https://circleci.com/gh/o/r/1."),
         "{prompt}"
     );
-    rig.host.finish_fix_checks(req, None);
+    rig.host.finish_fix_checks_for_tests(req, None);
     assert_eq!(handed_over(&answer_to(&mut session, 1)), Some(false));
 
     // The same key again: the same answer, and the agent not told twice.
@@ -1268,7 +1716,7 @@ fn fixing_checks_is_answered_once_the_agent_has_them_even_across_a_reconnect() {
     session.send_envelope(&fix(5, "fix-5", &worktree)).unwrap();
     assert!(message(&answer_to(&mut session, 5)).contains("already giving"));
     rig.host
-        .finish_fix_checks(req, Some("agent is not configured".to_owned()));
+        .finish_fix_checks_for_tests(req, Some("agent is not configured".to_owned()));
     assert!(message(&answer_to(&mut session, 4)).contains("agent is not configured"));
 }
 
@@ -1938,7 +2386,7 @@ fn deleting_a_worktree_is_checked_then_handed_to_a_window_which_may_refuse() {
     session.send_envelope(&delete(4, &worktree, false)).unwrap();
     let (req, asked, force) = deleting(&mut window);
     assert_eq!((asked.as_str(), force), (worktree.as_str(), false));
-    rig.host.finish_delete_work(
+    rig.host.finish_delete_work_for_tests(
         req,
         Err("it has uncommitted changes that would be lost".to_owned()),
     );
@@ -1951,9 +2399,203 @@ fn deleting_a_worktree_is_checked_then_handed_to_a_window_which_may_refuse() {
     let (req, _, force) = deleting(&mut window);
     assert!(force);
     rig.host
-        .finish_delete_work(req, Ok(Some("phone-work".to_owned())));
+        .finish_delete_work_for_tests(req, Ok(Some("phone-work".to_owned())));
     match answer_to(&mut session, 5).payload {
         Some(Payload::WorktreeDeleted(deleted)) => assert_eq!(deleted.kept_branch, "phone-work"),
         other => panic!("not deleted: {other:?}"),
     }
+}
+
+/// A relay stand-in behind TLS on a free loopback port, with a self-signed
+/// certificate for `127.0.0.1` made for this test alone: takes one socket,
+/// finishes TLS and the WebSocket upgrade, and echoes the first message.
+/// Returns the `wss://` address to dial, and the certificate.
+fn tls_relay() -> (String, rustls_pki_types::CertificateDer<'static>) {
+    let made = rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_owned()])
+        .expect("a test certificate");
+    let cert = made.cert.der().clone();
+    let key = rustls_pki_types::PrivateKeyDer::Pkcs8(made.signing_key.serialize_der().into());
+    let config = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(vec![cert.clone()], key)
+        .expect("a server configuration");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a free port");
+    let address = format!("wss://{}", listener.local_addr().expect("its address"));
+    listener
+        .set_nonblocking(true)
+        .expect("a nonblocking listener");
+    std::thread::spawn(move || {
+        current_thread().block_on(async {
+            let listener = tokio::net::TcpListener::from_std(listener).expect("a listener");
+            let Ok((stream, _)) = listener.accept().await else {
+                return;
+            };
+            let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+            // A dialler that distrusts the certificate hangs up here.
+            let Ok(tls) = acceptor.accept(stream).await else {
+                return;
+            };
+            let Ok(mut socket) = tokio_tungstenite::accept_async(tls).await else {
+                return;
+            };
+            if let Some(Ok(message)) = socket.next().await {
+                let _ = socket.send(message).await;
+            }
+        });
+    });
+    (address, cert)
+}
+
+/// A dialler that trusts `cert` and nothing else.
+fn trusting(cert: rustls_pki_types::CertificateDer<'static>) -> Connector {
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(cert).expect("a root");
+    let config = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    Connector::Rustls(Arc::new(config))
+}
+
+fn current_thread() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("a runtime")
+}
+
+#[test]
+fn the_host_dials_a_relay_over_tls() {
+    let (relay, cert) = tls_relay();
+    current_thread().block_on(async {
+        let mut socket = tokio::time::timeout(WAIT, dial(&relay, Some(trusting(cert))))
+            .await
+            .expect("a connection in time")
+            .expect("a TLS connection to the relay");
+        let register = Control::Connect { host: [7; 16] }
+            .frame(0)
+            .encode()
+            .expect("a frame");
+        socket
+            .send(WsMessage::Binary(register.clone().into()))
+            .await
+            .expect("the frame is sent");
+        let echoed = tokio::time::timeout(WAIT, socket.next())
+            .await
+            .expect("an answer in time")
+            .expect("the relay answers")
+            .expect("a message");
+        assert_eq!(echoed, WsMessage::Binary(register.into()));
+    });
+}
+
+#[test]
+fn a_relay_whose_certificate_the_system_does_not_trust_is_refused() {
+    // Checking against the system's roots reads them from the Keychain first,
+    // which takes seconds on macOS, and longer beside every other test.
+    const READING_ROOTS: Duration = Duration::from_secs(60);
+    let (relay, _) = tls_relay();
+    current_thread().block_on(async {
+        let error = tokio::time::timeout(READING_ROOTS, dial(&relay, None))
+            .await
+            .expect("an answer in time")
+            .expect_err("the connection is refused");
+        let text = error.to_string();
+        assert!(text.contains("certificate"), "{text}");
+    });
+}
+
+/// A relay for any host, on a free loopback port, standing in for one
+/// elsewhere. Returns its address.
+fn relay_elsewhere() -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a free port");
+    let relay = format!("ws://{}", listener.local_addr().expect("its address"));
+    listener
+        .set_nonblocking(true)
+        .expect("a nonblocking listener");
+    std::thread::spawn(move || {
+        current_thread().block_on(async {
+            let listener = tokio::net::TcpListener::from_std(listener).expect("a listener");
+            ket_relay::serve(listener, None).await;
+        });
+    });
+    relay
+}
+
+#[test]
+fn a_phone_reaches_the_host_through_a_relay_elsewhere_until_it_is_turned_off() {
+    if rerun_sandboxed("a_phone_reaches_the_host_through_a_relay_elsewhere_until_it_is_turned_off")
+    {
+        return;
+    }
+    let rig = rig();
+    let device = Keypair::generate().unwrap();
+    let (session, seq) = paired(&rig, &device);
+    drop(session);
+    eventually("the first session did not end", || {
+        rig.phones.connected() == 0
+    });
+
+    let elsewhere = relay_elsewhere();
+    rig.phones.set_hosted(&rig.host, Some(elsewhere.clone()));
+    eventually("the host never linked to the relay elsewhere", || {
+        rig.phones
+            .hosted_relay()
+            .is_some_and(|hosted| hosted.linked && hosted.error.is_none())
+    });
+    // Phones are told to try it, after the host's own.
+    assert_eq!(rig.phones.addresses().last(), Some(&elsewhere));
+
+    let mut session =
+        resume_through(&elsewhere, &rig, &device, &hello(epoch(), seq)).expect("let in");
+    let Some(Payload::Welcome(welcome)) = next(&mut session).payload else {
+        panic!("a phone through the relay elsewhere was not welcomed");
+    };
+    assert!(welcome.resumed);
+
+    // Off, in place: the phone that came that way is let go, the relay no
+    // longer routes to this host, and the host's own relay still does.
+    rig.phones.set_hosted(&rig.host, None);
+    assert!(rig.phones.hosted_relay().is_none());
+    assert!(!rig.phones.addresses().contains(&elsewhere));
+    eventually("the phone through the relay elsewhere stayed", || {
+        rig.phones.connected() == 0
+    });
+    let (mut late, _) = tungstenite::connect(&elsewhere).expect("the relay elsewhere");
+    let id = lock(&rig.phones.identity).id;
+    late.send(WsMessage::binary(
+        Control::Connect { host: id }.frame(0).encode().unwrap(),
+    ))
+    .unwrap();
+    let refused = loop {
+        if let WsMessage::Binary(bytes) = late.read().unwrap() {
+            break Frame::decode(&bytes).unwrap();
+        }
+    };
+    assert_eq!(
+        Control::parse(&refused.body),
+        Ok(Control::Refused {
+            reason: REFUSED_HOST_OFFLINE
+        })
+    );
+    resume(&rig, &device, &hello(epoch(), seq)).expect("still let in at home");
+}
+
+#[test]
+fn a_relay_elsewhere_that_cannot_be_reached_says_why() {
+    let rig = rig();
+    // Nothing listens here.
+    let gone = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a free port");
+        format!("ws://{}", listener.local_addr().expect("its address"))
+    };
+    rig.phones.set_hosted(&rig.host, Some(gone.clone()));
+    eventually("no reason was given", || {
+        rig.phones
+            .hosted_relay()
+            .is_some_and(|hosted| !hosted.linked && hosted.error.is_some())
+    });
+    assert_eq!(rig.phones.hosted_relay().unwrap().url, gone);
+    // Asked again for the same relay, nothing restarts.
+    rig.phones.set_hosted(&rig.host, Some(gone));
+    assert!(rig.phones.hosted_relay().unwrap().error.is_some());
 }

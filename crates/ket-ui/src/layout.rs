@@ -104,6 +104,18 @@ enum SavedTab {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         pinned: bool,
     },
+    /// A request the network inspector logged, by the worktree its log is
+    /// in and its id there. `label` is the tab's own name — the model and
+    /// the time — kept because recomputing it would mean reading the log.
+    NetworkRequest {
+        worktree: String,
+        id: String,
+        label: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        pinned: bool,
+    },
     Audio {
         path: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -500,6 +512,17 @@ impl SavedTab {
                 title,
                 pinned,
             }),
+            TabKind::NetworkRequest(key) => Some(Self::NetworkRequest {
+                worktree: key.worktree.to_string(),
+                id: key.id.clone(),
+                label: if tab.renamed {
+                    String::new()
+                } else {
+                    tab.title.to_string()
+                },
+                title,
+                pinned,
+            }),
         }
     }
 
@@ -530,6 +553,22 @@ impl SavedTab {
                     root: root.into(),
                     rel: rel.into(),
                     base: base.map(|(label, rev)| (label.into(), rev.into())),
+                }),
+                renamed: title.is_some(),
+                pinned,
+                preview: false,
+            }),
+            Self::NetworkRequest {
+                worktree,
+                id,
+                label,
+                title,
+                pinned,
+            } => Some(Tab {
+                title: title.clone().unwrap_or(label).into(),
+                kind: TabKind::NetworkRequest(crate::network_panel::RequestKey {
+                    worktree: ket_core::id::WorktreeId::new(worktree),
+                    id,
                 }),
                 renamed: title.is_some(),
                 pinned,

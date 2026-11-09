@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  ket Helper (Plugin).app is where Chromium hosted third-party plugins: code
+  from other signers (disable-library-validation) that writes and runs
+  machine code without asking for JIT memory
+  (allow-unsigned-executable-memory). Those two are Chromium's
+  chrome/app/helper-plugin-entitlements.plist as of 147.0.7727.0; Chromium
+  dropped the file in 148, but CEF still starts this helper. allow-jit is not
+  in Chromium's file: it is added so this helper is never stricter than the
+  renderer.
+
+  Only the hardened runtime enforces entitlements, and ket is signed ad hoc
+  without it until a Developer ID signature is possible (it waits on the
+  LLC's Apple Developer account). Recorded now so that signature starts from
+  the right set. See scripts/chromium-dev.sh.
+-->
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+</dict>
+</plist>

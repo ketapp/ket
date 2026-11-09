@@ -9,6 +9,7 @@ members = [
     "crates/ket-relay",
     "crates/ket-android",
     "crates/ket-feedback",
+    "crates/ket-chromium",
 ]
 # Vendored third-party code — patched gpui and alacritty_terminal, see the
 # `[patch.crates-io]` block below. Not members: it is other people's code, and
@@ -26,6 +27,7 @@ publish = false
 
 [workspace.dependencies]
 ket-android = { path = "crates/ket-android" }
+ket-chromium = { path = "crates/ket-chromium" }
 ket-core = { path = "crates/ket-core" }
 ket-relay-protocol = { path = "crates/ket-relay-protocol" }
 ket-relay = { path = "crates/ket-relay" }
@@ -42,6 +44,21 @@ agent-client-protocol = { version = "3.6", features = ["process"] }
 # by `ket-core::terminal::checkpoint`, which needs the three accessors the
 # patch below adds.
 alacritty_terminal = { version = "0.26", default-features = false }
+# Chromium, embedded, for `ket-chromium` and only behind its `cef` feature:
+# the Chromium Embedded Framework's C API, bound by tauri-apps' cef-rs. Its
+# sys crate's build script downloads CEF's minimal distribution (~135 MB) and
+# compiles CEF's C++ wrapper with cmake and Ninja, which is why nothing builds
+# it by default. Pinned exactly: the crate's version names the CEF build it
+# downloads, and ket.app bundles that framework, so a semver bump would be a
+# different Chromium. Default features off: `build-util` is a bundling CLI's
+# (clap, cargo_metadata, plist), `resources` is resource ids ket does not
+# use; `sandbox` stays, because the helpers run sandboxed.
+cef = { version = "=156.2.0", default-features = false, features = ["sandbox"] }
+# The DevTools protocol's messages, typed, generated from Chrome's protocol
+# files. Types only: the connection is ket's own, in process, through CEF
+# (`ket-chromium::cdp`), not chromiumoxide's WebSocket client.
+chromiumoxide_cdp = "0.9.1"
+chromiumoxide_types = "0.9.1"
 clap = { version = "4.6", features = ["derive", "env", "string"] }
 futures = "0.3"
 # The native shell. Zed's framework is GPU-drawn and carries no browser engine
@@ -96,8 +113,18 @@ prost-build = "0.14"
 protox = "0.9"
 # Noise, rather than a handshake of ket's own design.
 snow = "0.10"
-# The relay's WebSockets, and the host's side of them (Epic 5b.3).
+# The relay's WebSockets, and the host's side of them (Epic 5b.3). `ket-core`
+# turns on its TLS for a relay elsewhere (#140).
 tokio-tungstenite = "0.30"
+# `ket-core`'s tests only: a relay stand-in behind TLS on loopback (#140).
+# All three already in the tree; rustls with ring, as everywhere else here,
+# never aws-lc-rs.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rustls-pki-types = "1.15"
+tokio-rustls = { version = "0.26", default-features = false }
+# The same tests' certificate, made fresh each run rather than a key checked
+# in. Pure Rust, MIT OR Apache-2.0; ring, as above, not aws-lc-rs.
+rcgen = { version = "0.14.10", default-features = false, features = ["crypto", "pem", "ring"] }
 # `ket-feedback`'s HTTP: one JSON endpoint and a health check, over HTTP/1.
 # Already in the tree through tonic. The client half is the network
 # inspector's (`ket_core::network`): the host passes agents' requests on to
@@ -114,6 +141,15 @@ hyper-rustls = { version = "0.27.9", default-features = false, features = [
     "ring",
     "tls12",
 ] }
+# The network inspector's stored request bodies, gzipped. Already in the
+# tree; the pure-Rust backend, so no C build.
+flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
+# The network inspector's fingerprint of an image it does not keep (SHA-256).
+# Already in the tree through rustls.
+ring = "0.17"
+# The network inspector's flags: identifiers and secrets in what was sent.
+# Already in the tree through gpui.
+regex = "1.13"
 # `ket-feedback`'s mail. SMTP because every mail host speaks it, so the
 # service is tied to no provider. rustls with ring and the operating
 # system's root certificates (rustls-native-certs), all three already in
@@ -159,7 +195,7 @@ opt-level = 3
 
 [workspace.lints.rust]
 # `deny` rather than `forbid` so documented carve-outs are possible. There are
-# exactly five, all because no safe equivalent exists:
+# exactly six, all because no safe equivalent exists:
 #
 #   1. The `clonefile(2)` binding in `ket-core::cow`, which buys a measured
 #      10-19x on worktree provisioning.
@@ -178,6 +214,17 @@ opt-level = 3
 #   5. `ket-ui::browser_snapshot`, the still a browser pane shows while ket's
 #      menus and popovers are over it. WebKit's snapshot call has no safe
 #      binding; the module holds that call and nothing else.
+#   6. `ket-chromium`, embedded Chromium, behind its `cef` feature. Three
+#      modules: `app` adds Chromium's application protocols to gpui's
+#      NSApplication class at run time (`class_addProtocol` has no safe
+#      binding), `pump` drives CEF's message loop from a CoreFoundation
+#      run-loop timer (creating the timer, naming the common modes and handing
+#      a block to the main run loop are all `unsafe` in
+#      objc2-core-foundation), and `record::writer` writes a page's recording
+#      to MP4 through AVFoundation's AVAssetWriter (every message
+#      objc2-av-foundation generates is `unsafe`, as are CoreVideo's
+#      pixel-buffer calls). CEF's own calls go through cef-rs's safe
+#      wrappers.
 #
 # Any other `#[allow(unsafe_code)]` should be treated as a mistake.
 unsafe_code = "deny"

@@ -31,7 +31,7 @@ the design and scope can be agreed before substantial work begins.
    ```sh
    export XDG_DATA_HOME="$(mktemp -d)"
    cargo run -p ket-cli -- project add .
-   cargo run -p ket-ui
+   ./ket-dev.sh
    ```
 
 6. **Make the change**, keeping the *Architectural invariants* below. Add or
@@ -58,8 +58,13 @@ moves while yours is open.
 
 The desktop application is developed and released on macOS. Install Xcode (the
 full app, not only its command-line tools — GPUI compiles its Metal shaders
-with `xcrun metal`), Git, Node.js 22 or newer, and the Rust toolchain declared
-in `rust-toolchain.toml`.
+with `xcrun metal`), Git, Node.js 22 or newer, the Rust toolchain declared
+in `rust-toolchain.toml`, and cmake and Ninja (`brew install cmake ninja`),
+which build embedded Chromium's C++ wrapper. The first build downloads
+Chromium's distribution, about 135 MB; set `CEF_PATH` to a directory of your
+own to keep one copy for every checkout rather than one per build directory.
+Chromium runs only from an app bundle, so run ket with `./ket-dev.sh`, which
+assembles one, rather than `cargo run -p ket-ui`.
 
 ```sh
 cargo check --workspace

@@ -43,6 +43,12 @@ use crate::ui::toast::Tone;
 use crate::ui::toggle::{checkbox, switch};
 use crate::ui::{CAPTION, LABEL, RADIUS_LG, RADIUS_MD, RADIUS_SM, WELL_SM};
 use crate::{EditorType, Shell};
+use ket_core::storage::format_bytes;
+
+/// Settings → Browser, for a ket built with Chromium.
+#[cfg(feature = "chromium")]
+#[path = "browser_settings.rs"]
+mod browser_settings;
 
 /// How wide the whole thing is.
 ///
@@ -77,6 +83,14 @@ const PANE_GLYPH: gpui::Pixels = px(20.0);
 /// The sheet's inset, either side of a pane.
 const SHEET_PAD: gpui::Pixels = px(24.0);
 
+/// One stored log's row in the Network pane: a line of its own, since a size
+/// under a name read as a description of it.
+const NETWORK_LOG_ROW: gpui::Pixels = px(40.0);
+
+/// The Network pane's size column, right-aligned so every size ends on one
+/// line whatever its width.
+const NETWORK_LOG_SIZE: gpui::Pixels = px(64.0);
+
 /// One group of settings.
 ///
 /// The rail's order is [`Section::GROUPS`], not this declaration — `Agents` is
@@ -95,6 +109,8 @@ pub(crate) enum Section {
     Agents,
     /// Active and staged Economy policy packs.
     Economy,
+    /// The network inspector: logging what agents send, and the logs kept.
+    Network,
     /// Saved prompt snippets.
     Snippets,
     /// What agents may run without asking.
@@ -108,6 +124,9 @@ pub(crate) enum Section {
     Editor,
     /// The terminal panes.
     Terminal,
+    /// The Chromium in browser tabs, and each worktree's profile in it.
+    #[cfg(feature = "chromium")]
+    Browser,
     /// What the sidebar's merge button does.
     Merge,
     /// Pairing phones with this Mac, and revoking them.
@@ -120,18 +139,22 @@ pub(crate) enum Section {
 
 impl Section {
     /// Every section, in the order the rail shows them: [`Section::GROUPS`]
-    /// run together, which is the order the arrow keys walk.
-    pub(crate) const ALL: [Section; 13] = [
+    /// run together, which is the order the arrow keys walk. Browser only in
+    /// a ket built with Chromium.
+    pub(crate) const ALL: [Section; 14 + cfg!(feature = "chromium") as usize] = [
         Section::Agents,
         Section::Permissions,
         Section::Mcp,
         Section::Economy,
+        Section::Network,
         Section::Snippets,
         Section::Merge,
         Section::General,
         Section::Appearance,
         Section::Editor,
         Section::Terminal,
+        #[cfg(feature = "chromium")]
+        Section::Browser,
         Section::Keybindings,
         Section::Devices,
         Section::GitHub,
@@ -148,6 +171,7 @@ impl Section {
                 Section::Permissions,
                 Section::Mcp,
                 Section::Economy,
+                Section::Network,
                 Section::Snippets,
                 Section::Merge,
             ],
@@ -159,6 +183,8 @@ impl Section {
                 Section::Appearance,
                 Section::Editor,
                 Section::Terminal,
+                #[cfg(feature = "chromium")]
+                Section::Browser,
                 Section::Keybindings,
                 Section::Devices,
                 Section::GitHub,
@@ -173,11 +199,14 @@ impl Section {
             Section::Appearance => "Appearance",
             Section::Editor => "Editor",
             Section::Terminal => "Terminal",
+            #[cfg(feature = "chromium")]
+            Section::Browser => "Browser",
             Section::Merge => "Merge",
             Section::Devices => "Devices",
             Section::GitHub => "GitHub",
             Section::Agents => "Agents",
             Section::Economy => "Economy",
+            Section::Network => "Network",
             Section::Snippets => "Snippets",
             Section::Permissions => "Permissions",
             Section::Mcp => "MCP",
@@ -192,11 +221,14 @@ impl Section {
             Section::Appearance => Icon::Swatch,
             Section::Editor => Icon::TextCursor,
             Section::Terminal => Icon::Prompt,
+            #[cfg(feature = "chromium")]
+            Section::Browser => Icon::BrowserWindow,
             Section::Merge => Icon::MergeInto,
             Section::Devices => Icon::LaptopPhone,
             Section::GitHub => Icon::GitHub,
             Section::Agents => Icon::Orbit,
             Section::Economy => Icon::Gauge,
+            Section::Network => Icon::Network,
             Section::Snippets => Icon::MessageBookmark,
             Section::Permissions => Icon::ShieldCheck,
             Section::Mcp => Icon::Code,
@@ -211,6 +243,10 @@ impl Section {
             Section::Economy => {
                 "Agents narrate less \u{2014} fewer recaps, less restating. Each session is \
                  priced against your own with Economy off."
+            }
+            Section::Network => {
+                "What agents send to their model providers, logged on this Mac so you can see \
+                 it. Claude Code and Codex."
             }
             Section::Snippets => "Prompts you keep, ready to send to any worktree\u{2019}s agent.",
             Section::Permissions => {
@@ -228,6 +264,11 @@ impl Section {
             Section::Appearance => "Theme, fonts and density.",
             Section::Editor => "How ket\u{2019}s own editor draws and plays files.",
             Section::Terminal => "What a terminal pane runs, and how much it keeps.",
+            #[cfg(feature = "chromium")]
+            Section::Browser => {
+                "The Chromium in ket\u{2019}s browser tabs, and the profile each worktree keeps \
+                 its sign-ins in."
+            }
             Section::Keybindings => "The chords for ket\u{2019}s commands.",
             Section::GitHub => {
                 "The GitHub accounts on this Mac. Each project picks one in its settings, for \
@@ -252,7 +293,10 @@ impl Section {
             | Section::Merge
             | Section::GitHub
             | Section::Permissions
+            | Section::Network
             | Section::Keybindings => Frame::Rows,
+            #[cfg(feature = "chromium")]
+            Section::Browser => Frame::Rows,
         }
     }
 
@@ -268,6 +312,8 @@ impl Section {
             // The colour of a live connection, which is what the pane
             // reports on.
             Section::Mcp => t.status.running,
+            // What leaves the Mac, in the colour the panel's tools wear.
+            Section::Network => t.terminal.ansi.cyan,
             Section::Merge => t.status.merging,
             Section::Appearance => t.terminal.ansi.magenta,
             Section::Editor => t.terminal.ansi.cyan,
@@ -275,6 +321,8 @@ impl Section {
             Section::GitHub | Section::General | Section::Terminal | Section::Keybindings => {
                 t.text.dim
             }
+            #[cfg(feature = "chromium")]
+            Section::Browser => t.text.dim,
         })
     }
 }
@@ -293,6 +341,19 @@ enum Frame {
     Padded,
     /// A pane that draws its own cards.
     Bare,
+}
+
+/// The Network pane's list of stored logs — see
+/// `ket_core::network::store::stored` — and what is being done to it.
+#[derive(Default)]
+struct NetworkLogs {
+    /// Each worktree with logs, by id, and the bytes they take; largest
+    /// first.
+    list: Vec<(String, u64)>,
+    /// Whether `list` has been read since the pane was shown.
+    known: bool,
+    /// The worktree being deleted, `""` for every worktree, while one is.
+    deleting: Option<String>,
 }
 
 impl Preferences {
@@ -347,6 +408,8 @@ pub(crate) struct Preferences {
     /// The TypeSafe API key for Jev's beta, as it is being typed. Drawn as
     /// bullets, as the OpenCode Go key is.
     jev_key: Entity<TextInput>,
+    /// The Network pane's list of stored logs. See [`NetworkLogs`].
+    network_logs: NetworkLogs,
     /// A persistence or detection failure shown in the pane that caused it.
     pub(crate) error: Option<String>,
     /// False when the existing config could not be loaded.
@@ -391,6 +454,8 @@ pub(crate) struct Preferences {
     update_menu: Option<OpenMenu<UpdateCheck>>,
     /// The General pane's idle sleep interval choices.
     sleep_menu: Option<OpenMenu<u32>>,
+    /// The Economy pane's cold-session threshold choices, in tokens.
+    cold_resume_menu: Option<OpenMenu<u64>>,
     /// The Phones pane: the pairing code, the paired phones, and the clock
     /// that keeps both current. Dropped with the view, which stops it.
     pub(crate) phones: crate::phones::PhonesPane,
@@ -400,6 +465,9 @@ pub(crate) struct Preferences {
     pub(crate) snippets: crate::snippets::SnippetsPane,
     /// General's Remove from your agents, as far as it has got.
     unhook: Unhook,
+    /// The Browser pane: the profiles found, and a Delete under way.
+    #[cfg(feature = "chromium")]
+    browser: browser_settings::BrowserPane,
 }
 
 /// A CLI result is only shown for the worktree that produced it. The default
@@ -845,6 +913,7 @@ impl Shell {
             usage_expanded: false,
             usage,
             jev_key,
+            network_logs: NetworkLogs::default(),
             error,
             writable,
             draft: None,
@@ -859,13 +928,19 @@ impl Shell {
             worktree_dir_menu: None,
             update_menu: None,
             sleep_menu: None,
+            cold_resume_menu: None,
             phones: crate::phones::PhonesPane::default(),
             local_models: Default::default(),
             snippets: crate::snippets::SnippetsPane::load(),
             unhook: Unhook::Idle,
+            #[cfg(feature = "chromium")]
+            browser: Default::default(),
         });
         self.phones_shown(cx);
+        self.network_logs_shown(cx);
         self.local_models_shown(cx);
+        #[cfg(feature = "chromium")]
+        self.browser_shown(cx);
     }
 
     /// Saves an Agents setting, keeping the modal open with an actionable error.
@@ -950,10 +1025,11 @@ impl Shell {
         let dir = view.worktree_dir_menu.take().is_some();
         let update = view.update_menu.take().is_some();
         let sleep = view.sleep_menu.take().is_some();
+        let cold = view.cold_resume_menu.take().is_some();
         let ui_font = view.ui_font_menu.take().is_some();
         let code_font = view.code_font_menu.take().is_some();
         let local_model = view.local_models.menu.take().is_some();
-        theme || dir || update || sleep || ui_font || code_font || local_model
+        theme || dir || update || sleep || cold || ui_font || code_font || local_model
     }
 
     /// Opens or closes the Worktree directory dropdown.
@@ -1106,6 +1182,42 @@ impl Shell {
                         choices
                             .iter()
                             .position(|minutes| *minutes == current)
+                            .unwrap_or(1),
+                    )
+                    .offset(px(0.0), px(6.0)),
+            );
+        }
+    }
+
+    /// Opens or closes the cold-session threshold choices.
+    fn toggle_cold_resume_menu(&mut self) {
+        let Some(view) = self.preferences.as_ref() else {
+            return;
+        };
+        let open = view.cold_resume_menu.is_some();
+        let current = view.config.agent.cold_resume_min_tokens();
+        self.close_preference_menus();
+        if open {
+            return;
+        }
+        let items = COLD_RESUME_CHOICES
+            .into_iter()
+            .map(|tokens| {
+                let item = MenuItem::new(tokens, cold_resume_label(tokens));
+                MenuEntry::Item(if tokens == current {
+                    item.checked()
+                } else {
+                    item
+                })
+            })
+            .collect();
+        if let Some(view) = self.preferences.as_mut() {
+            view.cold_resume_menu = Some(
+                OpenMenu::new("preferences-cold-resume".into(), None, SELECT_WIDTH, items)
+                    .selected(
+                        COLD_RESUME_CHOICES
+                            .iter()
+                            .position(|tokens| *tokens == current)
                             .unwrap_or(1),
                     )
                     .offset(px(0.0), px(6.0)),
@@ -1771,6 +1883,16 @@ impl Shell {
         }
     }
 
+    /// Opens the usage account directly from the Usage popover.
+    pub(crate) fn open_opencode_usage_settings(&mut self, cx: &mut Context<Self>) {
+        self.open_preferences_at(Section::Agents, cx);
+        if let Some(view) = self.preferences.as_mut() {
+            view.usage_expanded = true;
+            view.search
+                .update(cx, |input, _| input.set_text("OpenCode Go"));
+        }
+    }
+
     /// Expands the OpenCode Go account card, closing any open agent card.
     fn toggle_opencode_go_details(&mut self, cx: &mut Context<Self>) {
         self.commit_agent_draft(cx);
@@ -2139,6 +2261,8 @@ impl Shell {
             // A Revoke asking to be sure backs out first; the view closes on
             // the next Escape.
             "escape" if self.cancel_phone_prompt() => {}
+            #[cfg(feature = "chromium")]
+            "escape" if self.cancel_browser_prompt() => {}
             "escape" if self.close_preference_menus() => {}
             "escape" if self.clear_preferences_search(cx) => {}
             "escape" => self.close_preferences(window, cx),
@@ -2183,7 +2307,10 @@ impl Shell {
                     };
                 }
                 self.phones_shown(cx);
+                self.network_logs_shown(cx);
                 self.local_models_shown(cx);
+                #[cfg(feature = "chromium")]
+                self.browser_shown(cx);
             }
             // Everything else is swallowed. A modal takes every key it is
             // given, so a stray chord cannot drive the shell behind it. The
@@ -2438,6 +2565,7 @@ impl Shell {
                             _ if searching => None,
                             Section::Agents
                             | Section::Economy
+                            | Section::Network
                             | Section::Snippets
                             | Section::Permissions
                             | Section::Mcp
@@ -2447,6 +2575,8 @@ impl Shell {
                             | Section::Merge
                             | Section::GitHub
                             | Section::Devices => None,
+                            #[cfg(feature = "chromium")]
+                            Section::Browser => None,
                             Section::Keybindings => {
                                 Some("Read-only for now — chords cannot be changed yet.")
                             }
@@ -2471,6 +2601,7 @@ impl Shell {
         match section {
             Section::Agents => self.agent_settings(t, window, cx),
             Section::Economy => self.economy_settings(t, window, cx),
+            Section::Network => self.network_settings(t, cx),
             Section::Snippets => self.snippet_settings(t, snippet_body, window, cx),
             Section::Editor => self.viewer_settings(t, window, cx),
             Section::Merge => self.merge_settings(t, window, cx),
@@ -2480,6 +2611,8 @@ impl Shell {
             Section::General => self.general_settings(t, cx),
             Section::Permissions => self.permission_settings(t, cx),
             Section::Mcp => self.mcp_settings(t, cx),
+            #[cfg(feature = "chromium")]
+            Section::Browser => self.browser_settings(t, cx),
             section => rows(section, t),
         }
     }
@@ -2516,6 +2649,11 @@ impl Shell {
                     .border_b_1()
                     .border_color(paint(t.border)),
             )
+            .children(
+                self.cold_resume_rows(t, cx)
+                    .into_iter()
+                    .map(|row| row.border_b_1().border_color(paint(t.border))),
+            )
             .children(self.jev_rows(t, window, cx));
 
         vec![
@@ -2524,8 +2662,9 @@ impl Shell {
                 overview,
             ),
             Entry::setting(
-                "pack source adoption managed company policy version Jev decisions beta \
-                 TypeSafe API key auto economy approval risk",
+                "pack source adoption managed company policy version cold session cache \
+                 expired re-cache resume fresh threshold tokens Jev decisions beta TypeSafe API \
+                 key auto economy approval risk",
                 group,
             ),
         ]
@@ -2637,6 +2776,79 @@ impl Shell {
             adopt,
             t,
         )
+    }
+
+    /// Whether opening a cold session asks first, and above how many tokens,
+    /// as rows of the Economy group — see `ket_core::cold`.
+    fn cold_resume_rows(&self, t: &Theme, cx: &mut Context<Self>) -> Vec<gpui::Div> {
+        let Some(view) = self.preferences.as_ref() else {
+            return Vec::new();
+        };
+        let writable = view.writable;
+        let asks = view.config.agent.asks_on_cold_resume();
+        let min_tokens = view.config.agent.cold_resume_min_tokens();
+        let ask = switch("economy-cold-resume", asks, t)
+            .when(writable, |el| {
+                el.cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.save_setting(|config| config.agent.cold_resume = Some(!asks));
+                        cx.notify();
+                    }))
+            })
+            .into_any_element();
+        let menu = view.cold_resume_menu.as_ref().map(|menu| {
+            menu.view(
+                t,
+                cx,
+                |this, tokens, cx| {
+                    let tokens = *tokens;
+                    this.close_preference_menus();
+                    this.save_setting(|config| {
+                        config.agent.cold_resume_min_tokens = Some(tokens);
+                    });
+                    cx.notify();
+                },
+                |this, cx| {
+                    this.close_preference_menus();
+                    cx.notify();
+                },
+            )
+        });
+        let threshold = dropdown(
+            "preferences-cold-resume-select",
+            crate::ui::select::select("preferences-cold-resume", cold_resume_label(min_tokens))
+                .open(view.cold_resume_menu.is_some())
+                .render(t)
+                .w(SELECT_WIDTH),
+            menu,
+        )
+        .when(writable, |el| {
+            el.cursor_pointer().on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.toggle_cold_resume_menu();
+                    cx.notify();
+                }),
+            )
+        })
+        .into_any_element();
+        vec![
+            economy_row(
+                (Icon::Snowflake, paint(t.text.dim)),
+                economy_title("Ask when opening a cold session", t),
+                "When a session's prompt cache has expired, ket says what continuing costs as \
+                 you open it, and offers a fresh session. Messages always send as typed.",
+                Some(ask),
+                t,
+            ),
+            economy_row(
+                (Icon::Gauge, paint(t.text.dim)),
+                economy_title("Only when re-caching is more than", t),
+                "A small session is cheap to pick up again, so it never asks.",
+                Some(threshold),
+                t,
+            ),
+        ]
     }
 
     /// Jev's beta: what it does, the key, and the two decisions it may make,
@@ -2765,7 +2977,10 @@ impl Shell {
         // A dropdown belongs to the pane it was opened in.
         self.close_preference_menus();
         self.phones_shown(cx);
+        self.network_logs_shown(cx);
         self.local_models_shown(cx);
+        #[cfg(feature = "chromium")]
+        self.browser_shown(cx);
     }
 
     /// Empties the filter. Returns whether there was anything in it, so
@@ -2970,7 +3185,7 @@ impl Shell {
                 t,
             ),
             Entry::setting(
-                "Theme Which palette to draw with. Desk Light Acqua Coral Punk Acid colours",
+                "Theme Which palette to draw with. Desk Light Acqua Coral Punk Cobalt Ultraviolet Acid colours",
                 row("Theme", "Which palette to draw with.", theme_select, t),
             ),
             setting(
@@ -3634,12 +3849,19 @@ impl Shell {
                     "Reads an OpenCode Go subscription's quota into the Usage panel. It does not change how the OpenCode CLI launches.",
                     t,
                 ))
+                .child(
+                    button("opencode-go-console", "Open OpenCode console")
+                        .link()
+                        .trailing(Icon::ExternalLink)
+                        .render(t)
+                        .on_click(|_, _, cx| cx.open_url("https://opencode.ai/console")),
+                )
                 .child(labelled(
                     "API key",
                     key_field,
                     key_clear,
                     caption(
-                        "The OpenCode Go API key, as copied from the console. When this is empty, OPENCODE_API_KEY is read instead.",
+                        "Recommended: a Go API key keeps usage connected when browser sessions expire. Leave blank to use OPENCODE_API_KEY.",
                         t,
                     )
                     .into_any_element(),
@@ -3649,7 +3871,7 @@ impl Shell {
                     cookie_field,
                     cookie_clear,
                     caption(
-                        "Only needed for a legacy console (OpenCode Black) account. Paste the whole Cookie header, or just the auth value. Find it signed in at opencode.ai: DevTools → Network → any request → Cookie.",
+                        "Legacy accounts only. After signing in, copy a fresh Cookie header or __Host-console_session value from an opencode.ai request in DevTools → Network. Saved cookies do not update automatically.",
                         t,
                     )
                     .into_any_element(),
@@ -3664,6 +3886,16 @@ impl Shell {
                     )
                     .into_any_element(),
                 ))
+                .child(
+                    button("opencode-go-save", "Save and refresh")
+                        .small()
+                        .enabled(writable && self.usage_draft_is_dirty(cx))
+                        .render(t)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.save_opencode_credentials(cx);
+                            cx.notify();
+                        })),
+                )
         });
 
         let card = div()
@@ -4186,6 +4418,227 @@ impl Shell {
                 .child(self.github_setup("github-setup", cx)),
         ));
         entries
+    }
+
+    /// The Network pane: the switch that logs what agents send, and the logs
+    /// kept so far, each with Delete.
+    fn network_settings(&self, t: &Theme, cx: &mut Context<Self>) -> Vec<Entry> {
+        let Some(view) = self.preferences.as_ref() else {
+            return Vec::new();
+        };
+        let writable = view.writable;
+        let log = view.config.agent.network.log;
+        let logs = &view.network_logs;
+
+        let mut entries = vec![setting(
+            "Log what agents send",
+            "Every request Claude Code makes from a worktree, kept on this Mac for five days \
+             and deleted with the worktree. The Network panel shows it. Applies to agents \
+             started from now on; one already running is left as it is.",
+            switch("network-log", log, t)
+                .when(writable, |el| {
+                    el.cursor_pointer()
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.save_setting(|config| config.agent.network.log = !log);
+                            cx.notify();
+                        }))
+                })
+                .into_any_element(),
+            t,
+        )];
+
+        let total: u64 = logs.list.iter().map(|(_, bytes)| *bytes).sum();
+        let heading = match (logs.known, logs.list.is_empty()) {
+            (false, _) => "Reading\u{2026}".to_owned(),
+            (true, true) => "No logs are stored.".to_owned(),
+            (true, false) => format!(
+                "{} on disk, under ~/.local/share/ket/network. Anything older than five days \
+                 is deleted on its own.",
+                format_bytes(total)
+            ),
+        };
+        // Delete all sits on the heading's line, so the list ends on its last
+        // log rather than on a button under it.
+        let delete_all = (!logs.list.is_empty()).then(|| {
+            button("network-log-delete-all", "Delete all logs")
+                .danger()
+                .small()
+                .leading(Icon::Trash)
+                .enabled(writable && logs.deleting.is_none())
+                .loading_if(logs.deleting.as_deref() == Some(""), "Deleting\u{2026}")
+                .render(t)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.delete_network_logs(None, cx);
+                    cx.notify();
+                }))
+        });
+        let mut parts: Vec<AnyElement> = vec![
+            div()
+                .flex()
+                .items_center()
+                .gap(px(16.0))
+                .pt(px(14.0))
+                .pb(px(12.0))
+                .border_b_1()
+                .border_color(paint(t.border))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(subsection("Stored logs", &heading, t)),
+                )
+                .children(delete_all)
+                .into_any_element(),
+        ];
+        for (index, (worktree, bytes)) in logs.list.iter().enumerate() {
+            let deleting = logs.deleting.as_deref() == Some(worktree.as_str());
+            let target = worktree.clone();
+            let delete = button(("network-log-delete", index), "Delete")
+                .small()
+                .leading(Icon::Trash)
+                .enabled(writable && logs.deleting.is_none())
+                .loading_if(deleting, "Deleting\u{2026}")
+                .render(t)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.delete_network_logs(Some(target.clone()), cx);
+                    cx.notify();
+                }))
+                .into_any_element();
+            parts.push(self.network_log_row(worktree, *bytes, delete, t));
+        }
+        entries.push(together("Stored logs delete network worktree", parts));
+        entries
+    }
+
+    /// One worktree's stored log: whose it is, its size in a column of its
+    /// own, and Delete. Its project and branch while the sidebar still knows
+    /// the worktree, since several projects each have a `main`; the id its
+    /// log is filed under otherwise, which is all that is left of a worktree
+    /// that is gone, marked as such.
+    fn network_log_row(
+        &self,
+        worktree: &str,
+        bytes: u64,
+        delete: AnyElement,
+        t: &Theme,
+    ) -> AnyElement {
+        let id = WorktreeId::new(worktree.to_owned());
+        let known = self.projects.iter().find_map(|project| {
+            project
+                .worktrees
+                .iter()
+                .find(|node| node.id == id)
+                .map(|node| (project.name.to_string(), node.label().to_string()))
+        });
+        let removed = known.is_none();
+        let (project, name) = match known {
+            Some((project, name)) => (Some(project), name),
+            None => (None, worktree.to_owned()),
+        };
+        div()
+            .flex()
+            .items_center()
+            .gap(px(12.0))
+            .h(NETWORK_LOG_ROW)
+            .border_b_1()
+            .border_color(paint(t.border))
+            .child(
+                div()
+                    .flex()
+                    .flex_1()
+                    .min_w_0()
+                    .items_center()
+                    .gap(px(4.0))
+                    .text_size(LABEL)
+                    .text_color(paint(t.text.primary))
+                    .whitespace_nowrap()
+                    .children(project.map(|project| {
+                        div()
+                            .flex_none()
+                            .text_color(paint(t.text.dim))
+                            .child(format!("{project} /"))
+                    }))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .child(name),
+                    )
+                    .children(removed.then(|| tag("Worktree removed", t).ml(px(4.0)))),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_none()
+                    .justify_end()
+                    .w(NETWORK_LOG_SIZE)
+                    .text_size(px(12.0))
+                    .text_color(paint(t.text.dim))
+                    .child(format_bytes(bytes)),
+            )
+            .child(delete)
+            .into_any_element()
+    }
+
+    /// Reads which worktrees have logs, when the Network pane is the one
+    /// showing. A directory walk, so off the main thread.
+    pub(crate) fn network_logs_shown(&mut self, cx: &mut Context<Self>) {
+        if self
+            .preferences
+            .as_ref()
+            .is_none_or(|view| view.section != Section::Network)
+        {
+            return;
+        }
+        let read = cx
+            .background_executor()
+            .spawn(async move { ket_core::network::store::stored() });
+        cx.spawn(async move |shell: gpui::WeakEntity<Shell>, cx| {
+            let mut list = read.await;
+            list.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            let _ = shell.update(cx, |shell, cx| {
+                if let Some(view) = shell.preferences.as_mut() {
+                    view.network_logs.list = list;
+                    view.network_logs.known = true;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Deletes one worktree's logs, or every worktree's for `None`, then
+    /// reads the list again. The Network panel showing a deleted log
+    /// empties too.
+    fn delete_network_logs(&mut self, worktree: Option<String>, cx: &mut Context<Self>) {
+        let Some(view) = self.preferences.as_mut() else {
+            return;
+        };
+        if view.network_logs.deleting.is_some() {
+            return;
+        }
+        view.network_logs.deleting = Some(worktree.clone().unwrap_or_default());
+        let target = worktree.clone();
+        let work = cx.background_executor().spawn(async move {
+            match &target {
+                Some(worktree) => ket_core::network::store::remove_worktree(worktree),
+                None => ket_core::network::store::remove_all(),
+            }
+        });
+        cx.spawn(async move |shell: gpui::WeakEntity<Shell>, cx| {
+            work.await;
+            let _ = shell.update(cx, |shell, cx| {
+                if let Some(view) = shell.preferences.as_mut() {
+                    view.network_logs.deleting = None;
+                    view.network_logs.known = false;
+                }
+                shell.network_logs_deleted(worktree.as_deref());
+                shell.network_logs_shown(cx);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// The Merge pane: what the sidebar's merge button writes and leaves behind.
@@ -4907,6 +5360,14 @@ const ECONOMY_ROW_PAD: gpui::Pixels = px(16.0);
 /// The gap between an Economy row's well and its words.
 const ECONOMY_ROW_GAP: gpui::Pixels = px(14.0);
 
+/// The thresholds a cold session can be asked about above, in tokens.
+const COLD_RESUME_CHOICES: [u64; 4] = [50_000, 100_000, 200_000, 400_000];
+
+/// A threshold as its menu shows it: "100k tokens".
+fn cold_resume_label(tokens: u64) -> String {
+    format!("{} tokens", ket_core::cold::short_tokens(tokens))
+}
+
 /// The Jev key field's width, beside its Save button.
 const JEV_KEY_W: gpui::Pixels = px(240.0);
 
@@ -5286,7 +5747,10 @@ fn rows(section: Section, t: &Theme) -> Vec<Entry> {
         | Section::Editor
         | Section::Merge
         | Section::GitHub
+        | Section::Network
         | Section::Devices => Vec::new(),
+        #[cfg(feature = "chromium")]
+        Section::Browser => Vec::new(),
         Section::Terminal => vec![
             setting(
                 "Shell",

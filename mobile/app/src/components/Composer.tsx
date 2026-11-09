@@ -1,22 +1,21 @@
 // The composer's moving parts: Send, which lights up and launches, and turns
-// into Stop while the agent works; +, which turns into × as its menu opens;
-// and the float the + and / menus open in, over the chat rather than
-// pushing it. Every duration here is a Reanimated call, and every one
+// into Stop while the agent works; and +, which turns into × as its menu
+// opens. The + and / menus are the app's one menu, in place over the chat
+// rather than pushing it — see components/FloatMenu.tsx. Every duration here is a Reanimated call, and every one
 // follows Reduce Motion: with it on, each lands at its end at once.
 //
 // Nothing on the bar changes size or place but these: the chat above, the
 // chips and the field stay where they are while a menu is up, so a menu
 // can open with the keyboard up and the keyboard stays.
 
-import { createContext, type ReactNode, useContext, useEffect, useState } from 'react';
-import { Pressable, StyleSheet, type StyleProp, type ViewStyle } from 'react-native';
+import { useEffect } from 'react';
+import { Pressable, StyleSheet, type ViewStyle } from 'react-native';
 import Animated, {
   Easing,
   ReduceMotion,
   interpolateColor,
   useAnimatedStyle,
   useSharedValue,
-  withDelay,
   withSequence,
   withSpring,
   withTiming,
@@ -182,76 +181,8 @@ export function PlusButton({ open, onPress }: { open: boolean; onPress: () => vo
   );
 }
 
-/** How long a float takes to go, after which it is gone from the tree. */
-const CLOSE_MS = 140;
-
-/** Whether the float has just opened, for its rows to come in after it. */
-const Opened = createContext(false);
-/** How long after opening a row that mounts still comes in. */
-const FRESH_MS = 400;
-
-/** A float over the chat, hung from the composer's top edge: the + menu or
- * the / menu. It grows from its bottom corner, past the mark and back, and
- * drops away faster. Closed, it is out of the tree, so nothing under it
- * takes a tap meant for it. Everything else stays put: the chat, the chips,
- * the field and the keyboard. */
-export function ComposerMenu({ open, style, children }: { open: boolean; style?: StyleProp<ViewStyle>; children: ReactNode }) {
-  const [shown, setShown] = useState(open);
-  const [fresh, setFresh] = useState(open);
-  // Opening: in the tree, and fresh, before this render draws it.
-  const [was, setWas] = useState(open);
-  if (open !== was) {
-    setWas(open);
-    if (open) {
-      setShown(true);
-      setFresh(true);
-    }
-  }
-  const strength = useSharedValue(open ? 1 : 0);
-  const rise = useSharedValue(open ? 1 : 0);
-  useEffect(() => {
-    if (open) {
-      strength.set(withTiming(1, timing(140)));
-      rise.set(withTiming(1, timing(280, OVER)));
-      const timer = setTimeout(() => setFresh(false), FRESH_MS);
-      return () => clearTimeout(timer);
-    }
-    strength.set(withTiming(0, timing(110)));
-    rise.set(withTiming(0, timing(CLOSE_MS)));
-    const timer = setTimeout(() => setShown(false), CLOSE_MS);
-    return () => clearTimeout(timer);
-  }, [open, strength, rise]);
-  const floating = useAnimatedStyle(() => {
-    const r = rise.get();
-    return { opacity: strength.get(), transform: [{ translateY: 16 * (1 - r) }, { scale: 0.7 + 0.3 * r }] };
-  });
-  if (!shown) return null;
-  return (
-    <Opened.Provider value={fresh}>
-      <Animated.View pointerEvents={open ? 'auto' : 'none'} style={[styles.float, style, floating]}>
-        {children}
-      </Animated.View>
-    </Opened.Provider>
-  );
-}
-
-/** A row of a float's, coming up from under the card a beat after the one
- * before it, when the float has just opened; a row that comes later — the
- * / menu narrowing as you type — is simply there. */
-export function Stagger({ index, children }: { index: number; children: ReactNode }) {
-  const fresh = useContext(Opened);
-  const up = useSharedValue(fresh ? 0 : 1);
-  useEffect(() => {
-    if (!fresh) return;
-    up.set(withDelay(index * 40, withTiming(1, timing(300, OVER))));
-    // Only on the way in: `fresh` is settled on mount.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-  const coming = useAnimatedStyle(() => ({ opacity: up.get(), transform: [{ translateY: 14 * (1 - up.get()) }] }));
-  return <Animated.View style={coming}>{children}</Animated.View>;
-}
-
-/** Where the + menu hangs: off the + button, up to 296 wide. */
+/** Where the + menu hangs, in place over the composer: off the + button,
+ * up to 296 wide. */
 export const plusMenu: ViewStyle = { left: 0, right: 0, maxWidth: 296 };
 /** Where the / menu hangs: over the field, between the buttons. */
 export const slashMenu = (plus: boolean): ViewStyle => ({ left: plus ? size.control + 8 : 0, right: size.control + 8 });
@@ -262,19 +193,4 @@ const styles = StyleSheet.create({
   fill: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center' },
   glyph: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center' },
   center: { alignItems: 'center', justifyContent: 'center' },
-  float: {
-    position: 'absolute',
-    bottom: '100%',
-    marginBottom: 8,
-    borderRadius: size.radiusCard,
-    borderWidth: 1,
-    borderColor: t.border,
-    backgroundColor: t.elevated,
-    shadowColor: '#000',
-    shadowOpacity: 0.55,
-    shadowRadius: 20,
-    shadowOffset: { width: 0, height: 12 },
-    transformOrigin: 'bottom left',
-    zIndex: 2,
-  },
 });

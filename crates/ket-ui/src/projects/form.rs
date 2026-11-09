@@ -31,6 +31,7 @@ use crate::ui::button::icon_button;
 use crate::ui::chip::{Motion, badge, caption, status_dot, swatch, tag};
 use crate::ui::dialog::card;
 use crate::ui::field::{error as field_error, label};
+use crate::ui::glyph::{self, Glyph};
 use crate::ui::group::{button_group, segment};
 use crate::ui::icon::Icon;
 use crate::ui::menu::{MenuEntry, MenuItem, MenuKey, OpenMenu, dropdown};
@@ -70,6 +71,19 @@ const SWATCH_GAP: Pixels = px(8.0);
 
 /// The hex field's width: `#rrggbb` in the mono, and the field's padding.
 const HEX_W: Pixels = px(96.0);
+
+/// Glyphs to a row in the badge popover: eight cells and their gaps fill the
+/// width two rows of nine swatches set.
+const GLYPHS_PER_ROW: usize = 8;
+
+/// A glyph cell's side.
+const GLYPH_CELL: Pixels = px(30.0);
+
+/// The glyph in a cell: the chrome's icon size, so the grid reads as icons.
+const GLYPH_ICON: Pixels = px(16.0);
+
+/// The gap between glyph cells.
+const GLYPH_GAP: Pixels = px(6.0);
 
 /// Which text field in a project form has the keyboard.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -121,8 +135,16 @@ pub(crate) struct ProjectForm {
     /// Entities because a text field is one — see [`crate::input`] for why the
     /// input method needs them to be.
     pub(super) name: Entity<TextInput>,
-    /// Draft icon, stored verbatim by core. Empty means none.
+    /// Draft icon as typed, stored verbatim by core. Empty means none — or
+    /// the glyph, when one is picked.
     pub(super) icon: Entity<TextInput>,
+    /// Draft glyph, picked from the popover's grid ([`crate::ui::glyph`]).
+    ///
+    /// Beside the typed icon rather than written into it: the field would
+    /// otherwise show `glyph:leaf`, which is the store's spelling, not
+    /// something to read. Text typed in the field wins — typing a letter is
+    /// the newer choice — and picking a glyph empties the field.
+    pub(super) glyph: Option<Glyph>,
     /// Draft badge colour, as typed or as a swatch wrote it. Empty means the
     /// neutral default, which is its placeholder.
     ///
@@ -193,6 +215,8 @@ impl ProjectForm {
             "" => "The folder's name",
             name => name,
         };
+        let stored_icon = seed.settings.icon.as_deref().unwrap_or_default();
+        let glyph = glyph::named(stored_icon);
         Self {
             dir_name: seed.dir_name.to_owned().into(),
             name: TextInput::with_text(
@@ -201,10 +225,11 @@ impl ProjectForm {
                 cx,
             ),
             icon: TextInput::with_text(
-                "An emoji or a letter",
-                seed.settings.icon.as_deref().unwrap_or_default(),
+                "Or type a letter or an emoji",
+                if glyph.is_some() { "" } else { stored_icon },
                 cx,
             ),
+            glyph,
             hex: TextInput::with_text(PROJECT_COLORS[0].1, &hex, cx),
             palette_open: focus == Field::Icon || focus == Field::Hex,
             base: TextInput::with_text("main", seed.base, cx),
@@ -277,6 +302,16 @@ impl ProjectForm {
         Color::from_hex(text).ok()
     }
 
+    /// The icon as core will store it: what is typed, else the glyph's
+    /// stored form, else nothing.
+    fn icon_draft(&self, cx: &App) -> String {
+        let typed = self.icon.read(cx).text();
+        if !typed.trim().is_empty() {
+            return typed;
+        }
+        self.glyph.map(Glyph::stored).unwrap_or_default()
+    }
+
     /// The text field rows Tab walks, in order. The popover's two only while
     /// it is open, and only the command that is on show.
     fn order(&self) -> Vec<Field> {
@@ -313,7 +348,7 @@ impl ProjectForm {
         Some(Drafts {
             display_name: self.name.read(cx).text(),
             color: (colour != default_color()).then(|| colour.to_hex()),
-            icon: self.icon.read(cx).text(),
+            icon: self.icon_draft(cx),
             hide_discovered: self.hide_discovered,
             trust_automation: self.trust_automation,
             github_issues: self.github_issues,
@@ -770,6 +805,7 @@ impl Shell {
     ) -> AnyElement {
         let t = &self.theme;
         let icon_field = self.form_field(form, Field::Icon, false, None, window, cx);
+        let glyphs = self.glyph_grid(form, cx);
         let hex_field = self
             .form_field(form, Field::Hex, colour.is_none(), None, window, cx)
             .w(HEX_W)
@@ -815,12 +851,8 @@ impl Shell {
                     .flex()
                     .flex_col()
                     .child(label("Icon", t))
-                    .child(icon_field)
-                    .child(
-                        div()
-                            .pt(px(6.0))
-                            .child(caption("Blank shows the name's first letter", t)),
-                    ),
+                    .child(glyphs)
+                    .child(div().pt(px(10.0)).child(icon_field)),
             )
             .child(
                 div()
@@ -839,6 +871,55 @@ impl Shell {
                     .child(hex_field),
             )
             .into_any_element()
+    }
+
+    /// The popover's glyphs: letters first — the name's initial, or whatever
+    /// is typed below — then every glyph, the chosen one held down. Text
+    /// typed in the icon field outranks the glyphs, so while there is some,
+    /// the letters cell is the one held.
+    fn glyph_grid(&self, form: &ProjectForm, cx: &mut Context<Self>) -> Div {
+        let t = &self.theme;
+        let typed = !form.icon.read(cx).text().trim().is_empty();
+        let choices = std::iter::once((Icon::TextCursor, None))
+            .chain(glyph::every().map(|glyph| (Icon::Glyph(glyph), Some(glyph))));
+        let cells = choices.enumerate().map(|(at, (which, glyph))| {
+            let chosen = if typed {
+                glyph.is_none()
+            } else {
+                form.glyph == glyph
+            };
+            icon_button(("glyph-cell", at), which)
+                .bare()
+                .sized(GLYPH_CELL, GLYPH_ICON)
+                .pressed(chosen)
+                .render(t)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if let Some(form) = this.project_form_mut() {
+                        form.glyph = glyph;
+                        form.icon.update(cx, |input, _| input.set_text(""));
+                        form.error = None;
+                    }
+                    cx.notify();
+                }))
+                .into_any_element()
+        });
+        let mut rows = Vec::new();
+        let mut row = Vec::new();
+        for cell in cells {
+            row.push(cell);
+            if row.len() == GLYPHS_PER_ROW {
+                rows.push(
+                    div()
+                        .flex()
+                        .gap(GLYPH_GAP)
+                        .children(std::mem::take(&mut row)),
+                );
+            }
+        }
+        if !row.is_empty() {
+            rows.push(div().flex().gap(GLYPH_GAP).children(row));
+        }
+        div().flex().flex_col().gap(GLYPH_GAP).children(rows)
     }
 
     /// The labelled rows under the identity line — base, agent, the agent's
@@ -1238,12 +1319,15 @@ fn agent_menu(form: &ProjectForm, t: &Theme, cx: &App) -> OpenMenu<usize> {
     .offset(px(0.0), px(6.0))
 }
 
-/// The badge's mark: the icon, else the first letter of the name, else of
-/// the folder's name.
+/// The badge's mark: the typed icon, else the glyph, else the first letter of
+/// the name, else of the folder's name.
 fn badge_initial(form: &ProjectForm, cx: &App) -> SharedString {
     let icon = form.icon.read(cx).text();
     if !icon.trim().is_empty() {
         return icon.trim().to_owned().into();
+    }
+    if let Some(glyph) = form.glyph {
+        return glyph.stored().into();
     }
     let name = form.name.read(cx).text();
     let name = match name.trim() {

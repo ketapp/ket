@@ -142,7 +142,8 @@ your agents run.
 The desktop application and release bundle target macOS 11 or newer. Core and
 CLI code may compile elsewhere, but non-macOS desktop behavior is not a
 supported release target yet. The companion phone app is built with Expo and
-reaches the Mac over the local network; see `mobile/app/README.md`.
+reaches the Mac on the local network, over Tailscale, or, when it is turned
+on, through ket's relay; see `mobile/app/README.md` and `deploy/relay`.
 
 ## Workspace layout
 
@@ -152,8 +153,8 @@ reaches the Mac over the local network; see `mobile/app/README.md`.
 | `crates/ket-cli` | The `ket` command-line client |
 | `crates/ket-ui` | Native GPUI desktop application |
 | `crates/ket-remote` | Noise session and phone application protocol |
-| `crates/ket-relay-protocol` | Bounded relay framing |
-| `crates/ket-relay` | Local/development WebSocket relay |
+| `crates/ket-relay-protocol` | Bounded relay framing, and the layout of a host's proof of its id |
+| `crates/ket-relay` | WebSocket relay: each host's own on its Mac, and ket's for many Macs |
 | `crates/ket-android` | Android-facing Rust integration |
 | `crates/ket-feedback` | Receives in-app feedback reports and emails them to one address |
 | `mobile/remote` | TypeScript remote-protocol client |
@@ -166,7 +167,9 @@ Install Xcode, Git, Node.js 22 or newer, and Rust. The full Xcode app is
 needed, not only its command-line tools: GPUI compiles its Metal shaders with
 `xcrun metal` (on Xcode 26, also install the Metal toolchain from Xcode's
 Components settings). The pinned Rust toolchain installs automatically from
-`rust-toolchain.toml`.
+`rust-toolchain.toml`. Browser tabs are embedded Chromium, whose C++ wrapper
+builds with cmake and Ninja (`brew install cmake ninja`); the first build
+downloads Chromium's distribution, about 135 MB, into `CEF_PATH` if you set it.
 
 ```sh
 cargo check --workspace
@@ -179,8 +182,13 @@ For development, keep ket away from your normal application state:
 ```sh
 export XDG_DATA_HOME="$(mktemp -d)"
 cargo run -p ket-cli -- project add .
-cargo run -p ket-ui
+./ket-dev.sh
 ```
+
+Chromium runs only from an app bundle, so `./ket-dev.sh` builds
+`target/debug/ket-dev.app` and runs ket from it; `./ket-prod.sh` does the same
+from a release build. `KET_CHROMIUM=0` before either builds ket without
+Chromium, its browser tabs WebKit, and runs the bare binary.
 
 Creating a worktree still changes the source repository's `.git/worktrees`
 registry. Remove development worktrees explicitly when finished.
@@ -277,7 +285,9 @@ configuration when it starts:
 These hooks run in every session of those agents, including ones ket did not
 start. A report that cannot reach a running ket is kept in the owner-only file
 `~/.ket/agent-hooks/spool.jsonl` until ket next starts. Settings → General →
-**Remove ket from your agents** takes all of them out again.
+**Remove ket from your agents** takes all of them out again, and so does
+`ket uninstall-hooks`, which `brew uninstall ket` runs before it deletes the
+app.
 
 To show Claude usage limits, ket reads Claude Code's sign-in from the macOS
 Keychain (or `.credentials.json` in Claude Code's config directory) and sends

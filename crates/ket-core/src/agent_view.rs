@@ -1413,7 +1413,7 @@ mod tests {
         let home = crate::sessions::home();
         assert_eq!(config_dir_env(None), None);
         assert_eq!(config_dir_env(Some(&home.join(".claude"))), None);
-        let personal = home.join(".claude-personal");
+        let personal = home.join(".claude-alt");
         assert_eq!(config_dir_env(Some(&personal)), Some(personal.as_path()));
     }
 

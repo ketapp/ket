@@ -91,6 +91,19 @@
 // 1.26 adds the model and reasoning effort a terminal's agent runs with
 // (`TerminalSummary.settings`), and changing them: SetModel.
 
+// 1.27 adds a project's icon (`ProjectSummary.icon`), so the phone's badge
+// shows the glyph the desktop's does.
+
+// 1.28 adds a terminal whose agent session's prompt cache has gone cold
+// (`TerminalSummary.cold`), and StartFresh, which opens a fresh session
+// beside it the way the desktop's own question does, answered with
+// FreshStarted naming the fresh session's terminal.
+
+// 1.29 adds what each terminal is doing (`TerminalSummary.activity`), and
+// the program a shell is running with when it started
+// (`TerminalSummary.running`, `running_since_ms`), so a phone can list a
+// worktree's tabs as its desktop's tab strip has them.
+
 syntax = "proto3";
 
 package ket.remote.v1;
@@ -213,6 +226,9 @@ message Envelope {
     SetMode set_mode = 127;
     // Since 1.26.
     SetModel set_model = 128;
+    // Since 1.28.
+    StartFresh start_fresh = 129;
+    FreshStarted fresh_started = 130;
   }
 }
 
@@ -383,6 +399,10 @@ message ProjectSummary {
   string color = 4;
   // Since 1.9. Notes in the project's backlog not started or done yet.
   uint32 backlog = 5;
+  // Since 1.27. The project's icon as ket stores it: `glyph:<name>` for one
+  // of the desktop's glyphs, else what was typed in its place; empty for
+  // none, which shows the name's first letter.
+  string icon = 6;
 }
 
 message WorktreeSummary {
@@ -636,6 +656,56 @@ message TerminalSummary {
   // Since 1.26. The model and effort the agent runs with, and what it can
   // be switched to; unset for an agent the desktop can't switch, or a shell.
   AgentSettings settings = 7;
+  // Since 1.28. Set while the agent's session has a prompt cache that has
+  // expired and would cost enough to re-cache that the desktop asks before
+  // it is picked up again. Unset otherwise, including when the reader has
+  // turned the question off.
+  ColdCache cold = 8;
+  // Since 1.29. What the terminal is doing, as its tab on the desktop says
+  // it: its agent's own report while that stands, else RUNNING for a shell
+  // with a program in front of it, else QUIET.
+  Activity activity = 9;
+  // Since 1.29. The program in front of a shell — `npm start` — as `ps`
+  // reads its command line, and when it started, in epoch milliseconds (0
+  // when the desktop could not tell). Empty for a shell at its prompt and
+  // for an agent's terminal.
+  string running = 10;
+  uint64 running_since_ms = 11;
+}
+
+// Since 1.28. A session whose prompt cache has gone cold: its next prompt
+// writes the whole conversation to the cache again.
+message ColdCache {
+  // The session, by the agent's own id.
+  string session = 1;
+  // When its last request was, in epoch milliseconds: what tells this cold
+  // spell from the next one, so a phone asks about each once.
+  uint64 since_ms = 2;
+  // Tokens the next prompt re-caches.
+  uint64 tokens = 3;
+  // What that costs at list price, in millionths of a dollar; 0 when the
+  // desktop doesn't know the model's rates.
+  int64 cost_micros = 4;
+  // The figures as the desktop says them: "re-caches 312k tokens, about
+  // $6.24 at API prices".
+  string summary = 5;
+}
+
+// Since 1.28. Opens a fresh session beside a terminal whose session went
+// cold, in the same pane on the desktop, as its Start fresh does; the old
+// terminal stays open as it was. `session` and `since_ms` are `ColdCache`'s, so a
+// session used again since the phone asked is left alone, and so is one
+// whose agent is busy. A mutation; answered with FreshStarted once the
+// fresh session's terminal is open, or an Error saying why not.
+message StartFresh {
+  uint64 terminal_id = 1;
+  string session = 2;
+  uint64 since_ms = 3;
+}
+
+// Since 1.28. The terminal a StartFresh opened beside the cold one.
+message FreshStarted {
+  uint64 terminal_id = 1;
 }
 
 // Since 1.24. An agent's modes — Claude's permission modes, OpenCode's

@@ -17,13 +17,13 @@ use ket_core::workspace::Workspace;
 
 use crate::Shell;
 use crate::paint::{alpha, paint};
-use crate::projects::default_color;
+use crate::projects::{default_color, rail_colour};
 use crate::ui::agent::{MARK, mark, provider};
 use crate::ui::button::{button, icon_button};
 use crate::ui::chip::{BADGE, Motion, badge, readout, status_dot, tag};
 use crate::ui::group::{button_group, segment};
 use crate::ui::icon::{Icon, icon, sized_icon};
-use crate::ui::row::{BLOCK_LEAD, block_row, heading_row, row};
+use crate::ui::row::{BLOCK_LEAD, block_row, block_row_with_rail, heading_row, row};
 use ket_core::activity::{Activity, Foreground, Signal};
 use ket_core::agent_hooks::{self, Listener};
 use ket_core::subagents::{Subagent, SubagentState};
@@ -1463,7 +1463,11 @@ impl Shell {
                         .as_deref()
                         .and_then(|hex| Color::from_hex(hex).ok())
                         .unwrap_or_else(default_color),
-                    icon: settings.icon.clone().map(SharedString::from),
+                    icon: settings
+                        .icon
+                        .as_deref()
+                        .and_then(crate::ui::glyph::drawable)
+                        .map(|icon| SharedString::from(icon.to_owned())),
                     hide_discovered: settings.hide_discovered_worktrees,
                     agent_overrides: settings.agents.clone(),
                     expanded: true,
@@ -1850,6 +1854,9 @@ impl Shell {
         // A level just changed, or a worktree came or went: either moves what
         // the savings rollup lists.
         self.refresh_savings();
+        // A worktree that went takes its browser tabs and profile with it.
+        #[cfg(feature = "chromium")]
+        self.chromium_registry_changed(&workspace, cx);
     }
 
     /// Starts the hook listener and registers ket with the agents.
@@ -2037,11 +2044,13 @@ impl Shell {
         };
 
         if installed {
+            record_installed(status_line.place());
             return;
         }
 
-        if let Err(e) = status_line.install(&script) {
-            tracing::warn!(%e, "status line: install failed");
+        match status_line.install(&script) {
+            Ok(()) => record_installed(status_line.place()),
+            Err(e) => tracing::warn!(%e, "status line: install failed"),
         }
     }
 
@@ -2485,12 +2494,12 @@ impl Shell {
         self.refresh_backlog_issues(cx);
         self.refresh_pull_requests(cx);
 
-        // A worktree can have several terminals now, so its foreground is the
-        // busiest of them: one pane running a build is the worktree being busy,
-        // whatever the other three are sitting at.
+        // A worktree can have several terminals now, and the tracker reads
+        // them all: the busiest says what the worktree is doing, and an agent
+        // in any of them keeps its report standing.
         let foreground_span = crate::frametrace::tick("  activity:foreground");
         for node in self.projects.iter().flat_map(|p| p.worktrees.iter()) {
-            let busiest = self
+            let foregrounds: Vec<Foreground> = self
                 .spaces
                 .get(&node.id)
                 .map(|space| space.terminal_ids())
@@ -2498,12 +2507,9 @@ impl Shell {
                 .into_iter()
                 .filter_map(|id| self.terminals.get(&id))
                 .filter_map(|handle| handle.term.foreground())
-                .reduce(|a, b| match (&a, &b) {
-                    (Foreground::Running(_), _) => a,
-                    _ => b,
-                });
+                .collect();
 
-            self.activity.observe(&node.id, busiest);
+            self.activity.observe_terminals(&node.id, foregrounds);
         }
         drop(foreground_span);
 
@@ -3569,9 +3575,12 @@ impl Shell {
                                     });
 
                                     let last = project.worktrees.len().saturating_sub(1);
+                                    // The selected row's rail wears the project's colour.
+                                    let row_id = ("worktree", pi * 1000 + wi);
+                                    let project_rail = rail_colour(project.color, t);
 
                                     let item =
-                                        block_row(("worktree", pi * 1000 + wi), is_selected, t)
+                                        block_row_with_rail(row_id, is_selected, project_rail, t)
                                             .group(row_group.clone())
                                             .relative()
                                             // The rail stands in the row's own leading
@@ -4178,18 +4187,27 @@ fn claude_hook_installers() -> Vec<Box<dyn agent_hooks::HookInstaller>> {
         .collect()
 }
 
-/// Installs one agent's hooks unless they are already there.
+/// Installs one agent's hooks unless they are already there, and notes
+/// where they are for uninstalling them — see
+/// [`agent_hooks::record_installed`].
 fn install_hooks(installer: &dyn agent_hooks::HookInstaller, script: &std::path::Path) {
     match installer.is_installed() {
-        Ok(true) => {}
-        Ok(false) => {
-            if let Err(e) = installer.install(script) {
-                tracing::warn!(agent = installer.agent(), %e, "agent hooks: install failed");
+        Ok(true) => record_installed(installer.place()),
+        Ok(false) => match installer.install(script) {
+            Ok(()) => record_installed(installer.place()),
+            Err(e) => {
+                tracing::warn!(agent = installer.agent(), %e, "agent hooks: install failed")
             }
-        }
+        },
         Err(e) => {
             tracing::warn!(agent = installer.agent(), %e, "agent hooks: unreadable settings")
         }
+    }
+}
+
+fn record_installed(place: agent_hooks::Place) {
+    if let Err(e) = agent_hooks::record_installed(place) {
+        tracing::warn!(%e, "agent hooks: could not note where they went");
     }
 }
 

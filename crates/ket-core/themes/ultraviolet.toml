@@ -1,0 +1,79 @@
+# A blacklight: an indigo-black ground lit with electric violet and acid
+# lime.
+#
+# Punk's poster under UV. Violet is the chrome accent and the keyword
+# colour, with dark ink on it; acid lime is the `marker`, the strings and
+# a modified line. Punk's cyan stays on types, hunks and "waiting on you",
+# and its mint `running` and traffic-cone `failed` keep their meanings:
+# green is progress, red is broken. Merges go hot pink, since violet is
+# spent on the accent.
+
+label = "Ultraviolet"
+appearance = "dark"
+backdrop = "#040209"
+surface = "#0c081d"
+panel = "#0c081d"
+elevated = "#181138"
+sunken = "#140d2f"
+hover = "#1a123f"
+selection = "#2d1785"
+border = "#432c9e"
+rule = "#1a1236"
+marker = "#c6ff1a"
+accent = "#a35cff"
+accent_hover = "#c08fff"
+on_accent = "#0a0019"
+focus_ring = "#c6ff1a"
+
+[text]
+primary = "#f8f4ff"
+dim = "#b3a3e6"
+
+[diff]
+added = "#39ff88"
+removed = "#ff3b5c"
+modified = "#c6ff1a"
+context = "#b3a3e6"
+hunk_header = "#00e5ff"
+
+[status]
+running = "#39ff88"
+attention = "#00e5ff"
+failed = "#ff3b5c"
+merging = "#ff4fc4"
+
+[quota]
+warm = "#f2ff26"
+hot = "#ff9f1a"
+critical = "#ff3b5c"
+
+[terminal]
+foreground = "#f8f4ff"
+background = "#0c081d"
+cursor = "#a35cff"
+
+[terminal.ansi]
+black = "#1f1838"
+red = "#ff3b5c"
+green = "#39ff88"
+yellow = "#f2ff26"
+blue = "#6b7bff"
+magenta = "#a35cff"
+cyan = "#00e5ff"
+white = "#e2dcf5"
+bright_black = "#685c90"
+bright_red = "#ff7590"
+bright_green = "#8cffb8"
+bright_yellow = "#f9ff8a"
+bright_blue = "#9aa6ff"
+bright_magenta = "#c08fff"
+bright_cyan = "#70f2ff"
+bright_white = "#ffffff"
+
+[syntax]
+keyword = "#a35cff"
+string = "#c6ff1a"
+comment = "#6e6299"
+number = "#00e5ff"
+kind = "#00e5ff"
+punctuation = "#9a8cc8"

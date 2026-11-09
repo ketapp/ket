@@ -11,12 +11,12 @@ publish.workspace = true
 [dependencies]
 base64.workspace = true
 getrandom.workspace = true
+# The layout of a host's proof to a relay (#141). That crate has no
+# dependencies and must never depend on this one; this way round is fine.
+ket-relay-protocol.workspace = true
 prost.workspace = true
 snow.workspace = true
 thiserror.workspace = true
-
-[dev-dependencies]
-ket-relay-protocol.workspace = true
 
 [build-dependencies]
 prost-build.workspace = true

@@ -82,7 +82,6 @@ pub(crate) struct MenuEditor {
 }
 
 use crate::ProjectStorage;
-use crate::SendFeedback;
 use crate::ToggleEditorWrap;
 use crate::{
     AboutKet, BringAllToFront, CloseWindow, FocusPaneAbove, FocusPaneBelow, FocusPaneLeft,
@@ -96,13 +95,14 @@ use crate::{
     NewWorktree, NextTab, OpenBacklog, OpenCommandPalette, OpenPullRequest, OpenQuickPrompt,
     OpenSettings, PreviousTab, ProjectSettings, Quit, RefreshProjects, ReleaseNotes, RemoveProject,
     RenameWorktree, ReportIssue, SaveDocument, SearchProjects, SearchWorktree, SendSnippet,
-    ShowFilesPanel, ShowGitPanel, ShowSearchPanel, SplitDown, SplitRight,
+    ShowFilesPanel, ShowGitPanel, ShowNetworkPanel, ShowSearchPanel, SplitDown, SplitRight,
     ToggleDiscoveredWorktrees, ToggleFullScreen, ToggleRightPanel, ToggleSidebar, ToggleStatusBar,
     ToggleTabPin, ToggleWorktreePin, ViewAvailableReleases, ZoomIn, ZoomOut, ZoomWindow,
 };
 use crate::{EconomySavings, RevealWorktree};
 #[cfg(target_os = "macos")]
 use crate::{EditCopy, EditCut, EditPaste, EditRedo, EditSelectAll, EditUndo};
+use crate::{ExportDiagnostics, SendFeedback};
 use crate::{FindNext, FindPrevious};
 
 /// State that controls native labels, checkmarks, and item availability.
@@ -456,6 +456,12 @@ pub(crate) fn app_menus(state: &MenuState) -> Vec<Menu> {
                                 state.panel_open
                                     && state.panel_view == crate::panel::PanelView::Git,
                             ),
+                        MenuItem::action("Network", ShowNetworkPanel)
+                            .enabled(has_worktree)
+                            .checked(
+                                state.panel_open
+                                    && state.panel_view == crate::panel::PanelView::Network,
+                            ),
                     ],
                 }),
                 MenuItem::action(
@@ -467,7 +473,7 @@ pub(crate) fn app_menus(state: &MenuState) -> Vec<Menu> {
                     ToggleStatusBar,
                 )
                 .checked(state.status_bar_open),
-                MenuItem::action("Wrap Editor Lines", ToggleEditorWrap)
+                MenuItem::action("Wrap Lines", ToggleEditorWrap)
                     .enabled(state.editor_wrap.is_some())
                     .checked(state.editor_wrap == Some(true)),
                 MenuItem::separator(),
@@ -631,6 +637,7 @@ pub(crate) fn app_menus(state: &MenuState) -> Vec<Menu> {
                 MenuItem::separator(),
                 MenuItem::action("Send Feedback…", SendFeedback),
                 MenuItem::action("Report an Issue…", ReportIssue),
+                MenuItem::action("Export Diagnostics…", ExportDiagnostics),
             ],
         },
     ];

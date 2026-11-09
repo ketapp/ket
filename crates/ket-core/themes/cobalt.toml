@@ -1,0 +1,81 @@
+# Punk, inked in blue: a cobalt-black ground lit with electric blue and
+# neon yellow.
+#
+# One ink changed and nothing else. Electric blue takes pink's place as the
+# chrome accent and the keyword colour, with dark ink on it as Punk's pink
+# has; the grounds are Punk's ladder turned from violet to cobalt, and the
+# dim line is a strong periwinkle where Punk's is lavender. The rest is
+# Punk's own: neon yellow is the `marker` and the strings, cyan carries
+# types, hunks and "waiting on you" — far lighter than the blue, so the two
+# never read as one — a mint `running` and a traffic-cone `failed`. Merges
+# take a violet a step redder than the accent.
+
+label = "Cobalt"
+appearance = "dark"
+backdrop = "#020409"
+surface = "#070c1c"
+panel = "#070c1c"
+elevated = "#0f1734"
+sunken = "#0b132c"
+hover = "#101a3a"
+selection = "#16287a"
+border = "#26409a"
+rule = "#111a36"
+marker = "#f2ff26"
+accent = "#3f7bff"
+accent_hover = "#7aa3ff"
+on_accent = "#000514"
+focus_ring = "#f2ff26"
+
+[text]
+primary = "#f4f7ff"
+dim = "#9fb1e0"
+
+[diff]
+added = "#39ff88"
+removed = "#ff3b5c"
+modified = "#f2ff26"
+context = "#9fb1e0"
+hunk_header = "#00e5ff"
+
+[status]
+running = "#39ff88"
+attention = "#00e5ff"
+failed = "#ff3b5c"
+merging = "#c46bff"
+
+[quota]
+warm = "#f2ff26"
+hot = "#ff9f1a"
+critical = "#ff3b5c"
+
+[terminal]
+foreground = "#f4f7ff"
+background = "#070c1c"
+cursor = "#3f7bff"
+
+[terminal.ansi]
+black = "#18203c"
+red = "#ff3b5c"
+green = "#39ff88"
+yellow = "#f2ff26"
+blue = "#3f7bff"
+magenta = "#ff2d95"
+cyan = "#00e5ff"
+white = "#dce2f5"
+bright_black = "#5a6890"
+bright_red = "#ff7590"
+bright_green = "#8cffb8"
+bright_yellow = "#f9ff8a"
+bright_blue = "#7aa3ff"
+bright_magenta = "#ff7ac0"
+bright_cyan = "#70f2ff"
+bright_white = "#ffffff"
+
+[syntax]
+keyword = "#3f7bff"
+string = "#f2ff26"
+comment = "#5f6d9a"
+number = "#00e5ff"
+kind = "#00e5ff"
+punctuation = "#8b9ac4"

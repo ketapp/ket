@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, jest, test } from '@jest/globals';
+import { renderHook } from '@testing-library/react-native';
 
-import { compare, forgetSeen, turnOff, turnOn, useNotices } from './notices';
+import { compare, forgetSeen, startNotices, turnOff, turnOn, useNoticeFollowing, useNotices } from './notices';
 import type { NotifyConfig } from './store';
 
 const mockNotifications = {
@@ -10,6 +11,10 @@ const mockNotifications = {
   setBadgeCountAsync: jest.fn(async (_n: number) => {}),
 };
 let mockStored: NotifyConfig | null = null;
+// The tap the app last had, as expo-notifications hands it over.
+let mockResponse: object | null = null;
+const mockListen = jest.fn((_open: (response: object) => void) => ({ remove: () => {} }));
+const mockPush = jest.fn((_path: string) => {});
 
 jest.mock('expo-notifications', () => ({
   AndroidImportance: { HIGH: 4 },
@@ -21,10 +26,10 @@ jest.mock('expo-notifications', () => ({
   scheduleNotificationAsync: jest.fn(async () => ''),
   setNotificationHandler: jest.fn(),
   setNotificationChannelAsync: jest.fn(async () => null),
-  addNotificationResponseReceivedListener: jest.fn(),
-  useLastNotificationResponse: () => null,
+  addNotificationResponseReceivedListener: (open: (response: object) => void) => mockListen(open),
+  useLastNotificationResponse: () => mockResponse,
 }));
-jest.mock('expo-router', () => ({ router: { push: jest.fn() } }));
+jest.mock('expo-router', () => ({ router: { push: (path: string) => mockPush(path) } }));
 jest.mock('./connection', () => ({ connection: jest.fn() }));
 jest.mock('./store', () => ({
   DEFAULT_NOTIFY: { on: false, waiting: true, finished: true, checks: true },
@@ -95,6 +100,36 @@ describe('compare', () => {
     expect(compare(host, snapshot([tree('c', 0, { agent: '' })]), false).fresh).toEqual([]);
   });
 
+  test("a tap opens the agent's chat: the one that finished, and the newest prompt's", () => {
+    // The agent's tab, not the shell beside it: the chat that finished.
+    const terminals = [
+      { id: 3n, agent: '', closed: false },
+      { id: 5n, agent: 'codex', closed: false },
+    ];
+    compare(host, snapshot([tree('a', 2, { terminals }), tree('b', 0, { terminals })]), false);
+    const { fresh } = compare(
+      host,
+      snapshot([
+        tree('a', 0, { terminals }),
+        // A dialog read off the screen is only in the list; the single field
+        // keeps an older prompt in another tab.
+        tree('b', 4, {
+          terminals,
+          question: { terminalId: 5n, subject: 'Run tests?' },
+          questions: [
+            { terminalId: 9n, tool: 'Dialog', subject: 'Implement this plan?' },
+            { terminalId: 5n, subject: 'Run tests?' },
+          ],
+        }),
+      ]),
+      false,
+    );
+    expect(fresh.map((n) => [n.kind, n.path])).toEqual([
+      ['finished', '/session/host/5'],
+      ['waiting', '/session/host/9'],
+    ]);
+  });
+
   test('a check failing on a pull request is said once, naming the checks', () => {
     const pr = (states: number[]) => ({
       pullRequest: { number: 12n, checks: states.map((state, i) => ({ name: `check ${i}`, state, url: '' })) },
@@ -112,6 +147,36 @@ describe('compare', () => {
       },
     ]);
     expect(compare(host, snapshot([tree('a', 2, pr([2, 2]))]), false).fresh).toEqual([]);
+  });
+});
+
+describe('a tapped notice', () => {
+  const tap = (identifier: string, date: number, path: string) => ({
+    notification: { date, request: { identifier, content: { data: { path } } } },
+  });
+
+  test('opens once the screens are there, and once for the listener and the last response both', async () => {
+    mockResponse = tap('host/a', 1_000, '/session/host/7');
+    const hook = await renderHook(({ ready }: { ready: boolean }) => useNoticeFollowing(ready), {
+      initialProps: { ready: false },
+    });
+    // Pushed before the stack is drawn, it was dropped.
+    expect(mockPush).not.toHaveBeenCalled();
+    await hook.rerender({ ready: true });
+    expect(mockPush).toHaveBeenCalledWith('/session/host/7');
+
+    // The listener hands over the same tap: not a second chat on top.
+    startNotices();
+    const open = mockListen.mock.calls[0][0];
+    open(mockResponse!);
+    expect(mockPush).toHaveBeenCalledTimes(1);
+    // The same notice tapped again, later, is a tap of its own.
+    open(tap('host/a', 2_000, '/session/host/7'));
+    expect(mockPush).toHaveBeenCalledTimes(2);
+    // Something that is no screen's path opens nothing.
+    open(tap('host/b', 3_000, 'https://example.com'));
+    expect(mockPush).toHaveBeenCalledTimes(2);
+    await hook.unmount();
   });
 });
 

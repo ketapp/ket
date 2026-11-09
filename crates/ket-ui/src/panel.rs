@@ -1,7 +1,7 @@
 //! The right panel's frame: the strip of views along its top, and which view
 //! is showing under it.
 //!
-//! **One strip, fixed slots.** Files, Search and Git are buttons of one width
+//! **One strip, fixed slots.** Files, Search, Git and Network are buttons of one width
 //! in one order, so choosing a view moves nothing but the bar under the chosen
 //! one. The strip takes the panel's share of the band along the top edge — the
 //! height of the tab bar beside it — and the space it leaves over still drags
@@ -31,11 +31,19 @@ pub(crate) enum PanelView {
     Search,
     /// What changed in the worktree.
     Git,
+    /// What the worktree's agents sent to their providers. See
+    /// `crate::network_panel`.
+    Network,
 }
 
 impl PanelView {
     /// Every view, in the strip's order.
-    const ALL: [PanelView; 3] = [PanelView::Files, PanelView::Search, PanelView::Git];
+    const ALL: [PanelView; 4] = [
+        PanelView::Files,
+        PanelView::Search,
+        PanelView::Git,
+        PanelView::Network,
+    ];
 
     /// The name it is stored under.
     pub(crate) fn name(self) -> &'static str {
@@ -43,6 +51,7 @@ impl PanelView {
             PanelView::Files => "files",
             PanelView::Search => "search",
             PanelView::Git => "git",
+            PanelView::Network => "network",
         }
     }
 
@@ -52,6 +61,7 @@ impl PanelView {
         match name {
             "search" => PanelView::Search,
             "git" => PanelView::Git,
+            "network" => PanelView::Network,
             _ => PanelView::Files,
         }
     }
@@ -62,6 +72,7 @@ impl PanelView {
             PanelView::Files => "Files",
             PanelView::Search => "Search",
             PanelView::Git => "Git",
+            PanelView::Network => "Network",
         }
     }
 
@@ -70,6 +81,7 @@ impl PanelView {
             PanelView::Files => Icon::Folder,
             PanelView::Search => Icon::TextSearch,
             PanelView::Git => Icon::GitBranch,
+            PanelView::Network => Icon::Network,
         }
     }
 }
@@ -87,6 +99,7 @@ impl Shell {
             }
             PanelView::Search => self.open_workspace_search(cx),
             PanelView::Git => self.open_git_panel(cx),
+            PanelView::Network => self.open_network_panel(cx),
         }
         cx.notify();
     }
@@ -96,7 +109,7 @@ impl Shell {
         let t = self.theme;
         let badge = self.git_badge_count();
 
-        // The three views as one segmented switch across the panel's width.
+        // The four views as one segmented switch across the panel's width.
         // Git carries its change count in its label: how much changed is the
         // thing worth knowing before switching to look.
         let switch = crate::ui::group::button_group("panel-views")

@@ -8,7 +8,7 @@ use ket_remote::proto;
 
 use super::keys::answer_keys;
 use super::{Phones, lock};
-use crate::activity::Signal;
+use crate::activity::{Foreground, Signal};
 use crate::agent_hooks::Prompt;
 use crate::event::AgentState;
 use crate::host::server::Host;
@@ -77,7 +77,7 @@ fn agent_view(
     // A Claude tab, or a shell someone typed `claude agents` into — which
     // is agent view by its command line alone.
     let foreground = match terminal.foreground() {
-        Some(crate::activity::Foreground::Running(command)) => Some(command),
+        Some(Foreground::Running(command)) => Some(command),
         _ => None,
     };
     let started_as = foreground
@@ -120,8 +120,37 @@ fn agent_view(
     })
 }
 
+/// A signal as the phone's rows light it.
+fn activity_of(signal: Signal) -> proto::Activity {
+    match signal {
+        Signal::Quiet => proto::Activity::Quiet,
+        Signal::Running => proto::Activity::Running,
+        Signal::Working => proto::Activity::Working,
+        Signal::Merging => proto::Activity::Merging,
+        Signal::Blocked => proto::Activity::Blocked,
+        Signal::Failed => proto::Activity::Failed,
+    }
+}
+
 /// The host's terminals, grouped by worktree and project, with what each
 /// worktree's agent is doing.
+/// `session`'s cold spell, when it has one worth asking about at
+/// `min_tokens` — see `crate::cold`. `None` while warm, below the threshold,
+/// or with the question turned off.
+fn cold_cache(session: &str, min_tokens: Option<&u64>) -> Option<proto::ColdCache> {
+    let min_tokens = *min_tokens?;
+    let path = crate::conversation::claude_transcript(session)?;
+    let last = crate::cold::claude_last_call_cached(&path)?;
+    let cold = last.cold(crate::now_ms())?;
+    cold.worth_asking(min_tokens).then(|| proto::ColdCache {
+        session: session.to_owned(),
+        since_ms: last.at_ms,
+        tokens: cold.tokens,
+        cost_micros: cold.cost_micros.unwrap_or(0),
+        summary: cold.summary(),
+    })
+}
+
 pub(super) fn snapshot(host: &Host, phones: &Phones) -> proto::HostSnapshot {
     let listing = host.listing();
     // Tabs the windows have put to sleep: no terminal, still the worktree's.
@@ -141,22 +170,51 @@ pub(super) fn snapshot(host: &Host, phones: &Phones) -> proto::HostSnapshot {
     let now = crate::now_ms();
     // Which session each pane's agent is in, for its mode.
     let panes = host.agent_status().panes;
+    // Whether a cold session is asked about, and above how many tokens:
+    // the reader's own setting, the one the desktop's question honours.
+    let cold_asks = crate::config::Config::load()
+        .ok()
+        .filter(|config| config.agent.asks_on_cold_resume())
+        .map(|config| config.agent.cold_resume_min_tokens());
     let mut worktrees: Vec<proto::WorktreeSummary> = Vec::new();
     // Which terminal each pane is, for naming the one a prompt is in.
     let mut terminal_of: HashMap<String, u64> = HashMap::new();
+    // What each worktree's terminals are running, as a window reads them.
+    // Without it an agent's report stands only its first ten minutes, so a
+    // question nobody had answered by then went from the phone while the
+    // agent still waited on it.
+    let mut foregrounds: HashMap<String, Vec<Foreground>> = HashMap::new();
+    // Which pane each terminal is, for what its own agent reports.
+    let mut key_of: HashMap<u64, String> = HashMap::new();
     for (id, key, terminal) in listing.iter().cloned() {
         if let Some(key) = &key {
             terminal_of.insert(key.clone(), id);
+            key_of.insert(id, key.clone());
         }
         // Keys are `worktree|agent|nonce`; a terminal without one is still
         // listed, under no worktree.
         let mut parts = key.as_deref().unwrap_or_default().splitn(3, '|');
         let worktree = parts.next().unwrap_or_default().to_owned();
+        let foreground = terminal.foreground();
+        if let Some(foreground) = foreground.clone() {
+            foregrounds
+                .entry(worktree.clone())
+                .or_default()
+                .push(foreground);
+        }
         let agent = parts
             .next()
             .filter(|a| *a != "shell")
             .unwrap_or_default()
             .to_owned();
+        // A shell's program, named on its row: an agent's terminal has its
+        // agent in front, which is no program of the shell's.
+        let (running, running_since_ms) = match foreground {
+            Some(Foreground::Running(command)) if agent.is_empty() => {
+                (command, terminal.running_since().unwrap_or_default())
+            }
+            _ => (String::new(), 0),
+        };
         let agent_view = agent_view(id, &agent, &terminal, places.get(&worktree));
         let session = key
             .as_deref()
@@ -204,6 +262,24 @@ pub(super) fn snapshot(host: &Host, phones: &Phones) -> proto::HostSnapshot {
                     .collect(),
             })
         });
+        // Only an agent at rest: one mid-turn — a long build, say — has
+        // made no request for a while and looks cold, but it is working.
+        let at_rest = key.as_deref().is_none_or(|key| {
+            use crate::event::AgentState;
+            !panes.iter().any(|pane| {
+                pane.pane == key
+                    && matches!(
+                        pane.state,
+                        AgentState::Thinking
+                            | AgentState::ExecutingTool
+                            | AgentState::AwaitingPermission
+                    )
+            })
+        });
+        let cold = session
+            .as_deref()
+            .filter(|_| at_rest && crate::agents::harness(&agent) == "claude")
+            .and_then(|session| cold_cache(session, cold_asks.as_ref()));
         let summary = proto::TerminalSummary {
             id,
             title: terminal.title().unwrap_or_else(|| {
@@ -218,6 +294,10 @@ pub(super) fn snapshot(host: &Host, phones: &Phones) -> proto::HostSnapshot {
             agent_view,
             modes,
             settings,
+            cold,
+            running,
+            running_since_ms,
+            ..Default::default()
         };
         match worktrees.iter_mut().find(|w| w.id == worktree) {
             Some(existing) => existing.terminals.push(summary),
@@ -310,6 +390,7 @@ pub(super) fn snapshot(host: &Host, phones: &Phones) -> proto::HostSnapshot {
                 continue;
             }
             let id = WorktreeId::new(worktree.id.clone());
+            activity.observe_terminals(&id, foregrounds.remove(&worktree.id).unwrap_or_default());
             let now_doing = activity.activity(&id, now);
             worktree.agent_state = now_doing.detail();
             worktree.agent = now_doing.agent().unwrap_or_default().to_owned();
@@ -328,14 +409,19 @@ pub(super) fn snapshot(host: &Host, phones: &Phones) -> proto::HostSnapshot {
                     started_at_ms: subagent.started_at_ms,
                 })
                 .collect();
-            worktree.activity = match activity.signal(&id, now) {
-                Signal::Quiet => proto::Activity::Quiet,
-                Signal::Running => proto::Activity::Running,
-                Signal::Working => proto::Activity::Working,
-                Signal::Merging => proto::Activity::Merging,
-                Signal::Blocked => proto::Activity::Blocked,
-                Signal::Failed => proto::Activity::Failed,
-            } as i32;
+            worktree.activity = activity_of(activity.signal(&id, now)) as i32;
+            // Each tab as the desktop's tab strip has it: its agent's own
+            // report while that stands, else the shell's program.
+            for terminal in &mut worktree.terminals {
+                let reported = key_of
+                    .get(&terminal.id)
+                    .and_then(|key| activity.pane(key, now));
+                terminal.activity = match reported {
+                    Some((_, signal)) => activity_of(signal),
+                    None if !terminal.running.is_empty() => proto::Activity::Running,
+                    None => proto::Activity::Quiet,
+                } as i32;
+            }
             // Every prompt the worktree's panes are waiting on, newest first;
             // the newest alone for a phone from before 1.13.
             let mut waiting: Vec<_> = status
@@ -372,6 +458,7 @@ pub(super) fn snapshot(host: &Host, phones: &Phones) -> proto::HostSnapshot {
             worktrees: Vec::new(),
             color: project.color.clone(),
             backlog: backlogs.get(&project.id).copied().unwrap_or(0),
+            icon: project.icon.clone(),
         })
         .collect();
     let mut elsewhere = Vec::new();
@@ -403,6 +490,7 @@ pub(super) fn snapshot(host: &Host, phones: &Phones) -> proto::HostSnapshot {
             worktrees: elsewhere,
             color: String::new(),
             backlog: 0,
+            icon: String::new(),
         });
     }
     proto::HostSnapshot {
@@ -410,7 +498,7 @@ pub(super) fn snapshot(host: &Host, phones: &Phones) -> proto::HostSnapshot {
         palette: host.theme().as_ref().map(palette),
         usage: host.usage().iter().map(provider_usage).collect(),
         agents: host.agents(),
-        addresses: phones.relay.addresses(),
+        addresses: phones.addresses(),
     }
 }
 

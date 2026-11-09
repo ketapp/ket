@@ -24,15 +24,23 @@ pub(crate) enum NativeEdit {
 }
 
 impl Shell {
-    /// Whether the focused editor currently wraps lines.
+    /// Whether the focused editor, or the request tab in front, currently
+    /// wraps lines.
     pub(crate) fn active_editor_wrap(&self) -> Option<bool> {
+        if let Some(wrap) = self.network_wrap_in_front() {
+            return Some(wrap);
+        }
         self.editors
             .get(self.active_editor_key()?.as_ref())
             .map(|state| state.wrap)
     }
 
-    /// Toggle wrapping in the focused editor for the menu and its shortcut.
+    /// Toggle wrapping in the focused editor, or the request tab in front,
+    /// for the menu and its shortcut.
     pub(crate) fn toggle_active_editor_wrap(&mut self, cx: &mut Context<Self>) {
+        if self.network_wrap_in_front().is_some() {
+            return self.toggle_network_wrap(cx);
+        }
         let Some(key) = self.active_editor_key() else {
             return;
         };

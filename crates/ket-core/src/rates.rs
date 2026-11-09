@@ -257,6 +257,13 @@ static LIST: std::sync::LazyLock<RateConfig> = std::sync::LazyLock::new(|| RateC
         .collect(),
 });
 
+/// The published list price for `model`, whatever table is configured: for a
+/// figure quoted "at API prices", which every process must agree on — the
+/// host has no configured table, a window does.
+pub fn list_price(model: &str) -> Option<&'static ModelRate> {
+    LIST.for_model(model)
+}
+
 /// The rates to estimate `model` at: the configured table's when it covers the
 /// model, else the list price. For estimates only — see the module docs.
 pub fn estimate_for(model: &str) -> Option<&'static ModelRate> {

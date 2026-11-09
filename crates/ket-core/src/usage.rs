@@ -824,8 +824,8 @@ pub struct Record {
     ///
     /// A level number means nothing outside the table it indexes, and a level
     /// *name* means nothing outside the version that worded it. Both are kept
-    /// so a resume can refuse to carry a conversation across two policies —
-    /// see [`History::can_resume_with_economy`].
+    /// so a conversation carried across two policies is known for one and
+    /// left out of the figures — see [`History::keeps_economy`].
     ///
     /// Defaulted for every record written before packs existed, which puts them
     /// all under the built-in table.
@@ -1481,15 +1481,31 @@ impl History {
 
     /// Whether resuming `session` would keep one Economy policy throughout it.
     ///
-    /// An unseen session is safe to resume: there is no evidence it began
-    /// under anything else. Once ket has recorded it, its level and exact pack
-    /// must match the launch being prepared. Otherwise a level change followed
-    /// by reopening the worktree would resume the old conversation forever,
-    /// taint every reading, and never produce a sample for the new level.
-    pub fn can_resume_with_economy(&self, session: &str, level: u8) -> bool {
+    /// An unseen session would: there is no evidence it began under anything
+    /// else. Once ket has recorded it, its level and exact pack must match
+    /// the launch being prepared.
+    ///
+    /// Not a gate on resuming. A conversation is always picked up again; one
+    /// that fails this is only left out of Economy's figures — see
+    /// [`Self::exclude_from_economy`]. Refusing to resume was how a pack
+    /// update dropped every chat ket had at once, including the ones at a
+    /// level that reduces nothing.
+    pub fn keeps_economy(&self, session: &str, level: u8) -> bool {
         self.records.get(session).is_none_or(|record| {
             !record.tainted && record.level == level && record.uses_active_pack()
         })
+    }
+
+    /// Leaves `session` out of Economy's figures, because it is being
+    /// resumed under a level or pack other than the one it began with. A
+    /// session ket has not recorded has nothing to leave out.
+    pub fn exclude_from_economy(&mut self, session: &str) {
+        if let Some(record) = self.records.get_mut(session)
+            && !record.tainted
+        {
+            record.tainted = true;
+            self.dirty = true;
+        }
     }
 
     /// The last session heard from in each worktree.

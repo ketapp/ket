@@ -559,6 +559,13 @@ fn printed(line: &[u8]) -> Option<String> {
     Some(crate::conversation::strip_ansi(said))
 }
 
+/// Claude's question before a switch in a conversation it has cached —
+/// "Switch model?" or "Change effort level?" — with "Yes, switch to Opus 5.5"
+/// focused over "No, go back", as of Claude Code 2.1.288. The pick is the
+/// answer, so it is given.
+const SWITCH_QUESTION: [&str; 1] = ["Yes, switch to"];
+const SWITCH_REFUSE: &str = "No, go back";
+
 /// What an agent prints when a command's argument is refused.
 const REFUSALS: [&str; 4] = [
     "is unavailable",
@@ -569,7 +576,8 @@ const REFUSALS: [&str; 4] = [
 
 /// Types `line` and Enter into `terminal`, then waits for a new row saying
 /// one of `phrases` with `wanted` after it, or for the agent's `transcript`
-/// to record one. A refusal on screen is the `Err`.
+/// to record one. Claude's question before switching is answered yes as it
+/// is drawn. A refusal on screen is the `Err`.
 fn command(
     terminal: &LocalTerminal,
     line: &str,
@@ -587,6 +595,7 @@ fn command(
         .iter()
         .filter(|row| REFUSALS.iter().any(|refusal| row.contains(refusal)))
         .count();
+    let asked_before = confirmations(&before, &SWITCH_QUESTION, wanted);
     // A key at a time, as typed: a burst reads as a paste to some agents.
     for byte in line.bytes() {
         terminal.send_input(vec![byte]).map_err(gone)?;
@@ -594,7 +603,8 @@ fn command(
     }
     std::thread::sleep(SETTLE);
     terminal.send_input(b"\r".to_vec()).map_err(gone)?;
-    let since = Instant::now();
+    let mut since = Instant::now();
+    let mut answered = false;
     while since.elapsed() < CONFIRM_WAIT {
         std::thread::sleep(POLL);
         let rows = screen();
@@ -602,6 +612,15 @@ fn command(
             || transcript.is_some_and(|(path, from)| recorded(path, from, phrases, wanted))
         {
             return Ok(());
+        }
+        if !answered
+            && confirmations(&rows, &SWITCH_QUESTION, wanted) > asked_before
+            && rows.iter().any(|row| row.contains(SWITCH_REFUSE))
+        {
+            terminal.send_input(b"\r".to_vec()).map_err(gone)?;
+            answered = true;
+            since = Instant::now();
+            continue;
         }
         let refusals: Vec<&String> = rows
             .iter()

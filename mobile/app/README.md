@@ -6,9 +6,11 @@ watch one live, take control and type into it, interrupt it.
 Built on `../remote` (the protocol package) and Expo. Builds are local — Xcode
 and Gradle on the Mac, never EAS.
 
-Phones reach the Mac over the local network only: the relay runs on the Mac,
-and pairing is the whole of the authentication — there is no sign-in and no
-server of ours.
+Phones reach the Mac on the local network or over Tailscale, through the
+relay the Mac runs itself, or from anywhere through ket's relay when the Mac
+has Reach it from anywhere turned on in Settings › Devices. Pairing is the
+whole of the authentication: there is no sign-in, and the relay forwards
+ciphertext it cannot read.
 
 ## Try it on your phone
 

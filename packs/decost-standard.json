@@ -1,9 +1,9 @@
 {
-  "schemaVersion": 3,
+  "schemaVersion": 4,
   "packId": "decost-standard",
-  "packVersion": 3,
+  "packVersion": 4,
   "name": "decost — standard",
-  "publishedAt": "2026-10-07",
+  "publishedAt": "2026-10-30",
   "levels": [
     {
       "id": "no-reduction",
@@ -34,7 +34,7 @@
       "description": "Lower output and earlier compaction using each provider's supported controls.",
       "tag": "heavy reduction",
       "instruction": "Reduce token usage heavily: keep narration minimal, state results and decisions directly, skip recaps and closing summaries.",
-      "claude": { "effort": "medium", "subagentModel": "haiku", "subagentCacheTtl": "1h", "agentTeams": false, "crossSessionInbound": "hold", "autocompact": "150000", "outputLimit": 20000, "commandFilter": true },
+      "claude": { "effort": "medium", "subagentModel": "haiku", "subagentCacheTtl": "1h", "agentTeams": false, "crossSessionInbound": "hold", "autocompact": "150000", "outputLimit": 20000, "commandFilter": true, "style": "terse" },
       "codex": { "verbosity": "low", "reasoningSummary": "none", "autocompact": "150000", "outputLimit": 5000 }
     },
     {
@@ -43,7 +43,7 @@
       "description": "Lowest supported effort and output, no summaries, and early compaction.",
       "tag": "max reduction",
       "instruction": "Reduce token usage to the maximum: answer as tersely as possible, with no narration and no explanation unless one is asked for.",
-      "claude": { "effort": "low", "subagentModel": "haiku", "subagentCacheTtl": "1h", "agentTeams": false, "crossSessionInbound": "refuse", "autocompact": "150000", "outputLimit": 12000, "commandFilter": true },
+      "claude": { "effort": "low", "subagentModel": "haiku", "subagentCacheTtl": "1h", "agentTeams": false, "crossSessionInbound": "refuse", "autocompact": "150000", "outputLimit": 12000, "commandFilter": true, "style": "terse" },
       "codex": { "effort": "low", "verbosity": "low", "reasoningSummary": "none", "autocompact": "150000", "outputLimit": 3000 }
     }
   ],

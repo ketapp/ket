@@ -840,6 +840,90 @@ fn a_codex_question_stays_waiting_while_codex_is_in_the_foreground() {
 }
 
 #[test]
+fn a_question_stays_waiting_while_another_tab_runs_something_busier() {
+    let mut tracker = Tracker::new(["claude".to_owned()]);
+    let wt = worktree("w1");
+    // A dev server in the first tab is the busiest; the agent asks in the
+    // second.
+    tracker.observe_terminals(
+        &wt,
+        [
+            Foreground::Running("npm run dev".to_owned()),
+            Foreground::Running("claude --resume s1".to_owned()),
+        ],
+    );
+    let mut question = hook_report(HookEvent::PermissionRequest, "p1", "w1", 0);
+    question.tool_name = Some("AskUserQuestion".to_owned());
+    tracker.report(&question, known_any);
+
+    assert_eq!(tracker.signal(&wt, REPORT_LINGERS_MS + 1), Signal::Blocked);
+
+    // The agent gone, the dev server alone says nothing for its report.
+    tracker.observe_terminals(&wt, [Foreground::Running("npm run dev".to_owned())]);
+    assert_eq!(tracker.signal(&wt, REPORT_LINGERS_MS + 1), Signal::Running);
+}
+
+#[test]
+fn a_compacted_chat_keeps_its_row_beside_a_dev_server_while_its_agent_runs() {
+    let mut tracker = Tracker::new(["claude".to_owned()]);
+    let wt = worktree("w1");
+    // A dev server in the first tab, the agent in the second.
+    tracker.observe_terminals(
+        &wt,
+        [
+            Foreground::Running("npm start".to_owned()),
+            Foreground::Running("claude --resume s1".to_owned()),
+        ],
+    );
+    // A compaction ends on SessionStart: Starting is the pane's last word,
+    // and nobody gives it a turn for a long while.
+    tracker.report(
+        &hook_report(HookEvent::SessionStart, "p1", "w1", 0),
+        known_any,
+    );
+
+    let far_later = REPORT_LINGERS_MS + 1;
+    assert!(matches!(
+        tracker.activity(&wt, far_later),
+        Activity::Session {
+            state: AgentState::Idle,
+            ..
+        }
+    ));
+    assert_eq!(tracker.signal(&wt, far_later), Signal::Quiet);
+
+    // The agent gone, its report lapses, and the dev server is all the
+    // worktree is doing.
+    tracker.observe_terminals(&wt, [Foreground::Running("npm start".to_owned())]);
+    assert!(matches!(
+        tracker.activity(&wt, far_later),
+        Activity::Busy { ref command, .. } if command == "npm"
+    ));
+    assert_eq!(tracker.signal(&wt, far_later), Signal::Running);
+}
+
+#[test]
+fn the_busiest_tab_still_says_what_a_worktree_with_no_reports_is_doing() {
+    let mut tracker = Tracker::new(["claude".to_owned()]);
+    let wt = worktree("w1");
+    tracker.observe_terminals(
+        &wt,
+        [
+            Foreground::Shell,
+            Foreground::Running("npm run dev".to_owned()),
+            Foreground::Running("claude".to_owned()),
+        ],
+    );
+    assert!(matches!(
+        tracker.activity(&wt, 0),
+        Activity::Busy { ref command, .. } if command == "npm"
+    ));
+
+    tracker.observe_terminals(&wt, []);
+    assert_eq!(tracker.activity(&wt, 0), Activity::Idle);
+}
+
+#[test]
 fn subagents_filed_under_a_reported_pane_are_readable_and_roll_up_the_signal() {
     let mut tracker = Tracker::new(["claude".to_owned()]);
     let wt = worktree("w1");

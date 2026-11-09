@@ -24,7 +24,7 @@ estimates, not measurements.
 
 ## `decost-standard.json` — the standard pack
 
-This is the canonical schema-v3 pack. Each level has shared wording plus
+This is the canonical schema-v4 pack. Each level has shared wording plus
 explicit `claude`, `codex`, and optional `opencode` and `grok` policy blocks. ket applies
 only the block matching the worktree's agent, so Claude-only environment
 variables never leak into OpenCode and Codex never receives Claude flags.
@@ -41,6 +41,7 @@ The same wording, plus the settings whose effects are documented rather than ass
 | `autocompact: auto` | Compacting at a natural point reads a warm prefix; compacting after a long idle reads the whole history cold |
 | `outputLimit` (schema 3) | The first-party cap on *successful* command output — Claude Code's `bashOutputMaxChars`, in characters; its default is 30,000. Heavy takes 20,000, Max 12,000: a clippy run on a mid-size crate still fits inline at 20k, and 12k still holds a test summary with several failures. It never touches a failed run, which Claude Code reports whole. A reader's own `agent.output_limit` wins over it. Light and Moderate carry none: below a level that asks for it, ket keeps no opinion about the value |
 | `commandFilter: true` (schema 3) | Successful command output is filtered before the model reads it: progress and per-test pass lines go, warnings, errors and summaries stay, and the trailer says where the rest is. Only ever on a run that exited 0; a failed run is shown whole. Nothing is written to disk: the session transcript already holds the whole output. A reader who wants `ket recall` sets `agent.command_archive = true`, which keeps a copy owner-only for a day. Claude Code only for now. `agent.command_filter = false` turns it off |
+| `style: terse` (schema 4) | How replies are written, appended to Claude Code's system prompt with `--append-system-prompt-file`, so it holds for the whole session and through compaction instead of fading like a sentence at the start. Prose only: code, commands, commit messages, PR text, files and warnings keep their normal form. ket's own wording, kept in `~/.ket/styles`; a pack names it and cannot supply its own. Claude Code only. Heavy and Max carry it |
 
 **Accept the tradeoff knowingly.** Because levels 1 and 0 set `effort`, they land in
 different comparison buckets from the levels above them. This pack saves more and proves

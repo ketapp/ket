@@ -1,7 +1,7 @@
 //! A project's own agent command, drawn.
 //!
 //! A project can launch an agent with a command of its own — `claude-work`
-//! where every other project runs `claude-personal` (see
+//! where every other project runs `claude-alt` (see
 //! [`ket_core::project::ProjectSettings::agents`]). Getting that wrong is a
 //! session on the wrong account, so everything the command reaches wears one
 //! tint: the project's group in the sidebar, its marks, the header, the tab

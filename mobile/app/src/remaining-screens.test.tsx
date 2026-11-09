@@ -83,6 +83,8 @@ describe('Devices', () => {
     expect(view.getByText('Unnamed phone')).toBeTruthy();
     expect(view.getByText('this phone')).toBeTruthy();
     expect(view.getByText('In use')).toBeTruthy();
+    // It only knows the Mac's local address, and says how to reach it from anywhere.
+    expect(view.getByText(/Only on the Mac’s own network/)).toBeTruthy();
     await fireEvent.press(view.getByText('iPad'));
     await waitFor(() => expect(conn.revoke).toHaveBeenCalledWith('other'));
     await fireEvent.press(view.getByText('Forget this desktop'));
@@ -90,6 +92,29 @@ describe('Devices', () => {
     expect(conn.revoke).toHaveBeenCalledWith('self');
     expect(mockDropConnection).toHaveBeenCalledWith('host');
     expect(mockForgetHost).toHaveBeenCalledWith('host');
+    await view.unmount();
+  });
+
+  test('names ket’s relay, and says when the session runs through it', async () => {
+    mockParams = { host: 'host' };
+    const relay = 'wss://relay.ketapp.dev';
+    mockHost = host({
+      host: {
+        id: 'host',
+        name: 'Studio Mac',
+        relay: 'ws://Studio.local:7979',
+        addresses: ['ws://Studio.local:7979', 'ws://100.101.102.103:7979', relay],
+        hostPublic: '',
+        pairedAt: 0,
+      },
+      activeAddress: relay,
+    });
+    const view = await render(<Devices />);
+    expect(view.getByText('ket’s relay · from your Mac')).toBeTruthy();
+    expect(view.getByText('Local network · from your Mac')).toBeTruthy();
+    expect(view.getByText('Tailscale · from your Mac')).toBeTruthy();
+    expect(view.getByText(/^Through ket’s relay/)).toBeTruthy();
+    expect(view.queryByText(/Only on the Mac’s own network/)).toBeNull();
     await view.unmount();
   });
 

@@ -19,12 +19,13 @@ import {
   type ViewStyle,
 } from 'react-native';
 import Animated, { Easing, Keyframe, ReduceMotion } from 'react-native-reanimated';
-import Svg, { Defs, LinearGradient, Rect, Stop } from 'react-native-svg';
+import Svg, { Circle, Defs, Ellipse, G, Line, LinearGradient, Path, Polygon, Polyline, Rect, Stop } from 'react-native-svg';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { GLYPHS, type GlyphPart } from '../lib/glyphs';
 import { READABLE_WIDTH, showBeside, useSplit } from '../lib/layout';
 import { font, size, t, tint } from '../lib/theme';
-import { Back, Check, Chevron, Gauge, Inbox, ListTodo, Sliders, Tree } from './icons';
+import { Back, Check, Chevron, Gauge, Inbox, ListTodo, Pin, Sliders, Tree } from './icons';
 import { Fade, Wipe } from './Swap';
 
 /** A whole screen: the desk, clear of the status bar. On a wide screen its
@@ -105,47 +106,70 @@ export function Heading({ children, count, color }: { children: ReactNode; count
 }
 
 /**
- * A project's heading: its badge and its name. With `onToggle` it folds the
- * rows away; folded, a dot in the attention colour says one of them is
- * waiting on you, so folding never hides a question. No count of its rows:
- * they are right there, and the number beside the fold's arrow was one more
- * thing to read on a line that only needs the name.
+ * A project's heading, at the top of its card: its badge and its name. With
+ * `onToggle` it folds the rows away; folded, the worktrees it holds are named
+ * under it, and a dot in the attention colour says one of them is waiting on
+ * you, so folding never hides a question. No count of its rows: they are
+ * right there, or named.
  *
  * With `onBacklog`, open backlog notes show as a count a tap opens, as the
- * desktop's sidebar has them; holding the heading opens the backlog however
- * many there are, as the desktop's project menu does.
+ * desktop's sidebar has them. Holding the heading is `onHold`: the project's
+ * menu. A project pinned to the top wears a pin after its name.
  */
 export function ProjectHeading({
   name,
   color,
+  icon,
   collapsed,
+  inside,
+  pinned,
   waiting,
   onToggle,
+  onHold,
   backlog = 0,
   onBacklog,
 }: {
   name: string;
   color: string;
+  icon?: string;
   collapsed?: boolean;
+  /** Its worktrees' names, said under it while it is folded. */
+  inside?: string;
+  pinned?: boolean;
   waiting?: boolean;
   onToggle?: () => void;
+  onHold?: () => void;
   backlog?: number;
   onBacklog?: () => void;
 }) {
   return (
     <Pressable
       onPress={onToggle}
-      onLongPress={onBacklog}
-      disabled={!onToggle && !onBacklog}
+      onLongPress={onHold}
+      disabled={!onToggle && !onHold}
       accessibilityRole="button"
       accessibilityState={{ expanded: !collapsed }}
-      accessibilityHint={onBacklog ? 'Hold for its backlog' : undefined}
+      accessibilityHint={onHold ? 'Hold for more' : undefined}
       style={({ pressed }) => [styles.project, pressed && { backgroundColor: t.selection }]}
     >
-      <Badge name={name} color={color} />
-      <Text style={styles.projectName} numberOfLines={1}>
-        {name}
-      </Text>
+      <Badge name={name} color={color} icon={icon} />
+      <View style={styles.projectText}>
+        <View style={styles.projectLine}>
+          <Text style={styles.projectName} numberOfLines={1}>
+            {name}
+          </Text>
+          {pinned ? (
+            <View accessible accessibilityLabel="Pinned">
+              <Pin size={13} color={t.faint} weight={1.8} />
+            </View>
+          ) : null}
+        </View>
+        {collapsed && inside ? (
+          <Text style={styles.projectInside} numberOfLines={1}>
+            {inside}
+          </Text>
+        ) : null}
+      </View>
       {collapsed && waiting ? <Dot color={t.attention} size={6} /> : null}
       {onBacklog && backlog > 0 ? (
         <Pressable
@@ -190,6 +214,7 @@ export function Row({
   marker,
   chevron,
   small,
+  faded,
   live,
   onPress,
   onLongPress,
@@ -204,6 +229,9 @@ export function Row({
   marker?: boolean;
   chevron?: boolean;
   small?: boolean;
+  /** Something kept but not running — an asleep tab: its mark faded and its
+   * name dim. */
+  faded?: boolean;
   /** Its detail and state change under a wipe as updates land, as a
    * worktree's do, rather than at once. */
   live?: boolean;
@@ -236,9 +264,9 @@ export function Row({
       ]}
     >
       {marker ? <View style={styles.marker} /> : null}
-      {mark !== undefined ? <View style={styles.mark}>{mark}</View> : null}
+      {mark !== undefined ? <View style={[styles.mark, faded && styles.faded]}>{mark}</View> : null}
       <View style={styles.rowText}>
-        <Text style={[styles.name, small && { fontFamily: font.prose }]} numberOfLines={1}>
+        <Text style={[styles.name, small && { fontFamily: font.prose }, faded && { color: t.dim }]} numberOfLines={1}>
           {title}
         </Text>
         {detail && live ? (
@@ -547,13 +575,72 @@ export function StatFilter<K extends string>({
   );
 }
 
-/** A project's badge: its initial in its colour, on its colour at 13%. */
-export function Badge({ name, color, size: side = 22 }: { name: string; color: string; size?: number }) {
+/** The glyph a project's icon names (`glyph:<name>`, from a desktop at 1.27
+ * or later), if this phone has it. A name it does not have draws the letter,
+ * as the desktop does for a glyph a later ket dropped. */
+export function glyphOf(icon: string | undefined): GlyphPart[] | undefined {
+  const name = icon?.trim().match(/^glyph:(.+)$/)?.[1];
+  // Its own entries only: `glyph:constructor` typed on the desktop is text
+  // there, and must not find the object's prototype here.
+  return name && Object.prototype.hasOwnProperty.call(GLYPHS, name) ? GLYPHS[name] : undefined;
+}
+
+/** A project's badge, in its colour on its colour at 13%: the glyph the
+ * desktop gave it, else the icon typed there, else its initial. */
+export function Badge({
+  name,
+  color,
+  icon,
+  size: side = 22,
+}: {
+  name: string;
+  color: string;
+  icon?: string;
+  size?: number;
+}) {
+  const ink = lift(color);
+  const glyph = glyphOf(icon);
+  // A glyph this phone lacks is no icon at all, rather than its name spelled out.
+  const typed = glyph || icon?.trim().startsWith('glyph:') ? '' : (icon?.trim() ?? '');
   return (
     <View style={[styles.badge, { backgroundColor: tint(color, 0.13), width: side, height: side }]}>
-      <Text style={[styles.badgeText, { color: lift(color) }]}>{(name.trim()[0] ?? '?').toUpperCase()}</Text>
+      {glyph ? (
+        // Lucide's 2px stroke on its 24px grid, drawn at two thirds of the
+        // badge: about the weight of the letter it stands in for.
+        <Svg width={side * 0.64} height={side * 0.64} viewBox="0 0 24 24" testID="badge-glyph">
+          <G fill="none" stroke={ink} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+            {glyph.map((part, at) => (
+              <GlyphShape key={at} part={part} />
+            ))}
+          </G>
+        </Svg>
+      ) : (
+        <Text style={[styles.badgeText, { color: ink }]} numberOfLines={1}>
+          {typed || (name.trim()[0] ?? '?').toUpperCase()}
+        </Text>
+      )}
     </View>
   );
+}
+
+/** One shape of a glyph, as react-native-svg draws it. */
+function GlyphShape({ part }: { part: GlyphPart }) {
+  switch (part.kind) {
+    case 'path':
+      return <Path d={part.d} />;
+    case 'circle':
+      return <Circle cx={part.cx} cy={part.cy} r={part.r} />;
+    case 'ellipse':
+      return <Ellipse cx={part.cx} cy={part.cy} rx={part.rx} ry={part.ry} />;
+    case 'rect':
+      return <Rect x={part.x} y={part.y} width={part.width} height={part.height} rx={part.rx} ry={part.ry} />;
+    case 'line':
+      return <Line x1={part.x1} y1={part.y1} x2={part.x2} y2={part.y2} />;
+    case 'polyline':
+      return <Polyline points={part.points} />;
+    case 'polygon':
+      return <Polygon points={part.points} />;
+  }
 }
 
 /** A project colour made light enough to read on the dark card. */
@@ -895,6 +982,16 @@ export function tabBarFoot(insetBottom: number): number {
   return Math.max(insetBottom - 10, 10);
 }
 
+/**
+ * For a one-line `TextInput` with a placeholder. React Native 0.88 hands a
+ * field the native view of one that has gone, and one taken over from a
+ * multiline field with a `lineHeight` (the chat's composer) keeps that line
+ * height on its placeholder, which then sits low. A line-break mode gives
+ * the placeholder a paragraph style of its own (react-native#59132, fixed
+ * after 0.88.0).
+ */
+export const oneLine = { lineBreakModeIOS: 'tail' } as const;
+
 /** A text field's well, for a `TextInput`. */
 export const field: TextStyle = {
   height: size.control,
@@ -944,7 +1041,7 @@ export const styles = StyleSheet.create({
   // the marks under it share one column and every name starts at the
   // same inset.
   project: {
-    height: 48,
+    minHeight: 50,
     flexDirection: 'row',
     alignItems: 'center',
     gap: MARK_GAP,
@@ -954,7 +1051,10 @@ export const styles = StyleSheet.create({
   },
   open: { transform: [{ rotate: '90deg' }] },
   backlog: { gap: 5, paddingHorizontal: 8 },
-  projectName: { flex: 1, fontFamily: font.proseMedium, fontSize: size.name, color: t.text },
+  projectText: { flex: 1, minWidth: 0, gap: 2 },
+  projectLine: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  projectName: { flexShrink: 1, fontFamily: font.proseSemibold, fontSize: size.title, color: t.text },
+  projectInside: { fontFamily: font.chrome, fontSize: 11.5, color: t.faint },
   row: {
     minHeight: size.row,
     flexDirection: 'row',
@@ -967,6 +1067,7 @@ export const styles = StyleSheet.create({
   },
   marker: { position: 'absolute', left: 0, top: 12, bottom: 12, width: 3, borderRadius: 2, backgroundColor: t.marker },
   mark: { width: MARK_SLOT, alignItems: 'center' },
+  faded: { opacity: 0.55 },
   rowText: { flex: 1, minWidth: 0, gap: 3 },
   name: { fontFamily: font.chrome, fontSize: size.name, color: t.text },
   detail: { fontFamily: font.prose, fontSize: size.detail, color: t.dim },

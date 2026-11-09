@@ -6,8 +6,11 @@
 //! what it printed and what it left on disk.
 //!
 //! Every run is sandboxed. `XDG_DATA_HOME`, `XDG_CONFIG_HOME`,
-//! `XDG_CACHE_HOME` and `HOME` all point inside the test's own directory, so
-//! nothing here can touch the state of whoever runs the suite, and `KET_HOST=0`
+//! `XDG_CACHE_HOME` and `HOME` all point inside the test's own directory, and
+//! `CLAUDE_CONFIG_DIR` and `GROK_HOME` are cleared so the agents' settings
+//! follow `HOME` too. The shell ket asks about them is `/bin/sh`, with no
+//! `ZDOTDIR` to lead a zsh back to the real profile. So nothing here can
+//! touch the state of whoever runs the suite, and `KET_HOST=0`
 //! keeps any path that might reach for a host from starting one. Worktrees are
 //! registered in the fixture repository's own `.git`, which goes with the
 //! sandbox.
@@ -63,6 +66,10 @@ impl Sandbox {
             .env("XDG_CONFIG_HOME", self.path("config"))
             .env("XDG_CACHE_HOME", self.path("cache"))
             .env("HOME", self.path("home"))
+            .env_remove("CLAUDE_CONFIG_DIR")
+            .env_remove("GROK_HOME")
+            .env_remove("ZDOTDIR")
+            .env("SHELL", "/bin/sh")
             .env("KET_HOST", "0")
             .env_remove("KET_LOG")
             .env_remove("GH_TOKEN")
@@ -765,4 +772,104 @@ fn filter_passes_short_output_through_and_keeps_the_exit_status() {
     assert_eq!(failed.code(), Some(3), "{}", failed.stderr());
 
     sandbox.ket(&["recall", "no-such-output"]).err();
+}
+
+#[test]
+fn uninstall_hooks_takes_out_kets_entries_and_gives_back_the_status_line() {
+    let sandbox = Sandbox::new("unhook");
+    let claude = sandbox.path("home/.claude");
+    // Another Claude directory, named by a `CLAUDE_CONFIG_DIR` this process
+    // does not have — as under `brew uninstall`, which filters it out.
+    let work = sandbox.path("home/.claude-work");
+    let hooks = sandbox.path("home/.ket/agent-hooks");
+    for dir in [&claude, &work.join("projects"), &hooks] {
+        fs::create_dir_all(dir).unwrap();
+    }
+    let ket = |script: &str| {
+        format!(
+            "/bin/sh {} 2>/dev/null || printf '{{}}\\n'",
+            hooks.join(script).display()
+        )
+    };
+    // One event of Claude's, not the full set: an older ket's hooks are
+    // still ket's to take out.
+    let settings = serde_json::json!({
+        "model": "opus",
+        "hooks": {
+            "Stop": [
+                { "hooks": [{ "type": "command", "command": ket("ket-agent-hook.sh") }] },
+                { "hooks": [{ "type": "command", "command": "say done" }] },
+            ],
+        },
+        // A window that moved directories leaves its line in both, and one
+        // chain file for them: each gets the command back.
+        "statusLine": { "type": "command", "command": ket("ket-statusline.sh") },
+    });
+    fs::write(claude.join("settings.json"), settings.to_string()).unwrap();
+    let status_line = serde_json::json!({
+        "statusLine": { "type": "command", "command": ket("ket-statusline.sh") },
+    });
+    fs::write(work.join("settings.json"), status_line.to_string()).unwrap();
+    fs::write(hooks.join("statusline-chain"), "my-status-line").unwrap();
+
+    // OpenCode and Grok where the window's `XDG_CONFIG_HOME` and `GROK_HOME`
+    // put them, which this process does not have: found by the record the
+    // window keeps of where it installed.
+    let plugin = sandbox.path("elsewhere/opencode/plugin/ket.js");
+    let grok = sandbox.path("elsewhere/grok");
+    fs::create_dir_all(plugin.parent().unwrap()).unwrap();
+    fs::create_dir_all(grok.join("hooks")).unwrap();
+    fs::write(&plugin, "// ket-opencode-plugin — an older one\n").unwrap();
+    fs::write(grok.join("hooks/ket.json"), ket("ket-agent-hook.sh")).unwrap();
+    fs::write(
+        hooks.join("installed"),
+        format!("opencode\t{}\ngrok\t{}\n", plugin.display(), grok.display()),
+    )
+    .unwrap();
+
+    let printed = sandbox.ket(&["uninstall-hooks"]).ok().stdout();
+    assert!(
+        printed.contains(&format!("opencode ({}): removed", plugin.display())),
+        "{printed}"
+    );
+    assert!(
+        printed.contains(&format!("grok ({}): removed", grok.display())),
+        "{printed}"
+    );
+    assert!(!plugin.exists() && !grok.join("hooks/ket.json").exists());
+    assert!(!hooks.join("installed").exists());
+    assert!(printed.contains("claude: removed"), "{printed}");
+    assert!(
+        printed.contains("claude (status line): removed"),
+        "{printed}"
+    );
+    assert!(
+        printed.contains(&format!(
+            "claude (status line in {}): removed",
+            work.display()
+        )),
+        "{printed}"
+    );
+    assert!(printed.contains("codex: not there"), "{printed}");
+    assert!(printed.contains("grok: not there"), "{printed}");
+
+    let read = |path: PathBuf| -> serde_json::Value {
+        serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap()
+    };
+    let left = read(claude.join("settings.json"));
+    assert_eq!(left["model"], "opus");
+    assert_eq!(left["statusLine"]["command"], "my-status-line");
+    assert_eq!(
+        left["hooks"]["Stop"],
+        serde_json::json!([{ "hooks": [{ "type": "command", "command": "say done" }] }])
+    );
+    assert_eq!(
+        read(work.join("settings.json"))["statusLine"]["command"],
+        "my-status-line"
+    );
+
+    assert!(!hooks.join("statusline-chain").exists());
+
+    let again = sandbox.ket(&["uninstall-hooks"]).ok().stdout();
+    assert!(!again.contains(": removed"), "{again}");
 }

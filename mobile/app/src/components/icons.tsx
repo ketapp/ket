@@ -156,6 +156,13 @@ export const Globe = (p: IconProps) => (
   </Stroke>
 );
 
+/** ket's relay, for reaching the Mac from anywhere: a cloud. */
+export const Cloud = (p: IconProps) => (
+  <Stroke {...p}>
+    <Path d="M7 18h10a4 4 0 0 0 .6-7.95A6 6 0 0 0 6.1 9.5 4.25 4.25 0 0 0 7 18z" />
+  </Stroke>
+);
+
 /** An address someone typed in: two links of a chain. */
 export const Link = (p: IconProps) => (
   <Stroke {...p}>
@@ -503,6 +510,14 @@ export const Refresh = (p: IconProps) => (
   </Stroke>
 );
 
+/** Frost: a session whose prompt cache has gone cold. */
+export const Snowflake = (p: IconProps) => (
+  <Stroke {...p}>
+    <Path d="M12 2.5v19M3.8 7.25l16.4 9.5M3.8 16.75l16.4-9.5" />
+    <Path d="M9.75 3.9 12 6l2.25-2.1M9.75 20.1 12 18l2.25 2.1" />
+  </Stroke>
+);
+
 /** Merge: a branch joining its trunk. */
 export const Merge = (p: IconProps) => (
   <Stroke {...p}>
@@ -527,6 +542,15 @@ export const PullRequestGlyph = (p: IconProps) => (
 export const Pin = (p: IconProps) => (
   <Stroke {...p}>
     <Path d="M12 16.5V21M9 3.5h6l-1 5.5 3 3v2H7v-2l3-3z" />
+  </Stroke>
+);
+
+/** Hide: an eye, struck through. */
+export const EyeOff = (p: IconProps) => (
+  <Stroke {...p}>
+    <Path d="M2.5 12s3.5-6.5 9.5-6.5 9.5 6.5 9.5 6.5-3.5 6.5-9.5 6.5S2.5 12 2.5 12z" />
+    <Circle cx={12} cy={12} r={3} />
+    <Path d="M4 4l16 16" />
   </Stroke>
 );
 

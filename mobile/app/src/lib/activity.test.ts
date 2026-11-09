@@ -17,6 +17,7 @@ import {
   detailColor,
   everyWorktree,
   filterOf,
+  programBusy,
   projectColor,
   railColor,
   stateOf,
@@ -127,6 +128,20 @@ describe('snapshot helpers', () => {
     expect(agentOf(worktree(Activity.WORKING, { agent: 'claude', terminals: [terminal('codex')] }))).toBe('claude');
     expect(agentOf(worktree(Activity.QUIET, { terminals: [terminal(''), terminal('codex')] }))).toBe('codex');
     expect(agentOf(worktree(Activity.QUIET, { terminals: [terminal('')] }))).toBe('');
+  });
+
+  test('a program busy in a tab is no agent’s, where an agent starting is its own', () => {
+    // A dev server in one tab, Claude at rest in another: the host names no agent.
+    const devServer = worktree(Activity.RUNNING, { terminals: [terminal('claude'), terminal('')] });
+    expect(programBusy(devServer)).toBe(true);
+    expect(agentOf(devServer)).toBe('');
+    // Starting or signing in lights the same, but the host names the agent.
+    const starting = worktree(Activity.RUNNING, { agent: 'claude', terminals: [terminal('claude')] });
+    expect(programBusy(starting)).toBe(false);
+    expect(agentOf(starting)).toBe('claude');
+    // Anything but busy is no program's.
+    expect(programBusy(worktree(Activity.WORKING, { terminals: [terminal('claude')] }))).toBe(false);
+    expect(programBusy(worktree(Activity.QUIET, { terminals: [terminal('')] }))).toBe(false);
   });
 
   test('names a terminal without the glyph its agent leads the title with', () => {

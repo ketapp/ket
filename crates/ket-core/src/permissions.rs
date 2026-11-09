@@ -1114,6 +1114,19 @@ fn glob(pattern: &str, path: bool) -> Result<GlobMatcher> {
         .map_err(|e| KetError::Config(format!("permission pattern {pattern:?}: {e}")))
 }
 
+/// `path` as a pattern that matches it alone: the characters globs read
+/// as wildcards, escaped.
+pub fn literal(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    for c in path.chars() {
+        if matches!(c, '*' | '?' | '[' | ']' | '{' | '}' | '\\') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
 /// A path pattern made absolute: `/…` as is, `~/…` under home, anything else
 /// under the worktree. `None` when a relative pattern has no worktree to be
 /// relative to.

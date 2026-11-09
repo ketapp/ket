@@ -470,8 +470,12 @@ pub enum Foreground {
 /// see a stale state that should have expired.
 #[derive(Debug, Default)]
 pub struct Tracker {
-    /// The last foreground reading per worktree.
+    /// The last foreground reading per worktree: its busiest terminal's.
     observed: HashMap<WorktreeId, Foreground>,
+    /// Every program running in each worktree's terminals, the busiest's
+    /// among them: an agent waiting in one tab is still there while a dev
+    /// server in another is the busiest.
+    running: HashMap<WorktreeId, Vec<String>>,
     /// The most recent session per worktree, driven by ket.
     sessions: HashMap<WorktreeId, Session>,
     /// Agent names to recognise in a terminal's foreground.
@@ -600,13 +604,43 @@ impl Tracker {
     /// `None` means the worktree has no terminal at all, which is different
     /// from having one sitting at a prompt.
     pub fn observe(&mut self, worktree: &WorktreeId, foreground: Option<Foreground>) {
-        match foreground {
+        self.observe_terminals(worktree, foreground);
+    }
+
+    /// Records what each of a worktree's terminals has in its foreground.
+    ///
+    /// The busiest says what the worktree is doing: one terminal running
+    /// something is the worktree busy, whatever the others sit at. Every
+    /// program counts for whether an agent is still there to stand behind
+    /// its report — see [`Self::stands`]. No terminals at all is a worktree
+    /// with none, as [`Self::observe`]'s `None` is.
+    pub fn observe_terminals(
+        &mut self,
+        worktree: &WorktreeId,
+        foregrounds: impl IntoIterator<Item = Foreground>,
+    ) {
+        let mut busiest = None;
+        let mut running = Vec::new();
+        for foreground in foregrounds {
+            if let Foreground::Running(command) = &foreground {
+                running.push(command.clone());
+            }
+            if !matches!(busiest, Some(Foreground::Running(_))) {
+                busiest = Some(foreground);
+            }
+        }
+        match busiest {
             Some(state) => {
                 self.observed.insert(worktree.clone(), state);
             }
             None => {
                 self.observed.remove(worktree);
             }
+        }
+        if running.is_empty() {
+            self.running.remove(worktree);
+        } else {
+            self.running.insert(worktree.clone(), running);
         }
     }
 
@@ -668,28 +702,37 @@ impl Tracker {
     /// whatever it said on the way in. Renewing that on liveness alone would
     /// pin a row to "thinking" for as long as the agent stayed open. Those
     /// keep the wall clock, and fall back to it when it runs out.
+    ///
+    /// *Starting* is confirmed the same way as idle: it is the last word of
+    /// a session nobody has given a turn yet, and of one that has just been
+    /// compacted, and [`Self::project`] reads it as idle once the agent's
+    /// process is there to see. Left to the clock, a chat that compacted and
+    /// sat for ten minutes lost its row to whatever its neighbouring tabs ran.
     fn stands(&self, pane: &PaneAgentStatus, now_ms: u64) -> bool {
         // A subagent at work is the lead at work: a foreground one holds the
         // lead inside a single tool call for as long as it runs.
         if now_ms.saturating_sub(pane.heard_at_ms()) < REPORT_LINGERS_MS {
             return true;
         }
-        if !settled(pane.state) {
+        if !settled(pane.state) && pane.state != AgentState::Starting {
             return false;
         }
 
         // The *same* agent, not merely any: someone who quits `claude` and
         // starts `codex` in that pane has replaced the thing the report was
         // about, and renewing it would caption the new agent with the old
-        // one's last words.
+        // one's last words. In any of the worktree's terminals, not only the
+        // busiest: a dev server in another tab leaves the agent where it was.
         let worktree = WorktreeId::new(pane.worktree.clone());
-        let Some(Foreground::Running(command)) = self.observed.get(&worktree) else {
-            return false;
-        };
         // A local agent's process is OpenCode's, whatever model it was
         // named after.
-        self.match_agent(command)
-            .is_some_and(|agent| agent.eq_ignore_ascii_case(crate::agents::harness(&pane.agent)))
+        let harness = crate::agents::harness(&pane.agent);
+        self.running.get(&worktree).is_some_and(|commands| {
+            commands.iter().any(|command| {
+                self.match_agent(command)
+                    .is_some_and(|agent| agent.eq_ignore_ascii_case(harness))
+            })
+        })
     }
 
     /// What one pane's agent is doing, and the signal it earns with its
@@ -901,9 +944,11 @@ impl Tracker {
     /// nothing to see — an agent in a terminal ket does not own, or one whose
     /// process name does not resemble its configured command.
     fn has_started(&self, worktree: &WorktreeId, elapsed: u64) -> bool {
-        if let Some(Foreground::Running(command)) = self.observed.get(worktree)
-            && self.match_agent(command).is_some()
-        {
+        if self.running.get(worktree).is_some_and(|commands| {
+            commands
+                .iter()
+                .any(|command| self.match_agent(command).is_some())
+        }) {
             return true;
         }
         elapsed >= STARTING_READY_MS

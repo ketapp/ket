@@ -1175,3 +1175,92 @@ fn a_reading_without_totals_after_one_with_them_adds_only_what_is_new() {
     history.observe("s1", &wt, 4, &again, 3_000);
     assert_eq!(history.record("s1").unwrap().output_tokens, 570);
 }
+
+// ---- keeps_economy / exclude_from_economy ------------------------------------
+
+#[test]
+fn an_unseen_session_keeps_economy() {
+    let sandbox = Sandbox::new("usage-history-keeps-unseen");
+    let history = history_at(&sandbox);
+
+    assert!(history.keeps_economy("never-heard-of", 4));
+}
+
+#[test]
+fn a_session_at_its_own_level_and_pack_keeps_economy() {
+    let sandbox = Sandbox::new("usage-history-keeps-same");
+    let wt = WorktreeId::new("w1");
+    let mut history = history_at(&sandbox);
+
+    history.observe("s1", &wt, 4, &reading(None), 1_000);
+
+    assert!(history.keeps_economy("s1", 4));
+}
+
+#[test]
+fn a_session_begun_at_another_level_does_not_keep_economy() {
+    let sandbox = Sandbox::new("usage-history-keeps-level");
+    let wt = WorktreeId::new("w1");
+    let mut history = history_at(&sandbox);
+
+    history.observe("s1", &wt, 4, &reading(None), 1_000);
+
+    assert!(!history.keeps_economy("s1", 2));
+}
+
+#[test]
+fn a_session_recorded_under_another_pack_version_does_not_keep_economy() {
+    // What a restart that adopts a newer pack leaves behind: every record
+    // stamped with the version before it.
+    let sandbox = Sandbox::new("usage-history-keeps-pack");
+    let wt = WorktreeId::new("w1");
+    let mut history = history_at(&sandbox);
+    history.observe("s1", &wt, 4, &reading(None), 1_000);
+    history.save().expect("save");
+
+    let path = history.path().to_path_buf();
+    let mut saved: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).expect("read")).expect("json");
+    let records = saved.as_array_mut().expect("a list of records");
+    let current = records[0]["packVersion"].as_u64().expect("a pack version");
+    records[0]["packVersion"] = serde_json::json!(current + 1);
+    std::fs::write(&path, serde_json::to_string(&saved).unwrap()).expect("write");
+
+    let reloaded = History::load_from(path);
+    assert!(!reloaded.keeps_economy("s1", 4));
+}
+
+#[test]
+fn excluding_a_session_taints_it_once_and_survives_a_reload() {
+    let sandbox = Sandbox::new("usage-history-exclude");
+    let wt = WorktreeId::new("w1");
+    let mut history = history_at(&sandbox);
+    history.observe("s1", &wt, 4, &reading(None), 1_000);
+    history.save().expect("save");
+
+    history.exclude_from_economy("s1");
+    assert!(history.record("s1").unwrap().tainted);
+    assert!(history.dirty(), "a new exclusion is written out");
+    assert!(
+        !history.keeps_economy("s1", 4),
+        "an excluded session stays excluded"
+    );
+
+    history.save().expect("save");
+    history.exclude_from_economy("s1");
+    assert!(!history.dirty(), "excluding it again changes nothing");
+
+    let reloaded = History::load_from(history.path().to_path_buf());
+    assert!(reloaded.record("s1").unwrap().tainted);
+}
+
+#[test]
+fn excluding_an_unseen_session_records_nothing() {
+    let sandbox = Sandbox::new("usage-history-exclude-unseen");
+    let mut history = history_at(&sandbox);
+
+    history.exclude_from_economy("never-heard-of");
+
+    assert!(history.record("never-heard-of").is_none());
+    assert!(!history.dirty());
+}

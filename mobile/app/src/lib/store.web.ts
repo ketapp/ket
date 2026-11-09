@@ -20,6 +20,8 @@ const NOTIFY = 'ket.notify';
 const LOCK = 'ket.lock';
 const collapsedEntry = (host: string) => `ket.collapsed.${host}`;
 const lastWorkEntry = (host: string) => `ket.lastwork.${host}`;
+const hiddenEntry = (host: string) => `ket.hidden.${host}`;
+const pinnedEntry = (host: string) => `ket.pinned.${host}`;
 
 const get = (key: string) => localStorage.getItem(key);
 const set = (key: string, value: string) => localStorage.setItem(key, value);
@@ -60,6 +62,8 @@ export async function forgetHost(id: string): Promise<void> {
   localStorage.removeItem(hostEntry(id));
   localStorage.removeItem(collapsedEntry(id));
   localStorage.removeItem(lastWorkEntry(id));
+  localStorage.removeItem(hiddenEntry(id));
+  localStorage.removeItem(pinnedEntry(id));
   const ids: string[] = JSON.parse(get(HOSTS) ?? '[]');
   set(HOSTS, JSON.stringify(ids.filter((i) => i !== id)));
 }
@@ -79,6 +83,25 @@ export async function saveCollapsed(host: string, projects: string[]): Promise<v
 
 export async function getCollapsed(host: string): Promise<string[]> {
   return JSON.parse(get(collapsedEntry(host)) ?? '[]') as string[];
+}
+
+/** The projects hidden from the Worktrees screen, and pinned to its top, per
+ * desktop, by their keys (see `projectKey`). The phone's own: the desktop
+ * lists every project, in its own order. */
+export async function saveHiddenProjects(host: string, projects: string[]): Promise<void> {
+  set(hiddenEntry(host), JSON.stringify(projects));
+}
+
+export async function getHiddenProjects(host: string): Promise<string[]> {
+  return JSON.parse(get(hiddenEntry(host)) ?? '[]') as string[];
+}
+
+export async function savePinnedProjects(host: string, projects: string[]): Promise<void> {
+  set(pinnedEntry(host), JSON.stringify(projects));
+}
+
+export async function getPinnedProjects(host: string): Promise<string[]> {
+  return JSON.parse(get(pinnedEntry(host)) ?? '[]') as string[];
 }
 
 export async function saveLastWork(host: string, last: LastWork): Promise<void> {

@@ -3,14 +3,43 @@
 // row. Drawn by the session's chat, and by the chat that stands in for one
 // while the desktop is still making its worktree — see app/starting.
 
-import { useEffect, useState } from 'react';
-import { Pressable, StyleSheet, Text, View, type ViewStyle } from 'react-native';
-import Svg, { Circle, Path } from 'react-native-svg';
+import { useEffect, useId, useState } from 'react';
+import { Pressable, StyleSheet, Text, TextInput, useWindowDimensions, View, type TextInputProps, type ViewStyle } from 'react-native';
+import Animated, {
+  cancelAnimation,
+  Easing,
+  FadeInDown,
+  ReduceMotion,
+  type SharedValue,
+  useAnimatedProps,
+  useAnimatedStyle,
+  useFrameCallback,
+  useReducedMotion,
+  useSharedValue,
+  withRepeat,
+  withTiming,
+} from 'react-native-reanimated';
+import Svg, { Circle, Defs, LinearGradient, Path, Stop, Text as SvgText } from 'react-native-svg';
 
-import type { Attachment } from '../lib/attach';
-import { font, size, t, tint } from '../lib/theme';
-import { SentFiles } from './Attachments';
+import { fileName, type Attachment } from '../lib/attach';
+import { agentLabel, blend, font, size, t, tint } from '../lib/theme';
+import { FileChip, SentFiles } from './Attachments';
 import { AgentMark } from './icons';
+import { Slide } from './Swap';
+
+const AnimatedCircle = Animated.createAnimatedComponent(Circle);
+const AnimatedGradient = Animated.createAnimatedComponent(LinearGradient);
+const AnimatedInput = Animated.createAnimatedComponent(TextInput);
+/** The ring's circumference, in its 22pt view box. */
+const ORBIT_LENGTH = 2 * Math.PI * 10;
+const BEAT_MS = 850;
+const SHINE = blend(t.accent, t.accentPressed, 0.35);
+const motion = { reduceMotion: ReduceMotion.System };
+/** The details fall four points into place, below the working words. */
+const DETAILS_IN = FadeInDown.duration(200)
+  .easing(Easing.bezier(0.2, 0.8, 0.2, 1))
+  .withInitialValues({ opacity: 0, transform: [{ translateY: -4 }] })
+  .reduceMotion(ReduceMotion.System);
 
 /** Where a message of yours stands. `held`: the desktop has it, and the
  * agent it is for is not running yet. */
@@ -20,6 +49,7 @@ export type OutgoingStatus = 'sending' | 'queued' | 'unseen' | 'held';
 export function Outgoing({
   text,
   files = [],
+  named = [],
   status,
   onCopy,
   onDismiss,
@@ -27,6 +57,9 @@ export function Outgoing({
   text: string;
   /** Photos and files sent with it, drawn above its words. */
   files?: Attachment[];
+  /** The paths of files the desktop listed under it, for one this phone
+   * holds no files for. */
+  named?: string[];
   status: OutgoingStatus;
   onCopy: (text: string) => void;
   onDismiss?: () => void;
@@ -41,7 +74,8 @@ export function Outgoing({
           : 'Sending';
   const faded = status === 'sending' || status === 'held';
   const words = <Text style={[styles.youText, faded && styles.youSendingText]}>{text}</Text>;
-  const what = text || (files.length === 1 ? files[0].name : `${files.length} files`);
+  const names = files.length > 0 ? files.map((file) => file.name) : named.map(fileName);
+  const what = text || (names.length === 1 ? names[0] : `${names.length} files`);
   return (
     <Pressable
       onPress={status === 'unseen' ? onDismiss : undefined}
@@ -50,13 +84,13 @@ export function Outgoing({
       accessibilityLabel={`${what}. ${said}.`}
       accessibilityHint={status === 'unseen' ? 'Tap to clear, hold to copy' : 'Hold to copy'}
       style={({ pressed }) => [
-        files.length > 0 ? styles.yours : [styles.you, faded && styles.youSending],
+        names.length > 0 ? styles.yours : [styles.you, faded && styles.youSending],
         pressed && styles.held,
       ]}
     >
-      {files.length > 0 ? (
+      {names.length > 0 ? (
         <>
-          <SentFiles files={files} sending={faded} />
+          {files.length > 0 ? <SentFiles files={files} sending={faded} /> : named.map((path) => <FileChip key={path} name={fileName(path)} faded={faded} />)}
           {text ? (
             <View style={[styles.bubble, faded && styles.youSending]}>
               <StatusMark status={status} />
@@ -120,30 +154,185 @@ export function StatusMark({ status }: { status: OutgoingStatus | 'delivered' })
   );
 }
 
-/** The agent at work: its mark, three dots taking turns, and what it is
- * doing — or what the desktop is doing to get it running. */
-export function Working({ agent, what }: { agent: string; what: string }) {
-  const [phase, setPhase] = useState(0);
+/** The agent at work: a ring orbiting its mark, and what it is doing — or what
+ * the desktop is doing to get it running. Only the chat opens details. */
+export function Working({ agent, what, details = false }: { agent: string; what: string; details?: boolean }) {
+  const still = useReducedMotion();
+  const [expanded, setExpanded] = useState(false);
+  // Kept as the words change, from this phone's first sight of the turn.
+  const [began] = useState(Date.now);
+  const beat = useSharedValue(0);
+  const arc = useSharedValue(0.14);
+  const shine = useSharedValue(0);
+  const words = what || 'Waiting for the agent';
+  const name = agent ? agentLabel(agent) : 'Agent';
+
   useEffect(() => {
-    const timer = setInterval(() => setPhase((n) => (n + 1) % 3), 450);
-    return () => clearInterval(timer);
-  }, []);
+    beat.set(0);
+    arc.set(0.14);
+    shine.set(0);
+    if (still) return;
+    beat.set(withRepeat(withTiming(1, { duration: BEAT_MS, easing: Easing.linear, ...motion }), -1));
+    arc.set(withRepeat(withTiming(0.46, { duration: BEAT_MS, easing: Easing.bezier(0.42, 0, 0.58, 1), ...motion }), -1, true));
+    shine.set(withRepeat(withTiming(1, { duration: 1500, easing: Easing.linear, ...motion }), -1));
+    return () => {
+      cancelAnimation(beat);
+      cancelAnimation(arc);
+      cancelAnimation(shine);
+    };
+  }, [still, beat, arc, shine]);
+  const orbit = useAnimatedStyle(() => ({ transform: [{ rotate: `${beat.get() * 360}deg` }] }));
+  const breathing = useAnimatedProps(() => ({
+    strokeDasharray: [ORBIT_LENGTH * arc.get(), ORBIT_LENGTH * (1 - arc.get())],
+  }));
+  const row = (
+    <View
+      style={styles.working}
+      pointerEvents="none"
+      accessibilityElementsHidden
+      importantForAccessibility="no-hide-descendants"
+    >
+      <View style={styles.orbit}>
+        <Animated.View style={[StyleSheet.absoluteFill, orbit]}>
+          <Svg width={22} height={22} viewBox="0 0 22 22">
+            <Circle cx={11} cy={11} r={10} fill="none" stroke={t.border} strokeWidth={1.6} />
+            <AnimatedCircle
+              cx={11} cy={11} r={10} fill="none" stroke={t.running} strokeWidth={1.6}
+              strokeLinecap="round" animatedProps={breathing}
+            />
+          </Svg>
+        </Animated.View>
+        {agent ? <AgentMark agent={agent} size={11} /> : null}
+      </View>
+      <Slide token={words} item={words} style={styles.workingWords}>
+        {(text) => still ? (
+          <Text style={styles.workingText} numberOfLines={1}>{text}</Text>
+        ) : (
+          <WorkingWords what={text} shine={shine} />
+        )}
+      </Slide>
+    </View>
+  );
+  if (!details) return <View accessible accessibilityLabel={`${name} is working: ${words}`}>{row}</View>;
   return (
-    <View style={styles.agent} accessibilityLabel={what || 'Waiting for the agent'}>
-      {agent ? (
-        <View style={styles.agentMark}>
-          <AgentMark agent={agent} size={14} />
+    <View>
+      <Pressable
+        onPress={() => setExpanded((open) => !open)}
+        accessibilityRole="button"
+        accessibilityState={{ expanded }}
+        accessibilityLabel={`${name} is working: ${words}. ${expanded ? 'Hide' : 'Show'} details`}
+        hitSlop={{ top: 11, bottom: 11 }}
+        style={({ pressed }) => pressed && styles.held}
+      >
+        {row}
+      </Pressable>
+      {expanded ? (
+        <Animated.View entering={still ? undefined : DETAILS_IN} style={styles.workingDetails}>
+          <Text style={styles.workingDetailText}>{words}</Text>
+          <WorkingElapsed began={began} />
+        </Animated.View>
+      ) : null}
+    </View>
+  );
+}
+
+/** A clock read on the UI thread, including time spent away from the app.
+ * Only mounted while the details are open; Reduce Motion still tells time. */
+function WorkingElapsed({ began }: { began: number }) {
+  const { fontScale } = useWindowDimensions();
+  const [first] = useState(() => Math.max(0, Math.floor((Date.now() - began) / 1000)));
+  const seconds = useSharedValue(first);
+  useFrameCallback(() => {
+    const next = Math.max(0, Math.floor((Date.now() - began) / 1000));
+    if (next !== seconds.get()) seconds.set(next);
+  });
+  const clock = useAnimatedProps<TextInputProps & { text: string }>(() => {
+    const value = seconds.get();
+    const text = `${Math.floor(value / 60)}m ${String(value % 60).padStart(2, '0')}s`;
+    return { text, defaultValue: text, accessibilityLabel: `Elapsed time: ${text}` };
+  });
+  return (
+    <AnimatedInput
+      editable={false}
+      caretHidden
+      pointerEvents="none"
+      accessibilityRole="text"
+      underlineColorAndroid="transparent"
+      animatedProps={clock}
+      style={[styles.workingElapsed, { width: 82 * fontScale }]}
+    />
+  );
+}
+
+/** SVG gives the words a moving band of ink, with no native masking module. */
+function WorkingWords({ what, shine }: { what: string; shine: SharedValue<number> }) {
+  const { fontScale } = useWindowDimensions();
+  const [width, setWidth] = useState(0);
+  return (
+    <View style={styles.workingWords} onLayout={(e) => setWidth(e.nativeEvent.layout.width)}>
+      {width > 0 ? <FittedWorkingWords key={`${width}:${fontScale}:${what}`} what={what} width={width} fontScale={fontScale} shine={shine} /> : null}
+    </View>
+  );
+}
+
+/** Native text measures the actual font, including wide glyphs. Long words
+ * are shortened by whole characters until their ellipsis fits the column.
+ * Measurement happens only when the words or the column's width change;
+ * the gradient's movement stays on the UI thread. */
+function FittedWorkingWords({ what, width, fontScale, shine }: { what: string; width: number; fontScale: number; shine: SharedValue<number> }) {
+  const id = useId();
+  const letters = Array.from(what.replace(/\s+/g, ' '));
+  const [fit, setFit] = useState({ low: 0, high: letters.length, at: letters.length });
+  const [measured, setMeasured] = useState<{ words: string; baseline: number } | null>(null);
+  const candidate = letters.slice(0, fit.at).join('') + (fit.at < letters.length ? '…' : '');
+  const gradient = useAnimatedProps(() => ({
+    x1: width * (shine.get() * 2 - 1),
+    x2: width * shine.get() * 2,
+  }));
+  return (
+    <View style={styles.workingWords}>
+      {measured ? (
+        <Svg width={width} height={22} accessible={false}>
+          <Defs>
+            <AnimatedGradient id={id} gradientUnits="userSpaceOnUse" y1={0} y2={0} animatedProps={gradient}>
+              <Stop offset="0" stopColor={t.dim} />
+              <Stop offset="0.38" stopColor={t.dim} />
+              <Stop offset="0.5" stopColor={SHINE} />
+              <Stop offset="0.62" stopColor={t.dim} />
+              <Stop offset="1" stopColor={t.dim} />
+            </AnimatedGradient>
+          </Defs>
+          <SvgText x={0} y={measured.baseline} fontFamily={font.chrome} fontSize={size.detail * fontScale} fill={`url(#${id})`}>
+            {measured.words}
+          </SvgText>
+        </Svg>
+      ) : (
+        <Text style={styles.workingText} numberOfLines={1}>{what}</Text>
+      )}
+      {!measured ? (
+        <View pointerEvents="none" accessible={false} style={styles.workingMeasure}>
+          <Text
+            style={styles.workingText}
+            onTextLayout={({ nativeEvent: { lines } }) => {
+              const line = lines[0];
+              if (!line) return;
+              const fits = line.width <= width;
+              const low = fits ? fit.at : fit.low;
+              const high = fits ? fit.high : fit.at - 1;
+              if (low >= high) {
+                setMeasured({
+                  words: letters.slice(0, low).join('') + (low < letters.length ? '…' : ''),
+                  baseline: line.y + line.ascender,
+                });
+              } else {
+                setFit({ low, high, at: Math.ceil((low + high) / 2) });
+              }
+            }}
+          >
+            {candidate}
+          </Text>
         </View>
       ) : null}
-      <View style={styles.working}>
-        {[0, 1, 2].map((at) => (
-          <View key={at} style={[styles.workingDot, at === phase && { backgroundColor: t.running }]} />
-        ))}
-        {/* Always laid out, so the words arriving do not change its height. */}
-        <Text style={styles.workingText} numberOfLines={1}>
-          {what || ' '}
-        </Text>
-      </View>
     </View>
   );
 }
@@ -172,12 +361,14 @@ const styles = StyleSheet.create({
   statusMark: { position: 'absolute', left: -20, top: 12 },
   youText: { fontFamily: font.prose, fontSize: size.body, lineHeight: 20, color: t.text },
   held: { opacity: 0.7 },
-  agent: { flexDirection: 'row', gap: 10, alignItems: 'flex-start' },
-  // Centred on the first line of the words beside it — the body's 1pt top
-  // padding plus a 21pt line — however many lines they run to.
-  agentMark: { height: 22, paddingTop: 1, justifyContent: 'center' },
-  // As tall as a first line of words, so the mark sits beside it as it does beside them.
-  working: { flex: 1, minWidth: 0, flexDirection: 'row', alignItems: 'center', gap: 5, paddingTop: 1, minHeight: 22 },
-  workingDot: { width: 5, height: 5, borderRadius: 3, backgroundColor: t.faint },
-  workingText: { flex: 1, minWidth: 0, marginLeft: 4, fontFamily: font.chrome, fontSize: size.detail, color: t.dim },
+  working: { height: 22, flexDirection: 'row', alignItems: 'center', gap: 10 },
+  // A 22pt ring in the reply's 14pt mark column: words still start at 24pt.
+  orbit: { width: 22, height: 22, marginHorizontal: -4, alignItems: 'center', justifyContent: 'center' },
+  workingWords: { flex: 1, minWidth: 0, height: 22, overflow: 'hidden' },
+  workingText: { fontFamily: font.chrome, fontSize: size.detail, lineHeight: 22, color: t.dim, includeFontPadding: false },
+  // Wide enough to measure a single line, outside the visible row's layout.
+  workingMeasure: { position: 'absolute', width: 100_000, opacity: 0 },
+  workingDetails: { marginTop: 4, marginLeft: 24, flexDirection: 'row', alignItems: 'flex-start', gap: 10 },
+  workingDetailText: { flex: 1, minWidth: 0, fontFamily: font.chrome, fontSize: 12, lineHeight: 18, color: t.faint },
+  workingElapsed: { padding: 0, fontFamily: font.chrome, fontSize: 12, lineHeight: 18, color: t.faint, textAlign: 'right', includeFontPadding: false },
 });

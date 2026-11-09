@@ -59,6 +59,7 @@ type Internals = {
   backoff: number;
   wake: (() => void) | null;
   notify: () => void;
+  settleStarting: () => void;
 };
 
 const reply = (payload: { case: string; value?: unknown }): Envelope =>
@@ -117,6 +118,20 @@ afterEach(() => {
 });
 
 describe('HostConnection requests', () => {
+  test('binds a task after its starting row is gone and keeps the original terminal', async () => {
+    await conn.startWork('project', 'fix it', 'codex');
+    conn.snapshot = { projects: [{ id: 'project', worktrees: [{ id: 'new', branch: 'fix-it-k3f9', terminals: [] }] }] } as never;
+    inside.settleStarting();
+    expect(conn.starting).toEqual([]);
+    expect(conn.asked[0].terminal).toBeUndefined();
+    conn.snapshot = { projects: [{ id: 'project', worktrees: [{ id: 'new', branch: 'fix-it-k3f9', terminals: [{ id: 4n, agent: 'codex' }] }] }] } as never;
+    inside.settleStarting();
+    expect(conn.asked[0].terminal).toBe(4n);
+    const opened = conn.asked[0].openedAt;
+    conn.snapshot = { projects: [{ id: 'project', worktrees: [{ id: 'new', branch: 'fix-it-k3f9', terminals: [{ id: 5n, agent: 'codex' }] }] }] } as never;
+    inside.settleStarting();
+    expect(conn.asked[0]).toMatchObject({ terminal: 4n, openedAt: opened });
+  });
   test('adds and removes a hand-entered address without changing the pairing URL', async () => {
     Object.assign(conn.host, { relay: 'ws://mac.local:7979', addresses: ['ws://mac.local:7979'] });
     await expect(conn.addAddress('https://bad.example')).rejects.toThrow('ws:// or wss://');

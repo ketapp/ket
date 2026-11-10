@@ -103,6 +103,9 @@
 // the program a shell is running with when it started
 // (`TerminalSummary.running`, `running_since_ms`), so a phone can list a
 // worktree's tabs as its desktop's tab strip has them.
+//
+// 1.30 adds whether a terminal's agent is compacting its conversation
+// (`TerminalSummary.compacting`).
 
 syntax = "proto3";
 
@@ -671,6 +674,10 @@ message TerminalSummary {
   // for an agent's terminal.
   string running = 10;
   uint64 running_since_ms = 11;
+  // Since 1.30. Set while the terminal's agent is compacting its
+  // conversation: from its hook saying it has started until its next report.
+  // A message sent meanwhile waits in its queue.
+  bool compacting = 12;
 }
 
 // Since 1.28. A session whose prompt cache has gone cold: its next prompt

@@ -136,6 +136,9 @@ pub enum HookEvent {
     SubagentStop,
     /// The session is over.
     SessionEnd,
+    /// The conversation is being compacted, until the agent's next report —
+    /// see [`crate::agent_status::PaneAgentStatus::compacting`].
+    PreCompact,
     /// The conversation was compacted.
     Compact,
     /// The agent is idle and waiting.
@@ -170,6 +173,7 @@ impl HookEvent {
             "StopFailure" => Self::StopFailure,
             "SubagentStart" => Self::SubagentStart,
             "SubagentStop" => Self::SubagentStop,
+            "PreCompact" => Self::PreCompact,
             "PostCompact" => Self::Compact,
             "TeammateIdle" => Self::TeammateIdle,
             _ => return None,
@@ -182,8 +186,9 @@ impl HookEvent {
     /// entry under a name it does not recognise is a hook that silently never
     /// runs. This is not every event it offers — a status light has no use for
     /// `FileChanged` or `MessageDisplay` — but it is every one that moves the
-    /// state machine, plus the two that say a turn is over.
-    pub const CLAUDE_EVENTS: [&'static str; 15] = [
+    /// state machine, plus the two that say a turn is over and the two either
+    /// side of a compaction, which a phone's chat says is under way.
+    pub const CLAUDE_EVENTS: [&'static str; 16] = [
         "SessionStart",
         "SessionEnd",
         "UserPromptSubmit",
@@ -197,6 +202,7 @@ impl HookEvent {
         "StopFailure",
         "SubagentStart",
         "SubagentStop",
+        "PreCompact",
         "PostCompact",
         "TeammateIdle",
     ];
@@ -206,14 +212,13 @@ impl HookEvent {
     /// The intersection of what Codex offers and what [`HookEvent`] can do
     /// something with, which is smaller than [`HookEvent::CLAUDE_EVENTS`] in
     /// both directions. Codex has no `PostToolUseFailure`, `PermissionDenied`,
-    /// `Notification`, `StopFailure` or `TeammateIdle`; it has `PreCompact`,
-    /// which this enum has no arm for. Registering a name ket cannot map would
-    /// spawn a subprocess per event to produce a report that is then dropped,
-    /// so it is left out rather than parsed and discarded.
+    /// `Notification`, `StopFailure` or `TeammateIdle`. Registering a name ket
+    /// cannot map would spawn a subprocess per event to produce a report that
+    /// is then dropped, so it is left out rather than parsed and discarded.
     ///
     /// Confirmed against Codex CLI 0.153.4's own `~/.codex/hooks.json` on this
     /// machine, not only against its documentation.
-    pub const CODEX_EVENTS: [&'static str; 11] = [
+    pub const CODEX_EVENTS: [&'static str; 12] = [
         "SessionStart",
         "SessionEnd",
         "UserPromptSubmit",
@@ -224,6 +229,7 @@ impl HookEvent {
         "Interrupt",
         "SubagentStart",
         "SubagentStop",
+        "PreCompact",
         "PostCompact",
     ];
 
@@ -236,8 +242,9 @@ impl HookEvent {
     /// exist — a prompt waiting on a person arrives as a `Notification` of
     /// type `permission_prompt`.
     ///
-    /// Confirmed against Grok 1.0.44's hook runner on 2026-09-29.
-    pub const GROK_EVENTS: [&'static str; 12] = [
+    /// Confirmed against Grok 1.0.44's hook runner on 2026-09-29; `PreCompact`
+    /// against 1.0.77's on 2026-11-09.
+    pub const GROK_EVENTS: [&'static str; 13] = [
         "SessionStart",
         "SessionEnd",
         "UserPromptSubmit",
@@ -249,6 +256,7 @@ impl HookEvent {
         "Stop",
         "StopFailure",
         "StopCancelled",
+        "PreCompact",
         "PostCompact",
     ];
 
@@ -274,7 +282,7 @@ impl HookEvent {
             Self::Stop | Self::Interrupt | Self::StopFailure | Self::Idle | Self::SessionEnd => {
                 AgentState::Idle
             }
-            Self::Compact | Self::TeammateIdle => return None,
+            Self::PreCompact | Self::Compact | Self::TeammateIdle => return None,
         })
     }
 
@@ -1474,6 +1482,10 @@ export default {
           case "session.error":
             if (own(p.sessionID)) stop(p.sessionID);
             break;
+          // The end of a compaction; its start is the hook below.
+          case "session.compacted":
+            if (own(p.sessionID)) report("PostCompact", { session_id: p.sessionID });
+            break;
           case "message.updated":
             if (p.info && p.info.role === "assistant" && own(p.sessionID)) {
               if (said.size > 1000) said.clear();
@@ -1514,6 +1526,9 @@ export default {
       },
       "chat.message": async (input) => {
         if (own(input.sessionID)) report("UserPromptSubmit", { session_id: input.sessionID });
+      },
+      "experimental.session.compacting": async (input) => {
+        if (own(input.sessionID)) report("PreCompact", { session_id: input.sessionID });
       },
       "tool.execute.before": async (input, output) => {
         if (!own(input.sessionID)) return;
@@ -1642,6 +1657,14 @@ export default {
             break;
           case "session.status":
             if (d.status && d.status.type === "idle" && own(d.sessionID)) stop(d.sessionID);
+            break;
+          // A compaction, from its start to its end either way.
+          case "session.compaction.started":
+            if (own(d.sessionID)) report("PreCompact", { session_id: d.sessionID });
+            break;
+          case "session.compaction.ended":
+          case "session.compaction.failed":
+            if (own(d.sessionID)) report("PostCompact", { session_id: d.sessionID });
             break;
           // What the session last said. OpenCode 2 ends each of the
           // assistant's text parts with its full value, which is all of it.

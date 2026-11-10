@@ -282,7 +282,9 @@ describe('Session', () => {
     });
     const open = jest.spyOn(Linking, 'openURL').mockResolvedValue(undefined);
     const view = await render(<Session />);
-    await waitFor(() => expect(view.getByText('Read file')).toBeTruthy());
+    // A lone tool call shuts under its count, like a run of them.
+    await waitFor(() => expect(view.getByLabelText('1 tool call')).toBeTruthy());
+    expect(view.queryByText('Read file')).toBeNull();
     expect(view.getByText('queued request')).toBeTruthy();
     expect(view.getByLabelText(/queued request.*Queued/)).toBeTruthy();
     await fireEvent.press(view.getByLabelText('Codex is working: Running checks. Show details'));
@@ -324,6 +326,32 @@ describe('Session', () => {
     await waitFor(() => expect(starting.getByLabelText(/^Codex is working: Starting/)).toBeTruthy());
     expect(starting.getByText('busy')).toBeTruthy();
     await starting.unmount();
+  });
+
+  test('says the agent is compacting above the composer, and a message sent meanwhile is still on its way', async () => {
+    mockParams = { host: 'compacting', terminal: '7' };
+    mockConn = connection(tree({ terminals: [{ id: 7n, agent: 'codex', title: 'Codex', closed: false, modes, compacting: true }] }));
+    const view = await render(<Session />);
+    await waitFor(() => expect(view.getByLabelText('Compacting conversation')).toBeTruthy());
+    const start = Date.now();
+    const clock = jest.spyOn(Date, 'now').mockReturnValue(start);
+    try {
+      await fireEvent.changeText(view.getByPlaceholderText('Message Codex'), 'Check the CI run too');
+      await fireEvent.press(view.getByLabelText('Send'));
+      await waitFor(() => expect(mockConn.type).toHaveBeenCalledWith(7n, '\r'));
+      // Past the wait after which a message nobody has seen reads as lost,
+      // and read again since.
+      clock.mockReturnValue(start + 20_000);
+      const reads = mockConn.conversation.mock.calls.length;
+      await waitFor(() => expect(mockConn.conversation.mock.calls.length).toBeGreaterThan(reads + 1), { timeout: 3000 });
+      expect(view.getByLabelText('Check the CI run too. Sending.')).toBeTruthy();
+      expect(view.queryByLabelText(/Not in the conversation/)).toBeNull();
+      // Said once, above the composer, not as a working row in the chat.
+      expect(view.queryByLabelText(/is working/)).toBeNull();
+    } finally {
+      clock.mockRestore();
+    }
+    await view.unmount();
   });
 
   test('holding a table or a code block copies its turn, from inside the scroller it drags in', async () => {
@@ -372,8 +400,9 @@ describe('Session', () => {
     const view = await render(<Session />);
     const group = await waitFor(() => view.getByLabelText('3 tool calls: Bash, Edit'));
     expect(view.queryByText('$ cargo test')).toBeNull();
-    // A lone tool call is its own line, as it was.
-    expect(view.getByText('Read lib.rs')).toBeTruthy();
+    // A lone tool call shuts under its count too.
+    expect(view.getByLabelText('1 tool call: Read')).toBeTruthy();
+    expect(view.queryByText('Read lib.rs')).toBeNull();
     await fireEvent.press(group);
     expect(view.getByText('$ cargo test')).toBeTruthy();
     expect(view.getByText('Edited main.rs')).toBeTruthy();

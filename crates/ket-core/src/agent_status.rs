@@ -144,6 +144,12 @@ pub struct PaneAgentStatus {
     /// `Stop` — so the pane is idle again when the dialog goes.
     #[serde(skip)]
     pub(crate) covered_idle: bool,
+    /// Whether the lead is compacting its conversation: it said it started
+    /// one, and has said nothing since. Claude follows a compaction with
+    /// `PostCompact` and a `SessionStart`; Codex, Grok and OpenCode with
+    /// `PostCompact`.
+    #[serde(default)]
+    pub compacting: bool,
     pub(crate) roster: Roster,
 }
 
@@ -195,6 +201,7 @@ impl PaneAgentStatus {
             answered: None,
             covered: None,
             covered_idle: false,
+            compacting: false,
             roster: Roster::default(),
         }
     }
@@ -530,6 +537,8 @@ impl StatusStore {
             entry.session.clone_from(&report.session);
         }
         entry.roster.lead(report);
+        // Whatever the lead says next, the compaction is over.
+        entry.compacting = report.event == HookEvent::PreCompact;
 
         let Some(state) = state else {
             // A teammate going idle moves the roster and nothing else.

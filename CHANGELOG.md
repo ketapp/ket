@@ -408,11 +408,17 @@ words; no internal names, no commit hashes. ket reads this file
 
 ### Fixed
 
+- While an agent compacts its conversation, the phone's chat says so above
+  the message field, and a message you send meanwhile waits its turn
+  instead of showing as not delivered.
 - The iOS Simulator tab works with any Xcode 27 or 26 release, 27.2
   included, instead of saying a new point release isn't supported yet.
 - Switching Claude's model or effort from your phone in a conversation it
   has already answered in works at once, instead of saying after a wait that
   it didn't switch while Claude sat asking at your Mac whether to.
+- A number pressed in a terminal on your phone answers Claude's "You should
+  know" offer even when the phone's screen cuts the offer off above its
+  buttons, instead of landing in the prompt.
 - Sending a message from your phone no longer jumps the chat: the agent's
   working line stays put from the moment you send until the agent answers,
   instead of going and coming back as the message lands.

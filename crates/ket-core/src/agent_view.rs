@@ -264,7 +264,7 @@ fn search_word(name: &str) -> Option<&str> {
 
 /// What is typed in the input box between the last two rules on `rows`,
 /// without its `❯`. A list's box shows its placeholder when empty.
-fn typed(rows: &[String]) -> Option<String> {
+pub(crate) fn typed(rows: &[String]) -> Option<String> {
     let rules: Vec<usize> = rows
         .iter()
         .enumerate()

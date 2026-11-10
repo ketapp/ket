@@ -43,7 +43,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { FileChip, ImagesChip, SentFiles, type Source, Tray, attachSections } from '../../../components/Attachments';
 import { AgentViewList, backgroundState, terminalAt } from '../../../components/AgentView';
-import { Outgoing, type OutgoingStatus, StatusMark, Working } from '../../../components/ChatRows';
+import { Compacting, Outgoing, type OutgoingStatus, StatusMark, Working } from '../../../components/ChatRows';
 import { commandRow } from '../../../components/Commands';
 import { PlusButton, SendButton, plusMenu, slashMenu } from '../../../components/Composer';
 import { FloatMenu, type Place, placeOf } from '../../../components/FloatMenu';
@@ -396,8 +396,11 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
   const working = background
     ? backgroundSession?.state === BackgroundSession_State.WORKING
     : worktree?.activity === Activity.WORKING || (worktree?.activity === Activity.RUNNING && !programBusy(worktree));
+  // Compacting its conversation (1.30): said above the composer, not in the
+  // chat, and a message sent meanwhile is on its way rather than lost.
+  const compacting = !background && located?.terminal?.compacting === true;
   const busy = useRef(false);
-  const isBusy = working || pending.length > 0 || queued.length > 0;
+  const isBusy = working || compacting || pending.length > 0 || queued.length > 0;
   useEffect(() => {
     busy.current = isBusy;
   }, [isBusy]);
@@ -1091,7 +1094,7 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
     if (age <= UNSEEN_MS) return 'sending';
     if (p.key === 0 && age <= STARTING_FOR_MS) return 'held';
     if (p.key === 0 && STILL_OPENING.includes(unreadable)) return 'unseen';
-    return working ? 'sending' : 'unseen';
+    return working || compacting ? 'sending' : 'unseen';
   };
   const outgoing = (p: Pending) => (
     <Outgoing
@@ -1263,7 +1266,7 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
               indicator: the desktop says the agent is working a moment
               before its transcript has the message that set it off. */}
           {unsent.filter((p) => !p.behind).map(outgoing)}
-          {working || sending || handingOver ? <Working key={keptKey} agent={agent} what={working && worktree && !background ? detail(worktree) : ''} details /> : null}
+          {(working || sending || handingOver) && !compacting ? <Working key={keptKey} agent={agent} what={working && worktree && !background ? detail(worktree) : ''} details /> : null}
           {inQueue.map(({ words, named, files }, index) => (
             <Outgoing key={`q${index}`} text={words} files={files} named={files.length > 0 ? [] : named} status="queued" onCopy={copy} />
           ))}
@@ -1316,6 +1319,8 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
               <Button title="Open Settings" onPress={() => void Linking.openSettings()} style={styles.settings} />
             ) : null}
           </View>
+        ) : compacting ? (
+          <Compacting style={styles.compacting} />
         ) : null}
         {/* Chips send at once, so not while photos wait to go with the next
             message, or while the mic is writing one. Under a menu they
@@ -2315,6 +2320,7 @@ const styles = StyleSheet.create({
   hearing: { flexDirection: 'row', alignItems: 'center', gap: 7, paddingHorizontal: size.gutter + 4, paddingBottom: 8 },
   hearingDot: { width: 7, height: 7, borderRadius: 4, backgroundColor: t.accent },
   hearingText: { fontFamily: font.prose, fontSize: size.label, lineHeight: 18, color: t.dim },
+  compacting: { marginHorizontal: size.gutter + 4, marginBottom: 10 },
   replies: { flexGrow: 0 },
   repliesInner: { paddingHorizontal: size.gutter, paddingBottom: 8, gap: 6 },
   // A chip: a reply, a snippet, or `/`. Gone once there is a draft.

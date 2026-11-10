@@ -475,13 +475,14 @@ fn hook_names_map_to_events() {
         ("StopFailure", HookEvent::StopFailure),
         ("SubagentStart", HookEvent::SubagentStart),
         ("SubagentStop", HookEvent::SubagentStop),
+        ("PreCompact", HookEvent::PreCompact),
         ("PostCompact", HookEvent::Compact),
         ("TeammateIdle", HookEvent::TeammateIdle),
     ];
     for (name, event) in table {
         assert_eq!(HookEvent::from_hook_name(name), Some(event), "{name}");
     }
-    for name in ["", "stop", "PreCompact", "FileChanged", "Idle"] {
+    for name in ["", "stop", "FileChanged", "Idle"] {
         assert_eq!(HookEvent::from_hook_name(name), None, "{name}");
     }
 }
@@ -505,6 +506,7 @@ fn events_move_the_state_machine() {
         (HookEvent::StopFailure, Some(Idle)),
         (HookEvent::Idle, Some(Idle)),
         (HookEvent::SessionEnd, Some(Idle)),
+        (HookEvent::PreCompact, None),
         (HookEvent::Compact, None),
         (HookEvent::TeammateIdle, None),
     ];

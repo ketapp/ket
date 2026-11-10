@@ -171,6 +171,27 @@ fn offers_always(tool: &str) -> bool {
     )
 }
 
+/// Ctrl+X Tab: Claude Code's key for handing the keys to what its plugins
+/// show above the prompt, as of 2.1.321.
+pub(super) const OFFER_FOCUS: &[u8] = b"\x18\t";
+
+/// Whether `keys` answer one of Claude Code's "You should know" offers on
+/// `rows`: a lone number while the offer, marked ✦, shows above an empty
+/// prompt.
+///
+/// Claude takes the number only while that button is wholly on screen, and
+/// a phone's short terminal cuts a long offer off above its buttons, so the
+/// number sits in the prompt instead. With [`OFFER_FOCUS`] first, the offer
+/// holds the keys and the number presses its button wherever it sits.
+pub(super) fn answers_offer(keys: &[u8], rows: &dyn Fn() -> Vec<String>) -> bool {
+    if !matches!(keys, [b'0'..=b'9']) {
+        return false;
+    }
+    let rows = rows();
+    rows.iter().any(|row| row.trim_start().starts_with('✦'))
+        && crate::agent_view::typed(&rows).is_some_and(|text| text.is_empty())
+}
+
 /// Whether a keystroke asks the program to stop: Ctrl-C, or a bare Escape,
 /// which is how Claude Code and Codex cancel a turn. The same test a window
 /// makes on its own keystrokes.

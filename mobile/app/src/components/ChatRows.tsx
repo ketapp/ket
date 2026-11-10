@@ -1,7 +1,8 @@
 // The rows of a chat that are not turns read from the transcript: a message
-// of yours that the conversation has not shown yet, and the agent's working
-// row. Drawn by the session's chat, and by the chat that stands in for one
-// while the desktop is still making its worktree — see app/starting.
+// of yours that the conversation has not shown yet, the agent's working
+// row, and the line above the composer while it compacts. Drawn by the
+// session's chat, and by the chat that stands in for one while the desktop
+// is still making its worktree — see app/starting.
 
 import { useEffect, useId, useState } from 'react';
 import { Pressable, StyleSheet, Text, TextInput, useWindowDimensions, View, type TextInputProps, type ViewStyle } from 'react-native';
@@ -19,7 +20,7 @@ import Animated, {
   withRepeat,
   withTiming,
 } from 'react-native-reanimated';
-import Svg, { Circle, Defs, LinearGradient, Path, Stop, Text as SvgText } from 'react-native-svg';
+import Svg, { Circle, Defs, LinearGradient, Path, Rect, Stop, Text as SvgText } from 'react-native-svg';
 
 import { fileName, type Attachment } from '../lib/attach';
 import { agentLabel, blend, font, size, t, tint } from '../lib/theme';
@@ -337,6 +338,118 @@ function FittedWorkingWords({ what, width, fontScale, shine }: { what: string; w
   );
 }
 
+/** How far the compacting mark's chevrons travel each way: 1.5 of its 24
+ * units, drawn at 14pt. */
+const NUDGE = (1.5 * 14) / 24;
+const COMPACTING = 'Compacting conversation';
+
+/**
+ * The agent compacting its conversation, as a line above the composer: its
+ * words lit by a moving band, between two rules that fade out to the sides.
+ * It is not in the conversation, and a message sent meanwhile waits in the
+ * agent's queue. Reduce Motion stills the band and the mark.
+ */
+export function Compacting({ style }: { style?: ViewStyle }) {
+  const still = useReducedMotion();
+  const shine = useSharedValue(0);
+  const press = useSharedValue(0);
+  useEffect(() => {
+    shine.set(0);
+    press.set(0);
+    if (still) return;
+    shine.set(withRepeat(withTiming(1, { duration: 2400, easing: Easing.linear, ...motion }), -1));
+    press.set(withRepeat(withTiming(1, { duration: 800, easing: Easing.inOut(Easing.ease), ...motion }), -1, true));
+    return () => {
+      cancelAnimation(shine);
+      cancelAnimation(press);
+    };
+  }, [still, shine, press]);
+  // The chevrons close on the line and open again, out of step.
+  const down = useAnimatedStyle(() => ({ transform: [{ translateY: (press.get() * 2 - 1) * NUDGE }] }));
+  const up = useAnimatedStyle(() => ({ transform: [{ translateY: (1 - press.get() * 2) * NUDGE }] }));
+  const chevron = (d: string) => (
+    <Svg width={14} height={14} viewBox="0 0 24 24">
+      <Path d={d} fill="none" stroke={t.dim} strokeWidth={2.4} strokeLinecap="round" strokeLinejoin="round" />
+    </Svg>
+  );
+  return (
+    <View accessible accessibilityLabel={COMPACTING} accessibilityLiveRegion="polite" style={[styles.compacting, style]}>
+      <CompactingRule fade="left" />
+      <View style={styles.compactingMark}>
+        <Svg width={14} height={14} viewBox="0 0 24 24" style={StyleSheet.absoluteFill}>
+          <Path d="M5 12h14" fill="none" stroke={t.accent} strokeWidth={2.4} strokeLinecap="round" />
+        </Svg>
+        <Animated.View style={[StyleSheet.absoluteFill, down]}>{chevron('M8 4l4 4 4-4')}</Animated.View>
+        <Animated.View style={[StyleSheet.absoluteFill, up]}>{chevron('M8 20l4-4 4 4')}</Animated.View>
+      </View>
+      {still ? <Text style={styles.compactingText}>{COMPACTING}</Text> : <CompactingWords shine={shine} />}
+      <CompactingRule fade="right" />
+    </View>
+  );
+}
+
+/** A hairline in the border's colour, fading out towards `fade`. */
+function CompactingRule({ fade }: { fade: 'left' | 'right' }) {
+  const id = useId();
+  return (
+    <View style={styles.compactingRule}>
+      <Svg width="100%" height={1}>
+        <Defs>
+          <LinearGradient id={id} x1="0" y1="0" x2="1" y2="0">
+            <Stop offset="0" stopColor={t.border} stopOpacity={fade === 'left' ? 0 : 1} />
+            <Stop offset="1" stopColor={t.border} stopOpacity={fade === 'left' ? 1 : 0} />
+          </LinearGradient>
+        </Defs>
+        <Rect x={0} y={0} width="100%" height={1} fill={`url(#${id})`} />
+      </Svg>
+    </View>
+  );
+}
+
+/** The words at their own width, measured once, with a band of the text's
+ * colour crossing them left to right. */
+function CompactingWords({ shine }: { shine: SharedValue<number> }) {
+  const id = useId();
+  const { fontScale } = useWindowDimensions();
+  const [measured, setMeasured] = useState<{ width: number; baseline: number } | null>(null);
+  // Two and a half widths of gradient, slid from one side clear to the other.
+  const gradient = useAnimatedProps(() => {
+    const width = measured?.width ?? 0;
+    const x1 = -1.5 * width * (1 - shine.get());
+    return { x1, x2: x1 + 2.5 * width };
+  });
+  if (!measured) {
+    return (
+      <Text
+        key={fontScale}
+        style={styles.compactingText}
+        onTextLayout={({ nativeEvent: { lines } }) => {
+          const line = lines[0];
+          if (line) setMeasured({ width: Math.ceil(line.width), baseline: line.y + line.ascender });
+        }}
+      >
+        {COMPACTING}
+      </Text>
+    );
+  }
+  return (
+    <Svg width={measured.width} height={24} accessible={false}>
+      <Defs>
+        <AnimatedGradient id={id} gradientUnits="userSpaceOnUse" y1={0} y2={0} animatedProps={gradient}>
+          <Stop offset="0" stopColor={t.dim} />
+          <Stop offset="0.4" stopColor={t.dim} />
+          <Stop offset="0.5" stopColor={t.text} />
+          <Stop offset="0.6" stopColor={t.dim} />
+          <Stop offset="1" stopColor={t.dim} />
+        </AnimatedGradient>
+      </Defs>
+      <SvgText x={0} y={measured.baseline} fontFamily={font.chrome} fontSize={size.detail * fontScale} fill={`url(#${id})`}>
+        {COMPACTING}
+      </SvgText>
+    </Svg>
+  );
+}
+
 /** A message of yours: a bubble on the right, its tail at the foot. */
 export const bubble: ViewStyle = {
   backgroundColor: t.selection,
@@ -371,4 +484,8 @@ const styles = StyleSheet.create({
   workingDetails: { marginTop: 4, marginLeft: 24, flexDirection: 'row', alignItems: 'flex-start', gap: 10 },
   workingDetailText: { flex: 1, minWidth: 0, fontFamily: font.chrome, fontSize: 12, lineHeight: 18, color: t.faint },
   workingElapsed: { padding: 0, fontFamily: font.chrome, fontSize: 12, lineHeight: 18, color: t.faint, textAlign: 'right', includeFontPadding: false },
+  compacting: { height: 24, flexDirection: 'row', alignItems: 'center', gap: 10 },
+  compactingRule: { flex: 1, height: 1 },
+  compactingMark: { width: 14, height: 14 },
+  compactingText: { fontFamily: font.chrome, fontSize: size.detail, lineHeight: 24, color: t.dim, includeFontPadding: false },
 });

@@ -280,6 +280,11 @@ pub(super) fn snapshot(host: &Host, phones: &Phones) -> proto::HostSnapshot {
             .as_deref()
             .filter(|_| at_rest && crate::agents::harness(&agent) == "claude")
             .and_then(|session| cold_cache(session, cold_asks.as_ref()));
+        // The agent compacting its conversation: a message sent meanwhile
+        // waits in its queue, and the chat says why.
+        let compacting = key
+            .as_deref()
+            .is_some_and(|key| panes.iter().any(|pane| pane.pane == key && pane.compacting));
         let summary = proto::TerminalSummary {
             id,
             title: terminal.title().unwrap_or_else(|| {
@@ -297,6 +302,7 @@ pub(super) fn snapshot(host: &Host, phones: &Phones) -> proto::HostSnapshot {
             cold,
             running,
             running_since_ms,
+            compacting,
             ..Default::default()
         };
         match worktrees.iter_mut().find(|w| w.id == worktree) {

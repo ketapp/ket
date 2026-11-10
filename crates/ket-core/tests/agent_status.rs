@@ -80,6 +80,36 @@ fn an_event_with_no_state_on_an_unknown_pane_changes_nothing() {
 }
 
 #[test]
+fn a_compaction_lasts_until_the_agent_next_reports() {
+    let mut store = StatusStore::new(1);
+    store.report(&report(HookEvent::Stop, "p1", "w1", "s1", 0), known_any);
+    assert!(store.report(
+        &report(HookEvent::PreCompact, "p1", "w1", "s1", 1_000),
+        known_any
+    ));
+    let pane = store.get("p1").unwrap();
+    assert!(pane.compacting);
+    // Compacting says nothing about the turn: an idle agent compacts idle.
+    assert_eq!(pane.state, AgentState::Idle);
+
+    store.report(
+        &report(HookEvent::Compact, "p1", "w1", "s1", 70_000),
+        known_any,
+    );
+    assert!(!store.get("p1").unwrap().compacting);
+}
+
+#[test]
+fn a_compaction_on_a_pane_never_heard_from_is_not_filed() {
+    let mut store = StatusStore::new(1);
+    assert!(!store.report(
+        &report(HookEvent::PreCompact, "p1", "w1", "s1", 100),
+        known_any
+    ));
+    assert!(store.get("p1").is_none());
+}
+
+#[test]
 fn event_state_mapping_moves_the_pane_through_its_lifecycle() {
     let mut store = StatusStore::new(1);
     store.report(

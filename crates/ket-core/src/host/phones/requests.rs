@@ -10,7 +10,7 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
 use ket_remote::proto::{self, envelope::Payload};
 
-use super::keys::{answer_on_screen, is_interrupt};
+use super::keys::{OFFER_FOCUS, answer_on_screen, answers_offer, is_interrupt};
 use super::places::{Place, Places};
 use super::session::{Phone, pump};
 use super::typing::Typed;
@@ -530,6 +530,14 @@ fn apply(
                 }
                 let _ = terminal.send_input(input.bytes.clone());
             } else {
+                let rows =
+                    || terminal.with_term(|term| crate::screen::bottom_rows(term, usize::MAX));
+                if answers_offer(&input.bytes, &rows) {
+                    phone
+                        .phones
+                        .typing
+                        .keys(input.terminal_id, &terminal, OFFER_FOCUS.to_vec());
+                }
                 phone
                     .phones
                     .typing

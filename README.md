@@ -243,9 +243,10 @@ npm run lint --prefix mobile/app
 npm test --prefix mobile/app -- --runInBand
 ```
 
-CI also checks generated protocol drift. The scheduled dependency workflow runs
-Rust advisory and license checks, and npm audits with a reviewed allowlist in
-`.github/npm-audit-allow.json` for advisories that have no patched release.
+CI also checks generated protocol drift. The scheduled dependency workflow
+fails on a Rust license or source ket can't ship. Rust and npm advisories are
+only reported, never a red check; the npm audits skip the reviewed allowlist in
+`.github/npm-audit-allow.json` of advisories that have no patched release.
 
 ## Release process
 

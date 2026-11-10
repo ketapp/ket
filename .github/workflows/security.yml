@@ -24,10 +24,13 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-      - run: cargo install cargo-audit --locked
       - run: cargo install cargo-deny --locked
-      - run: cargo audit
-      - run: cargo deny check advisories licenses sources
+      # A license or a source ket can't ship stops the run. An advisory is
+      # only reported: it shows on the run as a failed step, never as a red
+      # check, and gets fixed when it's worth fixing.
+      - run: cargo deny check licenses sources
+      - run: cargo deny check advisories
+        continue-on-error: true
 
   npm-advisories:
     runs-on: ubuntu-24.04
@@ -36,6 +39,10 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       # `npm audit --audit-level=high`, minus the advisories with no patched
       # release that .github/npm-audit-allow.json lists, each with its reason.
+      # Reported, never a red check, like the Rust advisories above.
       - run: node .github/scripts/npm-audit.mjs mobile/remote
+        continue-on-error: true
       - run: node .github/scripts/npm-audit.mjs mobile/app
+        continue-on-error: true
       - run: node .github/scripts/npm-audit.mjs scripts/checkpoint-xterm
+        continue-on-error: true

@@ -9,10 +9,7 @@ and assets. The corresponding license files are authoritative.
 | alacritty_terminal 0.26.0, locally patched | The Alacritty Project | Apache-2.0 | `vendor/alacritty_terminal/LICENSE-APACHE`, `vendor/alacritty_terminal/KET-PATCH.md` |
 | Chromium Embedded Framework 156.0.14 (Chromium 156.0.8078.48), in builds with embedded Chromium | Marshall A. Greenblatt and the CEF contributors; The Chromium Authors | BSD-3-Clause; the projects Chromium includes keep their own licenses | `LICENSE.txt` and `CREDITS.html` (every component and its license) from the CEF distribution, shipped in ket.app beside the framework |
 | Fira Code font, also used by the phone app via `@expo-google-fonts/fira-code` | The Fira Code Project Authors | SIL OFL 1.1 | `crates/ket-ui/assets/fonts/fira-code/OFL.txt`; distributed with the npm package |
-| Atkinson Hyperlegible Mono font | The Atkinson Hyperlegible Mono Project Authors | SIL OFL 1.1 | `crates/ket-ui/assets/fonts/atkinson-hyperlegible-mono/OFL.txt` |
-| Geist and Geist Mono fonts | The Geist Project Authors | SIL OFL 1.1 | `crates/ket-ui/assets/fonts/geist*/OFL.txt` |
-| Mona Sans font | The Mona Sans Project Authors | SIL OFL 1.1 | `crates/ket-ui/assets/fonts/mona-sans/OFL.txt` |
-| Monaspace fonts | GitHub | SIL OFL 1.1 | `crates/ket-ui/assets/fonts/monaspace/OFL.txt` |
+| Geist font, also used by the phone app via `@expo-google-fonts/geist` | The Geist Project Authors | SIL OFL 1.1 | `crates/ket-ui/assets/fonts/geist/OFL.txt`; distributed with the npm package |
 | Lucide icons, including Feather-derived icons | Lucide contributors; Cole Bemis | ISC and MIT | `crates/ket-ui/assets/icons/LICENSE.txt` |
 | Phosphor icons 2.1.1, fill weight: the project glyphs, also as shapes in the phone app | Phosphor Icons | MIT | `crates/ket-ui/assets/icons/glyphs/LICENSE.txt`; the glyphs in `crates/ket-ui/assets/icons/glyphs/` and `mobile/app/src/lib/glyphs.ts` |
 | xterm.js and its WebGL addon, embedded in the mobile terminal asset | The xterm.js authors; SourceLair Private Company; Christopher Jeffrey | MIT | Both license texts in the header of `mobile/app/src/lib/xterm-assets.ts` |

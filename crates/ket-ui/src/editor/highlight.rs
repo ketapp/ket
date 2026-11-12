@@ -75,8 +75,8 @@ impl Mark {
     ///
     /// Safe for the column arithmetic because the family is monospaced:
     /// the code face's semibold and italic advance exactly as far as its
-    /// regular one, so a heavier keyword does not move the caret. Fira Code,
-    /// on trial, draws no italic: a comment stands upright in it.
+    /// regular one, so a heavier keyword does not move the caret. Fira Code
+    /// draws no italic: a comment stands upright in it.
     pub(super) fn font(self, base: &Font) -> Font {
         use ket_core::syntax::Token;
         match self {

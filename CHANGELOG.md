@@ -13,6 +13,12 @@ words; no internal names, no commit hashes. ket reads this file
 
 ## Unreleased
 
+### Improved
+
+- ket's download is smaller: it carries only the two fonts it uses, Fira
+  Code and Geist. If you picked Monaspace, Mona Sans, Geist Mono or Atkinson
+  Hyperlegible Mono in Settings, install it on your Mac to keep using it.
+
 ## 0.2.0 — 2026-11-12
 
 ### New

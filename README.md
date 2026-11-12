@@ -33,8 +33,17 @@ its own branch, where one agent works without touching anything else. You
 watch the agents from one window, read their diffs, and merge the work back
 when it's done.
 
-> ket isn't released yet. Until the first public build, run it from source —
-> see [Build and run](#build-and-run).
+Install it with Homebrew, or download the signed disk image from
+[ketapp.dev/download](https://ketapp.dev/download/). It needs a Mac with
+Apple silicon on macOS 13 or later.
+
+```
+brew tap ketapp/tap
+brew trust ketapp/tap
+brew install --cask ket
+```
+
+To run it from source instead, see [Build and run](#build-and-run).
 
 ## Keep all your projects moving at once
 

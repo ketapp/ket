@@ -5,7 +5,7 @@
 # and writes what a release publishes beside it.
 #
 # Usage:
-#   scripts/release.sh <version> [--beta]
+#   scripts/release.sh <version> [--beta] [--issue <n>]
 #   scripts/release.sh --new-key
 #
 # Needs KET_SIGN_IDENTITY and KET_NOTARY_PROFILE in the environment, as
@@ -18,11 +18,17 @@
 # A release, in order:
 #
 # 1. Refuses unless on main with a clean tree, a version above the current
-#    one, fmt and clippy clean, and something under "## Unreleased" in
-#    CHANGELOG.md, since that section becomes the release notes.
+#    one, a release commit message the checkout's commit-msg hook accepts,
+#    fmt and clippy clean, and something under "## Unreleased" in
+#    CHANGELOG.md, since that section becomes the release notes. The message
+#    is put to the hook here, before anything changes: refused at the commit,
+#    it left the version bumped and the changelog filed with nothing
+#    committed. A hook that wants every commit to name an issue gets one
+#    with --issue.
 # 2. Sets the workspace version and the phone app's (mobile/app's app.json,
 #    package.json and package-lock.json), files Unreleased under
-#    "## <version> — <date>", commits "chore(release): <version>" and tags
+#    "## <version> — <date>", commits "chore(release): <version>", or
+#    "chore(release): <version> (#<n>)" with --issue, and tags
 #    v<version>. Run
 #    again on that tagged commit, after a failed build say, and it goes
 #    straight to 3.
@@ -105,13 +111,23 @@ fi
 
 VERSION="${1:-}"
 [[ "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
-    die "usage: scripts/release.sh <major.minor.patch> [--beta] | --new-key"
+    die "usage: scripts/release.sh <major.minor.patch> [--beta] [--issue <n>] | --new-key"
+shift
 CHANNEL=stable
-case "${2:-}" in
-    "") ;;
-    --beta) CHANNEL=beta ;;
-    *) die "unknown argument: $2" ;;
-esac
+ISSUE=""
+while (($#)); do
+    case "$1" in
+        --beta) CHANNEL=beta ;;
+        --issue)
+            [[ "${2:-}" =~ ^[0-9]+$ ]] || die "--issue takes the issue's number"
+            ISSUE="$2"
+            shift
+            ;;
+        *) die "unknown argument: $1" ;;
+    esac
+    shift
+done
+MESSAGE="chore(release): ${VERSION}${ISSUE:+ (#${ISSUE})}"
 
 [[ -n "${KET_SIGN_IDENTITY:-}" && "${KET_SIGN_IDENTITY}" != - ]] ||
     die "KET_SIGN_IDENTITY must name the Developer ID Application identity"
@@ -135,6 +151,14 @@ else
     awk '/^## Unreleased$/ { on = 1; next } on && /^## / { exit } on && /^- / { found = 1 }
         END { exit !found }' CHANGELOG.md ||
         die "CHANGELOG.md has nothing under ## Unreleased to release"
+
+    # The release commit's message, put to the commit-msg hook now; see 1.
+    HOOKS="$(git config core.hooksPath || git rev-parse --git-path hooks)"
+    if [[ -x "${HOOKS}/commit-msg" ]]; then
+        printf '%s\n' "${MESSAGE}" >"${WORK}/message"
+        "${HOOKS}/commit-msg" "${WORK}/message" ||
+            die "the commit-msg hook refuses \"${MESSAGE}\"; name the release's issue with --issue <n>"
+    fi
 
     echo "checking formatting and lints"
     cargo fmt --all --check
@@ -177,7 +201,7 @@ PY
     cp "${WORK}/CHANGELOG.md" CHANGELOG.md
     git add Cargo.toml Cargo.lock CHANGELOG.md \
         mobile/app/app.json mobile/app/package.json mobile/app/package-lock.json
-    git commit -q -m "chore(release): ${VERSION}"
+    git commit -q -m "${MESSAGE}"
     git tag -a "${TAG}" -m "ket ${VERSION}"
 fi
 
@@ -247,7 +271,9 @@ echo "  ${CHANNEL}.json, signed by $(public_key)"
 echo "  notes.md"
 echo
 echo "to publish it:"
-echo "  1. push main and ${TAG} to GitHub"
-echo "  2. gh release create ${TAG} --title 'ket ${VERSION}' --notes-file ${OUT}/notes.md${PRERELEASE} \\"
+echo "  1. push main to GitHub, then tag the commit that lands there ${TAG}:"
+echo "       git push <remote> <that commit>:refs/tags/${TAG}"
+echo "     It is ${KET_COMMIT}, this run's, when main itself is what is pushed."
+echo "  2. gh release create ${TAG} --verify-tag --title 'ket ${VERSION}' --notes-file ${OUT}/notes.md${PRERELEASE} \\"
 echo "       ${OUT}/${DMG} ${OUT}/${ZIP} ${OUT}/${CHANNEL}.json"
 echo "  3. set the Homebrew cask to ${VERSION} with the disk image's sha256"

@@ -11,6 +11,7 @@ import { Linking, StyleSheet } from 'react-native';
 import { WebView, type WebViewMessageEvent } from 'react-native-webview';
 import { toBase64Url } from '@ket/remote';
 
+import { terminalFont } from '../lib/terminal-font';
 import { page } from '../lib/terminal-page';
 import { t } from '../lib/theme';
 
@@ -86,6 +87,8 @@ export const TerminalView = forwardRef<TerminalHandle, Props>(function TerminalV
     if (message.type === 'input' && message.data) onInput(message.data);
     // Only web addresses, checked here rather than trusted from the page.
     if (message.type === 'open' && message.url && /^https?:\/\//.test(message.url)) void Linking.openURL(message.url);
+    // The page asks for its face once it has loaded; see lib/terminal-font.
+    if (message.type === 'loaded') void terminalFont().then((font) => call({ type: 'font', ...font }));
     if (message.type === 'ready') onReady?.();
   };
 

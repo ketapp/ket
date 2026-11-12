@@ -333,6 +333,7 @@ impl Shell {
                 Intent::Say(message) => self.note = Some(message.into()),
                 Intent::AddProject => self.add_project(cx),
                 Intent::OpenSettings => self.open_preferences(cx),
+                Intent::OpenSetup => self.open_setup(cx),
                 Intent::OpenProjectSettings(id) => {
                     self.open_project_settings(&id, crate::projects::Field::Name, cx);
                 }

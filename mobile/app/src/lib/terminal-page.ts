@@ -18,6 +18,9 @@ html { height: 100%; overflow: hidden; overscroll-behavior: none; touch-action: 
 html, body { margin: 0; padding: 0; background: ${t.card}; }
 #terminal { padding: 6px 4px; display: inline-block; }
 .xterm { overflow: hidden; }
+/* Fira Code's ligatures off: a terminal is a grid of characters. WebGL draws
+   cell by cell anyway; this holds for the DOM renderer it falls back to. */
+.xterm-rows { font-variant-ligatures: none; font-feature-settings: "calt" 0, "liga" 0; }
 .xterm-screen { will-change: transform; }
 .xterm-viewport { overflow-y: auto !important; }
 </style></head>
@@ -278,10 +281,14 @@ html, body { margin: 0; padding: 0; background: ${t.card}; }
   // it fit. Otherwise the host's columns are squeezed across the screen.
   var fitted = false;
   var FIT_FONT = 13.5;
+  // Fira Code's advance, as a share of its size. It draws box drawing and
+  // blocks itself; what it lacks, such as Claude's ⏺ and ✻, comes from Menlo
+  // behind it, or the system's monospace where there is no Menlo.
+  var ADVANCE = 0.615;
   function measure() {
     var width = window.innerWidth - 8, height = window.innerHeight - 12;
     return {
-      cols: Math.max(20, Math.floor(width / (FIT_FONT * 0.602))),
+      cols: Math.max(20, Math.floor(width / (FIT_FONT * ADVANCE))),
       rows: Math.max(5, Math.floor(height / Math.ceil(FIT_FONT * 1.2))),
     };
   }
@@ -296,9 +303,9 @@ html, body { margin: 0; padding: 0; background: ${t.card}; }
   }
   function fontFor(cols) {
     if (fitted) return FIT_FONT;
-    // Menlo's advance is about 0.6 of its size: fit the host's columns across
-    // the screen, but never below a size that can still be read.
-    var fit = Math.floor((window.innerWidth - 8) / (cols * 0.602) * 10) / 10;
+    // Fit the host's columns across the screen, but never below a size that
+    // can still be read.
+    var fit = Math.floor((window.innerWidth - 8) / (cols * ADVANCE) * 10) / 10;
     return Math.max(6.5, Math.min(14, fit));
   }
   window.ket = function (message) {
@@ -308,7 +315,7 @@ html, body { margin: 0; padding: 0; background: ${t.card}; }
         // Room for history beyond what the checkpoint carried, which can be
         // little or none; what arrives after it scrolls into this.
         cols: message.cols, rows: message.rows, scrollback: Math.max(message.scrollback || 0, 10000),
-        fontFamily: 'Menlo, monospace', fontSize: fontFor(message.cols),
+        fontFamily: "'Fira Code', Menlo, monospace", fontSize: fontFor(message.cols),
         theme: { background: '${t.card}', foreground: '${t.text}', cursor: '${t.accent}',
                  selectionBackground: '${t.selection}' },
         disableStdin: !window.ketInteractive, allowProposedApi: true, convertEol: false,
@@ -345,8 +352,32 @@ html, body { margin: 0; padding: 0; background: ${t.card}; }
       reportSize();
     } else if (message.type === 'focus' && term) {
       term.focus();
+    } else if (message.type === 'font') {
+      addFont(message);
     }
   };
-  post({ type: 'ready' });
+  // Ready once the face is in: xterm measures its cell when it opens and
+  // draws its glyph atlas then, so a terminal opened on the fallback would
+  // keep Menlo's measurements under Fira Code's letters. The app reads the
+  // face from its own bundle and sends it in answer to 'loaded'; without an
+  // answer, or with one that will not load, the page is ready on Menlo.
+  var readied = false;
+  function ready() {
+    if (readied) return;
+    readied = true;
+    post({ type: 'ready' });
+  }
+  function addFont(message) {
+    if (!message.regular || !message.bold || !window.FontFace || !document.fonts) { ready(); return; }
+    var faces = [
+      new FontFace('Fira Code', decode(message.regular).slice(), { weight: '400' }),
+      new FontFace('Fira Code', decode(message.bold).slice(), { weight: '700' }),
+    ];
+    Promise.all(faces.map(function (face) {
+      return face.load().then(function (loaded) { document.fonts.add(loaded); });
+    })).catch(function () {}).then(ready);
+  }
+  setTimeout(ready, 3000);
+  post({ type: 'loaded' });
 })();
 </script></body></html>`;

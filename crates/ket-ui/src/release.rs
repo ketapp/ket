@@ -8,8 +8,8 @@
 //!
 //! The notes are the compiled-in `CHANGELOG.md` (`ket_core::changelog`): a
 //! release shows its own section, a dev build shows what has landed under
-//! Unreleased. Update state joins the card with the updater; until then only
-//! a dev build has one to give.
+//! Unreleased. Under the version, a dev build says it does not update, and a
+//! release says when a newer ket is out (`crate::updates`), with Download.
 //! Chosen as A Card on the release popover canvas, 2026-10-01.
 
 use std::time::Duration;
@@ -316,16 +316,18 @@ impl Shell {
                     })),
             );
 
-        // The updater's place. Until it exists, only a dev build has a state
-        // to report, and it is that there is nothing to report.
-        let status = dev.then(|| {
-            div().mx(px(12.0)).mt(px(12.0)).child(banner(
-                "release-updates-off",
-                Tone::Info,
-                "Updates are off in dev builds",
-                t,
-            ))
-        });
+        // A dev build never updates; a release says when a newer one is out.
+        let status = dev
+            .then(|| {
+                div().mx(px(12.0)).mt(px(12.0)).child(banner(
+                    "release-updates-off",
+                    Tone::Info,
+                    "Updates are off in dev builds",
+                    t,
+                ))
+            })
+            .map(IntoElement::into_any_element)
+            .or_else(|| self.release_update_line());
 
         let (title, notes) = match dev {
             true => {

@@ -24,6 +24,12 @@
 //! **Virtualised.** A busy worktree logs a request per tool call, thousands
 //! in the five days a log is kept, so the list is a `uniform_list`: only the
 //! rows on screen are built, as the file tree's are.
+//!
+//! **Picked with the pointer.** The body is text, and reads as text: a drag
+//! picks characters, a double-click the word under the pointer, a triple
+//! the line, ⇧-click runs the pick on, and ⌘C takes what is picked. The
+//! pick is kept as lines and bytes of the body, not rows, so it survives
+//! Wrap Lines; the rows draw their part of it.
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -32,8 +38,9 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, ClickEvent, Context, FontWeight, HighlightStyle, MouseButton, SharedString,
-    StyledText, UniformListScrollHandle, Window, canvas, div, prelude::*, px, uniform_list,
+    AnyElement, ClickEvent, Context, DispatchPhase, FontWeight, HighlightStyle, KeyDownEvent,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString,
+    StyledText, UniformListScrollHandle, Window, canvas, div, point, prelude::*, px, uniform_list,
 };
 use ket_core::id::WorktreeId;
 use ket_core::network::flags::{self, Flag, Kind, Source};
@@ -64,6 +71,12 @@ const ROW_INSET_RIGHT: gpui::Pixels = px(10.0);
 
 /// Width of the ⋯ menu.
 const MENU_W: gpui::Pixels = px(220.0);
+
+/// How near the body's top or bottom a dragged pick starts it scrolling.
+const AUTOSCROLL_EDGE: Pixels = px(28.0);
+
+/// One frame of that scrolling.
+const AUTOSCROLL_TICK: std::time::Duration = std::time::Duration::from_millis(16);
 
 /// What the context row's ⋯ menu offers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -186,6 +199,16 @@ pub(crate) struct RequestState {
     /// A line, and the byte in it, to scroll to once the rows it is in are
     /// known.
     reveal: Option<(usize, usize)>,
+    /// Text picked with the pointer, for ⌘C.
+    pick: Option<Pick>,
+    /// Where the pointer is while the button is held on the body: the pick
+    /// follows it, and the body scrolls when it leaves the top or bottom.
+    drag: Option<Point<Pixels>>,
+    /// Whether that scrolling is running — see
+    /// [`Shell::start_network_autoscroll`].
+    autoscrolling: bool,
+    /// The advance of one character of the body, as last drawn.
+    cell_width: Pixels,
     scroll: UniformListScrollHandle,
 }
 
@@ -206,6 +229,10 @@ impl Default for RequestState {
             columns: None,
             wrapped: None,
             reveal: None,
+            pick: None,
+            drag: None,
+            autoscrolling: false,
+            cell_width: px(7.0),
             scroll: UniformListScrollHandle::new(),
         }
     }
@@ -249,6 +276,190 @@ impl RequestState {
         self.scroll
             .scroll_to_item(row, gpui::ScrollStrategy::Center);
     }
+
+    /// The line numbers' column: wide enough for the last line's.
+    fn gutter(&self) -> Pixels {
+        px(18.0 + 7.0 * self.lines.len().to_string().len() as f32)
+    }
+
+    /// The byte of the body under `at` in the window, as a line and a byte
+    /// in it — the nearest one, with a pointer past the body's edges taken
+    /// as at them. None before the body is drawn, or for an empty one.
+    fn pos_at(&mut self, at: Point<Pixels>, wrap: bool) -> Option<Pos> {
+        let (view, offset) = {
+            let handle = &self.scroll.0.borrow().base_handle;
+            (handle.bounds(), handle.offset())
+        };
+        if view.size.height <= px(0.0) {
+            return None;
+        }
+        let y = at.y.max(view.top()).min(view.bottom() - px(1.0));
+        let row = (f32::from(y - view.top() - offset.y) / f32::from(LINE_HEIGHT)).floor();
+        let row = row.max(0.0) as usize;
+        let x = f32::from(at.x - view.left() - self.gutter()) / f32::from(self.cell_width).max(1.0);
+        let column = x.round().max(0.0) as usize;
+        let (line, shown) = if wrap {
+            let rows = self.wrapped();
+            let (line, range) = rows.get(row.min(rows.len().checked_sub(1)?))?.clone();
+            (line as usize, range)
+        } else {
+            let line = row.min(self.lines.len().checked_sub(1)?);
+            (line, 0..cut_at(&self.lines[line]))
+        };
+        let text = &self.lines[line][shown.clone()];
+        let at = text
+            .char_indices()
+            .nth(column)
+            .map_or(text.len(), |(at, _)| at);
+        Some((line, shown.start + at))
+    }
+
+    /// The text picked, with the body's own line breaks.
+    fn picked_text(&self) -> Option<String> {
+        let (start, end) = self.pick?.range();
+        if start == end {
+            return None;
+        }
+        let mut out = String::new();
+        for line in start.0..=end.0 {
+            let text = self.lines.get(line)?;
+            let from = if line == start.0 { start.1 } else { 0 };
+            let to = if line == end.0 { end.1 } else { text.len() };
+            if line > start.0 {
+                out.push('\n');
+            }
+            out.push_str(text.get(from..to).unwrap_or_default());
+        }
+        Some(out)
+    }
+}
+
+/// A place in a body: a line, and a byte in it.
+type Pos = (usize, usize);
+
+/// Text picked in a body with the pointer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Pick {
+    /// What the press took — a point, the word under it on a double-click,
+    /// the line on a triple — kept whole so a drag back past it keeps it.
+    anchor: (Pos, Pos),
+    /// Where the pointer has run to since.
+    head: Pos,
+}
+
+impl Pick {
+    /// The bytes picked, first to last.
+    fn range(&self) -> (Pos, Pos) {
+        let (from, to) = self.anchor;
+        (from.min(self.head), to.max(self.head))
+    }
+
+    /// Whether nothing is picked: a click that did not move.
+    fn is_empty(&self) -> bool {
+        let (from, to) = self.range();
+        from == to
+    }
+}
+
+/// The run of like characters around byte `at` of `line`, for a
+/// double-click: an identifier, a run of punctuation or a run of spaces,
+/// the classes every editor splits on. A click past the last character
+/// takes that character's run.
+fn word_at(line: &str, at: usize) -> Range<usize> {
+    let class = |c: char| {
+        if c.is_alphanumeric() || c == '_' {
+            2
+        } else if c.is_whitespace() {
+            0
+        } else {
+            1
+        }
+    };
+    let chars: Vec<(usize, char)> = line.char_indices().collect();
+    let Some(last) = chars.len().checked_sub(1) else {
+        return 0..0;
+    };
+    let pivot = chars.partition_point(|(start, _)| *start < at).min(last);
+    let kind = class(chars[pivot].1);
+    let mut start = pivot;
+    while start > 0 && class(chars[start - 1].1) == kind {
+        start -= 1;
+    }
+    let mut end = pivot + 1;
+    while end < chars.len() && class(chars[end].1) == kind {
+        end += 1;
+    }
+    chars[start].0..chars.get(end).map_or(line.len(), |(start, _)| *start)
+}
+
+/// A row's part of `pick` — the bytes `shown` of line `index` — as bytes
+/// of the row: from the pick's start on the line it starts on, to its end
+/// on the line it ends on, and whole between. None for a row the pick does
+/// not reach, including a later row of the line it ends on.
+fn row_pick(index: usize, shown: &Range<usize>, pick: Option<(Pos, Pos)>) -> Option<Range<usize>> {
+    let (from, to) = pick?;
+    if index < from.0 || index > to.0 {
+        return None;
+    }
+    let start = if index == from.0 { from.1 } else { shown.start };
+    let end = if index == to.0 { to.1 } else { shown.end };
+    let start = start.clamp(shown.start, shown.end) - shown.start;
+    let end = end.clamp(shown.start, shown.end) - shown.start;
+    (start < end).then_some(start..end)
+}
+
+/// `marked` and `picked` as the runs `StyledText` takes — in order, none
+/// overlapping — with text that is both drawn as marked on the pick's
+/// ground.
+fn runs(
+    marked: &[Range<usize>],
+    picked: Option<&Range<usize>>,
+    mark: HighlightStyle,
+    pick: HighlightStyle,
+) -> Vec<(Range<usize>, HighlightStyle)> {
+    let mut cuts: Vec<usize> = marked
+        .iter()
+        .chain(picked)
+        .flat_map(|range| [range.start, range.end])
+        .collect();
+    cuts.sort_unstable();
+    cuts.dedup();
+    cuts.windows(2)
+        .filter_map(|pair| {
+            let (from, to) = (pair[0], pair[1]);
+            let within = |range: &Range<usize>| range.start <= from && to <= range.end;
+            let style = match (marked.iter().any(within), picked.is_some_and(within)) {
+                (true, true) => HighlightStyle {
+                    background_color: pick.background_color,
+                    ..mark
+                },
+                (true, false) => mark,
+                (false, true) => pick,
+                (false, false) => return None,
+            };
+            Some((from..to, style))
+        })
+        .collect()
+}
+
+/// How far to scroll this frame for a drag whose pointer is at `y`: up when
+/// it is near or above the body's top, down near or below its bottom,
+/// faster the further out it is, and nothing between.
+fn edge_step(state: &RequestState, y: Pixels) -> Pixels {
+    let view = state.scroll.0.borrow().base_handle.bounds();
+    let past = if y < view.top() + AUTOSCROLL_EDGE {
+        y - (view.top() + AUTOSCROLL_EDGE)
+    } else if y > view.bottom() - AUTOSCROLL_EDGE {
+        y - (view.bottom() - AUTOSCROLL_EDGE)
+    } else {
+        return px(0.0);
+    };
+    let step = past / 3.0;
+    if step < px(0.0) {
+        step.max(px(-40.0)).min(px(-2.0))
+    } else {
+        step.min(px(40.0)).max(px(2.0))
+    }
 }
 
 /// What is flagged on each line of a body, and as what.
@@ -286,15 +497,25 @@ fn push_segments(index: usize, line: &str, columns: usize, out: &mut Vec<Segment
     }
 }
 
-/// `line` as a row with wrap off: whole, or cut at [`LINE_CAP`] with a mark
-/// saying how much more there is, and the byte length shown of it.
-fn cut_line(line: &SharedString) -> (SharedString, usize) {
+/// Where `line` is cut with wrap off: its end, or [`LINE_CAP`] brought back
+/// to a character's start.
+fn cut_at(line: &str) -> usize {
     if line.len() <= LINE_CAP {
-        return (line.clone(), line.len());
+        return line.len();
     }
     let mut cut = LINE_CAP;
     while !line.is_char_boundary(cut) {
         cut -= 1;
+    }
+    cut
+}
+
+/// `line` as a row with wrap off: whole, or cut at [`LINE_CAP`] with a mark
+/// saying how much more there is, and the byte length shown of it.
+fn cut_line(line: &SharedString) -> (SharedString, usize) {
+    let cut = cut_at(line);
+    if cut == line.len() {
+        return (line.clone(), cut);
     }
     let text = format!(
         "{} … {} more characters on this line",
@@ -1001,6 +1222,8 @@ impl Shell {
                             .enumerate()
                             .find_map(|(line, marks)| Some((line, marks.first()?.0.start)));
                         state.wrapped = None;
+                        state.pick = None;
+                        state.drag = None;
                         state.summary = Some(summary);
                         state.body = read.body;
                         state.lines = Arc::new(read.lines);
@@ -1044,6 +1267,8 @@ impl Shell {
                 state.summary = None;
                 state.lines = Arc::default();
                 state.marks = Arc::default();
+                state.pick = None;
+                state.drag = None;
                 state.error = Some("This request's log was deleted.".into());
             }
         }
@@ -1090,6 +1315,7 @@ impl Shell {
         self.worktree_menu = None;
         self.path_menu = None;
         self.project_menu = None;
+        self.tucked_menu = None;
         self.sidebar_menu = None;
         self.popup = None;
 
@@ -1319,13 +1545,13 @@ impl Shell {
 
         let alert = flagged.then(|| self.flag_alert(key, cx));
 
-        // Wide enough for the last line's number.
-        let gutter = px(18.0 + 7.0 * state.lines.len().to_string().len() as f32);
+        let gutter = state.gutter();
         let mono = self.font_family.clone();
         let cell_width = crate::editor::code_cell_width(window, &mono, BODY_TEXT);
         let Some(state) = self.network_requests.get_mut(key) else {
             return div().into_any_element();
         };
+        state.cell_width = cell_width;
         let wrapped = wrap.then(|| state.wrapped());
         // Wait for the real width before scrolling to what was flagged: the
         // rows cut at the fallback are not the rows that will be drawn.
@@ -1355,6 +1581,8 @@ impl Shell {
         } else {
             let lines = state.lines.clone();
             let marks = state.marks.clone();
+            let pick = state.pick.map(|pick| pick.range());
+            let dragging = state.drag.is_some();
             let count = wrapped.as_ref().map_or(lines.len(), |rows| rows.len());
             let list = uniform_list(
                 SharedString::from(format!("network-body-{}", key.id)),
@@ -1366,6 +1594,10 @@ impl Shell {
                     let marked = HighlightStyle {
                         color: Some(red.into()),
                         background_color: Some(alpha(red, 0.18).into()),
+                        ..Default::default()
+                    };
+                    let picked = HighlightStyle {
+                        background_color: Some(paint(t.selection).into()),
                         ..Default::default()
                     };
                     range
@@ -1385,7 +1617,7 @@ impl Shell {
                                 }
                             };
                             let hit = marks.get(line_index).filter(|ranges| !ranges.is_empty());
-                            let here: Vec<_> = hit
+                            let here: Vec<Range<usize>> = hit
                                 .into_iter()
                                 .flatten()
                                 .filter(|(range, _)| {
@@ -1394,14 +1626,16 @@ impl Shell {
                                 .map(|(range, _)| {
                                     let start = range.start.max(shown.start) - shown.start;
                                     let end = range.end.min(shown.end) - shown.start;
-                                    (start..end, marked)
+                                    start..end
                                 })
                                 .collect();
-                            let text: AnyElement = if here.is_empty() {
+                            let chosen = row_pick(line_index, &shown, pick);
+                            let highlights = runs(&here, chosen.as_ref(), marked, picked);
+                            let text: AnyElement = if highlights.is_empty() {
                                 text.into_any_element()
                             } else {
                                 StyledText::new(text)
-                                    .with_highlights(here)
+                                    .with_highlights(highlights)
                                     .into_any_element()
                             };
                             // A wrapped line's number is on its first row only.
@@ -1475,14 +1709,78 @@ impl Shell {
             .absolute()
             .size_full();
 
+            // While a pick is dragged, the pointer is followed past the
+            // body's edges too — the window's own moves, not the rows' — so
+            // the pick runs on and the body scrolls when it leaves the top
+            // or bottom.
+            let follow = dragging.then(|| {
+                let shell = cx.weak_entity();
+                let key = key.clone();
+                canvas(
+                    |_, _, _| {},
+                    move |_, _, window, _| {
+                        let (moved, moved_key) = (shell.clone(), key.clone());
+                        window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
+                            if phase != DispatchPhase::Bubble {
+                                return;
+                            }
+                            let _ = moved.update(cx, |this, cx| {
+                                let changed = match event.pressed_button {
+                                    Some(MouseButton::Left) => {
+                                        this.drag_network_pick(&moved_key, event.position, cx)
+                                    }
+                                    _ => this.end_network_drag(&moved_key),
+                                };
+                                if changed {
+                                    cx.notify();
+                                }
+                            });
+                        });
+                        let (released, released_key) = (shell.clone(), key.clone());
+                        window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
+                            if phase != DispatchPhase::Bubble {
+                                return;
+                            }
+                            let _ = released.update(cx, |this, cx| {
+                                if this.end_network_drag(&released_key) {
+                                    cx.notify();
+                                }
+                            });
+                        });
+                    },
+                )
+                .absolute()
+                .size_full()
+            });
+
+            let (press_key, up_key) = (key.clone(), key.clone());
             div()
                 .relative()
                 .flex()
                 .flex_grow()
                 .size_full()
                 .overflow_hidden()
+                .cursor_text()
                 .child(list)
                 .child(probe)
+                .children(follow)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                        this.press_network_body(&press_key, event);
+                        cx.notify();
+                    }),
+                )
+                // Here as well as on the window: a quick click can let go
+                // before the frame that starts listening there is drawn.
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(move |this, _: &MouseUpEvent, _, cx| {
+                        if this.end_network_drag(&up_key) {
+                            cx.notify();
+                        }
+                    }),
+                )
                 .into_any_element()
         };
 
@@ -1506,6 +1804,196 @@ impl Shell {
                     .child(body),
             )
             .into_any_element()
+    }
+
+    /// A press on `key`'s body: a pick starts under the pointer — the word
+    /// there on a double-click, the line on a triple — or, with ⇧, the pick
+    /// runs to it. The pick then follows the pointer until the button comes
+    /// up.
+    fn press_network_body(&mut self, key: &RequestKey, event: &MouseDownEvent) {
+        let wrap = self.network_panel.wrap;
+        let Some(state) = self.network_requests.get_mut(key) else {
+            return;
+        };
+        let Some(pos) = state.pos_at(event.position, wrap) else {
+            return;
+        };
+        let (line, at) = pos;
+        let anchor = match event.click_count {
+            1 => (pos, pos),
+            2 => {
+                let word = word_at(&state.lines[line], at);
+                ((line, word.start), (line, word.end))
+            }
+            _ => ((line, 0), (line, state.lines[line].len())),
+        };
+        state.pick = match state.pick {
+            Some(mut pick) if event.modifiers.shift && event.click_count == 1 => {
+                pick.head = pos;
+                Some(pick)
+            }
+            _ => Some(Pick { anchor, head: pos }),
+        };
+        state.drag = Some(event.position);
+    }
+
+    /// The pointer moved with the button held: the pick runs to the byte
+    /// under it, or to the body's edge when it is past one — and past it,
+    /// the body scrolls to follow. Says whether the pick changed.
+    fn drag_network_pick(
+        &mut self,
+        key: &RequestKey,
+        at: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let wrap = self.network_panel.wrap;
+        let Some(state) = self.network_requests.get_mut(key) else {
+            return false;
+        };
+        if state.drag.is_none() {
+            return false;
+        }
+        state.drag = Some(at);
+        let before = state.pick;
+        if let Some(pos) = state.pos_at(at, wrap)
+            && let Some(pick) = state.pick.as_mut()
+        {
+            pick.head = pos;
+        }
+        let changed = state.pick != before;
+        if edge_step(state, at.y) != px(0.0) {
+            self.start_network_autoscroll(key.clone(), cx);
+        }
+        changed
+    }
+
+    /// The button came up, or a move arrived without it: the drag is over,
+    /// and a pick that took nothing goes. Says whether there was a drag.
+    fn end_network_drag(&mut self, key: &RequestKey) -> bool {
+        let Some(state) = self.network_requests.get_mut(key) else {
+            return false;
+        };
+        let dragging = state.drag.take().is_some();
+        if state.pick.is_some_and(|pick| pick.is_empty()) {
+            state.pick = None;
+        }
+        dragging
+    }
+
+    /// Scrolls `key`'s body a step each frame while a drag holds the
+    /// pointer near or past its top or bottom. One loop per tab: a second
+    /// call while one runs does nothing.
+    fn start_network_autoscroll(&mut self, key: RequestKey, cx: &mut Context<Self>) {
+        let Some(state) = self.network_requests.get_mut(&key) else {
+            return;
+        };
+        if std::mem::replace(&mut state.autoscrolling, true) {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(AUTOSCROLL_TICK).await;
+                let going = this
+                    .update(cx, |this, cx| this.network_autoscroll_step(&key, cx))
+                    .unwrap_or(false);
+                if !going {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// One frame of [`Shell::start_network_autoscroll`]: scrolls, and runs
+    /// the pick to the byte now under the pointer. Says whether to keep
+    /// going.
+    fn network_autoscroll_step(&mut self, key: &RequestKey, cx: &mut Context<Self>) -> bool {
+        let wrap = self.network_panel.wrap;
+        let Some(state) = self.network_requests.get_mut(key) else {
+            return false;
+        };
+        let step = state.drag.map_or(px(0.0), |at| edge_step(state, at.y));
+        let Some(at) = state.drag.filter(|_| step != px(0.0)) else {
+            state.autoscrolling = false;
+            return false;
+        };
+        {
+            let handle = &state.scroll.0.borrow().base_handle;
+            let (offset, max) = (handle.offset(), handle.max_offset());
+            let y = (offset.y - step).max(-max.height).min(px(0.0));
+            handle.set_offset(point(offset.x, y));
+        }
+        if let Some(pos) = state.pos_at(at, wrap)
+            && let Some(pick) = state.pick.as_mut()
+        {
+            pick.head = pos;
+        }
+        cx.notify();
+        true
+    }
+
+    /// Escape and ⌘C while text is picked in the request tab in front.
+    pub(crate) fn network_request_key(
+        &mut self,
+        event: &KeyDownEvent,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(key) = self.active_request() else {
+            return false;
+        };
+        let Some(state) = self.network_requests.get_mut(&key) else {
+            return false;
+        };
+        if state.pick.is_none() {
+            return false;
+        }
+        let keys = event.keystroke.modifiers;
+        match event.keystroke.key.as_str() {
+            "escape" => {
+                state.pick = None;
+                state.drag = None;
+                true
+            }
+            "c" if keys.platform || keys.control => self.copy_network_pick(cx),
+            _ => false,
+        }
+    }
+
+    /// ⌘C and Edit › Copy: the text picked in the request tab in front to
+    /// the clipboard. Says whether there was any.
+    pub(crate) fn copy_network_pick(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(key) = self.active_request() else {
+            return false;
+        };
+        let Some(text) = self
+            .network_requests
+            .get(&key)
+            .and_then(RequestState::picked_text)
+        else {
+            return false;
+        };
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+        true
+    }
+
+    /// Edit › Select All in a request tab: the whole body. Says whether a
+    /// request tab was in front.
+    pub(crate) fn select_network_body(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(key) = self.active_request() else {
+            return false;
+        };
+        let Some(state) = self.network_requests.get_mut(&key) else {
+            return false;
+        };
+        if let Some(last) = state.lines.len().checked_sub(1) {
+            let end = (last, state.lines[last].len());
+            state.pick = Some(Pick {
+                anchor: ((0, 0), end),
+                head: (0, 0),
+            });
+            cx.notify();
+        }
+        true
     }
 
     /// What was flagged in `key`'s request, in a sentence, a chip a kind and
@@ -1998,5 +2486,103 @@ mod tests {
         let (text, shown) = cut_line(&long);
         assert_eq!(shown, LINE_CAP);
         assert!(text.ends_with(" … 5 more characters on this line"));
+    }
+
+    #[test]
+    fn a_double_click_takes_the_run_under_the_pointer() {
+        let line = "dsn: 'https://6f00ab@o45.example.com/'";
+        let word = |at: usize| &line[word_at(line, at)];
+        assert_eq!(word(0), "dsn");
+        assert_eq!(word(2), "dsn");
+        assert_eq!(word(3), ":");
+        assert_eq!(word(5), "'");
+        assert_eq!(word(16), "6f00ab");
+        assert_eq!(word(11), "://");
+        // Past the end: the last character's run.
+        assert_eq!(word(line.len()), "/'");
+        assert_eq!(word_at("", 0), 0..0);
+    }
+
+    #[test]
+    fn marks_and_the_pick_become_runs_that_do_not_overlap() {
+        let mark = HighlightStyle {
+            color: Some(gpui::red()),
+            background_color: Some(gpui::yellow()),
+            ..Default::default()
+        };
+        let pick = HighlightStyle {
+            background_color: Some(gpui::blue()),
+            ..Default::default()
+        };
+        let out = runs(std::slice::from_ref(&(2..6)), Some(&(4..9)), mark, pick);
+        let ranges: Vec<Range<usize>> = out.iter().map(|(range, _)| range.clone()).collect();
+        assert_eq!(ranges, [2..4, 4..6, 6..9]);
+        assert_eq!(out[0].1, mark);
+        // Marked text in the pick keeps its colour on the pick's ground.
+        assert_eq!(out[1].1.color, mark.color);
+        assert_eq!(out[1].1.background_color, pick.background_color);
+        assert_eq!(out[2].1, pick);
+
+        let apart = runs(std::slice::from_ref(&(0..2)), Some(&(5..7)), mark, pick);
+        let ranges: Vec<Range<usize>> = apart.iter().map(|(range, _)| range.clone()).collect();
+        assert_eq!(ranges, [0..2, 5..7]);
+        assert!(runs(&[], None, mark, pick).is_empty());
+    }
+
+    #[test]
+    fn the_text_picked_runs_across_lines_either_way_round() {
+        let state = RequestState {
+            lines: Arc::new(vec!["ab".into(), "cd".into(), "ef".into()]),
+            pick: Some(Pick {
+                anchor: ((0, 1), (0, 1)),
+                head: (2, 1),
+            }),
+            ..Default::default()
+        };
+        assert_eq!(state.picked_text().as_deref(), Some("b\ncd\ne"));
+        let backwards = RequestState {
+            pick: Some(Pick {
+                anchor: ((2, 1), (2, 1)),
+                head: (0, 1),
+            }),
+            ..state
+        };
+        assert_eq!(backwards.picked_text().as_deref(), Some("b\ncd\ne"));
+        let nothing = RequestState {
+            pick: Some(Pick {
+                anchor: ((1, 1), (1, 1)),
+                head: (1, 1),
+            }),
+            ..backwards
+        };
+        assert_eq!(nothing.picked_text(), None);
+        assert!(nothing.pick.unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_rows_part_of_the_pick_stays_within_the_row() {
+        // Line 1 is wrapped as bytes 0..10, 10..20 and 20..30.
+        let pick = Some(((1, 3), (1, 12)));
+        assert_eq!(row_pick(1, &(0..10), pick), Some(3..10));
+        assert_eq!(row_pick(1, &(10..20), pick), Some(0..2));
+        // A later row of the line the pick ends on, which it never reaches.
+        assert_eq!(row_pick(1, &(20..30), pick), None);
+        // An earlier row of the line it starts on.
+        let late = Some(((1, 25), (2, 4)));
+        assert_eq!(row_pick(1, &(0..10), late), None);
+        assert_eq!(row_pick(1, &(20..30), late), Some(5..10));
+        assert_eq!(row_pick(2, &(0..8), late), Some(0..4));
+        assert_eq!(row_pick(0, &(0..8), late), None);
+        assert_eq!(row_pick(3, &(0..8), late), None);
+        assert_eq!(row_pick(1, &(0..8), None), None);
+    }
+
+    #[test]
+    fn a_word_picked_stays_whole_when_dragged_back_past_it() {
+        let pick = Pick {
+            anchor: ((0, 4), (0, 8)),
+            head: (0, 1),
+        };
+        assert_eq!(pick.range(), ((0, 1), (0, 8)));
     }
 }

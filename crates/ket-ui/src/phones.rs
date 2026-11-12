@@ -11,9 +11,10 @@
 //! Phones are one switch at the top of the pane, off until turned on. On,
 //! the ket host runs the relay itself on the Mac and phones on the same
 //! Wi-Fi reach it — no restart, and no terminal ends; off, every phone is
-//! disconnected and nothing listens. A second switch under it links the host
-//! to ket's relay as well, so phones reach it from anywhere. Paired phones
-//! are listed either way: with no host to ask, `devices` reads the identity
+//! disconnected and nothing listens. Away from home, phones reach it over
+//! Tailscale; the switch that links the host to ket's relay as well stays
+//! hidden until that relay is offered ([`HOSTED_RELAY_OFFERED`]). Paired
+//! phones are listed either way: with no host to ask, `devices` reads the identity
 //! files, and revoking edits them.
 
 use std::sync::Arc;
@@ -23,7 +24,7 @@ use gpui::{
     AnyElement, ClipboardItem, Context, Pixels, SharedString, Task, WeakEntity, Window, div,
     prelude::*, px,
 };
-use ket_core::config::HOSTED_RELAY;
+use ket_core::config::{HOSTED_RELAY, HOSTED_RELAY_OFFERED};
 use ket_core::host::tailscale::Tailscale;
 use ket_core::host::{self, DeviceEntry, DeviceRole, HostedRelay, PendingPairing};
 use ket_core::theme::Theme;
@@ -704,7 +705,9 @@ impl Shell {
                     .child(
                         group_box(t)
                             .child(self.tailscale_row(pane, t))
-                            .child(self.hosted_row(pane, t, cx))
+                            .when(HOSTED_RELAY_OFFERED, |group| {
+                                group.child(self.hosted_row(pane, t, cx))
+                            })
                             .children(self.reach_row(pane, window, t, cx)),
                     ),
             ));
@@ -788,8 +791,7 @@ impl Shell {
             "phones-note",
             Tone::Info,
             "Only devices you pair can connect. Away from home they reach this Mac over \
-             Tailscale, or through ket's relay when it is on, which passes along what it \
-             cannot read. Everything between them is end-to-end encrypted, and revoking one \
+             Tailscale. Everything between them is end-to-end encrypted, and revoking one \
              disconnects it at once.",
             t,
         ))));

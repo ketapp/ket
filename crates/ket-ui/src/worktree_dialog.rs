@@ -497,6 +497,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         self.project_menu = None;
+        self.tucked_menu = None;
         let Some(node) = self.projects.get(index) else {
             return;
         };

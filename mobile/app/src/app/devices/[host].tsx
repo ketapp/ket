@@ -14,12 +14,12 @@ import { ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import type { Device } from '@ket/remote';
 
 import { hostOf } from '../../components/ConnectionHelp';
-import { addressKind, reachesAway } from '../../lib/address-kind';
-import { Close, Cloud, Desktop, Globe, Link, Padlock, Phone, Plus, Refresh, Tablet, Wifi } from '../../components/icons';
+import { WAY_NAME, addressKind, reachesAway, wayOf } from '../../lib/address-kind';
+import { ADDRESS_ICON, Close, Desktop, Link, Padlock, Phone, Plus, Refresh, Tablet } from '../../components/icons';
 import { Bar, Button, Card, Figure, Heading, IconButton, Prose, Row, Screen, Tag, Value, field, oneLine } from '../../components/ui';
 import { confirm } from '../../lib/confirm';
 import { dropConnection, type HostConnection } from '../../lib/connection';
-import { useHost } from '../../lib/hosts';
+import { statusLine, useHost } from '../../lib/hosts';
 import { forgetHost } from '../../lib/store';
 import { font, size, t } from '../../lib/theme';
 
@@ -170,8 +170,8 @@ export default function Devices() {
           ) : null}
           {conn && !reachesAway(conn.host) ? (
             <Prose color={t.dim} style={styles.note}>
-              Only on the Mac’s own network for now. To reach it from anywhere, turn on Tailscale or Reach it from
-              anywhere under Away from home in the Mac’s Settings › Devices, then scan Show code there.
+              Only on the Mac’s own network for now. To reach it from anywhere, turn on Tailscale on both, then scan
+              Show code under Away from home in the Mac’s Settings › Devices.
             </Prose>
           ) : null}
         </Card>
@@ -219,7 +219,7 @@ function Status({ conn }: { conn: HostConnection }) {
   const title = status === 'connected' ? 'Connected' : status === 'offline' ? 'Can’t reach it' : 'Connecting…';
   const detail =
     status === 'connected'
-      ? `${route(conn.activeAddress, conn)}${conn.upSince ? ` · since ${when(conn.upSince)}` : ''}`
+      ? `${statusLine(conn).text}${conn.upSince ? ` · since ${when(conn.upSince)}` : ''}`
       : status === 'offline'
         ? `${conn.downSince ? `Down since ${when(conn.downSince)} · ` : ''}attempt ${Math.max(conn.attempts, 1)}`
         : 'Trying every saved address';
@@ -279,8 +279,8 @@ function AddressRow({
   children?: ReactNode;
 }) {
   const live = conn?.status === 'connected' && conn.activeAddress === url;
-  const k = kind(url, manual);
-  const Icon = k.icon;
+  const way = wayOf(url, manual);
+  const Icon = manual ? Link : ADDRESS_ICON[addressKind(url)];
   const said = failure ? outcome(failure) : null;
   return (
     <View style={styles.addressRow}>
@@ -288,7 +288,7 @@ function AddressRow({
         <Row
           mark={<Icon size={16} color={live ? t.running : t.dim} />}
           title={hostOf(url)}
-          detail={manual ? 'Added on this phone' : `${k.name} · from your Mac`}
+          detail={manual ? WAY_NAME.manual : `${WAY_NAME[way]} · from your Mac`}
           meta={
             live ? (
               <Tag color={t.running}>In use</Tag>
@@ -301,38 +301,6 @@ function AddressRow({
       {children}
     </View>
   );
-}
-
-/** What an address is, from its shape: the Mac's own name on the local
- * network, a Tailscale name, ket's relay, or anything else — a relay. */
-function kind(url: string, manual?: boolean): { name: string; icon: typeof Wifi } {
-  if (manual) return { name: 'Added on this phone', icon: Link };
-  switch (addressKind(url)) {
-    case 'ket-relay':
-      return { name: 'ket’s relay', icon: Cloud };
-    case 'tailnet':
-      return { name: 'Tailscale', icon: Globe };
-    case 'local':
-      return { name: 'Local network', icon: Wifi };
-    default:
-      return { name: 'Relay', icon: Globe };
-  }
-}
-
-/** Where the open session runs, as a phrase. */
-function route(address: string | null, conn: HostConnection): string {
-  if (!address) return 'Connected';
-  if (conn.host.manualAddresses?.includes(address)) return 'At an address you added';
-  switch (kind(address).name) {
-    case 'Local network':
-      return 'On the local network';
-    case 'Tailscale':
-      return 'Over Tailscale';
-    case 'ket’s relay':
-      return 'Through ket’s relay';
-    default:
-      return 'Through the relay';
-  }
 }
 
 /** A dial's failure as a word, coloured by how final it is: no answer may

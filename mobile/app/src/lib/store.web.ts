@@ -8,6 +8,7 @@ import './polyfills';
 import { type Keypair, type PairedHost, fromBase64Url, generateKeypair, keypairFrom, toBase64Url } from '@ket/remote';
 
 import { DEFAULT_NOTIFY, type LastWork, type LockConfig, type NotifyConfig, type SavedHost } from './store';
+import { addressKind } from './address-kind';
 import { dialAddresses, normalizeHost } from './addresses';
 
 export { DEFAULT_NOTIFY, type LastWork, type LockConfig, type NotifyConfig, type SavedHost } from './store';
@@ -123,11 +124,13 @@ export async function saveNotify(config: NotifyConfig): Promise<void> {
 }
 
 export function toPaired(host: SavedHost): PairedHost {
+  const addresses = dialAddresses(host);
   return {
     hostId: fromBase64Url(host.id),
     hostPublic: fromBase64Url(host.hostPublic),
     relay: host.relay,
-    addresses: dialAddresses(host),
+    addresses,
+    preferred: addresses.filter((address) => addressKind(address) === 'local'),
   };
 }
 

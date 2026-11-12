@@ -419,6 +419,64 @@ fn resume_args(cwd: &std::path::Path, agent: &AgentSpec) -> Option<(String, Vec<
 }
 
 impl Shell {
+    /// Opens a visible setup command in its own terminal, even before a
+    /// project has been added. The process starts only from the clicked
+    /// Install or Sign in button.
+    pub(crate) fn start_setup_command(
+        &mut self,
+        agent: crate::setup::QuickStart,
+        install: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(old) = self.setup_terminal {
+            self.close_terminal(old);
+        }
+        let id = TerminalId(self.next_terminal);
+        self.next_terminal += 1;
+        self.setup_terminal = Some(id);
+        self.setup_running = Some((agent, install));
+        self.terminal_notes
+            .insert(id, "Starting setup terminal…".into());
+
+        let command = if install {
+            agent.install()
+        } else {
+            agent.login()
+        };
+        let cwd = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        let mut spec = TerminalSpec::shell(cwd);
+        let startup = format!("{command}; exit $?");
+        let launch = ket_core::shell::launch(&ket_core::shell::login_shell(), Some(&startup));
+        spec.command = launch.command;
+        spec.args = launch.args;
+        spec.env.extend(launch.env);
+        // The native installers put both commands here. The setup shell sees
+        // the new binary immediately, even if ket inherited an older PATH.
+        if let Some(home) = std::env::var_os("HOME") {
+            let mut paths = vec![PathBuf::from(home).join(".local/bin")];
+            if let Some(inherited) = std::env::var_os("PATH") {
+                paths.extend(std::env::split_paths(&inherited));
+            }
+            if let Ok(path) = std::env::join_paths(paths) {
+                spec.env
+                    .insert("PATH".to_owned(), path.to_string_lossy().into_owned());
+            }
+        }
+        cx.notify();
+        cx.spawn(async move |this: WeakEntity<Shell>, cx: &mut AsyncApp| {
+            let opened = cx
+                .background_executor()
+                .spawn(async move { Terminal::open(&spec) })
+                .await;
+            let _ = this.update(cx, |shell, cx| {
+                shell.finish_terminal(id, command.to_owned(), None, None, opened, cx);
+            });
+        })
+        .detach();
+    }
+
     /// Opens (or resumes) the selected worktree's own session: its configured
     /// agent, picking up its last conversation if it left one.
     ///
@@ -1768,7 +1826,13 @@ impl Shell {
             Ok(term) => term,
             Err(e) => {
                 tracing::warn!(terminal = id.0, error = %e, "terminal refused to open");
-                self.wake_failed(id, format!("Could not open terminal: {e}").into(), cx);
+                if self.setup_terminal == Some(id) {
+                    self.close_terminal(id);
+                    self.refresh_setup(cx);
+                    cx.notify();
+                } else {
+                    self.wake_failed(id, format!("Could not open terminal: {e}").into(), cx);
+                }
                 return;
             }
         };
@@ -1942,9 +2006,16 @@ impl Shell {
             // someone quitting their shell, and the tab goes.
             let used = opened.elapsed() >= STARTUP_GRACE;
             let clean = dying.exit_status().is_some_and(|status| status.success());
-            if used || clean {
+            let setup = this
+                .update(cx, |shell, _| shell.setup_terminal == Some(id))
+                .unwrap_or(false);
+            if setup || used || clean {
                 let _ = this.update(cx, |shell, cx| {
+                    let setup = shell.setup_terminal == Some(id);
                     shell.close_terminal(id);
+                    if setup {
+                        shell.refresh_setup(cx);
+                    }
                     cx.notify();
                 });
                 return;
@@ -1966,6 +2037,9 @@ impl Shell {
                 .unwrap_or_else(|| "no exit status".to_owned());
             let _ = this.update(cx, |shell, cx| {
                 shell.note = Some(format!("{command} exited immediately ({code})").into());
+                if shell.setup_terminal == Some(id) {
+                    shell.refresh_setup(cx);
+                }
                 cx.notify();
             });
         });
@@ -1993,6 +2067,10 @@ impl Shell {
     /// Both, always: a handle without a tab is a shell nobody can reach, and a
     /// tab without a handle is the pane that could not be got out of.
     pub(crate) fn close_terminal(&mut self, terminal: TerminalId) {
+        if self.setup_terminal == Some(terminal) {
+            self.setup_terminal = None;
+            self.setup_running = None;
+        }
         self.clear_agent_status(terminal);
         self.asleep_terminals.remove(&terminal);
         self.terminal_notes.remove(&terminal);
@@ -2018,6 +2096,11 @@ impl Shell {
     /// when that tab is a terminal. Read from the worktree dialog too, to
     /// decide which project a chord-opened worktree belongs to.
     pub(crate) fn active_terminal_id(&self) -> Option<TerminalId> {
+        if self.setup_visible()
+            && let Some(id) = self.setup_terminal
+        {
+            return Some(id);
+        }
         match self.space()?.active_tab()?.kind {
             TabKind::Terminal(id) => Some(id),
             _ => None,
@@ -2136,6 +2219,9 @@ impl Shell {
     /// selected — a space that is not the current one is not drawn at all, so
     /// every terminal in it is as hidden as one behind a tab.
     fn terminal_is_visible(&self, id: TerminalId) -> bool {
+        if self.setup_visible() && self.setup_terminal == Some(id) {
+            return true;
+        }
         self.space()
             .is_some_and(|space| space.active_terminal_ids().contains(&id))
     }
@@ -2515,14 +2601,17 @@ impl Shell {
         // does not take — so a focused terminal behind the quick prompt got
         // every character typed into it as well.
         let modal = self.modal_open();
-        let focused = self
-            .space()
-            .filter(|_| !modal)
-            .and_then(|space| space.active_tab())
-            .and_then(|tab| match tab.kind {
-                TabKind::Terminal(id) => Some(id),
-                _ => None,
-            });
+        let focused = if self.setup_visible() && self.setup_terminal.is_some() && !modal {
+            self.setup_terminal
+        } else {
+            self.space()
+                .filter(|_| !modal)
+                .and_then(|space| space.active_tab())
+                .and_then(|tab| match tab.kind {
+                    TabKind::Terminal(id) => Some(id),
+                    _ => None,
+                })
+        };
 
         let views: Vec<(TerminalId, Entity<TerminalView>)> = self
             .terminals

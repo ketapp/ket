@@ -829,6 +829,7 @@ impl Shell {
         // One overlay at a time, as everywhere else in the shell.
         self.menu = None;
         self.project_menu = None;
+        self.tucked_menu = None;
         self.palette.open = false;
 
         let (config, error, writable) = match Config::load() {
@@ -1335,13 +1336,29 @@ impl Shell {
             FontRole::Ui => ("preferences-ui-font", "Filter fonts"),
             FontRole::Code => ("preferences-code-font", "Filter fixed-width fonts"),
         };
-        // ket's own first, then a separator, then everything installed. The
-        // separator takes no selection slot, so a family's row is one past
-        // its index.
-        let selected = current
-            .as_ref()
-            .and_then(|name| families.iter().position(|family| family == name))
-            .map_or(0, |index| index + 1);
+        // The platform's own UI face, for the interface only: SF Pro, which
+        // the catalogue leaves out with the other dotted system names. It is
+        // what macOS and VS Code set their interfaces in, so it is the one
+        // choice that matches them.
+        let system = (role == FontRole::Ui).then(|| {
+            MenuItem::new(
+                Some(crate::fonts::SYSTEM.to_owned()),
+                font_label(Some(crate::fonts::SYSTEM)),
+            )
+            .subtitle("SF Pro, as macOS and VS Code set their interfaces")
+        });
+        // ket's own first, the system face under it for the interface, then
+        // a separator, then everything installed. The separator takes no
+        // selection slot, so a family's row is that many past its index.
+        let leading = 1 + usize::from(system.is_some());
+        let selected = match current.as_deref() {
+            Some(crate::fonts::SYSTEM) if system.is_some() => 1,
+            Some(name) => families
+                .iter()
+                .position(|family| family == name)
+                .map_or(0, |index| index + leading),
+            None => 0,
+        };
         let shipped_row = MenuItem::new(None, "Default").subtitle(shipped);
         let mut entries: Vec<MenuEntry<Option<String>>> =
             vec![MenuEntry::Item(if current.is_none() {
@@ -1349,6 +1366,15 @@ impl Shell {
             } else {
                 shipped_row
             })];
+        if let Some(system) = system {
+            entries.push(MenuEntry::Item(
+                if current.as_deref() == Some(crate::fonts::SYSTEM) {
+                    system.checked()
+                } else {
+                    system
+                },
+            ));
+        }
         entries.push(MenuEntry::Separator);
         entries.extend(families.into_iter().map(|family| {
             let item = MenuItem::new(Some(family.clone()), family.clone());
@@ -3337,6 +3363,12 @@ impl Shell {
         let tab = view.agents_tab;
         let mut content = Vec::new();
         if !searching {
+            content.push(Entry::layout(
+                crate::ui::row::row("agent-setup-row", false, t)
+                    .child("Set up a coding agent…")
+                    .on_click(cx.listener(|this, _, _, cx| this.open_setup(cx))),
+            ));
+            content.push(Entry::layout(div().h(px(10.0))));
             let local = entries
                 .iter()
                 .filter(|entry| ket_core::local_models::model_tag(&entry.name).is_some())
@@ -4128,6 +4160,11 @@ impl Shell {
                     let check = *check;
                     this.close_preference_menus();
                     this.save_setting(|config| config.updates.check = check);
+                    // What was saved, which is the old choice if saving failed.
+                    if let Some(view) = this.preferences.as_ref() {
+                        let saved = view.config.updates.check;
+                        this.set_update_check(saved, cx);
+                    }
                     cx.notify();
                 },
                 |this, cx| {
@@ -4188,8 +4225,7 @@ impl Shell {
         )
         .into_any_element();
 
-        // There is no updater yet; the choice is kept for the one that comes.
-        // Every build is a dev build until then, and a dev build never looks.
+        // A dev build never looks; see `crate::updates`.
         let updates = match ket_core::build_info::CHANNEL {
             ket_core::build_info::Channel::Dev => {
                 "How often to look for a newer ket. Dev builds never look."
@@ -4274,6 +4310,7 @@ impl Shell {
                 t,
             ),
             setting("Check for updates", updates, update_select, t),
+            self.update_status_setting(cx),
             self.unhook_setting(t, cx),
         ]
     }
@@ -4432,7 +4469,7 @@ impl Shell {
 
         let mut entries = vec![setting(
             "Log what agents send",
-            "Every request Claude Code makes from a worktree, kept on this Mac for five days \
+            "Every request Claude Code or Codex makes from a worktree, kept on this Mac for five days \
              and deleted with the worktree. The Network panel shows it. Applies to agents \
              started from now on; one already running is left as it is.",
             switch("network-log", log, t)
@@ -5592,6 +5629,7 @@ const SWATCH: gpui::Pixels = px(12.0);
 /// ket's own — see `crate::fonts`.
 fn font_label(family: Option<&str>) -> gpui::SharedString {
     match family {
+        Some(crate::fonts::SYSTEM) => "System font".into(),
         Some(family) => family.to_owned().into(),
         None => "Default".into(),
     }

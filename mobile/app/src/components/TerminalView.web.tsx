@@ -6,6 +6,7 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef } from 'react';
 import { toBase64Url } from '@ket/remote';
 
+import { terminalFont } from '../lib/terminal-font';
 import { page } from '../lib/terminal-page';
 import { t } from '../lib/theme';
 import type { TerminalHandle } from './TerminalView';
@@ -60,6 +61,13 @@ export const TerminalView = forwardRef<TerminalHandle, Props>(function TerminalV
       // other scheme, and this checks again rather than trusting the frame.
       if (message.type === 'open' && message.url && /^https?:\/\//.test(message.url)) {
         window.open(message.url, '_blank', 'noopener,noreferrer');
+      }
+      // The page asks for its face once it has loaded; see lib/terminal-font.
+      if (message.type === 'loaded') {
+        void terminalFont().then((font) => {
+          const target = frame.current?.contentWindow as (Window & { ket?: (m: object) => void }) | null;
+          target?.ket?.({ type: 'font', ...font });
+        });
       }
       if (message.type === 'ready') handlers.current.onReady?.();
     };

@@ -250,13 +250,17 @@ impl PaneAgentStatus {
     /// Applies a cancel verdict: the lead stops, and so does everything the
     /// turn had running that sends no stop of its own.
     fn cancel_now(&mut self, source: CancelSource, at_ms: u64) {
-        self.stop(at_ms);
+        self.stop(at_ms, "the turn was cancelled");
         self.cancel = Some(CancelVerdict { source, at_ms });
     }
 
     /// Stops the lead without latching anything — the shared half of a
-    /// verdict and of Escape's guess.
-    fn stop(&mut self, at_ms: u64) {
+    /// verdict and of Escape's guess. `why` names the caller for the log,
+    /// should this take a prompt down with it — see [`prompt_left`].
+    fn stop(&mut self, at_ms: u64, why: &'static str) {
+        if let Some(asked) = self.question.as_ref() {
+            prompt_left(&self.pane, &self.agent, asked, why);
+        }
         self.state = AgentState::Idle;
         self.note = None;
         self.question = None;
@@ -322,6 +326,9 @@ pub struct StatusStore {
     sessions: HashMap<String, String>,
     /// Where each worktree is on disk — see [`Self::route`].
     worktrees: Vec<Registered>,
+    /// The worktree each Codex thread works in, by session, as its own
+    /// thread-level events place it — see [`Self::route`].
+    threads: HashMap<String, String>,
 }
 
 impl StatusStore {
@@ -371,12 +378,37 @@ impl StatusStore {
     /// Codex may keep serving threads from a shared process. A thread opened
     /// in another checkout then inherits the process's original
     /// `KET_WORKTREE_ID`, even though Codex puts the thread's real `cwd` in
-    /// every event payload. That per-event fact wins whenever it names a
-    /// known worktree. Only the worktree moves: the pane is the process that
-    /// sent the report, which is where a keystroke cancelling it goes.
+    /// its events. That fact wins whenever it names a known worktree. Only
+    /// the worktree moves: the pane is the process that sent the report,
+    /// which is where a keystroke cancelling it goes.
+    ///
+    /// Only a thread-level event's `cwd` is the thread's, though. On a tool
+    /// call or a permission prompt it is the command's own `workdir` — a
+    /// check run in the main checkout, say — and placing the report there
+    /// moved the whole pane, prompt and all, to a worktree its tab is not
+    /// in: the phone looks for a pane's prompt under the pane's worktree,
+    /// and showed neither the prompt nor the wait. Those events take the
+    /// worktree the thread's own events last placed it in, as
+    /// [`Self::report`] learns it, and otherwise keep the one they came
+    /// with. One that came with none — a thread this store has not seen
+    /// since the host started, in a Codex started outside ket — still falls
+    /// back to its `cwd`, rather than being dropped.
     pub fn route(&self, report: &mut HookReport) {
         if !report.agent.eq_ignore_ascii_case("codex") {
             return;
+        }
+        if command_scoped(report.event) {
+            if let Some(thread) = report
+                .session
+                .as_deref()
+                .and_then(|session| self.threads.get(session))
+            {
+                report.worktree = Some(thread.clone());
+                return;
+            }
+            if report.worktree.is_some() {
+                return;
+            }
         }
         let Some(cwd) = report.cwd.as_deref() else {
             return;
@@ -400,7 +432,26 @@ impl StatusStore {
     pub fn report(&mut self, report: &HookReport, known: impl Fn(&str) -> bool) -> bool {
         let mut report = report.clone();
         self.route(&mut report);
+        // Where a Codex thread works, for its tool calls and prompts to be
+        // placed by — see `route`. Only the thread's own events say so: a
+        // subagent's may come from another checkout, and would carry the
+        // lead's later prompts there with it.
+        if report.agent.eq_ignore_ascii_case("codex")
+            && !command_scoped(report.event)
+            && report.subagent.is_none()
+            && let (Some(session), Some(worktree)) = (
+                report.session.as_deref().filter(|id| !id.is_empty()),
+                report.worktree.as_deref(),
+            )
+        {
+            if report.event == HookEvent::SessionEnd {
+                self.threads.remove(session);
+            } else {
+                self.threads.insert(session.to_owned(), worktree.to_owned());
+            }
+        }
         let Some(worktree) = report.worktree.clone() else {
+            dropped("", &report, "it names no worktree ket knows");
             return false;
         };
         let Some(pane) = self.resolve_pane(&report, &worktree, &known) else {
@@ -445,12 +496,7 @@ impl StatusStore {
         }
         match named {
             Some(pane) => {
-                tracing::debug!(
-                    pane,
-                    agent = %report.agent,
-                    event = ?report.event,
-                    "hook report from a pane this owner does not run; left unfiled"
-                );
+                dropped(pane, report, "it names a pane this owner does not run");
                 None
             }
             None => Some(format!("{UNPLACED}{worktree}")),
@@ -459,6 +505,19 @@ impl StatusStore {
 
     fn apply(&mut self, pane: String, worktree: String, report: &HookReport) -> bool {
         let at_ms = report.at_ms;
+
+        if self
+            .panes
+            .get(&pane)
+            .is_some_and(|entry| foreign(entry, report))
+        {
+            dropped(
+                &pane,
+                report,
+                "it is from another agent run inside this tab",
+            );
+            return false;
+        }
 
         // A subagent's report is about the subagent, never the lead: its tool
         // calls used to overwrite the lead's note, and one of several parallel
@@ -521,13 +580,18 @@ impl StatusStore {
         // The prompt a waiting subagent raised, announced again at the lead.
         // It is the subagent's, and its row already says so.
         if report.event == HookEvent::Notification && entry.roster.blocked() {
+            dropped(
+                &entry.pane,
+                report,
+                "it restates a subagent's prompt at the lead",
+            );
             return false;
         }
         if superseded(entry, report) {
-            tracing::debug!(
-                pane = %entry.pane,
-                event = ?report.event,
-                "report from a session this pane has moved on from"
+            dropped(
+                &entry.pane,
+                report,
+                "it is from a session this pane has moved on from",
             );
             return false;
         }
@@ -553,11 +617,7 @@ impl StatusStore {
 
         if entry.cancel.is_some() {
             if restates_turn(report.event) {
-                tracing::debug!(
-                    pane = %entry.pane,
-                    event = ?report.event,
-                    "held against a cancelled turn"
-                );
+                dropped(&entry.pane, report, "it is held against a cancelled turn");
                 return false;
             }
             entry.cancel = None;
@@ -625,7 +685,10 @@ impl StatusStore {
                 );
                 return true;
             }
-            tracing::debug!(
+            // At info, like every other way a prompt leaves the store: a
+            // prompt still on screen that ket has let go of is a person
+            // waiting on a phone that shows nothing.
+            tracing::info!(
                 pane = %entry.pane,
                 agent = %entry.agent,
                 tool = %asked.tool,
@@ -685,6 +748,7 @@ impl StatusStore {
         // A `Notification` restating the wait says no more than that it
         // waits, and must not wipe what the `PermissionRequest` before it
         // said it was waiting on.
+        let asked_before = entry.question.clone();
         entry.question = match state {
             AgentState::AwaitingPermission => report
                 .question
@@ -701,6 +765,29 @@ impl StatusStore {
                 }),
             _ => None,
         };
+        // Every prompt going up and every one a report takes down, at info:
+        // the host's log is the record of what a phone was shown.
+        match (asked_before.as_ref(), entry.question.as_ref()) {
+            (before, Some(now)) if before.is_none_or(|before| before.id != now.id) => {
+                tracing::info!(
+                    pane = %entry.pane,
+                    agent = %entry.agent,
+                    event = ?report.event,
+                    tool = %now.tool,
+                    id = now.id,
+                    "prompt up"
+                );
+            }
+            (Some(before), None) => tracing::info!(
+                pane = %entry.pane,
+                agent = %entry.agent,
+                event = ?report.event,
+                tool = %before.tool,
+                id = before.id,
+                "prompt cleared by a report"
+            ),
+            _ => {}
+        }
         // A report that replaced the dialog's question, or took the wait
         // away, took what it covered with it: the screen is read afresh.
         if entry
@@ -818,7 +905,7 @@ impl StatusStore {
             return false;
         };
         tracing::debug!(pane, agent = %entry.agent, "turn stopped: escape");
-        entry.stop(now_ms);
+        entry.stop(now_ms, "Escape was pressed");
         self.revision += 1;
         true
     }
@@ -843,8 +930,7 @@ impl StatusStore {
         }) else {
             return false;
         };
-        tracing::debug!(pane, agent = %entry.agent, tool = %question.tool, "prompt gone: hook ended");
-        entry.stop(now_ms);
+        entry.stop(now_ms, "its held hook ended");
         self.revision += 1;
         true
     }
@@ -874,7 +960,7 @@ impl StatusStore {
         let Some(asked) = entry.question.take() else {
             return false;
         };
-        tracing::debug!(pane, agent = %entry.agent, tool = %asked.tool, allowed, "prompt answered from a phone");
+        tracing::info!(pane, agent = %entry.agent, tool = %asked.tool, allowed, "prompt answered from a phone");
         if allowed {
             entry.state = AgentState::ExecutingTool;
             entry.note = asked.subject.clone();
@@ -888,7 +974,7 @@ impl StatusStore {
                 ended_at_ms: None,
             });
         } else {
-            entry.stop(now_ms);
+            entry.stop(now_ms, "denied from a phone");
         }
         entry.answered = Some(Answered {
             question: asked,
@@ -961,6 +1047,47 @@ pub(crate) fn settled(state: AgentState) -> bool {
     }
 }
 
+/// Whether an event's `cwd` can be a command's directory rather than its
+/// thread's: a tool call, and a permission asked for one — see
+/// [`StatusStore::route`].
+fn command_scoped(event: HookEvent) -> bool {
+    matches!(
+        event,
+        HookEvent::PreTool
+            | HookEvent::PostTool
+            | HookEvent::PostToolFailure
+            | HookEvent::PermissionRequest
+            | HookEvent::PermissionDenied
+    )
+}
+
+/// A prompt leaving the store some other way than a report about it, at
+/// info for the same reason as "prompt up": a prompt cleared while still on
+/// screen is a person waiting on a phone that shows nothing, and the log is
+/// how to tell which rule did it.
+fn prompt_left(pane: &str, agent: &str, asked: &PermissionQuestion, why: &'static str) {
+    tracing::info!(pane, agent, tool = %asked.tool, id = asked.id, why, "prompt cleared");
+}
+
+/// A report the store will not file. At info when it carries a prompt, the
+/// one report whose loss leaves a person waiting on a phone that shows
+/// nothing, so the log names the rule that dropped it; at debug otherwise,
+/// since hooks send the rest by the hundred.
+fn dropped(pane: &str, report: &HookReport, why: &'static str) {
+    if report.question.is_some() {
+        tracing::info!(
+            pane,
+            agent = %report.agent,
+            event = ?report.event,
+            tool = report.tool_name.as_deref().unwrap_or_default(),
+            why,
+            "prompt report dropped"
+        );
+    } else {
+        tracing::debug!(pane, agent = %report.agent, event = ?report.event, why, "report dropped");
+    }
+}
+
 /// Whether a lead's report comes from a session older than the one its pane
 /// has moved on to — a `/clear`, a resume, a new agent — and arrived late.
 ///
@@ -975,6 +1102,22 @@ fn superseded(entry: &PaneAgentStatus, report: &HookReport) -> bool {
     let from = report.session.as_deref().filter(|id| !id.is_empty());
     held.zip(from).is_some_and(|(held, from)| held != from)
         && report.event != HookEvent::SessionStart
+}
+
+/// Whether a report is from an agent other than the one a tab was opened
+/// for: Codex run through Claude's shell, say, which inherits the tab's
+/// environment and so names its pane. Its `SessionStart` would move the tab
+/// to that run, which the tab's own agent then never moves back.
+///
+/// Other means a harness neither the tab's agent nor the one reporting from
+/// it so far has. A shell tab has no agent of its own: quitting one agent
+/// there and starting another is the tab moving on.
+fn foreign(entry: &PaneAgentStatus, report: &HookReport) -> bool {
+    let tab = entry.pane.split('|').nth(1).unwrap_or_default();
+    let other = |agent: &str| {
+        !crate::agents::harness(agent).eq_ignore_ascii_case(crate::agents::harness(&report.agent))
+    };
+    !tab.is_empty() && tab != "shell" && other(tab) && other(&entry.agent)
 }
 
 /// Whether an event is the cancelled turn still talking — ignored while a

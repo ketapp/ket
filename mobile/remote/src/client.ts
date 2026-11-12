@@ -41,6 +41,10 @@ const HANDSHAKE_TIMEOUT_MS = 15_000;
  * fails — a wrong address on some networks, a relay that accepts and says
  * nothing — would otherwise hang the caller forever. */
 const DIAL_TIMEOUT_MS = 10_000;
+/** How long the addresses on the phone's own network get to answer before
+ * the rest are dialled too. A name on the local network is looked up first,
+ * so a tailnet address — a bare IP — would otherwise win at home. */
+const HEAD_START_MS = 1_000;
 
 /** Frames, and bytes, a link holds for a reader that has not asked for
  * them yet. Past either the desktop — or whatever stands in for it on the
@@ -216,6 +220,9 @@ export interface PairedHost {
   relay: string;
   /** Addresses to race on resume, including the pairing URL as fallback. */
   addresses?: string[];
+  /** Those of them on the desktop's own network, dialled first: the rest
+   * wait for these to have their head start, or to have all failed. */
+  preferred?: string[];
 }
 
 /** No address answered: what each one said, so a screen can show which
@@ -228,19 +235,34 @@ export class DialError extends Error {
   }
 }
 
-/** Opens all addresses together and closes every link that loses the race. */
+/** Opens the addresses together and closes every link that loses the race:
+ * the `preferred` ones at once, the rest after `headStartMs`, or as soon as
+ * every preferred one has failed. */
 export async function firstOpen<T extends { close(): void }>(
   addresses: string[],
   open: (address: string, signal: AbortSignal) => Promise<T>,
+  preferred: readonly string[] = [],
+  headStartMs = HEAD_START_MS,
 ): Promise<{ link: T; address: string }> {
   const controllers = addresses.map(() => new AbortController());
   let winnerIndex: number | null = null;
   const failures: Record<string, string> = {};
+  const first = (address: string) => preferred.includes(address);
+  let firstLeft = addresses.filter(first).length;
+  let release = () => {};
+  const released = new Promise<void>((resolve) => (release = resolve));
+  const headStart = firstLeft > 0 && firstLeft < addresses.length ? setTimeout(release, headStartMs) : undefined;
+  if (headStart === undefined) release();
+  const dial = (address: string, index: number) =>
+    controllers[index].signal.aborted
+      ? Promise.reject<T>(new Error('another address answered first'))
+      : open(address, controllers[index].signal);
   const attempts = addresses.map((address, index) =>
-    open(address, controllers[index].signal)
+    (headStart === undefined || first(address) ? dial(address, index) : released.then(() => dial(address, index)))
       .then((link) => ({ link, address, index }))
       .catch((error: unknown) => {
         failures[address] = error instanceof Error ? error.message : String(error);
+        if (first(address) && --firstLeft === 0) release();
         throw error;
       }),
   );
@@ -250,6 +272,8 @@ export async function firstOpen<T extends { close(): void }>(
   } catch {
     controllers.forEach((controller) => controller.abort());
     throw new DialError(failures);
+  } finally {
+    clearTimeout(headStart);
   }
   winnerIndex = winner.index;
   attempts.forEach((attempt) => {
@@ -260,6 +284,8 @@ export async function firstOpen<T extends { close(): void }>(
   controllers.forEach((controller, index) => {
     if (index !== winner.index) controller.abort();
   });
+  // Those still waiting their turn see they lost, and never dial.
+  release();
   return { link: winner.link, address: winner.address };
 }
 
@@ -376,7 +402,11 @@ export async function pair(
  * resume cursor to pick up where the last session left off. */
 export async function resume(host: PairedHost, keys: Keypair, greeting: Greeting): Promise<Remote> {
   const addresses = [...new Set(host.addresses?.length ? host.addresses : [host.relay])];
-  const { link, address } = await firstOpen(addresses, (url, signal) => Link.open(url, host.hostId, signal));
+  const { link, address } = await firstOpen(
+    addresses,
+    (url, signal) => Link.open(url, host.hostId, signal),
+    host.preferred,
+  );
   const header = concat(MAGIC, Uint8Array.of(MODE_RESUME), host.hostId, new Uint8Array(16));
   const { session } = await closingOnFailure(
     link,

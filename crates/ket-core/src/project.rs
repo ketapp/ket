@@ -198,6 +198,16 @@ pub struct ProjectSettings {
     /// of those `gh` is signed in to. `None` is whichever `gh` has active.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub github_account: Option<String>,
+    /// Listed first in this Mac's sidebar, ahead of the projects that are
+    /// not. The phone keeps pins of its own.
+    #[serde(default)]
+    pub pinned: bool,
+    /// Left out of this Mac's sidebar until it is shown again — though back
+    /// in it while an agent there waits on a person. Nothing else changes:
+    /// its worktrees, agents and notifications carry on, and the phone keeps
+    /// a list of its own.
+    #[serde(default)]
+    pub hidden: bool,
 }
 
 impl Default for ProjectSettings {
@@ -216,6 +226,8 @@ impl Default for ProjectSettings {
             backlog_in_repo: false,
             github_issues: false,
             github_account: None,
+            pinned: false,
+            hidden: false,
         }
     }
 }

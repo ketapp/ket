@@ -549,9 +549,10 @@ mod sample {
         /// whichever process started it.
         Terminal,
         /// Leading a process group of its own, with no terminal of its own.
-        /// The window starts three things this way: the host, the Android
-        /// emulator, and every ACP agent — the protocol crate makes each one
-        /// its own group so that ending it ends what its `npx` started too.
+        /// Three things the window starts are this: the host, which starts
+        /// a session of its own, the Android emulator, and every ACP agent —
+        /// the protocol crate makes each one its own group so that ending it
+        /// ends what its `npx` started too.
         Apart,
         /// In its parent's group: a `git`, a `ps`, a shell probe, running for
         /// a moment on its parent's behalf. Not a session.

@@ -53,20 +53,21 @@ also differ in lightness. Waiting is blue so it never reads as the marker.
 
 ### Type
 
-Geist for words, Geist Mono for anything you would quote — branches, paths,
-figures, keys. Sentence case everywhere; no tracked uppercase labels.
+Two faces: Geist (Sans below) for words, Fira Code (Mono) for anything you
+would quote — branches, paths, figures, keys — and for code and terminals,
+with its ligatures off. Sentence case everywhere; no tracked uppercase labels.
 
-| Role       | Face       | Size / weight | Example                         |
-| ---------- | ---------- | ------------- | ------------------------------- |
-| Value      | Geist Mono | 15 / 500      | `41%`, `+128 −14`, a branch     |
-| Title      | Geist      | 15 / 600      | Dialog and popover titles       |
-| Control    | Geist      | 13 / 500      | Button and segment labels       |
-| Body       | Geist      | 13 / 400      | Dialog copy, field text         |
-| Identifier | Geist Mono | 12.5 / 400    | Worktree branch in a row        |
-| Label      | Geist      | 12.5 / 500    | Field labels, figure labels     |
-| Secondary  | Geist      | 11–12 / 400   | A row's detail line (11), help text (12) |
-| Caption    | Geist Mono | 11 / 400      | Key hints, resets, counts       |
-| Code       | Monaspace Neon | 11 / 400  | Terminal and editor only        |
+| Role       | Face | Size / weight | Example                         |
+| ---------- | ---- | ------------- | ------------------------------- |
+| Value      | Mono | 15 / 500      | `41%`, `+128 −14`, a branch     |
+| Title      | Sans | 15 / 600      | Dialog and popover titles       |
+| Control    | Sans | 13 / 500      | Button and segment labels       |
+| Body       | Sans | 13 / 400      | Dialog copy, field text         |
+| Identifier | Mono | 12.5 / 400    | Worktree branch in a row        |
+| Label      | Sans | 12.5 / 500    | Field labels, figure labels     |
+| Secondary  | Sans | 11–12 / 400   | A row's detail line (11), help text (12) |
+| Caption    | Mono | 11 / 400      | Key hints, resets, counts       |
+| Code       | Mono | 11 / 400      | Terminal and editor             |
 
 `fonts.rs` owns the families; reach prose through `.prose()`. The chrome's
 line height is 1.3, set once on the window's root; text read at length
@@ -105,9 +106,9 @@ them. Never emoji, never filled glyphs for chrome.
 - **Ghost** — transparent, dim ink, no edge. Toolbars and footers.
 - **Danger** — failed ink and a 45% failed edge. Never the default focus.
 - States: hover is `hover` fill (`accent_hover` for primary); disabled keeps
-  its shape at 55% ink. A key hint trails the label in Geist Mono 11.
+  its shape at 55% ink. A key hint trails the label in Mono 11.
 - `.detail()` names what the action acts on — the branch a Start makes — in
-  Geist Mono 11 after the label, cut short past 180.
+  Mono 11 after the label, cut short past 180.
 - Sizes: default 32 / 13px; small 26 / 12px; `.w_full()` for a block button.
 
 `icon_button` for a glyph alone: a 32 well in toolbars, `.bare()` inside rows
@@ -121,7 +122,7 @@ header's size: 24px dense cells, 28 wide.
 
 ## Inputs — `ui::field`
 
-- A `sunken` well, 36 tall, 7 corner, 10 inset, 13px Geist.
+- A `sunken` well, 36 tall, 7 corner, 10 inset, 13px Sans.
 - No edge at rest. Hover: dim ink at 28%. Focus: `focus_ring` plus a soft
   3px halo. Invalid: failed edge and an error line below.
 - Label above in dim 12.5/500; help and errors below in 12px.
@@ -138,8 +139,8 @@ One menu for everything: a float at 10 corner, 5 padding, two-layer shadow.
 
 - Filter row at the top once a menu passes eight items.
 - 20px icon column, so titles align with or without icons.
-- Rows 28 (tall 38 with a subtitle), 5 corner, 12.5px Geist.
-- Chord right-aligned in Geist Mono 10.5, dim.
+- Rows 28 (tall 38 with a subtitle), 5 corner, 12.5px Sans.
+- Chord right-aligned in Mono 10.5, dim.
 - Hairline separators between sections; a dim heading when a section needs
   a name (`MenuEntry::Heading`).
 - `.wells()` sets each icon in a 20px well — sunken behind a glyph, a
@@ -164,7 +165,7 @@ the value and the chevron — the command a project's own override will run.
   `hover`.
 - A setting's group hugs its answers. A view switch or filter uses `.fill()`
   and shares the width.
-- A count rides in the label in Geist Mono 11, a step under dim, and
+- A count rides in the label in Mono 11, a step under dim, and
   brightens with its segment.
 - Popup headers use the 18px size.
 - A group sharing its row with other controls is `.dense()`. A segment can
@@ -195,15 +196,15 @@ Four surfaces, chosen by what a thing is, not how loud it should be.
 ## Rows and read-outs
 
 - **Worktree row** — 42 tall, 6 corner, no hairline. Agent mark, branch in
-  Geist Mono 12.5, detail in Geist 11 dim, state right-aligned in mono 11.5
+  Mono 12.5, detail in Sans 11 dim, state right-aligned in mono 11.5
   with its dot (`running`, `waiting`, `merging`, `failed`, or dim `idle`).
   Selected: `hover` fill plus a 3px `marker` rail inset 10 top and bottom.
-- **Project heading** — 24 tall: 16px badge (initial in Geist Mono semibold),
-  name in Geist 12.5, count in mono, chevron at the end.
-- **File tree row** — 28 tall, Geist Mono 12.5. The git letter sits at the far
+- **Project heading** — 24 tall: 16px badge (initial in Mono semibold),
+  name in Sans 12.5, count in mono, chevron at the end.
+- **File tree row** — 28 tall, Mono 12.5. The git letter sits at the far
   end in its signal colour (`A U` added, `M R` modified, `D !` removed); a
   folder with changes under it gets a dot.
-- **Figure** — label over value: dim Geist 12.5 over Geist Mono 15. A quota bar
+- **Figure** — label over value: dim Sans 12.5 over Mono 15. A quota bar
   is 56 × 4 with round ends and takes the ramp colour with the figure.
 - **Progress** (`ui::progress`) — every bar that reports a share: a `border`
   track, an `accent` fill (or the quota ramp), round ends at any height, a
@@ -213,7 +214,7 @@ Four surfaces, chosen by what a thing is, not how loud it should be.
   `tinted_tag` (signal at 10%). `key_hint` is a `kbd` and its word — `↵ save`
   — for the strip of keys under a surface.
 - **Read-out** (`chip::readout`) — a figure in a small recessed well, 20
-  tall, 5 corner, Geist Mono 11, usually led by a glyph. A line of them is the
+  tall, 5 corner, Mono 11, usually led by a glyph. A line of them is the
   compact header: provider mark + figure + 28 × 4 bar + reset; branch glyph +
   branch; `+128 −14`; status dot + "1 running".
 

@@ -22,8 +22,9 @@ import { font, t, tint } from '../lib/theme';
 const GLYPH = 10;
 const ROW = 12;
 
-/** A cell's width: Geist Mono's advance is 0.6 of its size. */
-const CELL = GLYPH * 0.6;
+/** A cell's width: the chrome face's advance, Fira Code's, is 0.615 of its
+ * size. */
+const CELL = GLYPH * 0.615;
 
 /** Where the planet's top sits, as a share of the field's height from the
  * top. The copy sits above it. */

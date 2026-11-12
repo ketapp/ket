@@ -94,6 +94,7 @@ mod release;
 mod review;
 mod savings;
 mod search;
+mod setup;
 mod shortcuts;
 mod sidebar_rail;
 mod snippet_picker;
@@ -105,6 +106,7 @@ mod terminal;
 mod toasts;
 mod tree;
 mod ui;
+mod updates;
 mod usage_card;
 mod view;
 // The workspace's third `unsafe` carve-out; see its lint block and the
@@ -236,6 +238,10 @@ actions!(
         OpenBacklog,
         /// Show or hide discovered worktrees in the selected project.
         ToggleDiscoveredWorktrees,
+        /// Pin the selected project to the top of the sidebar, or unpin it.
+        ToggleProjectPin,
+        /// Leave the selected project out of the sidebar.
+        HideProject,
         /// Reload the project sidebar.
         RefreshProjects,
         /// Confirm removal of the selected project.
@@ -707,6 +713,9 @@ struct Shell {
     /// The header mark's release card: where the pointer is, and whether it
     /// is open. See `crate::release`.
     pub(crate) release_hover: crate::release::ReleaseHover,
+    /// Whether a newer ket is out, and when to look next. See
+    /// `crate::updates`.
+    pub(crate) updates: crate::updates::Updates,
     /// The card behind a project heading's launch glyph: which project's is
     /// open, and where the pointer is. See `crate::agent_override`.
     pub(crate) override_hover: crate::agent_override::OverrideHover,
@@ -958,10 +967,19 @@ struct Shell {
     /// opening that backend failed. Kept separately so the tab can appear in
     /// the first frame instead of waiting on filesystem scans and pty setup.
     pub(crate) terminal_notes: HashMap<TerminalId, SharedString>,
+    /// The setup screen can own a terminal before any project exists.
+    pub(crate) setup_terminal: Option<TerminalId>,
+    /// An explicit entry point keeps setup visible after projects exist.
+    pub(crate) setup_open: bool,
+    pub(crate) setup_agents: Vec<setup::SetupAgent>,
+    pub(crate) setup_running: Option<(setup::QuickStart, bool)>,
     /// Why the content area is empty, when it is.
     pub(crate) note: Option<SharedString>,
     /// The menu open beside a project heading, if one is. See `crate::projects`.
     pub(crate) project_menu: Option<ProjectMenu>,
+    /// The menu of projects hidden from the sidebar, opened from the line
+    /// under the list, while it is up. See `crate::projects`.
+    pub(crate) tucked_menu: Option<crate::ui::menu::OpenMenu<Option<ProjectId>>>,
     /// The project settings dialog, while it is open.
     pub(crate) settings: Option<SettingsDialog>,
     /// The add-project dialog, while it is open.
@@ -1313,6 +1331,7 @@ impl Shell {
         // to. A config that will not load falls back to defaults rather than
         // refusing to open a window — see `Config::load`.
         let config = Config::load().unwrap_or_default();
+        let update_check = config.updates.check;
         crate::notify::prepare();
         // Read before the theme is moved out: the editor's size falls back to
         // the code size, so it needs the whole config still standing.
@@ -1459,6 +1478,7 @@ impl Shell {
                     worktree_target: None,
                     hovered_ring: None,
                     release_hover: Default::default(),
+                    updates: Default::default(),
                     override_hover: Default::default(),
                     hovered_primary: None,
                     hovered_merge: None,
@@ -1531,8 +1551,13 @@ impl Shell {
                     terminals: HashMap::new(),
                     asleep_terminals: HashMap::new(),
                     terminal_notes: HashMap::new(),
+                    setup_terminal: None,
+                    setup_open: false,
+                    setup_agents: setup::checking_agents(),
+                    setup_running: None,
                     note: Some(format!("could not open the workspace: {e}").into()),
                     project_menu: None,
+                    tucked_menu: None,
                     settings: None,
                     adding_project: None,
                     new_worktree: None,
@@ -1640,6 +1665,7 @@ impl Shell {
             worktree_target: None,
             hovered_ring: None,
             release_hover: Default::default(),
+            updates: Default::default(),
             override_hover: Default::default(),
             hovered_primary: None,
             hovered_merge: None,
@@ -1712,8 +1738,13 @@ impl Shell {
             terminals: HashMap::new(),
             asleep_terminals: HashMap::new(),
             terminal_notes: HashMap::new(),
+            setup_terminal: None,
+            setup_open: false,
+            setup_agents: setup::checking_agents(),
+            setup_running: None,
             note: None,
             project_menu: None,
+            tucked_menu: None,
             settings: None,
             adding_project: None,
             new_worktree: None,
@@ -1750,6 +1781,7 @@ impl Shell {
         shell.activate_rates(&workspace);
         shell.install_agent_hooks();
         shell.publish_agents(cx);
+        shell.refresh_setup(cx);
 
         // Before the layouts, because restoring the panels' widths and what
         // is expanded is what the window is, and after them is a frame of the
@@ -1774,6 +1806,10 @@ impl Shell {
         // on a tick. Until it lands the rows simply carry no size — see
         // `crate::storage`.
         shell.measure_all(cx);
+
+        // Whether a newer ket is out: thirty seconds from now at the
+        // soonest, on the schedule Settings chose. See `crate::updates`.
+        shell.start_update_checks(update_check, cx);
 
         let layout_warning = shell.note.clone();
 
@@ -1972,6 +2008,7 @@ impl Render for Shell {
             .then(|| self.search_view(window, cx))
             .flatten();
         let project_menu = (!modal_open).then(|| self.project_menu_view(cx)).flatten();
+        let tucked_menu = (!modal_open).then(|| self.tucked_menu_view(cx)).flatten();
         let tab_context_menu = (!modal_open)
             .then(|| self.tab_context_menu_view(cx))
             .flatten();
@@ -2068,6 +2105,16 @@ impl Render for Shell {
             // that show code or a grid ask for `self.font_family`, and only
             // the lines that are words ask for `fonts::prose`.
             .font_family(self.chrome_family.clone())
+            // Fira Code's ligatures are contextual alternates: off for the
+            // whole window, so a branch or path keeps its own characters
+            // (`->`, `www`, `0x` included). The terminal and editor turn
+            // them off for their grids as well.
+            .map(|mut el| {
+                el.text_style()
+                    .get_or_insert_with(Default::default)
+                    .font_features = Some(gpui::FontFeatures::disable_ligatures());
+                el
+            })
             // Stated once, for everything under it. gpui's default is the
             // golden ratio, which set every two-line row in the sidebar a
             // third taller than its text and is most of what made the
@@ -2348,6 +2395,7 @@ impl Render for Shell {
                 }
                 if !this.modal_open()
                     && !this.native_editor_edit(crate::editor::NativeEdit::Copy, cx)
+                    && !this.copy_network_pick(cx)
                     && let Some(id) = this.active_terminal_id()
                 {
                     this.terminal_copy(id, cx);
@@ -2378,8 +2426,10 @@ impl Render for Shell {
                 if !this.modal_open() && this.chromium_edit(ket_chromium::Edit::SelectAll) {
                     return;
                 }
-                if !this.modal_open() {
-                    this.native_editor_edit(crate::editor::NativeEdit::SelectAll, cx);
+                if !this.modal_open()
+                    && !this.native_editor_edit(crate::editor::NativeEdit::SelectAll, cx)
+                {
+                    this.select_network_body(cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &SaveDocument, _, cx| {
@@ -2552,6 +2602,20 @@ impl Render for Shell {
                     return;
                 }
                 this.native_project_action(crate::projects::ProjectAction::ToggleDiscovered, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ToggleProjectPin, _, cx| {
+                this.menu_dirty = true;
+                if this.modal_open() {
+                    return;
+                }
+                this.native_project_action(crate::projects::ProjectAction::Pin, cx);
+            }))
+            .on_action(cx.listener(|this, _: &HideProject, _, cx| {
+                this.menu_dirty = true;
+                if this.modal_open() {
+                    return;
+                }
+                this.native_project_action(crate::projects::ProjectAction::Hide, cx);
             }))
             .on_action(cx.listener(|this, _: &RefreshProjects, _, cx| {
                 this.menu_dirty = true;
@@ -2807,6 +2871,7 @@ impl Render for Shell {
                         | this.token_reduction_menu.take().is_some()
                         | this.worktree_snippet_menu.take().is_some()
                         | this.project_menu.take().is_some()
+                        | this.tucked_menu.take().is_some()
                         | this.sidebar_menu.take().is_some()
                         | this.network_panel.menu.take().is_some()
                         | this.tab_open_in.take().is_some()
@@ -3008,6 +3073,11 @@ impl Render for Shell {
                         return;
                     }
                     if this.project_menu_key(event, cx) {
+                        cx.notify();
+                        stop_unless_text(event, cx);
+                        return;
+                    }
+                    if this.tucked_menu_key(event, cx) {
                         cx.notify();
                         stop_unless_text(event, cx);
                         return;
@@ -3245,6 +3315,7 @@ impl Render for Shell {
                     if this.audio_key(event, cx)
                         || this.android_key(&event.keystroke, cx)
                         || this.diff_key(event, cx)
+                        || this.network_request_key(event, cx)
                         || this.editor_key(event, window, cx)
                     {
                         cx.notify();
@@ -3373,6 +3444,7 @@ impl Render for Shell {
             .children(snippet_picker.map(|el| deferred(el).with_priority(8)))
             .children(search.map(|el| deferred(el).with_priority(8)))
             .children(project_menu.map(|el| deferred(el).with_priority(8)))
+            .children(tucked_menu.map(|el| deferred(el).with_priority(8)))
             .children(tab_context_menu.map(|el| deferred(el).with_priority(8)))
             .children(link_menu.map(|el| deferred(el).with_priority(8)))
             // A priority above its parent's: a branch that drew under the menu
@@ -3483,6 +3555,7 @@ fn open_main_window(cx: &mut App) {
                         shell.window_active = active;
                         if regained {
                             shell.poll_tick(cx);
+                            shell.refresh_setup(cx);
                         }
                     })
                 });

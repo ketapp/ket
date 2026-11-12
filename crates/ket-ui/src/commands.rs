@@ -56,6 +56,8 @@ pub(crate) enum Intent {
     AddProject,
     /// Open the global settings view.
     OpenSettings,
+    /// Open the coding-agent quick starts.
+    OpenSetup,
     /// Open the settings dialog for a project.
     OpenProjectSettings(ProjectId),
     /// Ask before removing a project.
@@ -200,6 +202,7 @@ fn bind(registry: &mut Registry, outbox: &Outbox) {
     wire("shell.toggle_panel", Box::new(|_| Ok(Intent::TogglePanel)));
     wire("shell.refresh", Box::new(|_| Ok(Intent::Reload)));
     wire("config.show", Box::new(|_| Ok(Intent::OpenSettings)));
+    wire("setup.show", Box::new(|_| Ok(Intent::OpenSetup)));
     wire("shell.split_right", Box::new(|_| Ok(Intent::SplitRight)));
     wire("shell.split_down", Box::new(|_| Ok(Intent::SplitDown)));
     wire("shell.close_pane", Box::new(|_| Ok(Intent::ClosePane)));

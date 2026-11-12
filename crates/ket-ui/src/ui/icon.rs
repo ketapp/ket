@@ -137,6 +137,8 @@ pub(crate) enum Icon {
     Copy,
     /// Keep this at the top.
     Pin,
+    /// [`Icon::Pin`]'s body, filled, to lay under it in a lighter ink.
+    PinFill,
     /// Take this off the top.
     PinOff,
     /// The primary checkout's mark on a worktree row: a `p` in a box, whose
@@ -316,6 +318,8 @@ pub(crate) enum Icon {
     /// Showing what something will be: a backlog note's brief, as its agent
     /// will be handed it.
     Eye,
+    /// Left out of a list: a project hidden from the sidebar.
+    EyeOff,
     /// A label on a note, and the button that adds one.
     Tag,
     /// Kept in the repository: a backlog stored beside the code.
@@ -382,6 +386,7 @@ impl Icon {
             Icon::List => "icons/list.svg",
             Icon::Copy => "icons/copy.svg",
             Icon::Pin => "icons/pin.svg",
+            Icon::PinFill => "icons/pin-fill.svg",
             Icon::PinOff => "icons/pin-off.svg",
             Icon::Primary => "icons/primary.svg",
             Icon::Bell => "icons/bell.svg",
@@ -448,6 +453,7 @@ impl Icon {
             Icon::PriorityTrack => "icons/priority-track.svg",
             Icon::Ellipsis => "icons/ellipsis.svg",
             Icon::Eye => "icons/eye.svg",
+            Icon::EyeOff => "icons/eye-off.svg",
             Icon::Tag => "icons/tag.svg",
             Icon::BookMarked => "icons/book-marked.svg",
             Icon::GitHub => "icons/github.svg",
@@ -494,7 +500,7 @@ pub(crate) fn sized_icon(which: Icon, size: Pixels, colour: Rgba) -> Svg {
 pub(crate) struct Assets;
 
 /// The bytes for every path [`Icon::asset`] can return.
-const FILES: [(&str, &[u8]); 115] = [
+const FILES: [(&str, &[u8]); 117] = [
     (
         "icons/chevron-down.svg",
         include_bytes!("../../assets/icons/chevron-down.svg"),
@@ -618,6 +624,10 @@ const FILES: [(&str, &[u8]); 115] = [
     (
         "icons/pin.svg",
         include_bytes!("../../assets/icons/pin.svg"),
+    ),
+    (
+        "icons/pin-fill.svg",
+        include_bytes!("../../assets/icons/pin-fill.svg"),
     ),
     (
         "icons/pin-off.svg",
@@ -892,6 +902,10 @@ const FILES: [(&str, &[u8]); 115] = [
         include_bytes!("../../assets/icons/eye.svg"),
     ),
     (
+        "icons/eye-off.svg",
+        include_bytes!("../../assets/icons/eye-off.svg"),
+    ),
+    (
         "icons/tag.svg",
         include_bytes!("../../assets/icons/tag.svg"),
     ),
@@ -1122,6 +1136,7 @@ mod tests {
             Icon::PriorityTrack,
             Icon::Ellipsis,
             Icon::Eye,
+            Icon::EyeOff,
             Icon::Tag,
             Icon::BookMarked,
             Icon::GitHub,

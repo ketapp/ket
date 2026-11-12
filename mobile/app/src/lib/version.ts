@@ -1,5 +1,6 @@
 // The app's version, from app.json — the one place it is kept. `version` is
-// the release version people see (bumped for each App Store release);
+// the release version people see: ket's own, which scripts/release.sh sets
+// here with the desktop's, so a phone and its Mac name the same release.
 // `build` counts uploads of it (iOS `buildNumber`, Android `versionCode`).
 // In Expo Go these still come from app.json, through the dev server.
 

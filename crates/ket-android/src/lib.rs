@@ -141,9 +141,12 @@ impl Sdk {
         let grpc = free_port().ok_or_else(|| failed("no free port for the emulator"))?;
         let console =
             free_console_port().ok_or_else(|| failed("no free console port for the emulator"))?;
+        let tuning = tuning(avd);
+        tracing::info!(avd, ?tuning, "booting the emulator");
         let mut command = Command::new(&self.emulator);
         command
             .args(["-avd", avd, "-no-window", "-no-audio", "-no-boot-anim"])
+            .args(&tuning)
             .args(["-grpc", &grpc.to_string(), "-grpc-use-token"])
             .args(["-port", &console.to_string()])
             .stdin(Stdio::null())
@@ -177,6 +180,98 @@ impl Sdk {
         let _ = child.kill();
         Err(failed("the emulator did not start in time"))
     }
+}
+
+/// The least memory, in megabytes, ket boots a device with. Android Studio
+/// makes most devices with 2 GB, which a current system image fills, and a
+/// guest that swaps is slow however fast the Mac is.
+const MEMORY_FLOOR: u64 = 4096;
+
+/// What ket passes on top of `avd`'s own settings, which it reads from the
+/// device's `config.ini`. Without a window, the emulator's `auto` renderer is
+/// a software one (lavapipe on emulator 37.2) whatever the GPU, so a device
+/// left on `auto` gets the host's GPU on macOS, where every Mac has Metal. A
+/// mode someone chose is kept, and Linux stays on `auto`: `host` does not
+/// boot without a usable GPU. Memory is raised to [`MEMORY_FLOOR`], never
+/// lowered. Nothing is added when the settings can't be read.
+fn tuning(avd: &str) -> Vec<String> {
+    let Some(config) = avd_config(avd) else {
+        tracing::debug!(
+            avd,
+            "no config.ini found for the device; booting it as it is"
+        );
+        return Vec::new();
+    };
+    let value = |key| ini_value(&config, key);
+    let mut args = Vec::new();
+    let auto = value("hw.gpu.mode").is_none_or(|mode| mode.eq_ignore_ascii_case("auto"));
+    let off = value("hw.gpu.enabled").is_some_and(|on| on.eq_ignore_ascii_case("no"));
+    if cfg!(target_os = "macos") && auto && !off {
+        args.extend(["-gpu".to_owned(), "host".to_owned()]);
+    }
+    // No size at all is the emulator's own default, below the floor.
+    let memory = value("hw.ramSize").map_or(Some(0), megabytes);
+    if memory.is_some_and(|size| size < MEMORY_FLOOR) {
+        args.extend(["-memory".to_owned(), MEMORY_FLOOR.to_string()]);
+    }
+    args
+}
+
+/// A size as `config.ini` writes `hw.ramSize`, in megabytes: a bare number
+/// is megabytes, and `M`, `MB`, `G` and `GB` are understood.
+fn megabytes(size: &str) -> Option<u64> {
+    let size = size.trim();
+    let digits = size
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(size.len());
+    let (number, unit) = size.split_at(digits);
+    let number: u64 = number.parse().ok()?;
+    match unit.trim().to_ascii_uppercase().as_str() {
+        "" | "M" | "MB" => Some(number),
+        "G" | "GB" => number.checked_mul(1024),
+        _ => None,
+    }
+}
+
+/// The text of `avd`'s `config.ini`: its `<avd>.ini` in the first folder of
+/// devices that has one names the device's own folder.
+fn avd_config(avd: &str) -> Option<String> {
+    avd_homes().into_iter().find_map(|home| {
+        let pointer = std::fs::read_to_string(home.join(format!("{avd}.ini"))).ok()?;
+        let folder = ini_value(&pointer, "path")
+            .map(PathBuf::from)
+            .filter(|folder| folder.is_dir())
+            .unwrap_or_else(|| home.join(format!("{avd}.avd")));
+        std::fs::read_to_string(folder.join("config.ini")).ok()
+    })
+}
+
+/// The folders the emulator looks for devices in, in its order.
+fn avd_homes() -> Vec<PathBuf> {
+    let var = |name| {
+        std::env::var_os(name)
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+    };
+    let home = var("HOME").or_else(|| var("USERPROFILE"));
+    [
+        var("ANDROID_AVD_HOME"),
+        var("ANDROID_EMULATOR_HOME").map(|dir| dir.join("avd")),
+        var("ANDROID_USER_HOME").map(|dir| dir.join("avd")),
+        var("ANDROID_SDK_HOME").map(|dir| dir.join(".android").join("avd")),
+        home.map(|dir| dir.join(".android").join("avd")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+/// `key`'s value in the emulator's `key=value` files.
+fn ini_value<'a>(text: &'a str, key: &str) -> Option<&'a str> {
+    text.lines().find_map(|line| {
+        let (k, v) = line.split_once('=')?;
+        (k.trim() == key).then(|| v.trim())
+    })
 }
 
 /// A port nothing is listening on now.
@@ -341,12 +436,7 @@ fn read_discovery(path: &Path) -> Option<Running> {
         .parse()
         .ok()?;
     let text = std::fs::read_to_string(path).ok()?;
-    let value = |key: &str| {
-        text.lines().find_map(|line| {
-            let (k, v) = line.split_once('=')?;
-            (k.trim() == key).then(|| v.trim().to_owned())
-        })
-    };
+    let value = |key| ini_value(&text, key).map(str::to_owned);
     Some(Running {
         pid,
         avd: value("avd.id")?,

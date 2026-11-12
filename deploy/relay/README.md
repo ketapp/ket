@@ -52,7 +52,9 @@ Any small Linux VPS does. Sockets are cheap, and the relay holds at most
 
    Then on a Mac, turn on Settings › Devices › Reach it from anywhere. The
    row says Connected once the Mac has registered, and the health check
-   counts it.
+   counts it. The row, and any link to this relay, is off in every build
+   until `HOSTED_RELAY_OFFERED` in `crates/ket-core/src/config.rs` is
+   turned on; ket's relay stays off until ket offers it.
 
 ## Rolling a release
 

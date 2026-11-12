@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  ket Helper.app, the plain helper. Chromium's own needs nothing, because
+  Chrome starts its renderers and its GPU process from the (Renderer) and
+  (GPU) variants. CEF 156 as ket sets it up does not: every child process,
+  renderers and GPU included, runs from this helper (see `ps` while a browser
+  tab is open), so it needs what helper-renderer.plist and helper-gpu.plist
+  hold. Without allow-jit, V8 cannot reserve memory for the code it compiles
+  and every renderer dies at start ("V8 process OOM (Failed to reserve virtual
+  memory for CodeRange)" in chromium.log), which an ad-hoc build with
+  KET_HARDENED_RUNTIME=1 shows.
+
+  If ket ever starts the variants as Chrome does, this can go back to none.
+-->
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+</dict>
+</plist>

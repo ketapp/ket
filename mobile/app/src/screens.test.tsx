@@ -81,10 +81,7 @@ jest.mock('@ket/remote', () => ({
   UsageStatus: { UNSPECIFIED: 0, FRESH: 1, STALE: 2, UNAVAILABLE: 3, UNSUPPORTED: 4 },
 }));
 jest.mock('./lib/hosts', () => ({
-  statusLine: (conn: HostConnection) => ({
-    text: conn.status === 'connected' ? 'Connected through the relay' : 'Offline',
-    connected: conn.status === 'connected',
-  }),
+  statusLine: jest.requireActual<typeof import('./lib/hosts')>('./lib/hosts').statusLine,
   useHost: () => mockHost,
   useHosts: () => mockConns,
 }));
@@ -292,6 +289,7 @@ describe('top-level screens', () => {
       },
     );
     (conn.snapshot as unknown as { agents: string[] }).agents = ['claude', 'codex'];
+    Object.assign(conn, { activeAddress: 'ws://100.101.102.103:7979' });
     mockConns = [conn];
     const alert = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
     const view = await render(<Worktrees />);
@@ -301,9 +299,11 @@ describe('top-level screens', () => {
     expect(view.getByText('Compile workspace')).toBeTruthy();
     expect(view.getByText('#21')).toBeTruthy();
 
-    // The badge says how the line is kept.
-    await fireEvent.press(view.getByLabelText('Secure: end-to-end encrypted'));
+    // The badge says how the line is kept, and marks the way it runs.
+    expect(view.getByText('VPN')).toBeTruthy();
+    await fireEvent.press(view.getByLabelText('Secure: end-to-end encrypted, Over Tailscale'));
     expect(alert).toHaveBeenLastCalledWith('End-to-end encrypted', expect.stringContaining('Studio Mac'));
+    expect(alert).toHaveBeenLastCalledWith('End-to-end encrypted', expect.stringContaining('Over Tailscale.'));
 
     // Held, a row lifts out with its menu.
     const holdAt = async (id: string) => {

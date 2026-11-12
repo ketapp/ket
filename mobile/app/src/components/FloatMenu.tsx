@@ -8,9 +8,9 @@
 //   screen's edges. `lifted` is drawn where the thing held was, above the
 //   dimming — a held row stays in sight while its menu is open.
 // - **In place** (`inline`), for the composer's + and / menus: hung from the
-//   top edge of what holds it, over what is above, with nothing dimmed. A
-//   menu over the screen is a modal, and a modal takes the keyboard away;
-//   in place, the field keeps it.
+//   top edge of what holds it, over what is above, with nothing dimmed; a
+//   tap anywhere else shuts it. A menu over the screen is a modal, and a
+//   modal takes the keyboard away; in place, the field keeps it.
 //
 // Either way it grows from the corner nearest what opened it, past the mark
 // and back, its rows coming up a beat apart, and drops away faster. Every
@@ -275,6 +275,7 @@ export function FloatMenu(props: Props) {
 }
 
 function InPlace({ open, onClose, sections, label, hang }: Props & { hang: ViewStyle }) {
+  const window = useWindowDimensions();
   // Kept in the tree while its close plays, and out of it after, so nothing
   // under a closed menu loses a tap to it.
   const [shown, setShown] = useState(open);
@@ -294,9 +295,21 @@ function InPlace({ open, onClose, sections, label, hang }: Props & { hang: ViewS
     item.onPress();
   };
   return (
-    <MenuCard open={open} from="below" label={label} style={[styles.inline, hang]}>
-      <MenuList sections={sections} onChoose={choose} maxHeight={INLINE_HEIGHT} />
-    </MenuCard>
+    <>
+      {/* Clear, and a screen past what holds the menu every way, so a tap
+          anywhere but the menu shuts it. Gone as the close starts, so that
+          tap is the only one it takes. */}
+      {open ? (
+        <Pressable
+          accessibilityLabel="Close menu"
+          onPress={onClose}
+          style={[styles.catcher, { top: -window.height, bottom: -window.height, left: -window.width, right: -window.width }]}
+        />
+      ) : null}
+      <MenuCard open={open} from="below" label={label} style={[styles.inline, hang]}>
+        <MenuList sections={sections} onChoose={choose} maxHeight={INLINE_HEIGHT} />
+      </MenuCard>
+    </>
   );
 }
 
@@ -372,6 +385,7 @@ const styles = StyleSheet.create({
   },
   // Hung off the top of what holds it, over everything above.
   inline: { position: 'absolute', bottom: '100%', marginBottom: GAP, zIndex: 2 },
+  catcher: { position: 'absolute', zIndex: 2 },
   list: { padding: 6 },
   rule: { height: 1, marginVertical: 6, marginHorizontal: 4, backgroundColor: t.border },
   title: { paddingHorizontal: 10, paddingTop: 8, paddingBottom: 6, fontFamily: font.chromeMedium, fontSize: 11.5, color: t.dim },

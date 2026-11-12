@@ -69,13 +69,18 @@ pub(crate) fn key_hint(
 /// Named because the sidebar's worktree rows size their mark column to it:
 /// the badge heads the column, and the marks under it share its centre.
 ///
-/// Sixteen, an icon's size: the badge stands beside a 12.5px name, and at
-/// twenty it was the tallest thing in a row that is otherwise all text.
-pub(crate) const BADGE: Pixels = px(16.0);
+/// Twenty. At sixteen, an icon's size, it sat quietly beside the 12.5px name,
+/// but its letter was 9.5px and its glyph 11px, and neither could be read at
+/// a glance. A badge that names a project is worth the extra height.
+pub(crate) const BADGE: Pixels = px(20.0);
 
-/// A glyph's side inside a [`BADGE`]: Lucide's 2px stroke lands near 1px, the
-/// weight of the letter it stands in for.
-const BADGE_GLYPH: Pixels = px(11.0);
+/// A glyph's side inside a [`BADGE`]: big enough that a busy one keeps its
+/// parts apart, with a tile's margin of colour still around it.
+const BADGE_GLYPH: Pixels = px(14.0);
+
+/// A letter's size inside a [`BADGE`]: just under the 12.5px name beside it,
+/// and bold, so the initial reads as a mark rather than a word.
+const BADGE_LETTER: Pixels = px(12.0);
 
 /// `label` is the project's icon or initial; an icon naming a glyph
 /// ([`super::glyph`]) is drawn as that picture, in the same ink a letter
@@ -94,7 +99,7 @@ pub(crate) fn badge(colour: Color, label: impl Into<SharedString>, t: &Theme) ->
         .items_center()
         .justify_center()
         .size(BADGE)
-        .rounded(px(4.0))
+        .rounded(RADIUS_SM)
         .bg(paint(colour));
     match super::glyph::named(&label) {
         Some(glyph) => square.child(super::icon::sized_icon(
@@ -102,9 +107,12 @@ pub(crate) fn badge(colour: Color, label: impl Into<SharedString>, t: &Theme) ->
             BADGE_GLYPH,
             paint(on_badge),
         )),
+        // Prose, not the chrome's mono: a capital in a fixed-width face is
+        // drawn narrow to fit its cell, and the badge is no cell.
         None => square
-            .text_size(px(9.5))
-            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .prose()
+            .text_size(BADGE_LETTER)
+            .font_weight(gpui::FontWeight::BOLD)
             .text_color(paint(on_badge))
             .child(label),
     }

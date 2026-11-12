@@ -1372,6 +1372,7 @@ impl Shell {
         self.menu = None;
         self.worktree_menu = None;
         self.project_menu = None;
+        self.tucked_menu = None;
         self.close_tab_menus();
         self.popup = None;
 

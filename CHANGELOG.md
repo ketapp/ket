@@ -13,13 +13,16 @@ words; no internal names, no commit hashes. ket reads this file
 
 ## Unreleased
 
+## 0.2.0 — 2026-11-12
+
 ### New
 
-- Reach your Mac from your phone or iPad anywhere, with no VPN: turn on
-  Reach it from anywhere in Settings › Devices, and devices away from your
-  Wi-Fi and your tailnet connect through ket's relay. It passes along what
-  it cannot read, and the row says whether your Mac is connected to it and,
-  when not, why. At home your devices still connect to the Mac directly.
+- On first launch, ket lists the coding agents it finds on your Mac, helps you install or sign in to one, and then add your first project.
+- Pin a project to the top of the sidebar, or hide it, from its right-click
+  menu or the Project menu, the way the phone does it. A pinned project glows
+  faintly in its own colour, with a pin in that colour after its name. A
+  hidden project comes back while an agent in it needs
+  you, and the line under the projects lists the rest to show again.
 - Browser tabs run on Chromium instead of WebKit, and the tabs and the
   Browser entry in the + menu carry its mark. Pages render and behave as they do in
   Chromium-based browsers, each worktree keeps its own sign-ins and site data
@@ -140,23 +143,46 @@ words; no internal names, no commit hashes. ket reads this file
 - Two new themes: Cobalt, Punk printed in electric blue on a cobalt-black
   ground, and Ultraviolet, electric violet and acid lime on indigo-black.
   Your phone draws in them too.
+- ket tells you when a newer version is out, once, with a Download button
+  that opens the download page. It looks on the schedule you pick in
+  Settings → General, and Check now there looks straight away. Until you
+  update, Settings and the card under the ket mark say which version is
+  waiting. Nothing is downloaded or installed for you.
 
 ### Improved
 
+- ket uses two typefaces everywhere, on the Mac and the phone: words are
+  set in Geist, and branch names, commit IDs, paths, figures, code and
+  terminals in Fira Code.
+- Settings › Appearance › Interface font can be set to the system font,
+  SF Pro, the face macOS and VS Code set their own interfaces in.
+- A project's badge in the sidebar is larger, with a bigger, bolder letter
+  and a bigger icon, so you can tell projects apart at a glance.
+- Project badge pictures are solid shapes instead of thin outlines, on the
+  Mac and on your phone, so they read clearly on every project colour.
+- The Secure pill at the top of Worktrees on your phone marks how it is
+  reaching your Mac: Wi-Fi at home, VPN over Tailscale. Settings and the
+  Mac switcher name it too, where they said "through the relay" whichever
+  way the phone was connected.
 - When the phone only knows how to reach your Mac on its own network, the
   Mac's screen and the help shown while it can't connect say so, and what
   to turn on and scan for away from home.
-- A phone or iPad paired before Tailscale or Reach it from anywhere was on
-  can learn the new ways to reach your Mac without pairing again: Show code
-  under Away from home in the Mac's Settings › Devices, and scan it with the
-  device's Camera or in ket under Pair a desktop.
+- A phone or iPad paired before Tailscale was on can learn to reach your
+  Mac over it without pairing again: Show code under Away from home in the
+  Mac's Settings › Devices, and scan it with the device's Camera or in ket
+  under Pair a desktop.
 - Settings › Devices has an Away from home group. It says whether Tailscale
   is on this Mac, signed out, turned off or not installed, with the step to
-  take and a button to get or open it, and holds the Reach it from anywhere
-  switch beside it.
+  take and a button to get or open it.
 - A request in the Network view wraps its long lines, so a long message is
   read in full instead of running off the edge. The wrap button beside Copy,
   or View › Wrap Lines (⌥⌘W), turns it off and on.
+- Text in a request in the Network view can be selected and copied: drag
+  over it, double-click a word or triple-click a line, hold Shift to extend,
+  and press ⌘C; ⌘A selects the whole body.
+- The Network view no longer flags the user and host of a web address as an
+  email address, so a Sentry DSN or a database URL in a file an agent read
+  does not mark the request.
 
 - Phones and iPads paired with your Mac before this update need pairing
   again, once: turn on Devices in the Mac's Settings and scan the new code.
@@ -408,6 +434,25 @@ words; no internal names, no commit hashes. ket reads this file
 
 ### Fixed
 
+- Ctrl+C in a terminal you started ket from no longer ends every terminal
+  in ket while leaving its window open.
+- A chat on your phone whose agent is waiting on a prompt the phone can't
+  answer now says what it wants and offers the terminal, instead of looking
+  idle.
+- Codex asking to run a command in another checkout shows on your phone and
+  in the sidebar as waiting on you, under its own tab, instead of not at
+  all.
+- On your phone, projects and worktrees leave as much room on the right of
+  their cards as on the left.
+- Files, Find, Git and Net tabs remain readable when the right panel is narrow.
+- Android emulators in ket's emulator tab draw with your Mac's GPU instead
+  of in software, and get at least 4 GB of memory, so they no longer crawl
+  when booted from ket. A renderer or memory size you set for the device
+  yourself is kept.
+- At home, the phone reaches your Mac over your own Wi-Fi even with
+  Tailscale on, instead of over Tailscale because it answered first. Away,
+  it gives the home address at most a second before trying Tailscale, and
+  none if the home address fails.
 - While an agent compacts its conversation, the phone's chat says so above
   the message field, and a message you send meanwhile waits its turn
   instead of showing as not delivered.
@@ -419,6 +464,16 @@ words; no internal names, no commit hashes. ket reads this file
 - A number pressed in a terminal on your phone answers Claude's "You should
   know" offer even when the phone's screen cuts the offer off above its
   buttons, instead of landing in the prompt.
+- Tapping a chat on your phone puts the keyboard away, keeping what you had
+  typed.
+- A tap anywhere outside the phone composer's + or / menu shuts it, and the
+  keyboard stays up.
+- A chat your phone can't find on your Mac says so in the middle of the
+  screen, with how long it has looked, Try again beside Open terminal, and
+  an (i) that says why, instead of a line of text and a button.
+- An agent run from inside another's tab, like Codex run by Claude for a
+  review, no longer takes the tab over: the phone's chat stays on the tab's
+  own agent instead of losing its conversation.
 - Sending a message from your phone no longer jumps the chat: the agent's
   working line stays put from the moment you send until the agent answers,
   instead of going and coming back as the message lands.

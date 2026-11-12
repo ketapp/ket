@@ -122,6 +122,19 @@ describe('secure mobile storage', () => {
       hostPublic: Uint8Array.of(7, 8),
       relay: 'ws://1-2',
       addresses: ['ws://1-2'],
+      preferred: ['ws://1-2'],
+    });
+  });
+
+  test('dials the local network first, then Tailscale and the relay', () => {
+    const away = {
+      ...host('1-2'),
+      relay: 'ws://Studio.local:7979',
+      addresses: ['ws://Studio.local:7979', 'ws://100.101.102.103:7979', 'wss://relay.ketapp.dev'],
+    };
+    expect(toPaired(away)).toMatchObject({
+      addresses: ['ws://Studio.local:7979', 'ws://100.101.102.103:7979', 'wss://relay.ketapp.dev'],
+      preferred: ['ws://Studio.local:7979'],
     });
   });
 

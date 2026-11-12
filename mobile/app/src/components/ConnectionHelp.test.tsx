@@ -45,7 +45,7 @@ describe('ConnectionHelp', () => {
     expect(getByText('studio.local:7979')).toBeTruthy();
     // Only the Mac's local address is known: the help says so, and what to do.
     expect(getByText(/only knows how to reach Studio Mac on its own network/)).toBeTruthy();
-    expect(getByText(/scan Show code there/)).toBeTruthy();
+    expect(getByText(/scan Show code under Away from home/)).toBeTruthy();
     await fireEvent.press(getByText('Retry now'));
     await fireEvent.press(getByText('Pair again'));
     expect(conn.retry).toHaveBeenCalled();

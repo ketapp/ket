@@ -70,9 +70,9 @@ impl PanelView {
     fn label(self) -> &'static str {
         match self {
             PanelView::Files => "Files",
-            PanelView::Search => "Search",
+            PanelView::Search => "Find",
             PanelView::Git => "Git",
-            PanelView::Network => "Network",
+            PanelView::Network => "Net",
         }
     }
 
@@ -107,7 +107,11 @@ impl Shell {
     /// The strip along the top of the right panel.
     pub(crate) fn panel_strip(&self, cx: &mut Context<Self>) -> AnyElement {
         let t = self.theme;
-        let badge = self.git_badge_count();
+        let badge = if self.panel_width >= px(280.0) {
+            self.git_badge_count()
+        } else {
+            0
+        };
 
         // The four views as one segmented switch across the panel's width.
         // Git carries its change count in its label: how much changed is the
@@ -117,6 +121,7 @@ impl Shell {
             // The small track: the strip is the tab bar's height, and a
             // full one would stand taller than the tabs it lines up with.
             .small()
+            .dense()
             .children(PanelView::ALL.map(|view| {
                 let active = self.panel_view == view;
                 let segment = crate::ui::group::segment(
@@ -128,12 +133,13 @@ impl Shell {
                     PanelView::Git if badge > 0 => segment.count(badge.to_string()),
                     _ => segment,
                 };
+                let segment = if self.panel_width >= px(360.0) {
+                    segment.leading(view.icon(), paint(t.text.dim))
+                } else {
+                    segment
+                };
                 segment
                     .selected(active)
-                    .leading(
-                        view.icon(),
-                        paint(if active { t.text.primary } else { t.text.dim }),
-                    )
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.show_panel_view(view, cx);
                     }))

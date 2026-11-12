@@ -917,6 +917,7 @@ impl Shell {
                     this.close_finder(cx);
                     this.menu = None;
                     this.project_menu = None;
+                    this.tucked_menu = None;
                     this.worktree_menu = None;
                     this.refresh_savings();
                     this.popup = Some(PopupKind::Savings);

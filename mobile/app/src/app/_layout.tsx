@@ -1,8 +1,7 @@
 import '../lib/polyfills';
 
+import { FiraCode_400Regular, FiraCode_500Medium, FiraCode_600SemiBold, useFonts } from '@expo-google-fonts/fira-code';
 import { Geist_400Regular, Geist_500Medium, Geist_600SemiBold, Geist_900Black } from '@expo-google-fonts/geist';
-import { GeistMono_400Regular, GeistMono_500Medium, GeistMono_600SemiBold } from '@expo-google-fonts/geist-mono';
-import { IBMPlexMono_400Regular, IBMPlexMono_600SemiBold, useFonts } from '@expo-google-fonts/ibm-plex-mono';
 import { DarkTheme, DefaultTheme, Stack, type Theme, ThemeProvider, usePathname } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
 import { StatusBar } from 'expo-status-bar';
@@ -41,11 +40,9 @@ export default function Layout() {
     Geist_500Medium,
     Geist_600SemiBold,
     Geist_900Black,
-    GeistMono_400Regular,
-    GeistMono_500Medium,
-    GeistMono_600SemiBold,
-    IBMPlexMono_400Regular,
-    IBMPlexMono_600SemiBold,
+    FiraCode_400Regular,
+    FiraCode_500Medium,
+    FiraCode_600SemiBold,
   });
   const lock = useLock();
   // The desktop's theme, followed: a new one reloads the app to draw in it.

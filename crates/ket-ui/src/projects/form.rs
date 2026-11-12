@@ -434,6 +434,8 @@ impl Drafts {
             backlog_in_repo: existing.backlog_in_repo,
             github_issues: self.github_issues.unwrap_or(existing.github_issues),
             github_account: self.github_account.unwrap_or(existing.github_account),
+            pinned: existing.pinned,
+            hidden: existing.hidden,
         };
         workspace.set_project_settings(id, settings)?;
         workspace.set_default_base(id, &self.base)?;

@@ -1134,11 +1134,19 @@ pub struct PhonesConfig {
 /// The relay ket runs, for devices away from their Mac's networks (#142).
 pub const HOSTED_RELAY: &str = "wss://relay.ketapp.dev";
 
+/// Whether ket's relay is offered. Off until ket offers it: Settings
+/// shows no switch for it, and a config that names it links to nothing, so
+/// away from home a device reaches its Mac over Tailscale. A relay of the
+/// person's own, named in the config, is linked either way.
+pub const HOSTED_RELAY_OFFERED: bool = false;
+
 impl PhonesConfig {
-    /// The relay elsewhere to link to, if one is named.
+    /// The relay elsewhere to link to, if one is named — never ket's own
+    /// while it is not offered ([`HOSTED_RELAY_OFFERED`]).
     pub fn hosted_relay(&self) -> Option<String> {
         let url = self.relay.trim();
-        (!url.is_empty()).then(|| url.to_owned())
+        let ours = url.trim_end_matches('/') == HOSTED_RELAY;
+        (!url.is_empty() && (HOSTED_RELAY_OFFERED || !ours)).then(|| url.to_owned())
     }
 }
 
@@ -1897,9 +1905,17 @@ mod tests {
         assert_eq!(config.phones.hosted_relay(), None);
         assert!(!toml::to_string(&config).unwrap().contains("relay ="));
 
-        let named: Config =
-            toml::from_str(&format!("[phones]\nrelay = \" {HOSTED_RELAY} \"\n")).unwrap();
-        assert_eq!(named.phones.hosted_relay().as_deref(), Some(HOSTED_RELAY));
+        let own: Config =
+            toml::from_str("[phones]\nrelay = \" wss://relay.example.test \"\n").unwrap();
+        assert_eq!(
+            own.phones.hosted_relay().as_deref(),
+            Some("wss://relay.example.test")
+        );
+        // ket's own, only once it is offered.
+        for url in [HOSTED_RELAY, "wss://relay.ketapp.dev/"] {
+            let ours: Config = toml::from_str(&format!("[phones]\nrelay = \"{url}\"\n")).unwrap();
+            assert_eq!(ours.phones.hosted_relay().is_some(), HOSTED_RELAY_OFFERED);
+        }
         let blank: Config = toml::from_str("[phones]\nrelay = \"  \"\n").unwrap();
         assert_eq!(blank.phones.hosted_relay(), None);
     }

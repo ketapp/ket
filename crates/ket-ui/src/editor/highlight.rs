@@ -74,8 +74,9 @@ impl Mark {
     /// weights, rather than six hues.
     ///
     /// Safe for the column arithmetic because the family is monospaced:
-    /// Monaspace Neon's semibold and italic faces advance exactly as far as its
-    /// regular one, so a heavier keyword does not move the caret.
+    /// the code face's semibold and italic advance exactly as far as its
+    /// regular one, so a heavier keyword does not move the caret. Fira Code,
+    /// on trial, draws no italic: a comment stands upright in it.
     pub(super) fn font(self, base: &Font) -> Font {
         use ket_core::syntax::Token;
         match self {

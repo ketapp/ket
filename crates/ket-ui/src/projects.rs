@@ -5,9 +5,11 @@
 //! The flow keeps to the shape a person already knows: the content area is a
 //! landing page until a project exists; `+` in the sidebar header opens the
 //! add-project dialog; right-clicking a project's heading opens its menu —
-//! **New Worktree** and **Backlog** first, what the project weighs on disk
-//! and what Economy has saved it, then **Project Settings**, **Hide non-ket
-//! worktrees** and **Remove Project**.
+//! **New Worktree** and **Backlog** first, **Pin to Top** and **Hide
+//! Project** as the phone's hold menu has them, what the project weighs on
+//! disk and what Economy has saved it, then **Project Settings**, **Hide
+//! non-ket worktrees** and **Remove Project**. A hidden project waits behind
+//! a line under the list, whose menu shows it again.
 //!
 //! The two dialogs are separate components over one form:
 //!
@@ -35,6 +37,7 @@ use gpui::{
 use ket_core::KetError;
 use ket_core::id::ProjectId;
 use ket_core::keybinding::Chord;
+use ket_core::project::ProjectSettings;
 use ket_core::storage::format_bytes;
 use ket_core::theme::{Color, Theme, contrast_ratio};
 use ket_core::workspace::Workspace;
@@ -107,6 +110,9 @@ pub(crate) fn rail_colour(project: Color, t: &Theme) -> Color {
 /// How the project menu names itself, so an opener can tell whose menu is up.
 const PROJECT_MENU_ORIGIN: &str = "project-context";
 
+/// How the hidden-projects menu names itself.
+const TUCKED_MENU_ORIGIN: &str = "hidden-projects";
+
 /// What a project's menu can do.
 ///
 /// The menu itself never interprets these — see [`crate::ui::menu`] — so the
@@ -122,6 +128,10 @@ pub(crate) enum ProjectAction {
     Economy,
     /// Open the project's backlog.
     Backlog,
+    /// Pin it to the top of the sidebar, or unpin it.
+    Pin,
+    /// Leave it out of the sidebar.
+    Hide,
     /// Open the settings dialog.
     Settings,
     /// Show or hide worktrees ket did not create.
@@ -160,6 +170,7 @@ struct Facts {
 fn project_menu(
     at: Point<Pixels>,
     hidden: bool,
+    pinned: bool,
     facts: Facts,
     t: &Theme,
 ) -> OpenMenu<ProjectAction> {
@@ -215,6 +226,17 @@ fn project_menu(
                     ),
             ),
             MenuEntry::Item(backlog),
+            // The phone's two, in its words.
+            MenuEntry::Item(if pinned {
+                MenuItem::new(ProjectAction::Pin, "Unpin").icon(Icon::PinOff)
+            } else {
+                MenuItem::new(ProjectAction::Pin, "Pin to Top").icon(Icon::Pin)
+            }),
+            MenuEntry::Item(
+                MenuItem::new(ProjectAction::Hide, "Hide Project")
+                    .subtitle("Back in the list if an agent there needs you")
+                    .icon(Icon::EyeOff),
+            ),
             MenuEntry::Heading("Footprint".into()),
             MenuEntry::Item(storage),
             MenuEntry::Item(economy),
@@ -273,6 +295,8 @@ impl Shell {
         match action {
             ProjectAction::NewWorktree => self.open_new_worktree(selection.project, false, cx),
             ProjectAction::Backlog => self.open_backlog(&id, cx),
+            ProjectAction::Pin => self.toggle_project_pin(&id, cx),
+            ProjectAction::Hide => self.hide_project(&id, cx),
             ProjectAction::Settings => self.open_project_settings(&id, Field::Name, cx),
             ProjectAction::ToggleDiscovered => self.toggle_discovered_worktrees(&id, cx),
             ProjectAction::Remove => self.confirm_remove_project(&id),
@@ -286,16 +310,59 @@ impl Shell {
     /// toggle in the menu, and a menu item that opened a dialog to flip a
     /// switch would be a step nobody asked for.
     pub(crate) fn toggle_discovered_worktrees(&mut self, id: &ProjectId, cx: &mut Context<Self>) {
-        self.project_menu = None;
-        let result = Workspace::open().and_then(|workspace| {
-            let mut settings = workspace.project_settings(id)?;
+        self.change_projects(std::slice::from_ref(id), cx, |settings| {
             settings.hide_discovered_worktrees = !settings.hide_discovered_worktrees;
-            workspace.set_project_settings(id, settings)
         });
-        match result {
-            Ok(()) => self.reload(cx),
-            Err(e) => self.note = Some(format!("could not change the project: {e}").into()),
+    }
+
+    /// Pins a project to the top of the sidebar, or unpins it.
+    pub(crate) fn toggle_project_pin(&mut self, id: &ProjectId, cx: &mut Context<Self>) {
+        self.change_projects(std::slice::from_ref(id), cx, |settings| {
+            settings.pinned = !settings.pinned;
+        });
+    }
+
+    /// Leaves a project out of the sidebar. Nothing else about it changes:
+    /// its worktrees and agents carry on, a selection in it stays, and it is
+    /// back in the list while an agent there waits on you.
+    pub(crate) fn hide_project(&mut self, id: &ProjectId, cx: &mut Context<Self>) {
+        self.change_projects(std::slice::from_ref(id), cx, |settings| {
+            settings.hidden = true;
+        });
+    }
+
+    /// Puts hidden projects back in the sidebar.
+    pub(crate) fn show_projects(&mut self, ids: &[ProjectId], cx: &mut Context<Self>) {
+        self.change_projects(ids, cx, |settings| settings.hidden = false);
+    }
+
+    /// Writes one change to each project's settings, then reloads once.
+    ///
+    /// Written straight through rather than via the dialog: these are
+    /// one-click picks in a menu, and a pick that opened a dialog to flip a
+    /// switch would be a step nobody asked for.
+    fn change_projects(
+        &mut self,
+        ids: &[ProjectId],
+        cx: &mut Context<Self>,
+        change: impl Fn(&mut ProjectSettings),
+    ) {
+        self.project_menu = None;
+        self.tucked_menu = None;
+        let result = Workspace::open().and_then(|workspace| {
+            ids.iter().try_for_each(|id| {
+                let mut settings = workspace.project_settings(id)?;
+                change(&mut settings);
+                workspace.set_project_settings(id, settings)
+            })
+        });
+        if let Err(e) = result {
+            self.note = Some(format!("could not change the project: {e}").into());
         }
+        // After a failure too: the projects changed before it are changed.
+        self.reload(cx);
+        // The menu bar's Pin to Top check follows the pick, wherever it was made.
+        self.menu_dirty = true;
     }
 
     // ---- removing -------------------------------------------------------------
@@ -303,6 +370,7 @@ impl Shell {
     /// Asks before removing. Reachable from a menu in one click, so it must ask.
     pub(crate) fn confirm_remove_project(&mut self, id: &ProjectId) {
         self.project_menu = None;
+        self.tucked_menu = None;
         self.settings = None;
         self.popup = None;
         let Some(node) = self.projects.iter().find(|p| &p.id == id) else {
@@ -441,7 +509,10 @@ impl Shell {
     /// page says so with the button that does it. With projects but no
     /// selection, it points at the sidebar. In both cases the shell's `note`
     /// is shown here, because this is where the eye is when adding fails.
-    pub(crate) fn landing_view(&self, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn landing_view(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        if self.setup_open || !self.setup_ready() || self.projects.is_empty() {
+            return self.setup_view(window, cx);
+        }
         let t = &self.theme;
         let has_projects = !self.projects.is_empty();
         let message: SharedString = if has_projects {
@@ -559,6 +630,8 @@ impl Shell {
         match action {
             ProjectAction::NewWorktree => self.open_new_worktree(open.project, false, cx),
             ProjectAction::Backlog => self.open_backlog(&id, cx),
+            ProjectAction::Pin => self.toggle_project_pin(&id, cx),
+            ProjectAction::Hide => self.hide_project(&id, cx),
             ProjectAction::Settings => self.open_project_settings(&id, Field::Name, cx),
             ProjectAction::ToggleDiscovered => self.toggle_discovered_worktrees(&id, cx),
             ProjectAction::Remove => self.confirm_remove_project(&id),
@@ -666,6 +739,7 @@ impl Shell {
     /// Closes the project menu.
     fn close_project_menu(&mut self) {
         self.project_menu = None;
+        self.tucked_menu = None;
     }
 
     /// Opens the menu for the project at `index` at `at`, where its heading
@@ -693,9 +767,151 @@ impl Shell {
         };
         self.project_menu = Some(ProjectMenu {
             project: index,
-            menu: project_menu(at, node.hide_discovered, facts, &self.theme)
+            menu: project_menu(at, node.hide_discovered, node.pinned, facts, &self.theme)
                 .with_header(node.name.clone()),
         });
+    }
+
+    // ---- hidden projects ------------------------------------------------------
+
+    /// The line under the projects to the ones hidden from the sidebar, when
+    /// any are — the phone's "hidden on this phone". A press opens the menu
+    /// that shows them again.
+    pub(crate) fn tucked_line(&self, now: u64, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let count = self.tucked_projects(now).len();
+        if count == 0 {
+            return None;
+        }
+        let t = &self.theme;
+        let open = self.tucked_menu.is_some();
+        let label = if count == 1 {
+            "1 hidden project".to_owned()
+        } else {
+            format!("{count} hidden projects")
+        };
+        Some(
+            // The shared row, selected while its menu is up; placed in the
+            // list's margin and set in the quiet ink of a line that is not
+            // itself a project.
+            crate::ui::row::sized_row("tucked-projects", open, px(28.0), t)
+                .mx(px(6.0))
+                .mb(px(6.0))
+                .text_size(crate::ui::CAPTION)
+                .text_color(paint(t.text.dim))
+                .cursor_pointer()
+                .child(sized_icon(Icon::EyeOff, px(13.0), paint(t.text.dim)))
+                .child(label)
+                // On the press, as the project heading's right-click is: the
+                // shell closes every menu on a press, and this one has to
+                // open after that rather than be closed by it.
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(|this, event: &gpui::MouseDownEvent, _, cx| {
+                        if this.tucked_menu.take().is_none() {
+                            this.open_tucked_menu(event.position);
+                        }
+                        cx.stop_propagation();
+                        cx.notify();
+                    }),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// Opens the menu of hidden projects at `at`: each one, to show it again,
+    /// then all of them.
+    fn open_tucked_menu(&mut self, at: Point<Pixels>) {
+        // One menu at a time: two open is two things claiming the keyboard.
+        self.menu = None;
+        self.worktree_menu = None;
+        self.path_menu = None;
+        self.project_menu = None;
+        self.tucked_menu = None;
+        self.sidebar_menu = None;
+        self.popup = None;
+
+        let tucked: Vec<&crate::tree::ProjectNode> = self
+            .tucked_projects(ket_core::now_ms())
+            .into_iter()
+            .filter_map(|index| self.projects.get(index))
+            .collect();
+        if tucked.is_empty() {
+            return;
+        }
+        let mut entries: Vec<MenuEntry<Option<ProjectId>>> = tucked
+            .iter()
+            .map(|project| {
+                let worktrees: Vec<String> = project
+                    .worktrees
+                    .iter()
+                    .map(|node| node.label().to_string())
+                    .collect();
+                MenuEntry::Item(
+                    MenuItem::new(Some(project.id.clone()), project.name.clone())
+                        .subtitle(if worktrees.is_empty() {
+                            "No worktrees".to_owned()
+                        } else {
+                            worktrees.join(" \u{b7} ")
+                        })
+                        .icon(Icon::Eye)
+                        .detail("Show", None),
+                )
+            })
+            .collect();
+        if tucked.len() > 1 {
+            entries.push(MenuEntry::Separator);
+            entries.push(MenuEntry::Item(
+                MenuItem::new(None, format!("Show All {}", tucked.len())).icon(Icon::Eye),
+            ));
+        }
+        self.tucked_menu = Some(
+            OpenMenu::new(TUCKED_MENU_ORIGIN.into(), None, px(264.0), entries)
+                .with_header("Hidden projects")
+                .at(at),
+        );
+    }
+
+    /// The hidden-projects menu, when it is open.
+    pub(crate) fn tucked_menu_view(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let menu = self.tucked_menu.as_ref()?;
+        Some(menu.view(
+            &self.theme,
+            cx,
+            |shell, pick, cx| shell.run_tucked_pick(pick.clone(), cx),
+            |shell, cx| {
+                shell.tucked_menu = None;
+                cx.notify();
+            },
+        ))
+    }
+
+    /// Shows the picked project again, or every hidden one for Show All.
+    fn run_tucked_pick(&mut self, pick: Option<ProjectId>, cx: &mut Context<Self>) {
+        let ids: Vec<ProjectId> = match pick {
+            Some(id) => vec![id],
+            None => self
+                .tucked_projects(ket_core::now_ms())
+                .into_iter()
+                .filter_map(|index| self.projects.get(index))
+                .map(|project| project.id.clone())
+                .collect(),
+        };
+        self.show_projects(&ids, cx);
+        cx.notify();
+    }
+
+    /// Handles a key while the hidden-projects menu is open.
+    pub(crate) fn tucked_menu_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) -> bool {
+        let Some(menu) = self.tucked_menu.as_mut() else {
+            return false;
+        };
+        match menu.key(event) {
+            MenuKey::Ignored => return false,
+            MenuKey::Consumed => {}
+            MenuKey::Close => self.tucked_menu = None,
+            MenuKey::Run(pick) => self.run_tucked_pick(pick, cx),
+        }
+        true
     }
 }
 

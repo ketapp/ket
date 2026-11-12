@@ -661,6 +661,7 @@ impl Shell {
         self.menu = None;
         self.worktree_menu = None;
         self.project_menu = None;
+        self.tucked_menu = None;
         self.path_menu = None;
         self.popup = None;
         self.tab_open_in = None;
@@ -1515,6 +1516,7 @@ impl Shell {
             || self.token_reduction_menu.is_some()
             || self.worktree_snippet_menu.is_some()
             || self.project_menu.is_some()
+            || self.tucked_menu.is_some()
             || self.popup.is_some()
             || self.palette.open
             || self.finder.open
@@ -3624,6 +3626,7 @@ impl Shell {
                                 this.close_tab_menus();
                                 this.worktree_menu = None;
                                 this.project_menu = None;
+                                this.tucked_menu = None;
                                 this.popup = None;
                                 let agents = this.runnable_agents();
                                 #[cfg(target_os = "macos")]
@@ -4104,8 +4107,11 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        if self.setup_open {
+            return self.setup_view(window, cx);
+        }
         let Some(space) = self.space().cloned() else {
-            return self.landing_layout(cx);
+            return self.landing_layout(window, cx);
         };
         // Which pane wears the focus ring — none while there is one pane, which
         // is focused by definition, and a ring round the whole card only
@@ -4149,13 +4155,13 @@ impl Shell {
 
     /// The landing view. The header card carries the sidebar and panel
     /// toggles, so nothing here has to bring either back.
-    fn landing_layout(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    fn landing_layout(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         div()
             .flex()
             .flex_col()
             .flex_1()
             .size_full()
-            .child(self.landing_view(cx))
+            .child(self.landing_view(window, cx))
             .into_any_element()
     }
 

@@ -2,9 +2,11 @@
 // the desktop sidebar shows them, and plain stroke icons.
 
 import { BacklogPriority } from '@ket/remote';
+import { StyleSheet, Text, View } from 'react-native';
 import Svg, { Circle, G, Path, Polygon, Rect } from 'react-native-svg';
 
-import { AGENT_COLORS, agentHarness, t } from '../lib/theme';
+import type { AddressKind } from '../lib/address-kind';
+import { AGENT_COLORS, agentHarness, font, t } from '../lib/theme';
 
 type IconProps = { size?: number; color?: string; weight?: number };
 
@@ -140,26 +142,33 @@ export const Bolt = (p: IconProps) => (
   </Stroke>
 );
 
-/** The local network: Wi-Fi arcs. */
+/** The local network: Wi-Fi arcs over a dot. */
 export const Wifi = (p: IconProps) => (
   <Stroke {...p}>
-    <Path d="M2.5 9.5a14 14 0 0 1 19 0M6 13a9 9 0 0 1 12 0M9.5 16.5a4 4 0 0 1 5 0" />
-    <Circle cx={12} cy={19.5} r={0.6} fill="currentColor" />
+    <Path d="M12 20h.01M8.94 17.43a4 4 0 0 1 6.12 0M5.49 14.54a8.5 8.5 0 0 1 13.02 0M2.04 11.64a13 13 0 0 1 19.92 0" />
   </Stroke>
 );
 
-/** Reached from anywhere: a globe. */
-export const Globe = (p: IconProps) => (
-  <Stroke {...p}>
-    <Circle cx={12} cy={12} r={9} />
-    <Path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18" />
-  </Stroke>
+/** Tailscale, or any tunnel to the Mac: the boxed VPN of the iPhone's own
+ * status bar. Sized to sit among the stroke icons: 13 tall at 14. */
+export const Vpn = ({ size = 18, color = t.dim }: IconProps) => (
+  <View style={[vpn.box, { height: Math.round(size * 0.93), borderColor: color }]}>
+    <Text allowFontScaling={false} style={[vpn.text, { fontSize: size * 0.57, color }]}>
+      VPN
+    </Text>
+  </View>
 );
 
-/** ket's relay, for reaching the Mac from anywhere: a cloud. */
+const vpn = StyleSheet.create({
+  box: { justifyContent: 'center', paddingHorizontal: 2, borderWidth: 1.3, borderRadius: 3 },
+  text: { fontFamily: font.chromeSemibold, includeFontPadding: false },
+});
+
+/** A relay, ket's or another: a cloud of two round bumps on a flat base,
+ * which stays clean at the pill's 14. */
 export const Cloud = (p: IconProps) => (
   <Stroke {...p}>
-    <Path d="M7 18h10a4 4 0 0 0 .6-7.95A6 6 0 0 0 6.1 9.5 4.25 4.25 0 0 0 7 18z" />
+    <Path d="M9.5 19a6.5 6.5 0 1 1 6.32-8H17a4 4 0 0 1 0 8z" />
   </Stroke>
 );
 
@@ -170,6 +179,14 @@ export const Link = (p: IconProps) => (
     <Path d="M14 10.5a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1.5-1.5" />
   </Stroke>
 );
+
+/** Each kind of address, as a glyph. */
+export const ADDRESS_ICON: Record<AddressKind, (p: IconProps) => React.JSX.Element> = {
+  local: Wifi,
+  tailnet: Vpn,
+  'ket-relay': Cloud,
+  relay: Cloud,
+};
 
 export const Phone = (p: IconProps) => (
   <Stroke {...p}>
@@ -499,6 +516,23 @@ export const CheckCircle = (p: IconProps) => (
 export const Comment = (p: IconProps) => (
   <Stroke {...p}>
     <Path d="M4.5 5h15v10.5H10l-4.5 4v-4h-1z" />
+  </Stroke>
+);
+
+/** A conversation: a speech bubble, with `dots` one under way. */
+export const Bubble = ({ dots, ...p }: IconProps & { dots?: boolean }) => (
+  <Stroke {...p}>
+    <Path d="M5 5h14a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-8l-4 3.5V17H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2z" />
+    {dots
+      ? [8.5, 12, 15.5].map((cx) => <Circle key={cx} cx={cx} cy={11} r={1.2} fill={p.color ?? t.dim} stroke="none" />)
+      : null}
+  </Stroke>
+);
+
+/** Look again: one arrow round. */
+export const Retry = (p: IconProps) => (
+  <Stroke {...p}>
+    <Path d="M20 12a8 8 0 1 1-2.34-5.66M20 4v5h-5" />
   </Stroke>
 );
 

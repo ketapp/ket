@@ -59,6 +59,8 @@ fn settings_survive_the_process_that_wrote_them() {
                 backlog_in_repo: false,
                 github_issues: false,
                 github_account: None,
+                pinned: false,
+                hidden: false,
             },
         )
         .unwrap();

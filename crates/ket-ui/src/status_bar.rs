@@ -753,8 +753,33 @@ impl Shell {
 
         let sections: Vec<Section> = Provider::ALL
             .into_iter()
-            .filter_map(|provider| section(&self.rate_limits.snapshot(provider), now))
+            .filter_map(|provider| {
+                let snapshot = self.rate_limits.snapshot(provider);
+                let mut reading = section(&snapshot, now)?;
+                if matches!(snapshot.status, SnapshotStatus::Unavailable { .. }) {
+                    reading.headline = match provider {
+                        Provider::Claude => match self.setup_state("claude") {
+                            crate::setup::AgentState::Missing => "not installed".into(),
+                            crate::setup::AgentState::SignedOut => "signed out".into(),
+                            _ => "usage unavailable".into(),
+                        },
+                        Provider::Codex => match self.setup_state("codex") {
+                            crate::setup::AgentState::Missing => "not installed".into(),
+                            crate::setup::AgentState::SignedOut => "signed out".into(),
+                            _ => "usage unavailable".into(),
+                        },
+                        _ => "usage unavailable".into(),
+                    };
+                }
+                Some(reading)
+            })
             .collect();
+        let needs_setup = self.setup_agents.iter().any(|agent| {
+            matches!(
+                agent.state,
+                crate::setup::AgentState::Missing | crate::setup::AgentState::SignedOut
+            )
+        });
 
         let summary = crate::ui::button::pressable("quota-summary", t)
             .when(compact, |el| {
@@ -852,7 +877,12 @@ impl Shell {
                     false => crate::header::stat(label, value, t),
                 }
             }))
-            .on_click(cx.listener(|this, _, _, cx| {
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if needs_setup {
+                    this.open_setup(cx);
+                    cx.stop_propagation();
+                    return;
+                }
                 if this.popup == Some(PopupKind::Usage) {
                     this.popup = None;
                 } else {
@@ -862,6 +892,7 @@ impl Shell {
                     this.close_finder(cx);
                     this.menu = None;
                     this.project_menu = None;
+                    this.tucked_menu = None;
                     this.worktree_menu = None;
                     this.popup = Some(PopupKind::Usage);
                 }

@@ -4,8 +4,8 @@
 
 import type { SavedHost } from './store';
 
-/** ket's own relay, which a Mac links to when Reach it from anywhere is on
- * in its Settings › Devices. */
+/** ket's own relay, which a Mac links to once it is offered; not yet, so
+ * away from home a phone reaches its Mac over Tailscale. */
 export const KET_RELAY = 'relay.ketapp.dev';
 
 /** The Mac's own name or address on its local network; its tailnet address
@@ -36,3 +36,29 @@ export function reachesAway(host: SavedHost): boolean {
   if (host.manualAddresses?.length) return true;
   return [...(host.addresses ?? []), host.relay].some((url) => addressKind(url) !== 'local');
 }
+
+/** A way of reaching the Mac, as the phone names it: an address its owner
+ * typed in, or one of the kinds above. */
+export type Way = 'manual' | AddressKind;
+
+export function wayOf(url: string, manual?: boolean): Way {
+  return manual ? 'manual' : addressKind(url);
+}
+
+/** Each way's short name, for the Devices screen's address rows. */
+export const WAY_NAME: Record<Way, string> = {
+  manual: 'Added on this phone',
+  local: 'Local network',
+  tailnet: 'Tailscale',
+  'ket-relay': 'ket’s relay',
+  relay: 'Relay',
+};
+
+/** A session open over each way, as a phrase. */
+export const WAY_PHRASE: Record<Way, string> = {
+  manual: 'At an address you added',
+  local: 'On the local network',
+  tailnet: 'Over Tailscale',
+  'ket-relay': 'Through ket’s relay',
+  relay: 'Through the relay',
+};

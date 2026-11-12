@@ -1,9 +1,10 @@
 // ket's Desk theme, for the phone: the desktop's own tokens
 // (crates/ket-core/themes/dark.toml) and the spec in design/STYLE-GUIDE.md.
 // The screen is a desk of cards: a near-black ground, cards on a 10px gutter,
-// wells set into them, floats above. Geist for words, Geist Mono for anything
-// you would quote, IBM Plex Mono for what a terminal draws. Colour is spent
-// on state, never decoration.
+// wells set into them, floats above. Two faces, as on the desktop: Geist for
+// words, and Fira Code for anything you would quote and for what a terminal
+// draws. Colour is spent on
+// state, never decoration.
 //
 // The colours follow the desktop. Whatever theme ket is drawn in there, the
 // host sends as a palette (`HostSnapshot.palette`), and the phone keeps the
@@ -206,16 +207,16 @@ export function blend(under: string, over: string, alpha: number): string {
 }
 
 export const font = {
-  chrome: 'GeistMono_400Regular',
-  chromeMedium: 'GeistMono_500Medium',
-  chromeSemibold: 'GeistMono_600SemiBold',
+  chrome: 'FiraCode_400Regular',
+  chromeMedium: 'FiraCode_500Medium',
+  chromeSemibold: 'FiraCode_600SemiBold',
   prose: 'Geist_400Regular',
   proseMedium: 'Geist_500Medium',
   proseSemibold: 'Geist_600SemiBold',
   /** A display heading, and nothing smaller. */
   proseBlack: 'Geist_900Black',
-  code: 'IBMPlexMono_400Regular',
-  codeSemibold: 'IBMPlexMono_600SemiBold',
+  code: 'FiraCode_400Regular',
+  codeSemibold: 'FiraCode_600SemiBold',
 } as const;
 
 export const size = {

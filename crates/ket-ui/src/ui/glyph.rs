@@ -1,12 +1,13 @@
 //! A project's glyph: a small picture in its badge where the letter goes.
 //!
-//! Forty-seven marks from **Lucide** 1.64 (ISC; the licence sits in
-//! `assets/icons`), vendored under `assets/icons/glyphs` the way the chrome's
-//! icons are, with `currentColor` written out as a literal. A fixed set rather
-//! than any file or emoji: a badge is sixteen pixels, a picture there is noise,
-//! and a stroke drawn on the same grid as every other icon reads as part of the
-//! sidebar rather than pasted onto it. Each was picked for holding its shape at
-//! the badge's size.
+//! Forty-seven marks from **Phosphor** 2.1.1, its fill weight (MIT; the
+//! licence sits beside them), vendored under `assets/icons/glyphs` the way the
+//! chrome's icons are, with `currentColor` written out as a literal. A fixed
+//! set rather than any file or emoji: a badge is twenty pixels, and a picture
+//! there is noise. Filled rather than outlined, as Lucide drew them at first:
+//! a stroke of under a pixel on a coloured tile could not be read at a
+//! glance, and a solid shape can. Two are stand-ins for marks Phosphor does
+//! not draw: `telescope` is binoculars and `toothbrush` a tooth.
 //!
 //! Stored in `ProjectSettings::icon` as `glyph:<name>`. Core keeps that field
 //! verbatim and leaves its meaning to the shell, so the prefix is what tells a
@@ -172,7 +173,7 @@ mod tests {
     }
 
     #[test]
-    fn every_glyph_is_a_drawable_stroke_svg() {
+    fn every_glyph_is_a_drawable_svg() {
         // `resvg` draws `currentColor` as nothing; see `super::super::icon`.
         for (name, path, bytes) in GLYPHS {
             let text = std::str::from_utf8(bytes).expect("svg is text");

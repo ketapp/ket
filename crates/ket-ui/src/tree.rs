@@ -5,14 +5,19 @@
 //! repository's own checkout is shown badged because it is where
 //! `ket collapse` merges *to*.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use gpui::{
     AnyElement, BoxShadow, ClickEvent, Context, CursorStyle, Div, DragMoveEvent, ElementId,
-    FontWeight, MouseButton, MouseDownEvent, Pixels, Point, Render, SharedString, Stateful,
-    StyledText, TextRun, Window, div, font, point, prelude::*, px,
+    FontWeight, ImageSource, MouseButton, MouseDownEvent, ObjectFit, Pixels, Point, Render,
+    RenderImage, SharedString, Size, Stateful, StyledText, TextRun, Window, div, font, img, point,
+    prelude::*, px,
 };
 use ket_core::id::{ProjectId, WorktreeId};
 use ket_core::permissions;
-use ket_core::theme::{Color, Theme};
+use ket_core::theme::{Color, Theme, contrast_ratio};
 use ket_core::workspace::Workspace;
 
 use crate::Shell;
@@ -113,8 +118,32 @@ const COLUMN_INSET: Pixels = px(4.0);
 const OVERRIDE_PAD: Pixels = px(4.0);
 
 /// How far a mark's well reaches past the mark's column on each side: a
-/// [`BADGE`]-wide column (16) in a 20px well.
+/// [`BADGE`]-wide column (20) in a 24px well.
 const MARK_WELL_BLEED: Pixels = px(2.0);
+
+/// How far a pinned project's glow reaches past its rows, above and below,
+/// and how far in from the sidebar's edges it stops — see [`pinned_glow`].
+/// A step of ground around the rows, so the glow lights the project rather
+/// than being a box drawn tight around it.
+const GLOW_BLEED: Pixels = px(2.0);
+
+/// How far a pinned project's glow reaches from its centre, the badge: most
+/// of the way across a sidebar and a couple of rows down, so it marks the
+/// whole project and is gone before the next one.
+const GLOW_REACH: Size<Pixels> = Size {
+    width: px(230.0),
+    height: px(120.0),
+};
+
+/// The glow's opacity at a distance from its centre, as a fraction of
+/// [`GLOW_REACH`], straight between these stops: faint at the badge, fainter
+/// across the rows, nothing at its edge.
+const GLOW_STOPS: [(f32, f32); 3] = [(0.0, 0.24), (0.45, 0.09), (1.0, 0.0)];
+
+/// A pinned project's pin, after its name: the project's colour over its own
+/// body filled in the colour, the line lifted toward the text until it reads
+/// on the sidebar.
+const PIN: Pixels = px(12.0);
 
 /// How far apart one project's rows sit.
 ///
@@ -662,6 +691,10 @@ pub struct ProjectNode {
     pub(crate) icon: Option<SharedString>,
     /// Whether discovered worktrees are being hidden. Drives the menu label.
     pub(crate) hide_discovered: bool,
+    /// Listed ahead of the projects that are not; a pin follows its name.
+    pub(crate) pinned: bool,
+    /// Left out of the sidebar — see [`Shell::project_shown`].
+    pub(crate) hidden: bool,
     /// Whether the project's worktrees are shown.
     pub(crate) expanded: bool,
     /// Worktrees ket manages.
@@ -963,6 +996,124 @@ fn detail_text(text: String, ink: gpui::Rgba) -> StyledText {
         .collect();
 
     StyledText::new(rendered).with_runs(runs)
+}
+
+/// Where a pinned project's glow is brightest, from the glow's own top-left:
+/// the centre of the project's badge.
+fn glow_centre() -> Point<Pixels> {
+    point(
+        COLUMN_INSET + LEAD + BADGE / 2.0 - GLOW_BLEED,
+        GLOW_BLEED + HEADING_H / 2.0,
+    )
+}
+
+/// A pinned project's glow, as a picture: gpui fills a box with a colour or a
+/// linear gradient but not a radial one.
+///
+/// Drawn once for each colour and height a sidebar asks for and kept for the
+/// life of the app — a few small textures, one pair for each pinned colour —
+/// so no frame uploads one.
+fn glow_image(colour: Color, height: Pixels) -> Arc<RenderImage> {
+    thread_local! {
+        static DRAWN: RefCell<HashMap<(Color, u32), Arc<RenderImage>>> = RefCell::default();
+    }
+    let centre = glow_centre();
+    let (cx, cy) = (f32::from(centre.x), f32::from(centre.y));
+    let (rx, ry) = (f32::from(GLOW_REACH.width), f32::from(GLOW_REACH.height));
+    let width = (cx + rx).ceil() as u32;
+    let rows = f32::from(height).ceil() as u32;
+    DRAWN.with(|drawn| {
+        drawn
+            .borrow_mut()
+            .entry((colour, rows))
+            .or_insert_with(|| {
+                let mut pixels = Vec::with_capacity((width * rows * 4) as usize);
+                for y in 0..rows {
+                    for x in 0..width {
+                        let dx = (x as f32 + 0.5 - cx) / rx;
+                        let dy = (y as f32 + 0.5 - cy) / ry;
+                        let opacity = glow_opacity((dx * dx + dy * dy).sqrt());
+                        // BGRA and not premultiplied, the way gpui's
+                        // sprites take their pixels.
+                        pixels.extend_from_slice(&[
+                            colour.b,
+                            colour.g,
+                            colour.r,
+                            (opacity * 255.0).round() as u8,
+                        ]);
+                    }
+                }
+                let frame = image::RgbaImage::from_raw(width, rows, pixels)
+                    .unwrap_or_else(|| image::RgbaImage::new(1, 1));
+                Arc::new(RenderImage::new(vec![image::Frame::new(frame)]))
+            })
+            .clone()
+    })
+}
+
+/// [`GLOW_STOPS`] read at `distance` from the centre.
+fn glow_opacity(distance: f32) -> f32 {
+    GLOW_STOPS
+        .windows(2)
+        .find(|stops| distance <= stops[1].0)
+        .map_or(0.0, |stops| {
+            let ((near, from), (far, to)) = (stops[0], stops[1]);
+            from + (to - from) * ((distance - near) / (far - near))
+        })
+}
+
+/// The glow under a pinned project: its colour, brightest behind the badge
+/// and fading across and down the project's rows.
+///
+/// `open` is whether rows hang under the heading, and `inset` how far below
+/// the group's top edge (and above its bottom one) the rows start. Absolute
+/// and first among the group's children, so it takes no room and lies under
+/// everything else.
+fn pinned_glow(colour: Color, open: bool, inset: Pixels) -> AnyElement {
+    let centre = glow_centre();
+    // A folded project's glow is exactly as tall as its heading and rounds
+    // all four corners; an open one's runs as far down as it reaches, and the
+    // last row cuts it off.
+    let height = if open {
+        centre.y + GLOW_REACH.height
+    } else {
+        HEADING_H + GLOW_BLEED * 2.0
+    };
+    // Concentric with the rows' own corners, a bleed inside it.
+    let corner = crate::ui::RADIUS_MD + GLOW_BLEED;
+    div()
+        .absolute()
+        .top(inset - GLOW_BLEED)
+        .bottom(inset - GLOW_BLEED)
+        .left(GLOW_BLEED)
+        .right(GLOW_BLEED)
+        .overflow_hidden()
+        .child(
+            img(ImageSource::Render(glow_image(colour, height)))
+                .w(centre.x + GLOW_REACH.width)
+                .h(height)
+                .object_fit(ObjectFit::Fill)
+                .rounded_tl(corner)
+                .when(!open, |el| el.rounded_bl(corner)),
+        )
+        .into_any_element()
+}
+
+/// A pinned project's pin — see [`PIN`].
+fn pin_mark(colour: Color, t: &Theme) -> Div {
+    let line = (0..=20)
+        .map(|step| colour.mix(t.text.primary, f64::from(step) / 20.0))
+        .find(|candidate| contrast_ratio(*candidate, t.panel) >= 4.5)
+        .unwrap_or(t.text.primary);
+    div()
+        .relative()
+        .flex_none()
+        .child(div().absolute().inset_0().child(sized_icon(
+            Icon::PinFill,
+            PIN,
+            alpha(paint(colour), 0.55),
+        )))
+        .child(sized_icon(Icon::Pin, PIN, paint(line)))
 }
 
 /// The top of the tree's trunk, drawn inside the worktree row itself.
@@ -1427,7 +1578,7 @@ impl Shell {
             return Vec::new();
         };
 
-        projects
+        let mut nodes: Vec<ProjectNode> = projects
             .into_iter()
             .map(|project| {
                 let report = workspace.worktree_report(Some(&project.id)).ok();
@@ -1469,6 +1620,8 @@ impl Shell {
                         .and_then(crate::ui::glyph::drawable)
                         .map(|icon| SharedString::from(icon.to_owned())),
                     hide_discovered: settings.hide_discovered_worktrees,
+                    pinned: settings.pinned,
+                    hidden: settings.hidden,
                     agent_overrides: settings.agents.clone(),
                     expanded: true,
                     worktrees: std::iter::once({
@@ -1590,7 +1743,40 @@ impl Shell {
                 node.worktrees.sort_by_key(|w| (!w.primary, !w.pinned));
                 node
             })
+            .collect();
+        // Pinned projects lead, as pinned rows lead a project. Stable, so each
+        // side keeps the order it was dragged into.
+        nodes.sort_by_key(|node| !node.pinned);
+        nodes
+    }
+
+    /// Whether the sidebar lists a project: every one but the hidden, and a
+    /// hidden one too while an agent in it waits on a person, until that is
+    /// answered — the phone's rule for its own hidden projects.
+    pub(crate) fn project_shown(&self, project: &ProjectNode, now: u64) -> bool {
+        !project.hidden
+            || project
+                .worktrees
+                .iter()
+                .any(|node| self.row_signal(node, now) == Signal::Blocked)
+    }
+
+    /// The projects hidden from the sidebar just now, by index.
+    pub(crate) fn tucked_projects(&self, now: u64) -> Vec<usize> {
+        self.projects
+            .iter()
+            .enumerate()
+            .filter(|(_, project)| !self.project_shown(project, now))
+            .map(|(index, _)| index)
             .collect()
+    }
+
+    /// The project a new worktree goes in when nothing is selected: the
+    /// first the sidebar lists.
+    pub(crate) fn first_shown_project(&self, now: u64) -> Option<usize> {
+        self.projects
+            .iter()
+            .position(|project| self.project_shown(project, now))
     }
 
     /// Where the selected row lives on disk.
@@ -1850,6 +2036,7 @@ impl Shell {
             .is_some_and(|menu| menu.project >= self.projects.len())
         {
             self.project_menu = None;
+            self.tucked_menu = None;
         }
         // A level just changed, or a worktree came or went: either moves what
         // the savings rollup lists.
@@ -2791,6 +2978,19 @@ impl Shell {
         if from >= self.projects.len() || before > self.projects.len() {
             return;
         }
+        // Pinned projects lead, so a pinned one moves among the pinned and
+        // the rest below them: a drop across the line would be put back by
+        // the next reload.
+        let unpinned = self
+            .projects
+            .iter()
+            .position(|node| !node.pinned)
+            .unwrap_or(self.projects.len());
+        let before = if self.projects[from].pinned {
+            before.min(unpinned)
+        } else {
+            before.max(unpinned)
+        };
         let Some(to) = Self::landing(from, before) else {
             return;
         };
@@ -2802,6 +3002,7 @@ impl Shell {
 
         self.selection = selected.and_then(|selected| self.position_of(&selected));
         self.project_menu = None;
+        self.tucked_menu = None;
         self.worktree_menu = None;
 
         if let Ok(workspace) = Workspace::open()
@@ -2867,6 +3068,22 @@ impl Shell {
         // line would sit there until somebody dragged something else.
         let drop = cx.has_active_drag().then_some(self.drop_target).flatten();
         let projects = self.projects.len();
+        // Which projects are listed. A drop below one lands before the next
+        // that is, past any hidden between them, so its line is drawn by a
+        // heading on screen; the line under the list is the last listed one's.
+        let shown: Vec<bool> = self
+            .projects
+            .iter()
+            .map(|project| self.project_shown(project, now))
+            .collect();
+        let last_shown = shown.iter().rposition(|&listed| listed);
+        let after: Vec<usize> = (0..projects)
+            .map(|pi| {
+                (pi + 1..projects)
+                    .find(|&next| shown[next])
+                    .unwrap_or(projects)
+            })
+            .collect();
 
         // The top of the sidebar's card: which worktrees to show, then the
         // search. The filter's counts are across every project, so a filter
@@ -2875,7 +3092,9 @@ impl Shell {
         for node in self
             .projects
             .iter()
-            .flat_map(|project| project.worktrees.iter())
+            .zip(&shown)
+            .filter(|(_, listed)| **listed)
+            .flat_map(|(project, _)| project.worktrees.iter())
         {
             counts[0] += 1;
             counts[SidebarFilter::of(self.row_signal(node, now)) as usize] += 1;
@@ -3125,6 +3344,10 @@ impl Shell {
                     // hidden under a folded heading is not an answer.
                     let filter = self.sidebar_filter;
                     let filtering = filter != SidebarFilter::All;
+                    if !shown[pi] {
+                        return div();
+                    }
+                    let below = after[pi];
                     if filtering
                         && !project
                             .worktrees
@@ -3166,11 +3389,26 @@ impl Shell {
                                 .bg(alpha(tint, 0.055))
                         })
                         .mb(GROUP_GAP)
+                        // A pinned project glows faintly in its own colour
+                        // from behind its badge, so the ones you keep at the
+                        // top are told apart from the rest, and from each
+                        // other, without a border or a band across the row.
+                        .when(project.pinned, |el| {
+                            el.child(pinned_glow(
+                                project.color,
+                                project.expanded || filtering,
+                                if launches.is_some() {
+                                    OVERRIDE_PAD
+                                } else {
+                                    px(0.0)
+                                },
+                            ))
+                        })
                         .on_drag_move::<ProjectDrag>(cx.listener(
                             move |this, event: &DragMoveEvent<ProjectDrag>, _, cx| {
                                 let moved = this.note_drop_target(
-                                    |below| DropTarget::Project {
-                                        before: if below { pi + 1 } else { pi },
+                                    |under| DropTarget::Project {
+                                        before: if under { below } else { pi },
                                     },
                                     GROUP_GAP / 2.0,
                                     event,
@@ -3308,6 +3546,10 @@ impl Shell {
                                             .font_weight(FontWeight::MEDIUM)
                                             .child(project.name.clone()),
                                     )
+                                    // Pinned to the top, said after the name
+                                    // as the phone says it, in the colour
+                                    // the glow behind it is.
+                                    .when(project.pinned, |el| el.child(pin_mark(project.color, t)))
                                     // The launch glyph, beside the name: the
                                     // wash says *something* is different, and
                                     // the card behind the glyph says what.
@@ -4027,12 +4269,13 @@ impl Shell {
                         el.child(insertion_line(false, GROUP_GAP, px(0.0), t))
                     })
                     .when(
-                        pi + 1 == projects
+                        Some(pi) == last_shown
                             && drop == Some(DropTarget::Project { before: projects }),
                         |el| el.child(insertion_line(true, GROUP_GAP, px(0.0), t)),
                     )
                 }))
-            });
+            })
+            .children(self.tucked_line(now, cx));
 
         // The merge card sits outside the scrolling list, so it stays docked
         // at the sidebar's foot however long or short the list above it is.
@@ -4071,6 +4314,7 @@ impl Shell {
             .selection
             .map(|selection| selection.project)
             .filter(|&index| index < self.projects.len())
+            .or_else(|| self.first_shown_project(ket_core::now_ms()))
             .or((!self.projects.is_empty()).then_some(0));
         let label = match project {
             Some(_) => "New worktree",

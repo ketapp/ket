@@ -207,6 +207,7 @@ impl Shell {
                     this.close_finder(cx);
                     this.menu = None;
                     this.project_menu = None;
+                    this.tucked_menu = None;
                     this.worktree_menu = None;
                     this.dismiss_feedback();
                     this.popup = Some(PopupKind::Overhead);

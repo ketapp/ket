@@ -57,7 +57,13 @@ describe('web storage', () => {
     await store.saveLock(null);
     expect(await store.getLock()).toBeNull();
 
-    expect(store.toPaired(host)).toEqual({ hostId: Uint8Array.of(1, 2), hostPublic: Uint8Array.of(3, 4), relay: host.relay, addresses: [host.relay] });
+    expect(store.toPaired(host)).toEqual({
+      hostId: Uint8Array.of(1, 2),
+      hostPublic: Uint8Array.of(3, 4),
+      relay: host.relay,
+      addresses: [host.relay],
+      preferred: [host.relay],
+    });
     await store.forgetHost(host.id);
     expect(await store.listHosts()).toEqual([]);
     expect(await store.getCollapsed(host.id)).toEqual([]);

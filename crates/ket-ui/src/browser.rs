@@ -400,6 +400,7 @@ impl Shell {
             || self.token_reduction_menu.is_some()
             || self.worktree_snippet_menu.is_some()
             || self.project_menu.is_some()
+            || self.tucked_menu.is_some()
             || self.popup.is_some()
             || self.palette.open
             || self.finder.open

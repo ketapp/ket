@@ -10,6 +10,7 @@
 import { useFocusEffect } from 'expo-router';
 import { useCallback, useEffect, useState } from 'react';
 
+import { type AddressKind, WAY_PHRASE, addressKind, wayOf } from './address-kind';
 import { connection, type HostConnection } from './connection';
 import { getHost, listHosts } from './store';
 import { adoptPalette } from './theme';
@@ -59,11 +60,17 @@ export function useHost(id: string): HostConnection | null {
   return conn;
 }
 
-/** What a connection's state reads as under a desktop's name. */
-export function statusLine(conn: HostConnection | null): { text: string; connected: boolean } {
+/** What a connection's state reads as under a desktop's name: once it is
+ * up, how — on the local network, over Tailscale, through a relay — in
+ * words, and as the kind of address the Secure pill draws a mark for. */
+export function statusLine(conn: HostConnection | null): { text: string; connected: boolean; kind?: AddressKind } {
   switch (conn?.status) {
-    case 'connected':
-      return { text: 'Connected through the relay', connected: true };
+    case 'connected': {
+      const address = conn.activeAddress;
+      if (!address) return { text: 'Connected', connected: true };
+      const way = wayOf(address, conn.host.manualAddresses?.includes(address));
+      return { text: WAY_PHRASE[way], connected: true, kind: addressKind(address) };
+    }
     case 'offline':
       return { text: conn.error ? `Offline · ${conn.error}` : 'Offline · retrying', connected: false };
     default:

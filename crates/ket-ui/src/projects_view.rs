@@ -44,6 +44,8 @@ impl Shell {
             .projects
             .iter()
             .enumerate()
+            // A hidden project is left out here as in the grouped list.
+            .filter(|(_, node)| self.project_shown(node, now))
             .flat_map(|(project, node)| {
                 node.worktrees
                     .iter()

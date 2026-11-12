@@ -43,14 +43,23 @@
 # clone, and only that piece and the app around it are signed again. A stamp
 # per piece, in target/<profile>/ket-dev.stamps, records what it came from.
 #
-# Signing is ad hoc and inside out: the framework's libraries, the framework,
-# each helper with its entitlements (scripts/entitlements/), then the app.
-# Never --deep, which re-signs every helper with the app's entitlements in
-# place of its own. The app and the plain and Alerts helpers need none. None
-# of it is enforced yet: only the hardened runtime checks entitlements, and
-# that waits on a Developer ID signature, which waits on the LLC's Apple
-# Developer account. (Under the hardened runtime an ad-hoc app could not load
-# an ad-hoc framework anyway: library validation wants a Team ID.)
+# Signing is inside out: the framework's libraries, the framework, each
+# helper with its entitlements (scripts/entitlements/), then the app. Never
+# --deep, which re-signs every helper with the app's entitlements in place of
+# its own. The Alerts helper needs none. ket-dev.app's framework and helpers
+# are signed ad hoc without the hardened runtime, so none of it is enforced
+# there: only the hardened runtime checks entitlements.
+#
+# --embed signs as scripts/bundle-macos.sh says, through the variables its
+# header describes: KET_SIGN_IDENTITY (unset or "-" is ad hoc) and
+# KET_HARDENED_RUNTIME. A real identity always gets the hardened runtime and
+# a secure timestamp, which notarisation asks of every piece of code. Ad hoc
+# with the hardened runtime is for trying that runtime out before there is a
+# certificate, and it needs one entitlement a release does not: library
+# validation admits only code signed by the loading process's own team, an
+# ad-hoc signature has no team, and so no helper could load the ad-hoc
+# framework. In that mode alone every helper also gets
+# disable-library-validation.
 
 set -euo pipefail
 
@@ -69,9 +78,11 @@ VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
 # CEF is pointed at "ket Helper.app" (crates/ket-chromium/src/engine.rs) and
 # finds the others beside it by adding their suffix to that name. The
 # identifier suffixes are CEF's own (cmake/cef_variables.cmake), the
-# entitlements Chromium's (see each file).
+# entitlements Chromium's (see each file). In practice CEF 156 starts its
+# renderer and GPU processes from the plain helper too, so that one carries
+# what they need (helper.plist).
 HELPERS=(
-    "||"
+    "||helper.plist"
     " (Alerts)|.alerts|"
     " (GPU)|.gpu|helper-gpu.plist"
     " (Plugin)|.plugin|helper-plugin.plist"
@@ -104,14 +115,56 @@ clone() {
     fi
 }
 
-# Signs ad hoc. codesign --force reports every signature it replaces on
-# stderr, so its output is shown only when it fails.
+# How sign() signs: ad hoc, without the hardened runtime, unless --embed is
+# told otherwise (embed_signing). LOOSE_LIBRARY_VALIDATION is set for the one
+# mode that needs disable-library-validation, and SCRATCH is where the
+# entitlements that adds are written.
+SIGN_FLAGS=(--sign -)
+LOOSE_LIBRARY_VALIDATION=0
+SCRATCH=""
+
+# Reads --embed's signing from the environment; see the top.
+embed_signing() {
+    local identity="${KET_SIGN_IDENTITY:--}"
+    SIGN_FLAGS=(--sign "${identity}")
+    if [[ "${identity}" != - ]]; then
+        SIGN_FLAGS+=(--options runtime --timestamp)
+    elif [[ "${KET_HARDENED_RUNTIME:-0}" == 1 ]]; then
+        SIGN_FLAGS+=(--options runtime)
+        LOOSE_LIBRARY_VALIDATION=1
+        SCRATCH="$(mktemp -d)"
+        trap 'rm -rf "${SCRATCH}"' EXIT
+    fi
+}
+
+# codesign --force reports every signature it replaces on stderr, so its
+# output is shown only when it fails.
 sign() {
     local out
-    out="$(codesign --force --sign - "$@" 2>&1)" || {
+    out="$(codesign --force "${SIGN_FLAGS[@]}" "$@" 2>&1)" || {
         echo "${out}" >&2
         return 1
     }
+}
+
+# Prints the entitlements file to sign the executable <name> with: <file>
+# (empty for none) as it is, or a copy that adds disable-library-validation
+# when LOOSE_LIBRARY_VALIDATION says so. plutil reads dots as a key path, so
+# the dots in the key are escaped.
+entitlements_for() {
+    local copy
+    if [[ "${LOOSE_LIBRARY_VALIDATION}" != 1 ]]; then
+        echo "$1"
+        return
+    fi
+    copy="${SCRATCH}/$2.plist"
+    if [[ -n "$1" ]]; then
+        cp "$1" "${copy}"
+    else
+        plutil -create xml1 "${copy}"
+    fi
+    plutil -replace 'com\.apple\.security\.cs\.disable-library-validation' -bool YES "${copy}"
+    echo "${copy}"
 }
 
 # Path, mtime and size: enough to tell a rebuilt file from the one a piece of
@@ -245,8 +298,9 @@ embed_helpers() {
         mkdir -p "${helper}/Contents/MacOS"
         clone "${binary}" "${helper}/Contents/MacOS/${name}"
         helper_plist "${name}" "$3.helper${id_suffix}" >"${helper}/Contents/Info.plist"
+        entitlements="$(entitlements_for "${entitlements:+${ENTITLEMENTS}/${entitlements}}" "${name}")"
         if [[ -n "${entitlements}" ]]; then
-            sign --entitlements "${ENTITLEMENTS}/${entitlements}" "${helper}"
+            sign --entitlements "${entitlements}" "${helper}"
         else
             sign "${helper}"
         fi
@@ -276,6 +330,7 @@ embed() {
     if [[ ! -f "$1/Contents/Info.plist" ]]; then
         die "$1 has no Contents/Info.plist to add to"
     fi
+    embed_signing
     cef="$(cef_dir "$2")"
     embed_framework "${cef}" "$1"
     embed_helpers "$1" "$2" "$3"
@@ -310,7 +365,7 @@ dev_plist() {
     <key>CFBundleIconFile</key>
     <string>ket.icns</string>
     <key>LSMinimumSystemVersion</key>
-    <string>11.0</string>
+    <string>${CHROMIUM_MIN_MACOS}</string>
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSAppTransportSecurity</key>

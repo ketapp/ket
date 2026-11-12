@@ -184,7 +184,7 @@ export function ProjectHeading({
         </Pressable>
       ) : null}
       {onToggle ? (
-        <View style={!collapsed && styles.open}>
+        <View style={collapsed ? styles.fold : styles.open}>
           <Chevron size={14} color={t.faint} />
         </View>
       ) : null}
@@ -286,7 +286,11 @@ export function Row({
       ) : state ? (
         <View style={styles.state}>{stateMark(state)}</View>
       ) : null}
-      {chevron ? <Chevron size={16} color={t.faint} /> : null}
+      {chevron ? (
+        <View style={styles.rowChevron}>
+          <Chevron size={16} color={t.faint} />
+        </View>
+      ) : null}
     </Pressable>
   );
 }
@@ -605,10 +609,10 @@ export function Badge({
   return (
     <View style={[styles.badge, { backgroundColor: tint(color, 0.13), width: side, height: side }]}>
       {glyph ? (
-        // Lucide's 2px stroke on its 24px grid, drawn at two thirds of the
-        // badge: about the weight of the letter it stands in for.
-        <Svg width={side * 0.64} height={side * 0.64} viewBox="0 0 24 24" testID="badge-glyph">
-          <G fill="none" stroke={ink} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+        // Phosphor's filled shapes on its 256-unit grid, drawn at two thirds
+        // of the badge, as solid as the letter it stands in for.
+        <Svg width={side * 0.64} height={side * 0.64} viewBox="0 0 256 256" testID="badge-glyph">
+          <G fill={ink}>
             {glyph.map((part, at) => (
               <GlyphShape key={at} part={part} />
             ))}
@@ -970,6 +974,13 @@ export const MARK_SLOT = 22;
 /** From the slot to the row's words. */
 export const MARK_GAP = 8;
 
+// How far a chevron's stroke ends inside its 24-unit box, as a share of its
+// size: 8.1 units pointing right, 5.1 turned down. A row's chevron is pulled
+// out by that much, so what you see ends at the row's inset, as its badge
+// starts at it.
+const CHEVRON_RIGHT = 8.1 / 24;
+const CHEVRON_DOWN = 5.1 / 24;
+
 /** Room a scrolling screen leaves under its content for the tab bar. */
 export const TAB_BAR_ROOM = 104;
 
@@ -1039,17 +1050,17 @@ export const styles = StyleSheet.create({
   count: { fontFamily: font.chrome, fontSize: 12, color: t.faint },
   // Its badge stands in the same slot a row's mark does, so the badge and
   // the marks under it share one column and every name starts at the
-  // same inset.
+  // same inset. It ends at that inset too.
   project: {
     minHeight: 50,
     flexDirection: 'row',
     alignItems: 'center',
     gap: MARK_GAP,
-    paddingLeft: ROW_INSET,
-    paddingRight: 6,
+    paddingHorizontal: ROW_INSET,
     borderRadius: size.radiusRow,
   },
-  open: { transform: [{ rotate: '90deg' }] },
+  fold: { marginRight: -14 * CHEVRON_RIGHT },
+  open: { marginRight: -14 * CHEVRON_DOWN, transform: [{ rotate: '90deg' }] },
   backlog: { gap: 5, paddingHorizontal: 8 },
   projectText: { flex: 1, minWidth: 0, gap: 2 },
   projectLine: { flexDirection: 'row', alignItems: 'center', gap: 6 },
@@ -1061,10 +1072,10 @@ export const styles = StyleSheet.create({
     alignItems: 'center',
     gap: MARK_GAP,
     paddingVertical: 9,
-    paddingLeft: ROW_INSET,
-    paddingRight: 12,
+    paddingHorizontal: ROW_INSET,
     borderRadius: size.radiusRow,
   },
+  rowChevron: { marginRight: -16 * CHEVRON_RIGHT },
   marker: { position: 'absolute', left: 0, top: 12, bottom: 12, width: 3, borderRadius: 2, backgroundColor: t.marker },
   mark: { width: MARK_SLOT, alignItems: 'center' },
   faded: { opacity: 0.55 },

@@ -6,10 +6,10 @@
   framework). Chromium's own chrome/app/helper-gpu-entitlements.plist,
   unchanged.
 
-  Only the hardened runtime enforces entitlements, and ket is signed ad hoc
-  without it until a Developer ID signature is possible (it waits on the
-  LLC's Apple Developer account). Recorded now so that signature starts from
-  the right set. See scripts/chromium-dev.sh.
+  Only the hardened runtime enforces entitlements: a Developer ID build, or
+  an ad-hoc one with KET_HARDENED_RUNTIME=1 (scripts/bundle-macos.sh). CEF
+  156 starts every child process from the plain helper at present, so this
+  variant is signed but not run; see helper.plist.
 -->
 <plist version="1.0">
 <dict>

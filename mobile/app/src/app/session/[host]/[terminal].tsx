@@ -43,7 +43,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { FileChip, ImagesChip, SentFiles, type Source, Tray, attachSections } from '../../../components/Attachments';
 import { AgentViewList, backgroundState, terminalAt } from '../../../components/AgentView';
-import { Compacting, Outgoing, type OutgoingStatus, StatusMark, Working } from '../../../components/ChatRows';
+import { CantFind, Compacting, Outgoing, type OutgoingStatus, StatusMark, Working } from '../../../components/ChatRows';
 import { commandRow } from '../../../components/Commands';
 import { PlusButton, SendButton, plusMenu, slashMenu } from '../../../components/Composer';
 import { FloatMenu, type Place, placeOf } from '../../../components/FloatMenu';
@@ -100,7 +100,9 @@ const HAND_OVER_MS = 8_000;
  * while the task a chat was started on is on its way, they are that
  * message's sending; any other reason — the terminal closed, a transcript it
  * can't read — is news, and shown. */
-const STILL_OPENING = ['no agent has reported from this terminal yet', "the session's transcript isn't there yet"];
+/** The desktop's word for a session whose conversation it can't find. */
+const NOT_THERE = "the session's transcript isn't there yet";
+const STILL_OPENING = ['no agent has reported from this terminal yet', NOT_THERE];
 
 /** How long after sending the composer turns away what iOS puts back:
  * Send tapped mid-autocorrect, the correction lands after the clearing. */
@@ -287,6 +289,8 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
   const [seen, setSeen] = useState({ yours: -1, sending: false });
   const sentCount = useRef(seed ? 1 : 0);
   const [unreadable, setUnreadable] = useState('');
+  // Asks the desktop for the conversation now, not at the next tick.
+  const lookNow = useRef(() => {});
   // Whether the desktop has answered once, and why it has not when asking
   // keeps failing: an empty conversation, one still loading and one the
   // desktop is refusing looked the same — blank.
@@ -437,7 +441,9 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
     if (!question) return askCold && cold ? { key: `cold${cold.sinceMs}`, kind: 'cold', cold } : undefined;
     const key = `q${question.id}`;
     if (prompt) return { key, kind: prompt, question };
-    if (!question.answerable) return undefined;
+    // One the Mac cannot answer from here — it does not know that agent's
+    // keys for it — is still a wait: said, with the way to the terminal,
+    // rather than a chat that looks idle while the agent sits on a prompt.
     const chosen = answered?.id === question.id ? answered.choice : undefined;
     return { key, kind: 'permission', question, chosen, marked: chosen !== undefined };
   })();
@@ -550,6 +556,7 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
         clearTimeout(timer);
         void loop();
       };
+      lookNow.current = now;
       let wasConnected = conn.status === 'connected';
       const offChange = conn.onChange(() => {
         const connected = conn.status === 'connected';
@@ -923,33 +930,42 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
             </Text>
           ) : null}
         </Dim>
-        <View style={styles.askButtons}>
-          <Button
-            kind="primary"
-            title="Allow once"
-            mark={markOf(Answer_Choice.ALLOW_ONCE, t.onAccent)}
-            disabled={done}
-            onPress={() => void answer(Answer_Choice.ALLOW_ONCE)}
-            style={styles.grow}
-          />
-          {c.question.always ? (
+        {c.question.answerable ? (
+          <View style={styles.askButtons}>
             <Button
-              title="Always"
-              mark={markOf(Answer_Choice.ALLOW_ALWAYS, t.text)}
+              kind="primary"
+              title="Allow once"
+              mark={markOf(Answer_Choice.ALLOW_ONCE, t.onAccent)}
               disabled={done}
-              onPress={() => void answer(Answer_Choice.ALLOW_ALWAYS)}
+              onPress={() => void answer(Answer_Choice.ALLOW_ONCE)}
               style={styles.grow}
             />
-          ) : null}
+            {c.question.always ? (
+              <Button
+                title="Always"
+                mark={markOf(Answer_Choice.ALLOW_ALWAYS, t.text)}
+                disabled={done}
+                onPress={() => void answer(Answer_Choice.ALLOW_ALWAYS)}
+                style={styles.grow}
+              />
+            ) : null}
+            <Button
+              kind="danger"
+              title="Deny"
+              mark={markOf(Answer_Choice.DENY, t.failed)}
+              disabled={done}
+              onPress={() => void answer(Answer_Choice.DENY)}
+              style={styles.grow}
+            />
+          </View>
+        ) : (
           <Button
-            kind="danger"
-            title="Deny"
-            mark={markOf(Answer_Choice.DENY, t.failed)}
-            disabled={done}
-            onPress={() => void answer(Answer_Choice.DENY)}
-            style={styles.grow}
+            kind="primary"
+            title="Answer in the terminal"
+            icon={<TerminalWindow size={16} color={t.onAccent} />}
+            onPress={openTerminal}
           />
-        </View>
+        )}
       </View>
     );
   };
@@ -1089,6 +1105,9 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
   // loading, or the agent not yet reading — see STILL_OPENING — is that
   // message on its way, not news to put above it.
   const opening = seed !== undefined && pending.some((p) => p.key === 0);
+  // The conversation not found on the Mac: said in the middle of the chat,
+  // with Try again and Open terminal.
+  const missing = painted && !tooOld && !opening && unreadable === NOT_THERE && turns.length === 0;
   const statusOf = (p: Pending): OutgoingStatus => {
     const age = now - p.at;
     if (age <= UNSEEN_MS) return 'sending';
@@ -1198,8 +1217,10 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
           // conversation scrolls clear of it, and follows it down as it goes.
           extraContentPadding={FLOATS ? room : undefined}
           style={styles.fill}
-          contentContainerStyle={styles.page}
-          keyboardShouldPersistTaps="handled"
+          contentContainerStyle={[styles.page, missing && styles.pageFill]}
+          // A tap in the conversation puts the keyboard away, and the draft
+          // stays. With it up, a tap on a message or a button only does that.
+          keyboardShouldPersistTaps="never"
           onScroll={(e) => {
             const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent;
             // What is under a card waiting on you is not in view.
@@ -1227,6 +1248,14 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
                 onCopy={copy}
               />
               <Button title="Open the terminal" onPress={openTerminal} />
+            </View>
+          ) : missing ? (
+            <View style={styles.lost}>
+              <CantFind
+                agent={agent ? agentLabel(agent) : 'The agent'}
+                onRetry={() => lookNow.current()}
+                onTerminal={openTerminal}
+              />
             </View>
           ) : unreadable && turns.length === 0 && !(opening && STILL_OPENING.includes(unreadable)) ? (
             <View style={styles.empty}>
@@ -2212,6 +2241,9 @@ const styles = StyleSheet.create({
   },
   modePillText: { fontFamily: font.prose, fontSize: 13.5, fontWeight: '500', color: t.text, maxWidth: 104 },
   empty: { gap: 12, paddingVertical: 24, alignItems: 'flex-start' },
+  // With nothing to show, the chat's own height, for a mark in its middle.
+  pageFill: { flexGrow: 1 },
+  lost: { flex: 1, justifyContent: 'center', paddingVertical: 24 },
   you: { ...bubble, alignSelf: 'flex-end', maxWidth: '86%' },
   // A message of yours with photos or files: them, then its bubble.
   yours: { alignSelf: 'flex-end', maxWidth: '86%', alignItems: 'flex-end', gap: 4 },

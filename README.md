@@ -129,8 +129,8 @@ your agents run.
 - **Rust.** The app, the engine and the CLI share one language.
 - **GPU.** [gpui](https://www.gpui.rs) draws every frame through Metal, and
   terminals run on `alacritty_terminal`.
-- **No Electron.** No bundled browser or JavaScript runtime. Optional browser
-  tabs use the system's WKWebView.
+- **No Electron.** No JavaScript runtime under the interface. Browser tabs
+  embed Chromium through CEF.
 - **293 ms** to clone a 20,000-file dependency folder copy-on-write.
 
 > ket launches tools that can execute commands as your user. Only enable
@@ -139,11 +139,12 @@ your agents run.
 
 ## Supported platforms
 
-The desktop application and release bundle target macOS 11 or newer. Core and
+The desktop application and release bundle target macOS 13 or newer, the oldest the bundled Chromium supports. Core and
 CLI code may compile elsewhere, but non-macOS desktop behavior is not a
 supported release target yet. The companion phone app is built with Expo and
-reaches the Mac on the local network, over Tailscale, or, when it is turned
-on, through ket's relay; see `mobile/app/README.md` and `deploy/relay`.
+reaches the Mac on the local network or over Tailscale; see
+`mobile/app/README.md`. ket's own relay for reaching a Mac from anywhere is
+built (`deploy/relay`) but not offered yet.
 
 ## Workspace layout
 
@@ -250,15 +251,30 @@ only reported, never a red check; the npm audits skip the reviewed allowlist in
 
 ## Release process
 
-1. Update versions and user-facing release notes.
-2. Run all quality, protocol-drift, advisory, and license checks.
-3. Build the application with `scripts/bundle-macos.sh`.
-4. Test the bundle using disposable ket state and a disposable repository.
-5. For distribution to another Mac, replace the script's ad-hoc signature with
-   Developer ID signing and Apple notarization.
-6. Publish the matching source revision, lockfiles, `LICENSE`, and `NOTICE.md`.
+1. Write the release's notes under `## Unreleased` in `CHANGELOG.md`.
+2. Run the protocol-drift, advisory and license checks.
+3. Cut the release on a clean `main`:
 
-The repository does not currently automate signing, notarization, or publishing.
+   ```sh
+   KET_SIGN_IDENTITY="Developer ID Application: Ketapp LLC (<team id>)" \
+     KET_NOTARY_PROFILE=ket scripts/release.sh <version>
+   ```
+
+   `ket` is a notarytool keychain profile, made once with
+   `xcrun notarytool store-credentials`. The manifest's signing key is made
+   once with `scripts/release.sh --new-key`. The script checks formatting and
+   lints, bumps the version, files the changelog, commits and tags
+   `v<version>`, then builds, signs and notarizes through
+   `scripts/bundle-macos.sh` and writes the disk image, a zip of the app, the
+   notes and the signed channel manifest to
+   `target/release/bundle/release-<version>/`. Without a certificate,
+   `KET_HARDENED_RUNTIME=1 scripts/bundle-macos.sh` builds an ad-hoc app under
+   the same runtime restrictions, to test before signing.
+4. Test the disk image on another Mac, or another user account, using
+   disposable ket state and a disposable repository.
+5. Push `main` and the tag, then create the GitHub release `v<version>` with
+   the command the script prints, and update the Homebrew cask's version and
+   SHA-256.
 
 ## Security
 

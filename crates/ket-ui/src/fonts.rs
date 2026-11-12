@@ -19,31 +19,35 @@
 //! line that already has to fit a 300px sidebar, and the even rhythm that
 //! makes it good for the branch name above is what makes it grey here.
 //!
-//! So the chrome has two faces and the editor keeps its own:
+//! So there are three roles, and two faces fill them:
 //!
-//! - [`chrome_family`] — Geist Mono, on trial with the Desk redesign;
-//!   Monaspace Argon before it. The window root, and anything that is an
-//!   identifier: branch names, commit shas, paths, figures.
-//! - [`prose_family`] — Geist, on trial alongside it; SF Pro and Mona Sans
-//!   before it. Anything that is words. Reached through [`prose`] or the [`Prose`] extension trait
+//! - [`chrome_family`] — Fira Code, on trial; Atkinson Hyperlegible Mono
+//!   for a day before it, Geist Mono with the Desk redesign, and Monaspace
+//!   Argon before that. The window root, and anything that is an identifier:
+//!   branch names, commit shas, paths, figures.
+//! - [`prose_family`] — Geist; SF Pro and Mona Sans before it, and Fira Sans
+//!   and Atkinson Hyperlegible Next each for a morning. Anything that is words. Reached through [`prose`] or the [`Prose`] extension trait
 //!   rather than threaded through every component — see below.
-//! - [`monospace_family`] — Monaspace Neon. The terminal grid and the editor.
+//! - [`monospace_family`] — Fira Code again, on trial; Monaspace Neon before
+//!   it. The terminal grid and the editor.
 //!
-//! All three from GitHub's one foundry, which is the reason for the choice:
-//! Monaspace was drawn as Mona Sans's monospaced companion, so the branch line
-//! and the prose line under it share a skeleton rather than two unrelated
-//! faces sharing a row. Argon and Neon are two voices of one metric-compatible
-//! superfamily — Argon softer and humanist for the chrome, Neon neutral for
-//! code — so the labels and the code they name stay related without being
-//! indistinguishable. Geist Mono and IBM Plex Mono held these two slots
-//! before; Intel One Mono held both for a day.
+//! One mono and one sans, and no more: the terminal and the labels that name
+//! what runs in it are the same kind of text, so they share a face. Each
+//! sister sans tried beside a mono — Atkinson Hyperlegible Next, Fira Sans —
+//! read worse in the sidebar than Geist, so the pair is two families rather
+//! than one. GitHub's Monaspace and Mona Sans held these roles across three
+//! voices before; Geist Mono and IBM Plex Mono held the mono slots before
+//! that, and Intel One Mono held both for a day. Atkinson Hyperlegible Mono
+//! read well in the chrome and badly in the terminal, and draws no
+//! box-drawing characters for a TUI's borders.
 //!
 //! # What is bundled
 //!
-//! Five families are compiled into the binary so the preference lists always
+//! Seven families are compiled into the binary so the preference lists always
 //! bottom out somewhere deliberate rather than in whatever the host has:
-//! Geist Mono and Geist for the chrome on trial, Monaspace Argon and Mona Sans
-//! kept behind them, Monaspace Neon for code, all under the SIL Open Font License (the licences
+//! Fira Code on trial and Geist, with Atkinson Hyperlegible Mono, Geist Mono,
+//! Monaspace Argon, Monaspace Neon and Mona Sans kept behind them, all under
+//! the SIL Open Font License (the licences
 //! sit beside the files in `assets/fonts`). They are registered with the text
 //! system by [`install_bundled`] before the window opens, which is what makes
 //! them show up as installed to the pickers below.
@@ -69,12 +73,27 @@ use gpui::{Pixels, SharedString, Styled, TextSystem, font, px};
 /// because a variable font registers as a single face at its default weight
 /// and the chrome's semibolds would come back regular.
 ///
-/// Four weights each of Geist Mono, Geist, Monaspace Argon and Mona Sans, no
-/// italics: the
-/// chrome never slants. Five faces of Monaspace Neon: four weights, because
+/// Four weights each of Fira Code, Atkinson Hyperlegible Mono, Geist Mono,
+/// Geist, Monaspace Argon and Mona Sans, no italics: the chrome never
+/// slants, and Fira Code draws none, so the editor's comments stand upright
+/// while it is on trial. Five faces of Monaspace Neon: four weights, because
 /// the editor leans on weight where it used to lean on colour — a semibold
 /// keyword — and one italic, which is what a comment is set in.
-const BUNDLED: [&[u8]; 21] = [
+const BUNDLED: [&[u8]; 29] = [
+    include_bytes!("../assets/fonts/fira-code/FiraCode-Regular.ttf"),
+    include_bytes!("../assets/fonts/fira-code/FiraCode-Medium.ttf"),
+    include_bytes!("../assets/fonts/fira-code/FiraCode-SemiBold.ttf"),
+    include_bytes!("../assets/fonts/fira-code/FiraCode-Bold.ttf"),
+    include_bytes!(
+        "../assets/fonts/atkinson-hyperlegible-mono/AtkinsonHyperlegibleMono-Regular.ttf"
+    ),
+    include_bytes!(
+        "../assets/fonts/atkinson-hyperlegible-mono/AtkinsonHyperlegibleMono-Medium.ttf"
+    ),
+    include_bytes!(
+        "../assets/fonts/atkinson-hyperlegible-mono/AtkinsonHyperlegibleMono-SemiBold.ttf"
+    ),
+    include_bytes!("../assets/fonts/atkinson-hyperlegible-mono/AtkinsonHyperlegibleMono-Bold.ttf"),
     include_bytes!("../assets/fonts/geist-mono/GeistMono-Regular.ttf"),
     include_bytes!("../assets/fonts/geist-mono/GeistMono-Medium.ttf"),
     include_bytes!("../assets/fonts/geist-mono/GeistMono-SemiBold.ttf"),
@@ -101,19 +120,24 @@ const BUNDLED: [&[u8]; 21] = [
 /// Monospace, for the terminal grid and the editor's text, in order of
 /// preference.
 ///
-/// Monaspace Neon is bundled and so always wins. The rest of the list only
-/// decides what happens if registering the bundled faces ever fails, which
-/// is why it ends where it does: `SF Mono` is what Terminal.app draws with,
-/// but Apple ships it only inside Terminal's and Xcode's bundles, so it is
-/// available to other apps only where someone has installed it system-wide.
-/// `Menlo` is on every Mac and was Terminal's default for a decade before
-/// it — and unlike a second bundled family, it is still there in exactly the
-/// case this fallback exists for.
-const MONOSPACE: [&str; 3] = ["Monaspace Neon", "SF Mono", "Menlo"];
+/// On trial: Fira Code, the chrome's own mono, so that ket sets everything in
+/// two faces. It is bundled and so always wins, and it draws every
+/// box-drawing and block character a TUI's borders are made of. Monaspace
+/// Neon, which held the slot before, stays bundled and second, so the trial
+/// is undone by dropping the first entry.
+///
+/// The rest of the list only decides what happens if registering the bundled
+/// faces ever fails, which is why it ends where it does: `SF Mono` is what
+/// Terminal.app draws with, but Apple ships it only inside Terminal's and
+/// Xcode's bundles, so it is available to other apps only where someone has
+/// installed it system-wide. `Menlo` is on every Mac and was Terminal's
+/// default for a decade before it — and unlike a second bundled family, it
+/// is still there in exactly the case this fallback exists for.
+const MONOSPACE: [&str; 4] = ["Fira Code", "Monaspace Neon", "SF Mono", "Menlo"];
 
 /// The chrome's default face, in order of preference.
 ///
-/// Monaspace Argon is bundled and so always wins. Still a mono, and still a
+/// The first entry is bundled and so always wins. Still a mono, and still a
 /// different voice from the code's Neon, so the labels and the text they
 /// describe stay the same kind of text without being indistinguishable — but
 /// it is the face for the chrome's *identifiers* rather than for all of it.
@@ -126,10 +150,26 @@ const MONOSPACE: [&str; 3] = ["Monaspace Neon", "SF Mono", "Menlo"];
 /// mono, Recursive and Intel One Mono each had a morning; Geist Mono held it
 /// before Argon.
 ///
-/// On trial: Geist Mono again, with the Desk redesign whose mockup was drawn
-/// in it. Argon stays bundled and second, so the trial is undone by dropping
-/// the first entry.
-const CHROME: [&str; 3] = ["Geist Mono", "Monaspace Argon", ".SystemUIFont"];
+/// Geist Mono came back with the Desk redesign whose mockup was drawn in it,
+/// and held the slot until its narrow, light letters at 12.5px were too hard
+/// to read.
+///
+/// Atkinson Hyperlegible Mono followed it: the Braille Institute's face
+/// drawn for low vision, where every character is made unlike the ones it is
+/// mistaken for — `I l 1`, `O 0`, `rn m`.
+///
+/// On trial: Fira Code, the same face the terminal and editor are set in, so
+/// the chrome and the code it names are one mono. Its ligatures are switched
+/// off at the window root, so `->` in a branch name stays two characters.
+/// Atkinson stays bundled and second, so the trial is undone by dropping the
+/// first entry.
+const CHROME: [&str; 5] = [
+    "Fira Code",
+    "Atkinson Hyperlegible Mono",
+    "Geist Mono",
+    "Monaspace Argon",
+    ".SystemUIFont",
+];
 
 /// The chrome's prose face, in order of preference.
 ///
@@ -142,9 +182,15 @@ const CHROME: [&str; 3] = ["Geist Mono", "Monaspace Argon", ".SystemUIFont"];
 /// the face for the lines that are words, and it buys back the width a mono
 /// spends on them. Mona Sans held this slot before it, and Geist before that.
 ///
-/// Geist leads for now, beside Geist Mono in the chrome: the pair the Desk
+/// Geist leads, as it did beside Geist Mono in the chrome: the pair the Desk
 /// mockup was drawn in. SF Pro behind it is the trial before this one.
+/// Fira Sans, beside Fira Code, was set too tight for a project's name.
 const PROSE: [&str; 3] = ["Geist", ".SystemUIFont", "Mona Sans"];
+
+/// `gpui`'s name for the face the platform draws its own interface in: SF Pro
+/// on a Mac. Always installed as far as [`resolve`] is concerned, so it can
+/// be chosen for the interface in Settings like any family.
+pub(crate) const SYSTEM: &str = ".SystemUIFont";
 
 /// The prose face, once the shell has resolved it.
 ///

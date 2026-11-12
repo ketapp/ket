@@ -19,9 +19,10 @@ import { font, t, tint } from '../lib/theme';
 const GLYPH = 11;
 const ROW = 13;
 
-/** A cell is about half as wide as it is tall: Geist Mono's advance is 0.6 of
- * its size. Circles are drawn against the real ratio so they stay round. */
-const ASPECT = ROW / (GLYPH * 0.6);
+/** A cell is about half as wide as it is tall: the chrome face's advance,
+ * Fira Code's, is 0.615 of its size. Circles are drawn against the real
+ * ratio so they stay round. */
+const ASPECT = ROW / (GLYPH * 0.615);
 
 /** The planet's surface, darkest first. */
 const SHADE = ['.', ':', '-', '=', '+', '*', '#', '%', '@'];

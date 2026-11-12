@@ -260,6 +260,13 @@ pub fn serve_if_asked() {
 
 /// Undoes what the host's launcher may have left it with, before serving.
 ///
+/// The launcher's terminal: the host starts a session of its own, with no
+/// controlling terminal. In a process group of its own but still on the
+/// terminal a window or the CLI was run from, it handed that terminal to
+/// every `zsh -i` it ran as a probe, and zsh, on exiting, handed the terminal
+/// back to the host's group rather than the window's. Ctrl-C there then
+/// ended the host and every terminal in it, and left the window running.
+///
 /// Signals it inherited blocked are unblocked, so the handler the server
 /// installs for `SIGTERM` can run — see `server::watch_signals`, which is
 /// also what overrides an inherited *ignore*.
@@ -268,6 +275,12 @@ pub fn serve_if_asked() {
 /// runs out at a few dozen terminals, each holding the pty three times over
 /// (the master, a reader and a writer), and then cannot open another.
 fn reset_process() {
+    // Fails only for a host that already leads a process group: one started
+    // by hand from a shell, which keeps that shell's terminal.
+    if let Err(error) = nix::unistd::setsid() {
+        tracing::warn!(%error, "ket host: still on its launcher's terminal");
+    }
+
     use nix::sys::signal::{SigSet, SigmaskHow, sigprocmask};
     let _ = sigprocmask(SigmaskHow::SIG_SETMASK, Some(&SigSet::empty()), None);
 

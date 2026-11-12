@@ -32,7 +32,10 @@ jest.mock('@ket/remote', () => ({
   pair: (...args: unknown[]) => mockPair(...args),
   toBase64Url: (bytes: Uint8Array) => [...bytes].join('-'),
 }));
-jest.mock('./lib/hosts', () => ({ useHost: () => mockHost }));
+jest.mock('./lib/hosts', () => ({
+  ...jest.requireActual<typeof import('./lib/hosts')>('./lib/hosts'),
+  useHost: () => mockHost,
+}));
 jest.mock('./lib/store', () => ({
   phoneKey: jest.fn(async () => ({ privateKey: Uint8Array.of(1), publicKey: Uint8Array.of(2) })),
   saveHost: (host: object) => mockSaveHost(host),

@@ -79,6 +79,7 @@ pub mod syntax;
 pub mod terminal;
 pub mod text_search;
 pub mod theme;
+pub mod update;
 pub mod usage;
 pub mod workspace;
 pub mod worktree;

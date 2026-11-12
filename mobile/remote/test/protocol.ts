@@ -360,5 +360,56 @@ check('address validation rejects a non-WebSocket URL', !validRelayUrl('https://
   );
 }
 
+{
+  // At home: the home address answers in its head start, and the tailnet
+  // address, which would have answered at once, is never dialled.
+  const dialled: string[] = [];
+  const home = await firstOpen(
+    ['ws://studio.local', 'ws://100.101.102.103'],
+    (address) => {
+      dialled.push(address);
+      const link = { close() {} };
+      return address === 'ws://studio.local'
+        ? new Promise<{ close(): void }>((resolve) => setTimeout(() => resolve(link), 20))
+        : Promise.resolve(link);
+    },
+    ['ws://studio.local'],
+    200,
+  );
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  check(
+    'a home address answering in its head start wins, and the rest are never dialled',
+    home.address === 'ws://studio.local' && dialled.join() === 'ws://studio.local',
+  );
+
+  // Away: the home address fails, and the rest go at once, not after the
+  // head start.
+  const started = Date.now();
+  const away = await firstOpen(
+    ['ws://studio.local', 'ws://100.101.102.103'],
+    (address) =>
+      address === 'ws://studio.local'
+        ? Promise.reject<{ close(): void }>(new Error('no such name'))
+        : Promise.resolve({ close() {} }),
+    ['ws://studio.local'],
+    10_000,
+  );
+  check(
+    'a failed home address lets the rest go at once',
+    away.address === 'ws://100.101.102.103' && Date.now() - started < 1_000,
+  );
+
+  // A home address that neither answers nor fails holds the rest back only
+  // for its head start.
+  const hung = await firstOpen(
+    ['ws://studio.local', 'ws://100.101.102.103'],
+    (address) =>
+      address === 'ws://studio.local' ? new Promise<{ close(): void }>(() => {}) : Promise.resolve({ close() {} }),
+    ['ws://studio.local'],
+    20,
+  );
+  check('a silent home address holds the rest back only for its head start', hung.address === 'ws://100.101.102.103');
+}
+
 console.log(`${passed} passed, ${failures} failed`);
 if (failures > 0) process.exit(1);

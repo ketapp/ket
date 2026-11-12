@@ -7,6 +7,7 @@ import './polyfills';
 
 import * as SecureStore from 'expo-secure-store';
 import { type Keypair, type PairedHost, fromBase64Url, generateKeypair, keypairFrom, toBase64Url } from '@ket/remote';
+import { addressKind } from './address-kind';
 import { dialAddresses, normalizeHost } from './addresses';
 
 const KEY = 'ket.phone.key';
@@ -242,11 +243,15 @@ export async function saveLock(config: LockConfig | null): Promise<void> {
   else await del(LOCK);
 }
 
+/** The host as the protocol dials it: its addresses on the local network
+ * first, so at home the phone stays off Tailscale and the relay. */
 export function toPaired(host: SavedHost): PairedHost {
+  const addresses = dialAddresses(host);
   return {
     hostId: fromBase64Url(host.id),
     hostPublic: fromBase64Url(host.hostPublic),
     relay: host.relay,
-    addresses: dialAddresses(host),
+    addresses,
+    preferred: addresses.filter((address) => addressKind(address) === 'local'),
   };
 }

@@ -63,6 +63,7 @@ import {
   Refresh,
   Sparkle,
   Trash,
+  ADDRESS_ICON,
 } from './icons';
 import {
   Badge,
@@ -435,21 +436,22 @@ export function WorktreeList({ sidebar = false, refresh }: { sidebar?: boolean; 
   const explainSecure = () =>
     Alert.alert(
       'End-to-end encrypted',
-      `Everything between this phone and ${conn?.host.name || 'your desktop'} is end-to-end encrypted. The relay only ever sees ciphertext.`,
+      `Everything between this phone and ${conn?.host.name || 'your desktop'} is end-to-end encrypted. The relay only ever sees ciphertext.${status.kind ? `\n\n${status.text}.` : ''}`,
     );
 
   return (
     <Screen>
       {/* ket's mark, where Back sits on every other screen, wears the line
           to the desktop: its green when up, grey while reaching, red when
-          down. Across from it, the lock on that line, and what it says. */}
+          down. Across from it, the lock on that line, what it says, and
+          after a hairline a mark for how it runs: Wi-Fi, VPN or a cloud. */}
       <View style={styles.top}>
         <View style={styles.brand}>
           <BrandMark size={17} color={status.connected ? t.brand : conn?.status === 'offline' ? t.failed : t.faint} />
         </View>
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="Secure: end-to-end encrypted"
+          accessibilityLabel={`Secure: end-to-end encrypted${status.kind ? `, ${status.text}` : ''}`}
           onPress={explainSecure}
           hitSlop={6}
           style={({ pressed }) => [
@@ -461,10 +463,16 @@ export function WorktreeList({ sidebar = false, refresh }: { sidebar?: boolean; 
           <Text style={[styles.secureText, { color: status.connected ? t.running : t.dim }]}>
             {status.connected ? 'Secure' : conn?.status === 'offline' ? 'Offline' : 'Reaching'}
           </Text>
+          {status.kind ? (
+            <>
+              <View style={styles.secureRule} />
+              {createElement(ADDRESS_ICON[status.kind], { size: 14, color: t.running, weight: 2.2 })}
+            </>
+          ) : null}
         </Pressable>
       </View>
-      {/* The desktop is the screen's large title, how it is reached under
-          it; a tap opens the Mac switcher. */}
+      {/* The desktop is the screen's large title; a tap opens the Mac
+          switcher. */}
       <Pressable
         accessibilityRole="button"
         accessibilityLabel="Switch desktop"
@@ -476,12 +484,6 @@ export function WorktreeList({ sidebar = false, refresh }: { sidebar?: boolean; 
             {conn?.host.name ?? ''}
           </Text>
           <ChevronDown size={14} color={t.dim} weight={2.4} />
-        </View>
-        <View style={styles.titleRow}>
-          <Dot size={6} color={status.connected ? t.running : conn?.status === 'offline' ? t.failed : t.faint} />
-          <Text style={styles.route} numberOfLines={1}>
-            {status.connected ? 'relay' : status.text}
-          </Text>
         </View>
       </Pressable>
 
@@ -1160,12 +1162,12 @@ const styles = StyleSheet.create({
   brand: { width: 40, height: 40, marginLeft: -6, alignItems: 'center', justifyContent: 'center' },
   secure: { height: 32, flexDirection: 'row', alignItems: 'center', gap: 6, paddingLeft: 10, paddingRight: 12, borderRadius: 16 },
   secureText: { fontFamily: font.chrome, fontSize: 11.5 },
+  secureRule: { width: StyleSheet.hairlineWidth * 2, height: 14, marginHorizontal: 2, backgroundColor: tint(t.running, 0.35) },
   // The desktop's name as a large title, in from the gutter as a card's
   // heading is, so it lines up with the list under it.
   title: { marginHorizontal: size.gutter, marginTop: 2, paddingHorizontal: 6, paddingVertical: 2, gap: 4, borderRadius: size.radiusLg },
   titleRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   titleText: { flexShrink: 1, fontFamily: font.proseSemibold, fontSize: 22, lineHeight: 28, letterSpacing: -0.3, color: t.text },
-  route: { flexShrink: 1, fontFamily: font.chrome, fontSize: 12, color: t.dim },
   // The empty slot a Mac would fill: a dashed square with a plus in it.
   addMark: {
     width: 18,
@@ -1257,8 +1259,7 @@ const styles = StyleSheet.create({
     gap: 8,
     paddingTop: 10,
     paddingBottom: 9,
-    paddingLeft: ROW_INSET,
-    paddingRight: 10,
+    paddingHorizontal: ROW_INSET,
     borderRadius: size.radiusRow,
     backgroundColor: t.sunken,
   },

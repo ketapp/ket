@@ -25,7 +25,7 @@ import Svg, { Circle, Defs, LinearGradient, Path, Rect, Stop, Text as SvgText } 
 import { fileName, type Attachment } from '../lib/attach';
 import { agentLabel, blend, font, size, t, tint } from '../lib/theme';
 import { FileChip, SentFiles } from './Attachments';
-import { AgentMark } from './icons';
+import { AgentMark, Bubble, Retry, TerminalWindow } from './icons';
 import { Slide } from './Swap';
 
 const AnimatedCircle = Animated.createAnimatedComponent(Circle);
@@ -460,6 +460,110 @@ export const bubble: ViewStyle = {
   gap: 6,
 };
 
+/** How long Try again says it is looking, whatever the answer: long enough
+ * to read, where the answer itself comes in a moment. */
+const LOOKING_MS = 1200;
+
+/**
+ * The agent's conversation, not found on the Mac: said in the middle of the
+ * chat, with how long the phone has looked, Try again beside Open terminal,
+ * and an (i) that says why. The phone looks again every couple of seconds
+ * anyway; Try again looks now, and says so.
+ */
+export function CantFind({ agent, onRetry, onTerminal }: { agent: string; onRetry: () => void; onTerminal: () => void }) {
+  const still = useReducedMotion();
+  const [since] = useState(() => Date.now());
+  const [now, setNow] = useState(since);
+  const [why, setWhy] = useState(false);
+  const [looking, setLooking] = useState(false);
+  const turn = useSharedValue(0);
+  useEffect(() => {
+    const tick = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(tick);
+  }, []);
+  useEffect(() => {
+    if (!looking) return;
+    const done = setTimeout(() => setLooking(false), LOOKING_MS);
+    if (!still) turn.set(withRepeat(withTiming(1, { duration: 800, easing: Easing.linear, ...motion }), -1));
+    return () => {
+      clearTimeout(done);
+      cancelAnimation(turn);
+      turn.set(0);
+    };
+  }, [looking, still, turn]);
+  const spin = useAnimatedStyle(() => ({ transform: [{ rotate: `${turn.get() * 360}deg` }] }));
+  const seconds = Math.max(0, Math.floor((now - since) / 1000));
+  const ago = seconds < 60 ? `${seconds} s` : `${Math.floor(seconds / 60)} min`;
+
+  return (
+    <View style={styles.lost}>
+      <View style={styles.lostMark}>
+        <Bubble dots size={24} color={t.dim} weight={1.8} />
+      </View>
+      <View style={styles.lostLine}>
+        <Text style={styles.lostTitle}>Can’t show this chat yet</Text>
+        <View>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Why can’t I see this chat?"
+            accessibilityState={{ expanded: why }}
+            onPress={() => setWhy(!why)}
+            style={styles.lostInfo}
+          >
+            <View style={[styles.lostInfoRing, why && { backgroundColor: t.dim }]}>
+              <Text style={[styles.lostInfoText, why && { color: t.card }]}>i</Text>
+            </View>
+          </Pressable>
+          {why ? (
+            <View accessibilityRole="summary" style={styles.why}>
+              <Text style={styles.whyTitle}>Why this chat is empty</Text>
+              <Text style={styles.whyText}>
+                Your phone is connected to your Mac. What’s missing is the conversation: {agent} keeps each session in a
+                file there, and ket hasn’t found this one.
+              </Text>
+              <Text style={[styles.whyText, styles.whyMore]}>
+                That’s usual for a session nothing’s been said in yet, and for a moment after /clear or a move to another
+                folder.
+              </Text>
+              <Text style={styles.whyNote}>ket looks again every couple of seconds</Text>
+              <View style={styles.whyArrow} />
+            </View>
+          ) : null}
+        </View>
+      </View>
+      <Text style={styles.lostSince}>looking for {ago}</Text>
+      <Text style={styles.lostText}>
+        ket on your Mac can’t find the file this session is kept in. It shows here as soon as it can.
+      </Text>
+      <View style={styles.lostActions}>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={looking ? 'Looking' : 'Try again'}
+          onPress={() => {
+            if (looking) return;
+            setLooking(true);
+            onRetry();
+          }}
+          style={({ pressed }) => [styles.lostAction, styles.retry, pressed && { opacity: 0.85 }]}
+        >
+          <Animated.View style={spin}>
+            <Retry size={17} color={t.onBrand} weight={2.2} />
+          </Animated.View>
+          <Text style={styles.retryText}>{looking ? 'Looking…' : 'Try again'}</Text>
+        </Pressable>
+        <Pressable
+          accessibilityRole="button"
+          onPress={onTerminal}
+          style={({ pressed }) => [styles.lostAction, styles.terminal, pressed && { backgroundColor: t.selection }]}
+        >
+          <TerminalWindow size={17} color={t.dim} weight={2} />
+          <Text style={styles.terminalText}>Open terminal</Text>
+        </Pressable>
+      </View>
+    </View>
+  );
+}
+
 const styles = StyleSheet.create({
   you: { ...bubble, alignSelf: 'flex-end', maxWidth: '86%' },
   // A message of yours with photos or files: them, then its bubble.
@@ -488,4 +592,91 @@ const styles = StyleSheet.create({
   compactingRule: { flex: 1, height: 1 },
   compactingMark: { width: 14, height: 14 },
   compactingText: { fontFamily: font.chrome, fontSize: size.detail, lineHeight: 24, color: t.dim, includeFontPadding: false },
+  lost: { alignItems: 'center', paddingHorizontal: 10 },
+  lostMark: {
+    width: 52,
+    height: 52,
+    borderRadius: 26,
+    borderWidth: 1,
+    borderColor: t.rule,
+    backgroundColor: t.card,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  lostLine: { marginTop: 16, flexDirection: 'row', alignItems: 'center' },
+  lostTitle: { flexShrink: 1, fontFamily: font.proseSemibold, fontSize: 19, lineHeight: 26, color: t.text },
+  // 44 to the finger, 22 to the eye.
+  lostInfo: {
+    width: 44,
+    height: 44,
+    marginVertical: -9,
+    marginLeft: -4,
+    marginRight: -10,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  lostInfoRing: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    borderWidth: 1.5,
+    borderColor: t.dim,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  lostInfoText: { fontFamily: font.chromeSemibold, fontSize: 12, lineHeight: 14, color: t.dim, includeFontPadding: false },
+  lostSince: { marginTop: 6, fontFamily: font.chrome, fontSize: 12, color: t.faint },
+  lostText: { marginTop: 12, maxWidth: 300, fontFamily: font.prose, fontSize: 13, lineHeight: 19, color: t.dim, textAlign: 'center' },
+  lostActions: { marginTop: 24, alignSelf: 'stretch', flexDirection: 'row', gap: 8 },
+  lostAction: { flex: 1, height: 48, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, borderRadius: 12 },
+  retry: { backgroundColor: t.brand },
+  retryText: { fontFamily: font.proseSemibold, fontSize: 15, color: t.onBrand },
+  terminal: { borderWidth: 1, borderColor: t.border, backgroundColor: t.card },
+  terminalText: { fontFamily: font.proseMedium, fontSize: 15, color: t.text },
+  // Over the title, from the (i), its arrow at the (i).
+  why: {
+    position: 'absolute',
+    bottom: 44,
+    right: -36,
+    width: 318,
+    paddingHorizontal: 16,
+    paddingTop: 14,
+    paddingBottom: 13,
+    borderRadius: size.radiusCard,
+    borderWidth: 1,
+    borderColor: t.border,
+    backgroundColor: t.elevated,
+    shadowColor: '#000',
+    shadowOpacity: 0.55,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 14 },
+    zIndex: 5,
+  },
+  whyTitle: { fontFamily: font.proseSemibold, fontSize: 14, lineHeight: 20, color: t.text },
+  whyText: { marginTop: 6, fontFamily: font.prose, fontSize: 13, lineHeight: 19, color: t.dim },
+  whyMore: { marginTop: 8 },
+  whyNote: {
+    marginTop: 10,
+    paddingTop: 9,
+    borderTopWidth: 1,
+    borderTopColor: t.rule,
+    fontFamily: font.chrome,
+    fontSize: 11.5,
+    color: t.dim,
+  },
+  // Under the (i)'s middle: 12 in from the right of what holds it (half its
+  // 44, less the 10 it hangs out by), which is 36 in from the why's right,
+  // less the why's edge and half the arrow.
+  whyArrow: {
+    position: 'absolute',
+    bottom: -7,
+    right: 36 + 12 - 1 - 6,
+    width: 12,
+    height: 12,
+    backgroundColor: t.elevated,
+    borderRightWidth: 1,
+    borderBottomWidth: 1,
+    borderColor: t.border,
+    transform: [{ rotate: '45deg' }],
+  },
 });

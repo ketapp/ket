@@ -91,13 +91,14 @@ use crate::{
     ActualSize, AddProject, AddToBacklog, ChangeTabTitle, ClearBuildOutput, CliReference,
     CloseOtherTabs, ClosePane, CloseTab, CloseTabsLeft, CloseTabsRight, CommitAndMerge,
     CopyRelativeTabPath, CopyTabPath, CopyWorktreePath, DeleteWorktree, FindFile, FindInTab,
-    KetHelp, KeyboardShortcuts, MinimizeWindow, NewBlankDocument, NewBrowserTab, NewTerminalTab,
-    NewWorktree, NextTab, OpenBacklog, OpenCommandPalette, OpenPullRequest, OpenQuickPrompt,
-    OpenSettings, PreviousTab, ProjectSettings, Quit, RefreshProjects, ReleaseNotes, RemoveProject,
-    RenameWorktree, ReportIssue, SaveDocument, SearchProjects, SearchWorktree, SendSnippet,
-    ShowFilesPanel, ShowGitPanel, ShowNetworkPanel, ShowSearchPanel, SplitDown, SplitRight,
-    ToggleDiscoveredWorktrees, ToggleFullScreen, ToggleRightPanel, ToggleSidebar, ToggleStatusBar,
-    ToggleTabPin, ToggleWorktreePin, ViewAvailableReleases, ZoomIn, ZoomOut, ZoomWindow,
+    HideProject, KetHelp, KeyboardShortcuts, MinimizeWindow, NewBlankDocument, NewBrowserTab,
+    NewTerminalTab, NewWorktree, NextTab, OpenBacklog, OpenCommandPalette, OpenPullRequest,
+    OpenQuickPrompt, OpenSettings, PreviousTab, ProjectSettings, Quit, RefreshProjects,
+    ReleaseNotes, RemoveProject, RenameWorktree, ReportIssue, SaveDocument, SearchProjects,
+    SearchWorktree, SendSnippet, ShowFilesPanel, ShowGitPanel, ShowNetworkPanel, ShowSearchPanel,
+    SplitDown, SplitRight, ToggleDiscoveredWorktrees, ToggleFullScreen, ToggleProjectPin,
+    ToggleRightPanel, ToggleSidebar, ToggleStatusBar, ToggleTabPin, ToggleWorktreePin,
+    ViewAvailableReleases, ZoomIn, ZoomOut, ZoomWindow,
 };
 use crate::{EconomySavings, RevealWorktree};
 #[cfg(target_os = "macos")]
@@ -125,6 +126,7 @@ pub(crate) struct MenuState {
     pub(crate) projects: Vec<MenuProject>,
     pub(crate) worktrees: Vec<MenuWorktree>,
     pub(crate) hide_discovered: bool,
+    pub(crate) project_pinned: bool,
     pub(crate) worktree_primary: bool,
     pub(crate) worktree_missing: bool,
     pub(crate) worktree_pinned: bool,
@@ -188,6 +190,7 @@ impl MenuState {
                 })
                 .unwrap_or_default(),
             hide_discovered: project.is_some_and(|node| node.hide_discovered),
+            project_pinned: project.is_some_and(|node| node.pinned),
             worktree_primary: worktree.is_some_and(|node| node.primary),
             worktree_missing: worktree.is_some_and(|node| node.missing),
             worktree_pinned: worktree.is_some_and(|node| node.pinned),
@@ -525,6 +528,11 @@ pub(crate) fn app_menus(state: &MenuState) -> Vec<Menu> {
                     .enabled(state.selected_project.is_some()),
                 MenuItem::action("Show Non-ket Worktrees", ToggleDiscoveredWorktrees)
                     .checked(!state.hide_discovered)
+                    .enabled(state.selected_project.is_some()),
+                MenuItem::action("Pin to Top", ToggleProjectPin)
+                    .checked(state.project_pinned)
+                    .enabled(state.selected_project.is_some()),
+                MenuItem::action("Hide Project", HideProject)
                     .enabled(state.selected_project.is_some()),
                 MenuItem::action("Refresh Projects", RefreshProjects),
                 MenuItem::separator(),

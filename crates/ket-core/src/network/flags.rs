@@ -11,9 +11,10 @@
 //! in the part of the request that was new (see [`super::delta`]).
 //!
 //! **Quiet on what is everywhere.** Loopback and private addresses, `noreply`
-//! mail, `git@` remotes and version numbers shaped like an address are not
-//! flagged: a session that touches a repository would otherwise be flagged
-//! on every turn, and a flag that is always there is one nobody reads.
+//! mail, `git@` remotes, a URL's `user@host` and version numbers shaped like
+//! an address are not flagged: a session that touches a repository would
+//! otherwise be flagged on every turn, and a flag that is always there is
+//! one nobody reads.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Range;
@@ -37,7 +38,8 @@ pub enum Kind {
     Birth,
     /// A North American number, or one with a country code.
     Phone,
-    /// An email address, other than `noreply` and `git@` ones.
+    /// An email address, other than `noreply` and `git@` ones, and other
+    /// than a URL's `user@host`.
     Email,
     /// A public IPv4 address.
     Ip,
@@ -609,7 +611,18 @@ fn email(text: &str, range: Range<usize>) -> bool {
         && !lower.contains("noreply")
         && !lower.contains("no-reply")
         && !NOT_DOMAINS.contains(&tld.to_ascii_lowercase().as_str())
+        && !in_url(text, range.start)
         && standalone(text, range, &['.', '-', '_', '@'])
+}
+
+/// Whether what starts at `at` is the `user@host` of a URL — a Sentry DSN,
+/// a registry with a token in it, a database URL — which has the shape of
+/// an address and is nobody's. A key in one is flagged as a key by its own
+/// shape, where it has one.
+fn in_url(text: &str, at: usize) -> bool {
+    text[..at]
+        .trim_end_matches(|c: char| c.is_ascii_alphanumeric() || "._%+-:".contains(c))
+        .ends_with("://")
 }
 
 fn ip(text: &str, range: Range<usize>) -> bool {

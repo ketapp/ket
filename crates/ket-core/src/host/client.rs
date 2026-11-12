@@ -482,9 +482,10 @@ fn hello(stream: UnixStream, build: &str) -> io::Result<(UnixStream, String, usi
 
 /// Starts this binary as the host, detached from this process.
 ///
-/// Its own process group, so a Ctrl-C meant for a `cargo run` in a terminal
-/// does not reach it, and its own process name, `ket-host`; its output goes
-/// to a log beside the socket.
+/// Its own process name, `ket-host`, and its output goes to a log beside the
+/// socket. It leaves this process's terminal session itself, on starting —
+/// see `reset_process` in `host.rs` — which is why it is not spawned into a
+/// process group of its own: a group leader cannot start a session.
 ///
 /// Returns a flag that is set when the process exits, so a window waiting for
 /// a host that failed on starting stops waiting straight away.
@@ -514,7 +515,6 @@ fn start_host() -> Result<Arc<AtomicBool>> {
         .stdin(Stdio::null())
         .stdout(log.try_clone().map_err(host_error)?)
         .stderr(log)
-        .process_group(0)
         .spawn()
         .map_err(host_error)?;
     // Reaped whenever it exits, so it is never left a zombie of this process.

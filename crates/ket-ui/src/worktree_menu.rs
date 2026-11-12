@@ -719,6 +719,7 @@ impl Shell {
         // claiming the keyboard.
         self.menu = None;
         self.project_menu = None;
+        self.tucked_menu = None;
         self.path_menu = None;
         self.popup = None;
 

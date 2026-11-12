@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  ket.app's own executable. Under the hardened runtime macOS refuses the
+  microphone, the camera and Apple Events to a process whose signature does
+  not claim them, without asking the person first, so each one here is
+  something ket would otherwise silently lose:
+
+  - audio-input: dictation in the quick prompt (crates/ket-ui/src/voice.rs),
+    and a web page in a browser tab asking for the microphone.
+  - camera: a web page asking for the camera, which is why Info.plist carries
+    NSCameraUsageDescription (scripts/chromium-dev.sh).
+  - automation.apple-events: the programs ket's terminals run. macOS holds
+    ket responsible for them, so `osascript` from a shell in ket asks under
+    ket's name, and is refused outright without this.
+
+  No code-signing exceptions (allow-jit and the like): the browser process
+  compiles no JavaScript, which is why Chromium's own app-entitlements.plist
+  has none either; the renderer and GPU helpers carry their own. Library
+  validation stays on, because a Developer ID signature gives the app, the CEF
+  framework and every helper the same Team ID.
+-->
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
+    <key>com.apple.security.device.camera</key>
+    <true/>
+    <key>com.apple.security.automation.apple-events</key>
+    <true/>
+</dict>
+</plist>

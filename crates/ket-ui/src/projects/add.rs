@@ -63,6 +63,7 @@ impl Shell {
     /// Opens the add-project dialog.
     pub(crate) fn add_project(&mut self, cx: &mut Context<Self>) {
         self.project_menu = None;
+        self.tucked_menu = None;
         let workspace = match Workspace::open() {
             Ok(workspace) => workspace,
             Err(e) => {

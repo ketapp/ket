@@ -276,6 +276,7 @@ impl Shell {
         self.worktree_menu = None;
         self.path_menu = None;
         self.project_menu = None;
+        self.tucked_menu = None;
         self.popup = None;
         self.rail_hover = RailHover::default();
 
@@ -494,6 +495,7 @@ impl Shell {
             .selection
             .map(|selection| selection.project)
             .filter(|&index| index < self.projects.len())
+            .or_else(|| self.first_shown_project(ket_core::now_ms()))
             .or((!self.projects.is_empty()).then_some(0));
         let new = self.rail_tip(
             "rail-new-worktree",
@@ -559,6 +561,8 @@ impl Shell {
         self.projects
             .iter()
             .enumerate()
+            // The rail lists what the sidebar does: no hidden project.
+            .filter(|(_, project)| self.project_shown(project, now))
             .map(|(pi, project)| {
                 let target = RailTarget::Project(pi);
                 // Whatever is most urgent in the project, as a dot on its
@@ -692,6 +696,7 @@ impl Shell {
             .projects
             .iter()
             .enumerate()
+            .filter(|(_, project)| self.project_shown(project, now))
             .flat_map(|(pi, project)| {
                 project.worktrees.iter().enumerate().map(move |(wi, node)| {
                     (

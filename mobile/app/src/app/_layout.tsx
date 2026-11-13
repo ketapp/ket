@@ -17,6 +17,14 @@ import { SIDEBAR_WIDTH, SplitContext, useWide } from '../lib/layout';
 import { startLock, useLock } from '../lib/lock';
 import { startNotices, useNoticeFollowing } from '../lib/notices';
 import { light, t } from '../lib/theme';
+import { installErrorCapture } from '../lib/crashes';
+
+// Before anything else runs, so an error in what follows is kept too.
+installErrorCapture();
+
+// A screen that throws while drawing shows this rather than taking the app
+// down; see components/ErrorScreen.
+export { ErrorScreen as ErrorBoundary } from '../components/ErrorScreen';
 
 SplashScreen.preventAutoHideAsync();
 startLock();

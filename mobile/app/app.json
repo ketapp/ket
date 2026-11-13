@@ -14,7 +14,7 @@
       "bundleIdentifier": "dev.ketapp.ket",
       "buildNumber": "1",
       "config": {
-        "usesNonExemptEncryption": false
+        "usesNonExemptEncryption": true
       },
       "infoPlist": {
         "NSLocalNetworkUsageDescription": "ket connects to your Mac over your Wi-Fi to show and control the agents running on it.",

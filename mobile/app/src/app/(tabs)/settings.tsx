@@ -3,14 +3,15 @@
 // Settings: the desktops this phone is paired with, and pairing another;
 // which notices the phone shows; the app lock; and About.
 
-import { router } from 'expo-router';
+import { router, useFocusEffect } from 'expo-router';
 import { Activity } from '@ket/remote';
 import { useEffect, useState } from 'react';
-import { Linking, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Linking, ScrollView, Share, StyleSheet, Text, View } from 'react-native';
 
 import { BrandMark, Desktop, External } from '../../components/icons';
 import { Button, Card, Heading, Prose, Row, Screen, Segmented, TAB_BAR_ROOM, TabBar, Tag, Toggle } from '../../components/ui';
 import { everyWorktree } from '../../lib/activity';
+import { reportText, useErrorReports } from '../../lib/crashes';
 import { statusLine, useHosts } from '../../lib/hosts';
 import { LOCK_AFTER, biometry, confirmIdentity, setLockAfter, turnOff, useLock } from '../../lib/lock';
 import { type Kind, available as noticesAvailable, choose, openPhoneSettings, turnOff as quiet, turnOn as notify, useNotices } from '../../lib/notices';
@@ -37,6 +38,9 @@ export default function Settings() {
     if (await confirmIdentity('Change your PIN')) router.push('/pin');
   };
   const notices = useNotices();
+  // Errors kept on this phone, read again each time Settings comes into view.
+  const errors = useErrorReports();
+  useFocusEffect(errors.refresh);
   const changeNotify = async (on: boolean) => {
     if (on) await notify();
     else await quiet();
@@ -153,6 +157,14 @@ export default function Settings() {
               </View>
             }
           />
+          <Row
+            small
+            title="Error reports"
+            meta={<Text style={styles.version}>{errors.reports.length === 0 ? 'None' : String(errors.reports.length)}</Text>}
+            chevron={errors.reports.length > 0}
+            onPress={errors.reports.length > 0 ? () => void Share.share({ message: reportText(errors.reports) }) : undefined}
+          />
+          {errors.reports.length > 0 ? <Row small title="Clear error reports" onPress={errors.clear} /> : null}
           <Row
             small
             title="Website"

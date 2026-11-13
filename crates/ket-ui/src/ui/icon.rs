@@ -1070,6 +1070,7 @@ mod tests {
             Icon::List,
             Icon::Copy,
             Icon::Pin,
+            Icon::PinFill,
             Icon::PinOff,
             Icon::Primary,
             Icon::Bell,

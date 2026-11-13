@@ -166,6 +166,9 @@ pub(crate) fn registry() -> (Registry, Outbox) {
             Category::Application,
         ),
         Command::new("review.send", "Send review to agent", Category::Review),
+        // The first-run setup is a window, so only the window can open it: in
+        // core's registry the CLI would have to implement it too.
+        Command::new("setup.show", "Set up a coding agent", Category::Application),
     ];
     for command in shell_commands {
         // A duplicate id here is a mistake in this file, not a runtime state.

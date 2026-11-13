@@ -851,7 +851,6 @@ fn builtin_commands() -> Vec<Command> {
             "Show the resolved configuration",
             Category::Config,
         ),
-        Command::new("setup.show", "Set up a coding agent", Category::Application),
         // Two commands rather than one with a switch: `--follow` never returns,
         // and "print the journal" and "watch what happens next" are different
         // things to offer someone.

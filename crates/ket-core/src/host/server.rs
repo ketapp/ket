@@ -316,8 +316,8 @@ pub(super) struct Host {
     /// tab's key, or to say why it won't.
     wake_waiting: Mutex<BTreeMap<u64, WakeWaiter>>,
     next_wake: AtomicU64,
-    /// Phone Start freshes waiting for the window to name the tab it opened
-    /// beside the cold one, or to say why it opened none.
+    /// Phone Start freshes waiting for the window to name the tab it started
+    /// fresh, or to say why it didn't.
     fresh_waiting: Mutex<BTreeMap<u64, mpsc::Sender<Freshened>>>,
     next_fresh: AtomicU64,
     /// The agents' plan usage, as a window last reported it, for phones. The
@@ -1002,9 +1002,9 @@ impl Host {
             })
     }
 
-    /// Starts a fresh session beside the cold one in the tab `key` names, for
-    /// a phone: asks the window showing it, waits for that window to name the
-    /// tab it opened once that tab's agent has started, then finds its
+    /// Starts the tab `key` names on a new conversation in place, for a
+    /// phone: asks the window showing it, waits for that window to name the
+    /// tab once its agent has reported the new session, then finds its
     /// terminal — all within [`WAKE_WAIT`], since a fresh session starts an
     /// agent as a wake does.
     /// `session` and `since_ms` are the cold spell the phone was shown, which

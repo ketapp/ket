@@ -17,6 +17,11 @@
 //! tinted, with a tag naming what, so it is seen without being opened; the
 //! context row counts them and filters to them. The tab marks each match.
 //!
+//! **Muted kinds say nothing.** A kind muted in Settings › Network, from an
+//! alert's Mute or from a request tab's, is left out everywhere a flag
+//! shows: no alert, tint, tag, count or mark. The log still holds it, so
+//! turning the kind back on brings its flags back.
+//!
 //! **One menu for the rest.** The context row's ⋯ holds what is done to the
 //! whole log — read it again, show its folder, its settings, clear it — so
 //! the row keeps only the count and the flag filter.
@@ -31,7 +36,7 @@
 //! pick is kept as lines and bytes of the body, not rows, so it survives
 //! Wrap Lines; the rows draw their part of it.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -89,6 +94,18 @@ pub(crate) enum NetworkAction {
     Settings,
     /// Deletes the worktree's whole log.
     Clear,
+    /// Stops flagging a kind, from a request tab's Mute menu.
+    Mute(Kind),
+}
+
+/// Who opened the panel's one menu: the context row's ⋯, or a request
+/// tab's Mute — see [`mute_menu`].
+const MORE_MENU: &str = "network-more";
+
+/// The Mute menu of `key`'s tab: its own, so two request tabs side by side
+/// do not both hang it.
+fn mute_menu(key: &RequestKey) -> SharedString {
+    format!("network-mute-{}-{}", key.worktree.as_str(), key.id).into()
 }
 
 /// Height of one line of a body in a request tab.
@@ -134,7 +151,19 @@ pub(crate) struct NetworkPanel {
     /// Whether request tabs wrap their bodies' long lines. One setting for
     /// every tab, so turning it off sticks from one request to the next.
     pub(crate) wrap: bool,
+    /// The kinds of flag muted in the config, as last read.
+    muted: BTreeSet<Kind>,
     scroll: UniformListScrollHandle,
+}
+
+impl NetworkPanel {
+    /// The panel as a window opens, with the kinds the config mutes.
+    pub(crate) fn muting(muted: BTreeSet<Kind>) -> Self {
+        Self {
+            muted,
+            ..Self::default()
+        }
+    }
 }
 
 impl Default for NetworkPanel {
@@ -151,6 +180,7 @@ impl Default for NetworkPanel {
             alerted: HashMap::new(),
             menu: None,
             wrap: true,
+            muted: BTreeSet::new(),
             scroll: UniformListScrollHandle::new(),
         }
     }
@@ -159,8 +189,36 @@ impl Default for NetworkPanel {
 /// What one worktree's alert has counted since it went up.
 #[derive(Default)]
 struct Tally {
-    requests: usize,
-    kinds: std::collections::BTreeSet<Kind>,
+    requests: Vec<Counted>,
+}
+
+/// One flagged request an alert counts.
+struct Counted {
+    key: RequestKey,
+    /// Who it went to, as the alert names it.
+    to: String,
+    /// What it sent, less what is muted.
+    kinds: BTreeSet<Kind>,
+}
+
+impl Tally {
+    /// Every kind the alert names, most serious first.
+    fn kinds(&self) -> Vec<Kind> {
+        let kinds: BTreeSet<Kind> = self
+            .requests
+            .iter()
+            .flat_map(|counted| counted.kinds.iter().copied())
+            .collect();
+        kinds.into_iter().collect()
+    }
+
+    /// Forgets `muted` kinds, and the requests that sent nothing else.
+    fn forget(&mut self, muted: &BTreeSet<Kind>) {
+        for counted in &mut self.requests {
+            counted.kinds.retain(|kind| !muted.contains(kind));
+        }
+        self.requests.retain(|counted| !counted.kinds.is_empty());
+    }
 }
 
 /// Which request a tab shows: the worktree its log is in, and its id there.
@@ -180,8 +238,8 @@ pub(crate) struct RequestState {
     lines: Arc<Vec<SharedString>>,
     /// What is flagged on each of `lines`; empty for a request with no flags.
     marks: Arc<Marks>,
-    /// Where what was flagged came from.
-    sources: Vec<Source>,
+    /// Where what was flagged came from, with the kinds each carried.
+    sources: Vec<(Source, BTreeSet<Kind>)>,
     /// Who issued each flagged key, and where it is revoked.
     issuers: Vec<(&'static str, &'static str)>,
     /// The checkout the request's worktree is, for the paths its tools read.
@@ -530,7 +588,7 @@ struct Read {
     body: SharedString,
     lines: Vec<SharedString>,
     marks: Marks,
-    sources: Vec<Source>,
+    sources: Vec<(Source, BTreeSet<Kind>)>,
     issuers: Vec<(&'static str, &'static str)>,
     root: Option<PathBuf>,
 }
@@ -562,6 +620,64 @@ fn what(summary: &RequestSummary) -> String {
         .strip_prefix("claude-")
         .unwrap_or(&summary.model)
         .to_owned()
+}
+
+/// `flags` less the kinds muted in Settings › Network.
+fn heard(flags: &[Flag], muted: &BTreeSet<Kind>) -> Vec<Flag> {
+    flags
+        .iter()
+        .filter(|flag| !muted.contains(&flag.kind))
+        .copied()
+        .collect()
+}
+
+/// Whether any of `flags` is of a kind not muted.
+fn any_heard(flags: &[Flag], muted: &BTreeSet<Kind>) -> bool {
+    flags.iter().any(|flag| !muted.contains(&flag.kind))
+}
+
+/// What the alert about a worktree's flagged requests is filed under.
+fn flag_subject(worktree: &str) -> SharedString {
+    format!("network-flags-{worktree}").into()
+}
+
+/// A kind as Mute names it.
+fn plural(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Secret => "API keys",
+        Kind::Ssn => "SSNs",
+        Kind::Card => "card numbers",
+        Kind::Birth => "birth dates",
+        Kind::Phone => "phone numbers",
+        Kind::Email => "emails",
+        Kind::Ip => "IP addresses",
+    }
+}
+
+/// The alert's Mute button: the kind it names, or every one, which the
+/// line above it lists.
+fn mute_label(kinds: &[Kind]) -> String {
+    match kinds {
+        [one] => format!("Mute {}", plural(*one)),
+        [_, _] => "Mute both".to_owned(),
+        all => format!("Mute all {}", all.len()),
+    }
+}
+
+/// What muting `kinds` did, in a sentence: `Emails and IP addresses won't
+/// be flagged`.
+fn muted_sentence(kinds: &[Kind]) -> String {
+    let words: Vec<&str> = kinds.iter().map(|kind| plural(*kind)).collect();
+    let list = match words.as_slice() {
+        [] => String::new(),
+        [one] => (*one).to_owned(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    };
+    let mut chars = list.chars();
+    let list: String = chars.next().map_or_else(String::new, |first| {
+        first.to_uppercase().chain(chars).collect()
+    });
+    format!("{list} won't be flagged")
 }
 
 /// A row's flag tag: the two most serious kinds, and how many more.
@@ -615,6 +731,7 @@ impl Shell {
         };
         self.network_panel.reading = true;
         self.network_panel.arrived.clear();
+        self.reload_network_muted();
         let generation = self.network_panel.generation;
         let read_id = worktree.clone();
         let read = cx.background_executor().spawn(async move {
@@ -661,9 +778,14 @@ impl Shell {
         if told.is_empty() {
             return false;
         }
+        // Another window may have muted a kind since this one last looked.
+        if told.iter().any(|(_, summary)| !summary.flags.is_empty()) {
+            self.reload_network_muted();
+        }
         for (worktree, summary) in &told {
-            if !summary.flags.is_empty() {
-                self.alert_flagged(worktree, summary, cx);
+            let flags = heard(&summary.flags, &self.network_panel.muted);
+            if !flags.is_empty() {
+                self.alert_flagged(worktree, summary, &flags, cx);
             }
         }
         let Some(shown) = self.network_panel.worktree.as_ref() else {
@@ -691,38 +813,61 @@ impl Shell {
         landed
     }
 
-    /// Warns that `summary`, a request from `worktree`, sent something
-    /// flagged: an alert that stays until dismissed, one per worktree,
-    /// counting the requests since it went up.
-    fn alert_flagged(&mut self, worktree: &str, summary: &RequestSummary, cx: &mut Context<Self>) {
-        let subject = SharedString::from(format!("network-flags-{worktree}"));
+    /// Warns that `summary`, a request from `worktree`, sent `flags`, its
+    /// flags less the muted ones: an alert that stays until dismissed, one
+    /// per worktree, counting the requests since it went up, with Mute for
+    /// what it names.
+    fn alert_flagged(
+        &mut self,
+        worktree: &str,
+        summary: &RequestSummary,
+        flags: &[Flag],
+        cx: &mut Context<Self>,
+    ) {
         // Dismissed since the last one: start counting again.
-        if !self.alert_up(&subject) {
+        if !self.alert_up(&flag_subject(worktree)) {
             self.network_panel.alerted.remove(worktree);
         }
-        let tally = self
-            .network_panel
+        self.network_panel
             .alerted
             .entry(worktree.to_owned())
-            .or_default();
-        tally.requests += 1;
-        tally
-            .kinds
-            .extend(summary.flags.iter().map(|flag| flag.kind));
-        let requests = tally.requests;
-        let kinds: Vec<Kind> = tally.kinds.iter().copied().collect();
-        let to = provider(&summary.upstream);
-        let message = match requests {
+            .or_default()
+            .requests
+            .push(Counted {
+                key: RequestKey {
+                    worktree: WorktreeId::new(worktree),
+                    id: summary.id.clone(),
+                },
+                to: provider(&summary.upstream).to_owned(),
+                kinds: flags.iter().map(|flag| flag.kind).collect(),
+            });
+        self.show_flag_alert(worktree, cx);
+    }
+
+    /// Puts up `worktree`'s alert as its tally now stands, or updates the
+    /// one up in place: how many requests, to whom, and what they sent,
+    /// opening the latest.
+    fn show_flag_alert(&mut self, worktree: &str, cx: &mut Context<Self>) {
+        let Some(tally) = self.network_panel.alerted.get(worktree) else {
+            return;
+        };
+        let Some(latest) = tally.requests.last() else {
+            return;
+        };
+        let kinds = tally.kinds();
+        let to = &latest.to;
+        let message = match tally.requests.len() {
             1 => format!("Personal or secret data went to {to}"),
             n => format!("{n} requests sent personal or secret data to {to}"),
         };
+        let key = latest.key.clone();
         let detail = format!("{}: {}", self.worktree_name(worktree), kind_list(&kinds));
-        let key = RequestKey {
-            worktree: WorktreeId::new(worktree),
-            id: summary.id.clone(),
-        };
+        let subject = flag_subject(worktree);
         let open: AlertAction =
             Rc::new(move |shell, cx| shell.show_network_request(key.clone(), cx));
+        let label = mute_label(&kinds);
+        let mute: AlertAction =
+            Rc::new(move |shell, cx| shell.mute_network_kinds(&kinds, true, true, cx));
         self.alert(
             Tone::Warning,
             message,
@@ -730,9 +875,68 @@ impl Shell {
             Alert {
                 subject,
                 action: Some(("Open request".into(), open)),
+                secondary: Some((label.into(), mute)),
             },
             cx,
         );
+    }
+
+    /// Takes up the kinds muted in the config, which another window may
+    /// have changed. A config that will not load leaves them as they were.
+    fn reload_network_muted(&mut self) {
+        if let Ok(config) = ket_core::config::Config::load() {
+            self.network_panel.muted = config.agent.network.muted;
+        }
+    }
+
+    /// Mutes `kinds` of flag everywhere, or flags them again — Settings ›
+    /// Network's switches, and Mute in an alert or a request tab. Saved to
+    /// the config and taken up at once; an alert left with nothing to warn
+    /// of goes. `confirm` says so in a toast, with where to undo it.
+    pub(crate) fn mute_network_kinds(
+        &mut self,
+        kinds: &[Kind],
+        muted: bool,
+        confirm: bool,
+        cx: &mut Context<Self>,
+    ) {
+        match self.save_network_muted(kinds, muted) {
+            Ok(now) => self.network_panel.muted = now,
+            Err(error) => {
+                let what = if muted { "muted" } else { "flagged again" };
+                self.toast_detail(Tone::Error, format!("Flags could not be {what}"), error, cx);
+                return;
+            }
+        }
+        if muted {
+            // Every alert up says no more of what is muted now: it goes when
+            // that was all it said, and is said again without it otherwise.
+            let muted_now = self.network_panel.muted.clone();
+            let worktrees: Vec<String> = self.network_panel.alerted.keys().cloned().collect();
+            for worktree in worktrees {
+                let subject = flag_subject(&worktree);
+                let up = self.alert_up(&subject);
+                let Some(tally) = self.network_panel.alerted.get_mut(&worktree) else {
+                    continue;
+                };
+                tally.forget(&muted_now);
+                if up && !tally.requests.is_empty() {
+                    self.show_flag_alert(&worktree, cx);
+                } else {
+                    self.network_panel.alerted.remove(&worktree);
+                    self.dismiss_alert(&subject, cx);
+                }
+            }
+            if confirm {
+                self.toast_detail(
+                    Tone::Success,
+                    muted_sentence(kinds),
+                    "Settings \u{203a} Network turns this back on.",
+                    cx,
+                );
+            }
+        }
+        cx.notify();
     }
 
     /// Goes to `key`'s worktree and opens the request as a tab, with the
@@ -787,7 +991,11 @@ impl Shell {
 
         let t = self.theme;
         let rows = &self.network_panel.rows;
-        let flagged = rows.iter().filter(|row| !row.flags.is_empty()).count();
+        let muted = &self.network_panel.muted;
+        let flagged = rows
+            .iter()
+            .filter(|row| any_heard(&row.flags, muted))
+            .count();
         let flagged_only = self.network_panel.flagged_only;
         // The count alone: what was sent is each row's, and summed it says
         // nothing anyone acts on.
@@ -891,13 +1099,14 @@ impl Shell {
     /// The list of requests, virtualised.
     fn network_list(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let t = self.theme;
+        let muted = &self.network_panel.muted;
         self.network_panel.shown = self.network_panel.flagged_only.then(|| {
             Arc::new(
                 self.network_panel
                     .rows
                     .iter()
                     .enumerate()
-                    .filter(|(_, row)| !row.flags.is_empty())
+                    .filter(|(_, row)| any_heard(&row.flags, muted))
                     .map(|(at, _)| at)
                     .collect(),
             )
@@ -1027,8 +1236,9 @@ impl Shell {
                 } else {
                     None
                 };
-                let flagged = !row.flags.is_empty();
-                let flag = flagged.then(|| tinted_tag(flag_tag(&row.flags), paint(t.status.failed)));
+                let flags = heard(&row.flags, &self.network_panel.muted);
+                let flagged = !flags.is_empty();
+                let flag = flagged.then(|| tinted_tag(flag_tag(&flags), paint(t.status.failed)));
 
                 Some(
                     sized_row(("network-row", index), selected, ROW_HEIGHT, &t)
@@ -1216,11 +1426,12 @@ impl Shell {
                     Some(summary) => {
                         // Open on what was flagged, not the system prompt
                         // above it.
-                        state.reveal = read
-                            .marks
-                            .iter()
-                            .enumerate()
-                            .find_map(|(line, marks)| Some((line, marks.first()?.0.start)));
+                        let muted = &shell.network_panel.muted;
+                        state.reveal = read.marks.iter().enumerate().find_map(|(line, marks)| {
+                            let (range, _) =
+                                marks.iter().find(|(_, kind)| !muted.contains(kind))?;
+                            Some((line, range.start))
+                        });
                         state.wrapped = None;
                         state.pick = None;
                         state.drag = None;
@@ -1276,16 +1487,21 @@ impl Shell {
 
     /// The context row's ⋯ button and, while open, its menu.
     fn network_more_button(&self, cx: &mut Context<Self>) -> AnyElement {
+        let menu = self
+            .network_panel
+            .menu
+            .as_ref()
+            .filter(|menu| menu.opened_by(MORE_MENU));
         let trigger = icon_button("network-more", Icon::Ellipsis)
             .bare()
             .dense()
-            .pressed(self.network_panel.menu.is_some())
+            .pressed(menu.is_some())
             .render(&self.theme)
             .on_click(cx.listener(|this, _, _, cx| {
                 this.toggle_network_menu();
                 cx.notify();
             }));
-        let panel = self.network_panel.menu.as_ref().map(|menu| {
+        let panel = menu.map(|menu| {
             menu.view(
                 &self.theme,
                 cx,
@@ -1305,12 +1521,102 @@ impl Shell {
             .into_any_element()
     }
 
-    /// Opens the ⋯ menu, or closes it when it is already open.
-    fn toggle_network_menu(&mut self) {
-        if self.network_panel.menu.take().is_some() {
+    /// A request tab's Mute: a menu of `kinds`, the kinds flagged in it,
+    /// hung under a bell at the right of its alert.
+    fn network_mute_button(
+        &self,
+        key: &RequestKey,
+        kinds: Vec<Kind>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let origin = mute_menu(key);
+        let menu = self
+            .network_panel
+            .menu
+            .as_ref()
+            .filter(|menu| menu.opened_by(&origin));
+        let bell = icon_button(origin.clone(), Icon::BellOff)
+            .bare()
+            .dense()
+            .pressed(menu.is_some())
+            .render(&self.theme)
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.toggle_network_mute_menu(origin.clone(), &kinds);
+                cx.notify();
+            }))
+            .into_any_element();
+        // To its left, clear of the menu that hangs below it. Told apart by
+        // the request, so a second request tab beside this one keeps its own.
+        let tab = {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            key.hash(&mut hasher);
+            hasher.finish() as usize
+        };
+        let trigger = self.tipped(
+            "network-mute",
+            tab,
+            bell,
+            "Mute a kind of flag",
+            crate::ui::tooltip::Side::Left,
+            cx,
+        );
+        let panel = menu.map(|menu| {
+            menu.view(
+                &self.theme,
+                cx,
+                |shell, action, cx| shell.run_network_action(*action, cx),
+                |shell, cx| {
+                    shell.network_panel.menu = None;
+                    cx.notify();
+                },
+            )
+        });
+        dropdown(
+            SharedString::from(format!("{}-menu", mute_menu(key))),
+            trigger,
+            panel,
+        )
+        .flex_none()
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .into_any_element()
+    }
+
+    /// Opens the Mute menu `origin` on `kinds`, or closes it when it is
+    /// already open.
+    fn toggle_network_mute_menu(&mut self, origin: SharedString, kinds: &[Kind]) {
+        if let Some(menu) = self.network_panel.menu.take()
+            && menu.opened_by(&origin)
+        {
             return;
         }
-        // One menu at a time: two open is two things claiming the keyboard.
+        self.close_menus_for_network();
+        let mut entries: Vec<MenuEntry<NetworkAction>> = kinds
+            .iter()
+            .map(|&kind| {
+                MenuEntry::Item(
+                    MenuItem::new(NetworkAction::Mute(kind), format!("Mute {}", plural(kind)))
+                        .icon(Icon::BellOff),
+                )
+            })
+            .collect();
+        entries.extend([
+            MenuEntry::Separator,
+            MenuEntry::Item(
+                MenuItem::new(NetworkAction::Settings, "Network settings\u{2026}")
+                    .icon(Icon::Sliders),
+            ),
+        ]);
+        // Hung under the bell with its right edge on the bell's.
+        self.network_panel.menu = Some(
+            OpenMenu::new(origin, None, MENU_W, entries)
+                .uncapped()
+                .offset(WELL_XS - MENU_W, px(6.0)),
+        );
+    }
+
+    /// One menu at a time: two open is two things claiming the keyboard.
+    fn close_menus_for_network(&mut self) {
         self.menu = None;
         self.worktree_menu = None;
         self.path_menu = None;
@@ -1318,6 +1624,16 @@ impl Shell {
         self.tucked_menu = None;
         self.sidebar_menu = None;
         self.popup = None;
+    }
+
+    /// Opens the ⋯ menu, or closes it when it is already open.
+    fn toggle_network_menu(&mut self) {
+        if let Some(menu) = self.network_panel.menu.take()
+            && menu.opened_by(MORE_MENU)
+        {
+            return;
+        }
+        self.close_menus_for_network();
 
         // What acts on the log is there only while there is one: an empty
         // worktree has no folder to show and nothing to clear.
@@ -1355,7 +1671,7 @@ impl Shell {
         ]);
         // Hung under the button with its right edge on the button's.
         self.network_panel.menu = Some(
-            OpenMenu::new("network-more".into(), None, MENU_W, entries)
+            OpenMenu::new(MORE_MENU.into(), None, MENU_W, entries)
                 .uncapped()
                 .offset(WELL_XS - MENU_W, px(6.0)),
         );
@@ -1409,6 +1725,7 @@ impl Shell {
                 self.open_preferences_at(crate::preferences::Section::Network, cx);
             }
             NetworkAction::Clear => self.clear_network_log(cx),
+            NetworkAction::Mute(kind) => self.mute_network_kinds(&[kind], true, true, cx),
         }
         cx.notify();
     }
@@ -1436,12 +1753,13 @@ impl Shell {
         .detach();
     }
 
-    /// Whether `key`'s request, as read, had anything flagged.
+    /// Whether `key`'s request, as read, had anything flagged that is not
+    /// muted.
     pub(crate) fn network_request_flagged(&self, key: &RequestKey) -> bool {
         self.network_requests
             .get(key)
             .and_then(|state| state.summary.as_ref())
-            .is_some_and(|summary| !summary.flags.is_empty())
+            .is_some_and(|summary| any_heard(&summary.flags, &self.network_panel.muted))
     }
 
     /// Drops the state of request tabs no longer open anywhere.
@@ -1480,7 +1798,7 @@ impl Shell {
                 .child(crate::ui::picker::note(text, &t))
                 .into_any_element();
         };
-        let flagged = !summary.flags.is_empty();
+        let flagged = any_heard(&summary.flags, &self.network_panel.muted);
 
         let copy_key = key.clone();
         let delete_key = key.clone();
@@ -1590,6 +1908,7 @@ impl Shell {
                 cx.processor(move |this, range: Range<usize>, _, _| {
                     let t = this.theme;
                     let mono = this.font_family.clone();
+                    let muted = this.network_panel.muted.clone();
                     let red = paint(t.status.failed);
                     let marked = HighlightStyle {
                         color: Some(red.into()),
@@ -1616,10 +1935,15 @@ impl Shell {
                                     (index, text, 0..end)
                                 }
                             };
-                            let hit = marks.get(line_index).filter(|ranges| !ranges.is_empty());
-                            let here: Vec<Range<usize>> = hit
+                            let line_marks: Vec<&(Range<usize>, Kind)> = marks
+                                .get(line_index)
                                 .into_iter()
                                 .flatten()
+                                .filter(|(_, kind)| !muted.contains(kind))
+                                .collect();
+                            let hit = !line_marks.is_empty();
+                            let here: Vec<Range<usize>> = line_marks
+                                .into_iter()
                                 .filter(|(range, _)| {
                                     range.start < shown.end && range.end > shown.start
                                 })
@@ -1662,14 +1986,16 @@ impl Shell {
                                             .items_center()
                                             .justify_end()
                                             .border_l_2()
-                                            .border_color(match hit {
-                                                Some(_) => red,
-                                                None => gpui::transparent_black().into(),
+                                            .border_color(if hit {
+                                                red
+                                            } else {
+                                                gpui::transparent_black().into()
                                             })
                                             .text_size(px(10.5))
-                                            .text_color(match hit {
-                                                Some(_) => red,
-                                                None => alpha(paint(t.text.dim), 0.6),
+                                            .text_color(if hit {
+                                                red
+                                            } else {
+                                                alpha(paint(t.text.dim), 0.6)
                                             })
                                             .children(number),
                                     )
@@ -2007,7 +2333,9 @@ impl Shell {
         let Some(summary) = state.summary.as_ref() else {
             return div().into_any_element();
         };
-        let found: usize = summary.flags.iter().map(|flag| flag.count).sum();
+        let muted = &self.network_panel.muted;
+        let flags = heard(&summary.flags, muted);
+        let found: usize = flags.iter().map(|flag| flag.count).sum();
         let title = format!(
             "{found} {} personal or secret went to {}",
             if found == 1 {
@@ -2018,7 +2346,8 @@ impl Shell {
             provider(&summary.upstream),
         );
 
-        let chips = summary.flags.iter().map(|flag| {
+        let mute = self.network_mute_button(key, flags.iter().map(|flag| flag.kind).collect(), cx);
+        let chips = flags.iter().map(|flag| {
             let serious = matches!(flag.kind, Kind::Secret | Kind::Ssn);
             let mut label = chip_label(flag.kind);
             if flag.count > 1 {
@@ -2059,11 +2388,18 @@ impl Shell {
 
         // "From fixtures/patients.csv and your message": a file is a link.
         let mono = self.font_family.clone();
-        // Files by name, up to three, as links; everything else in words,
-        // once each, so a turn of twenty commands is not twenty clauses.
-        let files: Vec<&String> = state
+        // Only where something not muted came from.
+        let sources: Vec<&Source> = state
             .sources
             .iter()
+            .filter(|(_, kinds)| !kinds.is_subset(muted))
+            .map(|(source, _)| source)
+            .collect();
+        // Files by name, up to three, as links; everything else in words,
+        // once each, so a turn of twenty commands is not twenty clauses.
+        let files: Vec<&String> = sources
+            .iter()
+            .copied()
             .filter_map(|source| match source {
                 Source::File(path) => Some(path),
                 _ => None,
@@ -2097,13 +2433,12 @@ impl Shell {
                     .into_any_element(),
             );
         }
-        let commands = state
-            .sources
+        let commands = sources
             .iter()
             .filter(|source| matches!(source, Source::Command(_)))
             .count();
         let mut words: Vec<String> = Vec::new();
-        for source in &state.sources {
+        for &source in &sources {
             let said = match source {
                 Source::File(_) => continue,
                 Source::Command(_) if commands > 1 => format!("{commands} commands' output"),
@@ -2176,7 +2511,13 @@ impl Shell {
                 .into_any_element(),
             );
         }
-        for &(issuer, page) in &state.issuers {
+        // A key to rotate only while keys are flagged.
+        let issuers = if muted.contains(&Kind::Secret) {
+            &[][..]
+        } else {
+            &state.issuers[..]
+        };
+        for &(issuer, page) in issuers {
             actions.push(
                 button(
                     SharedString::from(format!("network-rotate-{issuer}")),
@@ -2212,11 +2553,14 @@ impl Shell {
                     .child(sized_icon(Icon::TriangleAlert, px(16.0), red))
                     .child(
                         div()
+                            .flex_1()
+                            .min_w_0()
                             .text_size(px(14.0))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(paint(t.text.primary))
                             .child(title),
-                    ),
+                    )
+                    .child(mute),
             )
             .child(div().flex().flex_wrap().gap(px(6.0)).children(chips))
             .when(!from.is_empty(), |el| {
@@ -2557,6 +2901,69 @@ mod tests {
         };
         assert_eq!(nothing.picked_text(), None);
         assert!(nothing.pick.unwrap().is_empty());
+    }
+
+    #[test]
+    fn mute_names_one_kind_and_counts_several() {
+        assert_eq!(mute_label(&[Kind::Email]), "Mute emails");
+        assert_eq!(mute_label(&[Kind::Secret]), "Mute API keys");
+        assert_eq!(mute_label(&[Kind::Email, Kind::Ip]), "Mute both");
+        assert_eq!(
+            mute_label(&[Kind::Secret, Kind::Email, Kind::Ip]),
+            "Mute all 3"
+        );
+        assert_eq!(muted_sentence(&[Kind::Email]), "Emails won't be flagged");
+        assert_eq!(
+            muted_sentence(&[Kind::Secret, Kind::Email, Kind::Ip]),
+            "API keys, emails and IP addresses won't be flagged"
+        );
+    }
+
+    #[test]
+    fn muting_takes_a_kind_out_of_an_alert_and_the_requests_that_sent_only_it() {
+        let counted = |id: &str, kinds: &[Kind]| Counted {
+            key: RequestKey {
+                worktree: WorktreeId::new("w"),
+                id: id.to_owned(),
+            },
+            to: "Anthropic".to_owned(),
+            kinds: kinds.iter().copied().collect(),
+        };
+        let mut tally = Tally {
+            requests: vec![
+                counted("a", &[Kind::Email]),
+                counted("b", &[Kind::Email, Kind::Ip]),
+                counted("c", &[Kind::Email]),
+            ],
+        };
+        assert_eq!(tally.kinds(), [Kind::Email, Kind::Ip]);
+        tally.forget(&[Kind::Email].into_iter().collect());
+        assert_eq!(tally.kinds(), [Kind::Ip]);
+        let left: Vec<&str> = tally.requests.iter().map(|c| c.key.id.as_str()).collect();
+        assert_eq!(left, ["b"]);
+        tally.forget(&[Kind::Ip].into_iter().collect());
+        assert!(tally.requests.is_empty());
+    }
+
+    #[test]
+    fn a_muted_kind_is_left_out_of_the_flags() {
+        let flags = [
+            Flag {
+                kind: Kind::Secret,
+                count: 1,
+            },
+            Flag {
+                kind: Kind::Email,
+                count: 4,
+            },
+        ];
+        let muted: BTreeSet<Kind> = [Kind::Email].into_iter().collect();
+        assert_eq!(heard(&flags, &muted), [flags[0]]);
+        assert!(any_heard(&flags, &muted));
+        let all: BTreeSet<Kind> = Kind::ALL.into_iter().collect();
+        assert!(heard(&flags, &all).is_empty());
+        assert!(!any_heard(&flags, &all));
+        assert_eq!(heard(&flags, &BTreeSet::new()), flags);
     }
 
     #[test]

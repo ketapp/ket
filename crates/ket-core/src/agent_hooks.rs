@@ -1292,7 +1292,7 @@ const OPENCODE_PLUGIN: &str = r#"// ket-opencode-plugin — installed by ket. Re
 // One file, two plugin APIs: OpenCode 1 calls `server`, OpenCode 2 calls
 // `setup`, and neither reads the other's half. Both share the wire — the
 // envelope, where it is posted, and the queue that keeps reports in order.
-import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 // Claude Code's names for OpenCode 1's tools, so a row reads the same
@@ -1385,9 +1385,16 @@ const wire = (directory) => {
       const [first, second] = env.KET_PANE_KEY ? [inherited, host] : [host, inherited];
       if (await post(first, payload)) return;
       if (await post(second, payload)) return;
+      // Capped at 8 MiB, as the hook script's is: a ket dragged to the Trash
+      // with this plugin still in place never comes back to read it.
       try {
         mkdirSync(hooks, { recursive: true, mode: 0o700 });
-        appendFileSync(join(hooks, "spool.jsonl"), envelope(host ? host.token : token, payload) + "\n", { mode: 0o600 });
+        const spool = join(hooks, "spool.jsonl");
+        let size = 0;
+        try { size = statSync(spool).size; } catch {}
+        if (size < 8 * 1024 * 1024) {
+          appendFileSync(spool, envelope(host ? host.token : token, payload) + "\n", { mode: 0o600 });
+        }
       } catch {}
     });
   };
@@ -2092,8 +2099,18 @@ pub enum Removal {
     Removed,
     /// There were none to take out.
     NotThere,
-    /// The agent's settings could not be read or written, and say why.
+    /// The agent's settings could not be read or parsed, so whether ket is
+    /// in them is not known, and say why.
+    Unreadable(String),
+    /// Ket's entries were there and could not be taken out, and say why.
     Failed(String),
+}
+
+impl Removal {
+    /// Whether this place may still have ket in it, for a second try.
+    pub fn is_failure(&self) -> bool {
+        matches!(self, Self::Unreadable(_) | Self::Failed(_))
+    }
 }
 
 /// One place ket was taken out of, and how that went.
@@ -2154,7 +2171,7 @@ pub fn remove_everywhere() -> Vec<Removed> {
                     Ok(()) => Removal::Removed,
                     Err(why) => Removal::Failed(why.to_string()),
                 },
-                Err(why) => Removal::Failed(why.to_string()),
+                Err(why) => Removal::Unreadable(why.to_string()),
             },
         })
         .collect();
@@ -2186,7 +2203,7 @@ pub fn remove_everywhere() -> Vec<Removed> {
                 Ok(()) => Removal::Removed,
                 Err(why) => Removal::Failed(why.to_string()),
             },
-            Err(why) => Removal::Failed(why.to_string()),
+            Err(why) => Removal::Unreadable(why.to_string()),
         };
         if index > 0 && outcome == Removal::NotThere {
             continue;
@@ -2205,10 +2222,7 @@ pub fn remove_everywhere() -> Vec<Removed> {
 
     // Everything recorded has been looked at: the record goes with it, unless
     // something could not be changed and a second try needs to find it.
-    if !removed
-        .iter()
-        .any(|entry| matches!(entry.outcome, Removal::Failed(_)))
-    {
+    if !removed.iter().any(|entry| entry.outcome.is_failure()) {
         let _ = std::fs::remove_file(statusline_chain_path());
         let _ = std::fs::remove_file(installed_record_path());
     }
@@ -2515,7 +2529,10 @@ pub fn install_script() -> Result<PathBuf> {
 /// 2. **It never blocks.** Connect and total timeouts are one second; an agent
 ///    must not wait on ket to think.
 /// 3. **It does not lose reports.** A failed post is appended to the spool
-///    instead, for ket to pick up when it next starts.
+///    instead, for ket to pick up when it next starts — up to 8 MiB, past
+///    which a ket that never came back would only fill a disk. A report ket
+///    would drop on reading the spool is not written: one from an agent ket
+///    did not launch, other than Codex's, which are placed by directory.
 ///
 /// On `SessionStart` it does one more thing: it hands Claude Code back
 /// whatever [`crate::worktree::TOKEN_REDUCTION_NOTE_ENV`] holds as
@@ -2692,14 +2709,30 @@ if [ -n "$wait_port" ] && [ "$agent" = claude ]; then
   esac
 fi
 
-# Not delivered: keep it for whenever ket comes back.
-if [ "$delivered" -eq 0 ] && [ -n "${HOME:-}" ]; then
+# Not delivered: keep it for whenever ket comes back — unless ket would only
+# throw it away. An agent ket did not launch names no worktree, and only
+# Codex's reports are placed by their directory instead; any other is dropped
+# when the spool is read, so writing it would only grow the file.
+keep=1
+if [ -z "${KET_WORKTREE_ID:-}" ] && [ -z "${KET_LAUNCH_TOKEN:-}" ] && [ "$agent" != codex ]; then
+  keep=0
+fi
+if [ "$delivered" -eq 0 ] && [ "$keep" -eq 1 ] && [ -n "${HOME:-}" ]; then
   envelope=$(envelope "${host_token:-${KET_LAUNCH_TOKEN:-}}")
   spool="${HOME}/.ket/agent-hooks/spool.jsonl"
-  # Owner-only: the spool holds the token each report carries.
-  ( umask 077
-    mkdir -p "${HOME}/.ket/agent-hooks" 2>/dev/null || :
-    printf '%s\n' "$envelope" >> "$spool" 2>/dev/null || : )
+  # Capped at 8 MiB, for a ket that never comes back to read it: one dragged
+  # to the Trash with its hooks still in place. Past the cap a report is lost,
+  # which costs a reopened ket only the status it would have shown for a while.
+  size=0
+  if [ -f "$spool" ]; then
+    size=$( { wc -c < "$spool"; } 2>/dev/null | tr -d ' ')
+  fi
+  if [ "${size:-0}" -lt 8388608 ] 2>/dev/null; then
+    # Owner-only: the spool holds the token each report carries.
+    ( umask 077
+      mkdir -p "${HOME}/.ket/agent-hooks" 2>/dev/null || :
+      printf '%s\n' "$envelope" >> "$spool" 2>/dev/null || : )
+  fi
 fi
 
 # Only a SessionStart hook's output can steer the session, and only a session
@@ -4132,9 +4165,12 @@ mod tests {
             self.0.join(".ket").join("agent-hooks")
         }
 
+        fn spool_text(&self) -> String {
+            std::fs::read_to_string(self.hooks().join("spool.jsonl")).unwrap_or_default()
+        }
+
         fn spool(&self) -> Vec<serde_json::Value> {
-            std::fs::read_to_string(self.hooks().join("spool.jsonl"))
-                .unwrap_or_default()
+            self.spool_text()
                 .lines()
                 .map(|line| serde_json::from_str(line).unwrap())
                 .collect()
@@ -4554,6 +4590,48 @@ mod tests {
         let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode(&home.hooks().join("spool.jsonl")), 0o600);
         assert_eq!(mode(&home.hooks()), 0o700);
+    }
+
+    #[test]
+    fn only_codex_spools_a_report_from_an_agent_ket_did_not_launch() {
+        // Nothing of ket's in the environment: Claude in a plain terminal.
+        // Reading the spool drops a report with no worktree unless it is
+        // Codex's, which is placed by its directory.
+        let home = Home::new("spool-unlaunched");
+        run(SCRIPT, &[], &home, &[], PROMPT);
+        run(
+            SCRIPT,
+            &["grok"],
+            &home,
+            &[("GROK_HOOK_EVENT", "x")],
+            PROMPT,
+        );
+        assert!(home.spool().is_empty(), "{:?}", home.spool());
+
+        run(SCRIPT, &[], &home, &[("KET_AGENT_NAME", "codex")], PROMPT);
+        let spooled = home.spool();
+        assert_eq!(spooled.len(), 1);
+        assert_eq!(spooled[0]["agent"], "codex");
+        assert_eq!(reports_from_spool(&home.spool_text()).len(), 1);
+    }
+
+    #[test]
+    fn the_spool_stops_growing_at_its_cap() {
+        let home = Home::new("spool-cap");
+        let port = closed_port();
+        let env = [(PORT_ENV, port.as_str()), (TOKEN_ENV, "window")];
+        std::fs::create_dir_all(home.hooks()).unwrap();
+        let spool = home.hooks().join("spool.jsonl");
+
+        let file = std::fs::File::create(&spool).unwrap();
+        file.set_len(8 * 1024 * 1024 - 1).unwrap();
+        assert_eq!(run(SCRIPT, &[], &home, &env, PROMPT), "{}\n");
+        let under = std::fs::metadata(&spool).unwrap().len();
+        assert!(under > 8 * 1024 * 1024, "under the cap it is written");
+
+        // At or past the cap, nothing more, and the hook still answers.
+        assert_eq!(run(SCRIPT, &[], &home, &env, PROMPT), "{}\n");
+        assert_eq!(std::fs::metadata(&spool).unwrap().len(), under);
     }
 
     #[test]

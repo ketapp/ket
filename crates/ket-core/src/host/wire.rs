@@ -244,9 +244,9 @@ pub enum Request {
         /// once the window has started waking it.
         error: Option<String>,
     },
-    /// The answer to [`Reply::StartFresh`]: the key of the tab opened beside
-    /// the cold one, sent once its agent has reported itself started, or
-    /// why none was. The host then finds that tab's terminal to answer the
+    /// The answer to [`Reply::StartFresh`]: the key of the tab started fresh
+    /// — the one asked about — sent once its agent has reported the new
+    /// session, or why it wasn't. The host then finds that tab's terminal to answer the
     /// phone with.
     FreshResult {
         /// The request named in [`Reply::StartFresh`].
@@ -833,8 +833,8 @@ pub enum Reply {
         /// Whether a window was open to hand it to.
         taken: bool,
     },
-    /// A phone asked for a fresh session beside a terminal whose session
-    /// went cold, as the window's own Start fresh does — see
+    /// A phone asked for a terminal whose session went cold to start fresh
+    /// in place, as the window's own Start fresh does — see
     /// `crate::cold`. Sent to the window showing that terminal, which
     /// answers with [`Request::FreshResult`].
     StartFresh {

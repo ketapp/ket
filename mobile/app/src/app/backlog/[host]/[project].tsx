@@ -12,9 +12,10 @@
 import { type Backlog, type BacklogNote, BacklogPriority } from '@ket/remote';
 import { useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { useCallback, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { ActivityIndicator, Alert, Pressable, StyleSheet, Text, TextInput, View, type ViewInstance } from 'react-native';
 import { KeyboardAwareScrollView } from 'react-native-keyboard-controller';
 
+import { FloatMenu, type MenuSection, type Place, placeOf } from '../../../components/FloatMenu';
 import { Check, Chevron, ChevronDown, Plus, PriorityMark, Trash } from '../../../components/icons';
 import { Bar, Button, Card, Heading, IconButton, Prose, Screen, Segmented, Tag, field, oneLine } from '../../../components/ui';
 import type { BacklogChange } from '../../../lib/connection';
@@ -70,7 +71,9 @@ export default function BacklogScreen() {
   const [failing, setFailing] = useState('');
   const [capture, setCapture] = useState('');
   const [capturePriority, setCapturePriority] = useState(BacklogPriority.MEDIUM);
-  const [choosing, setChoosing] = useState(false);
+  // The priority menu, hung under its button while it is open.
+  const [choosing, setChoosing] = useState<Place | null>(null);
+  const priorityButton = useRef<ViewInstance>(null);
   const [adding, setAdding] = useState(false);
   // The note open for changing, by id: one at a time, as on the desktop.
   const [open, setOpen] = useState<string | null>(null);
@@ -138,7 +141,7 @@ export default function BacklogScreen() {
     if (await edit('', { save: { title, body: '', priority } })) {
       setCapture('');
       setCapturePriority(BacklogPriority.MEDIUM);
-      setChoosing(false);
+      setChoosing(null);
     }
     setAdding(false);
   };
@@ -202,16 +205,18 @@ export default function BacklogScreen() {
                 style={styles.captureInput}
               />
               {ranked ? (
-                <Pressable
-                  accessibilityRole="button"
-                  accessibilityLabel={`Priority: ${PRIORITY_NAMES[capturePriority]}`}
-                  accessibilityState={{ expanded: choosing }}
-                  onPress={() => setChoosing(!choosing)}
-                  style={({ pressed }) => [styles.capturePriority, (choosing || pressed) && styles.capturePriorityOpen]}
-                >
-                  <PriorityMark priority={capturePriority} size={16} />
-                  <ChevronDown size={13} color={t.dim} weight={2.2} />
-                </Pressable>
+                <View ref={priorityButton} collapsable={false}>
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel={`Priority: ${PRIORITY_NAMES[capturePriority]}`}
+                    accessibilityState={{ expanded: choosing !== null }}
+                    onPress={() => placeOf(priorityButton.current, setChoosing)}
+                    style={({ pressed }) => [styles.capturePriority, (choosing || pressed) && styles.capturePriorityOpen]}
+                  >
+                    <PriorityMark priority={capturePriority} size={16} />
+                    <ChevronDown size={13} color={t.dim} weight={2.2} />
+                  </Pressable>
+                </View>
               ) : null}
               <Pressable
                 accessibilityRole="button"
@@ -223,15 +228,14 @@ export default function BacklogScreen() {
                 <Plus size={18} color={capture.trim() ? t.onBrand : t.faint} weight={2.3} />
               </Pressable>
             </View>
-            {ranked && choosing ? (
-              <PriorityList
-                value={capturePriority}
-                onPick={(priority) => {
-                  setCapturePriority(priority);
-                  setChoosing(false);
-                }}
-              />
-            ) : null}
+            <FloatMenu
+              open={ranked && choosing !== null}
+              onClose={() => setChoosing(null)}
+              anchor={choosing}
+              width={PRIORITY_MENU_WIDTH}
+              label="Priority"
+              sections={priorityMenu(capturePriority, setCapturePriority)}
+            />
             {failing ? (
               <Prose color={t.failed} style={styles.note}>
                 {sentence(failing)}
@@ -356,29 +360,24 @@ function NoteText({ note }: { note: BacklogNote }) {
   );
 }
 
-/** The priorities to pick from, in a well under the control that opened
- * them: a dropdown that opens in place, so it scrolls with the list. */
-function PriorityList({ value, onPick }: { value: BacklogPriority; onPick: (priority: BacklogPriority) => void }) {
-  return (
-    <View accessibilityRole="menu" style={styles.priorities}>
-      {PRIORITIES.map((priority) => {
-        const on = priority === value;
-        return (
-          <Pressable
-            key={priority}
-            accessibilityRole="menuitem"
-            accessibilityState={{ selected: on }}
-            onPress={() => onPick(priority)}
-            style={({ pressed }) => [styles.priority, (on || pressed) && { backgroundColor: t.selection }]}
-          >
-            <PriorityMark priority={priority} size={16} />
-            <Text style={[styles.priorityName, styles.grow]}>{PRIORITY_NAMES[priority]}</Text>
-            {on ? <Check size={16} color={t.text} weight={2.2} /> : null}
-          </Pressable>
-        );
-      })}
-    </View>
-  );
+/** How wide the priority menu is: room for "Urgent" and a tick. */
+const PRIORITY_MENU_WIDTH = 200;
+
+/** The priorities to pick from, as the app's menu: it floats under the
+ * control that opened it, over the list, rather than pushing the list down. */
+function priorityMenu(value: BacklogPriority, onPick: (priority: BacklogPriority) => void): MenuSection[] {
+  return [
+    {
+      items: PRIORITIES.map((priority) => ({
+        key: String(priority),
+        label: PRIORITY_NAMES[priority],
+        mark: <PriorityMark priority={priority} size={16} />,
+        selected: priority === value,
+        icon: priority === value ? <Check size={16} color={t.text} weight={2.2} /> : undefined,
+        onPress: () => onPick(priority),
+      })),
+    },
+  ];
 }
 
 /** Delete, as a bin at the near end of a note's actions: kept apart from the
@@ -570,9 +569,6 @@ const styles = StyleSheet.create({
     gap: 6,
   },
   capturePriorityOpen: { backgroundColor: t.selection, borderColor: t.dim },
-  priorities: { padding: 4, gap: 2, borderRadius: size.radiusLg, backgroundColor: t.sunken },
-  priority: { height: 44, flexDirection: 'row', alignItems: 'center', gap: 11, paddingHorizontal: 12, borderRadius: size.radius },
-  priorityName: { fontFamily: font.proseMedium, fontSize: size.body, color: t.text },
   flipped: { transform: [{ rotate: '180deg' }] },
   note: { paddingHorizontal: 6 },
   list: { padding: 6, gap: 2 },

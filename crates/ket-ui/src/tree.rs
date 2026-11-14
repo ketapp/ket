@@ -121,11 +121,20 @@ const OVERRIDE_PAD: Pixels = px(4.0);
 /// [`BADGE`]-wide column (20) in a 24px well.
 const MARK_WELL_BLEED: Pixels = px(2.0);
 
-/// How far a pinned project's glow reaches past its rows, above and below,
-/// and how far in from the sidebar's edges it stops — see [`pinned_glow`].
-/// A step of ground around the rows, so the glow lights the project rather
-/// than being a box drawn tight around it.
-const GLOW_BLEED: Pixels = px(2.0);
+/// How far a pinned project's glow reaches past its rows, above and below —
+/// see [`pinned_glow`]. A step of ground around the rows, so the glow lights
+/// the project rather than being a box drawn tight around it.
+///
+/// Sized so the badge sits in an even margin: the glow's side stops at
+/// [`STRIP_PAD`], 6 short of the badge (`COLUMN_INSET + LEAD - STRIP_PAD`),
+/// and the badge sits 2 inside its heading (`(HEADING_H - BADGE) / 2`), so 4
+/// more above puts 6 over it too.
+const GLOW_BLEED: Pixels = px(4.0);
+
+/// The filter strip's padding, and so where its button group starts — which
+/// is also how far in from the sidebar's edges a pinned project's glow stops,
+/// so the glow's edge lines up with the group's above it.
+const STRIP_PAD: Pixels = px(6.0);
 
 /// How far a pinned project's glow reaches from its centre, the badge: most
 /// of the way across a sidebar and a couple of rows down, so it marks the
@@ -147,18 +156,16 @@ const PIN: Pixels = px(12.0);
 
 /// How far apart one project's rows sit.
 ///
-/// Nothing: a row carries a hairline along its bottom edge, and a gap as well
-/// as a line is how a list comes to look like a stack of cards. The insertion
-/// line centres itself on the edge either way — see [`insertion_line`] — and
-/// the drop target's slack going to zero is correct now that there is no dead
-/// space between two rows to be in.
-const ROW_GAP: Pixels = px(1.0);
+/// Enough air that two worktrees read as two rows without a rule between
+/// them: rows carry no hairline, so the gap is what parts them. The insertion
+/// line centres itself in the gap either way — see [`insertion_line`].
+const ROW_GAP: Pixels = px(4.0);
 
 /// How far apart one project's group sits from the next.
 ///
-/// A step over [`ROW_GAP`] rather than a band: a collapsed project is one
-/// heading, and a list of them spaced for groups read as a list with gaps.
-const GROUP_GAP: Pixels = px(4.0);
+/// A clear step over [`ROW_GAP`], so where one project ends and the next
+/// begins reads at a glance, collapsed or not.
+const GROUP_GAP: Pixels = px(10.0);
 
 /// How wide the caps on an insertion line are, which is also how tall it draws.
 const CAP: Pixels = px(6.0);
@@ -854,6 +861,7 @@ impl Shell {
         &self,
         id: &WorktreeId,
         activity: &Activity,
+        color: Option<ket_core::agent_color::SessionColor>,
         dirty: bool,
         missing: bool,
         t: &Theme,
@@ -864,10 +872,17 @@ impl Shell {
                 .iter()
                 .any(|terminal| self.asleep_terminals.contains_key(terminal))
         });
-        if asleep {
-            sized_icon(Icon::Moon, MARK, paint(t.text.dim)).into_any_element()
-        } else {
-            row_mark(activity, dirty, missing, t)
+        match (asleep, color, activity) {
+            (true, ..) => sized_icon(Icon::Moon, MARK, paint(t.text.dim)).into_any_element(),
+            (false, Some(color), Activity::Session { agent, .. }) => crate::session_color::tiled(
+                provider(agent, t).0,
+                MARK,
+                crate::session_color::ROW_TILE,
+                color,
+                t,
+            )
+            .into_any_element(),
+            _ => row_mark(activity, dirty, missing, t),
         }
     }
 }
@@ -934,7 +949,7 @@ fn guide(t: &Theme) -> gpui::Rgba {
 /// truncate with the row. Inline code is useful even there, though — commit
 /// ids, branches and commands otherwise keep their literal backticks and read
 /// like punctuation in prose. Paired backticks are removed and their contents
-/// take the chrome's identifier face and a faint code wash. An unmatched tick
+/// take the code face and a faint code wash. An unmatched tick
 /// is left alone, so a report cannot silently lose text while it is arriving.
 fn detail_text(text: String, ink: gpui::Rgba) -> StyledText {
     fn push_run(runs: &mut Vec<(usize, bool)>, len: usize, code: bool) {
@@ -979,7 +994,7 @@ fn detail_text(text: String, ink: gpui::Rgba) -> StyledText {
     push_run(&mut spans, rest.len(), false);
 
     let prose = font(crate::fonts::prose());
-    let mut code = font(crate::fonts::chrome());
+    let mut code = font(crate::fonts::code());
     code.weight = FontWeight::MEDIUM;
     let color = ink.into();
     let code_background = alpha(ink, 0.12).into();
@@ -1002,7 +1017,7 @@ fn detail_text(text: String, ink: gpui::Rgba) -> StyledText {
 /// the centre of the project's badge.
 fn glow_centre() -> Point<Pixels> {
     point(
-        COLUMN_INSET + LEAD + BADGE / 2.0 - GLOW_BLEED,
+        COLUMN_INSET + LEAD + BADGE / 2.0 - STRIP_PAD,
         GLOW_BLEED + HEADING_H / 2.0,
     )
 }
@@ -1079,14 +1094,14 @@ fn pinned_glow(colour: Color, open: bool, inset: Pixels) -> AnyElement {
     } else {
         HEADING_H + GLOW_BLEED * 2.0
     };
-    // Concentric with the rows' own corners, a bleed inside it.
-    let corner = crate::ui::RADIUS_MD + GLOW_BLEED;
+    // The button group's corner, as its edge is the group's.
+    let corner = crate::ui::RADIUS_MD;
     div()
         .absolute()
         .top(inset - GLOW_BLEED)
         .bottom(inset - GLOW_BLEED)
-        .left(GLOW_BLEED)
-        .right(GLOW_BLEED)
+        .left(STRIP_PAD)
+        .right(STRIP_PAD)
         .overflow_hidden()
         .child(
             img(ImageSource::Render(glow_image(colour, height)))
@@ -3238,7 +3253,7 @@ impl Shell {
             .flex_none()
             .flex_col()
             .gap(px(6.0))
-            .p(px(6.0))
+            .p(STRIP_PAD)
             .child(
                 div()
                     .relative()
@@ -3659,6 +3674,18 @@ impl Shell {
                                     // files changed on disk are the least urgent thing
                                     // a row can report.
                                     let activity = self.activity.activity(&node.id, now);
+                                    // The `/color` of the session the row speaks
+                                    // for: its mark on a tile of it, and its name
+                                    // in it — see `crate::session_color`.
+                                    let session_color = match &activity {
+                                        Activity::Session { .. } => self
+                                            .activity
+                                            .leading_session(&node.id, now)
+                                            .and_then(|(_, session)| self.session_color(session)),
+                                        _ => None,
+                                    };
+                                    let name_ink = session_color
+                                        .map(|color| paint(crate::session_color::label(color, t)));
                                     let overridden = activity
                                         .agent()
                                         .or(node.agent.as_ref().map(SharedString::as_ref))
@@ -3881,6 +3908,7 @@ impl Shell {
                                                     .child(self.worktree_row_mark(
                                                         &node.id,
                                                         &activity,
+                                                        session_color,
                                                         node.dirty,
                                                         node.missing,
                                                         t,
@@ -3930,6 +3958,12 @@ impl Shell {
                                                                     // dimmed rather than hidden
                                                                     // — but it must not look
                                                                     // like somewhere you can go.
+                                                                    .when_some(
+                                                                        name_ink,
+                                                                        |el, ink| {
+                                                                            el.text_color(ink)
+                                                                        },
+                                                                    )
                                                                     .when(node.missing, |el| {
                                                                         el.text_color(paint(
                                                                             t.text.dim,

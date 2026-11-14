@@ -967,3 +967,39 @@ fn subagents_filed_under_a_reported_pane_are_readable_and_roll_up_the_signal() {
     // `roll_up` explains a row that is both `Idle` and `Signal::Working`.
     assert_eq!(tracker.signal(&wt, 1), Signal::Working);
 }
+
+#[test]
+fn a_row_wears_the_session_of_the_pane_it_reports() {
+    let mut tracker = Tracker::new(["claude".to_owned()]);
+    let wt = worktree("w1");
+    assert_eq!(
+        tracker.leading_session(&wt, 0),
+        None,
+        "nothing has reported"
+    );
+
+    // Two Claude tabs in one worktree: one at rest, one at work.
+    let mut resting = hook_report(HookEvent::Stop, "p1", "w1", 0);
+    resting.session = Some("quiet".to_owned());
+    tracker.report(&resting, known_any);
+    let mut working = hook_report(HookEvent::UserPrompt, "p2", "w1", 1);
+    working.session = Some("busy".to_owned());
+    tracker.report(&working, known_any);
+    assert_eq!(
+        tracker.leading_session(&wt, 2),
+        Some(("claude", "busy")),
+        "the row reports the tab at work, so it wears that session"
+    );
+
+    // The busy one stops and the other picks up: the row follows.
+    let mut stopped = hook_report(HookEvent::Stop, "p2", "w1", 3);
+    stopped.session = Some("busy".to_owned());
+    tracker.report(&stopped, known_any);
+    let mut picked_up = hook_report(HookEvent::UserPrompt, "p1", "w1", 4);
+    picked_up.session = Some("quiet".to_owned());
+    tracker.report(&picked_up, known_any);
+    assert_eq!(tracker.leading_session(&wt, 5), Some(("claude", "quiet")));
+
+    // Another worktree's tabs are not this row's.
+    assert_eq!(tracker.leading_session(&worktree("w2"), 5), None);
+}

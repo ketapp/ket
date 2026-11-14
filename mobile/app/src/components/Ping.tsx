@@ -19,7 +19,7 @@ import { font, t, tint } from '../lib/theme';
 const GLYPH = 11;
 const ROW = 13;
 
-/** A cell is about half as wide as it is tall: the chrome face's advance,
+/** A cell is about half as wide as it is tall: the code face's advance,
  * Fira Code's, is 0.615 of its size. Circles are drawn against the real
  * ratio so they stay round. */
 const ASPECT = ROW / (GLYPH * 0.615);
@@ -171,5 +171,5 @@ function hash(x: number, y: number, seed: number): number {
 
 const styles = StyleSheet.create({
   field: { alignItems: 'center' },
-  row: { fontFamily: font.chrome, fontSize: GLYPH, lineHeight: ROW, letterSpacing: 0, color: t.dim },
+  row: { fontFamily: font.code, fontSize: GLYPH, lineHeight: ROW, letterSpacing: 0, color: t.dim },
 });

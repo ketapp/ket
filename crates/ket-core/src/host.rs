@@ -629,8 +629,8 @@ pub fn take_phone_work() -> Vec<PhoneWork> {
     )
 }
 
-/// A terminal a phone asked this window to start a fresh session beside,
-/// its own having gone cold — see [`take_phone_fresh`].
+/// A terminal a phone asked this window to start fresh in place, its session
+/// having gone cold — see [`take_phone_fresh`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PhoneFresh {
     /// Answered with [`finish_phone_fresh`].

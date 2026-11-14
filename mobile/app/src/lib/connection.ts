@@ -926,11 +926,12 @@ export class HostConnection {
     }
   }
 
-  /** Since 1.28: opens a fresh session on the desktop beside terminal
-   * `terminalId`, whose session went cold, as its own Start fresh does, and
-   * leaves the old one open — `session` and `sinceMs` are the terminal's
-   * `cold`, so a session used since is left alone — and resolves with the
-   * terminal the fresh one is, or why not.
+  /** Since 1.28: starts terminal `terminalId`, whose session went cold, on a
+   * new conversation, as the desktop's own Start fresh does — in place, or
+   * from a desktop before ket 0.3 in a new terminal beside it.
+   * `session` and `sinceMs` are the terminal's `cold`, so a session used
+   * since is left alone. Resolves with the terminal the fresh one is in, or
+   * why not.
    * `false` when the phone turns out not to have control. Asked again from
    * the next session under the same key if the connection drops meanwhile,
    * so one tap starts one session. */

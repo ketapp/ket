@@ -380,7 +380,7 @@ const styles = StyleSheet.create({
   words: { flex: 1, minWidth: 0, gap: 3 },
   label: { fontFamily: font.prose, fontSize: 15, color: t.text },
   labelOn: { fontFamily: font.proseMedium },
-  mono: { fontFamily: font.chrome },
+  mono: { fontFamily: font.chrome, fontVariant: ['tabular-nums'] },
   detailRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   dot: { width: 6, height: 6, borderRadius: 3 },
   itemDetail: { flexShrink: 1, fontFamily: font.prose, fontSize: size.detail, lineHeight: 17, color: t.dim },

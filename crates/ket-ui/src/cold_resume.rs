@@ -4,9 +4,9 @@
 //! Asked when the reader opens the tab, never when they send: a message in
 //! ket always goes as it was typed, so the one moment left to offer a choice
 //! is before anything has been typed at all. Continue leaves the session
-//! exactly as it was. Start fresh opens a new session beside it in the same
-//! pane and leaves the cold one open, its conversation as it was, for the
-//! reader to close: whatever is typed in it and not sent is theirs.
+//! exactly as it was. Start fresh clears it in place, as `/clear` typed into
+//! the tab would: the same tab, a new session, and the old conversation left
+//! in the agent's history for `/resume`.
 //!
 //! Asked once per cold spell: a session answered for is not asked about
 //! again until it has made another request and gone cold after that one.
@@ -41,6 +41,41 @@ const FRESH_OPEN: Duration = Duration::from_secs(30);
 /// How often that wait looks.
 const FRESH_POLL: Duration = Duration::from_millis(100);
 
+/// Typed first, so the input is never empty when [`CLEAR_INPUT`] is
+/// pressed: on an empty input Ctrl+C means quit — once more and Claude or
+/// Codex exits, and OpenCode exits there and then. A letter, so it lands as
+/// one wherever the cursor is; `i` so that in Claude's vim mode, where a
+/// letter is a command, it is the one that goes back to typing.
+const NOT_EMPTY: u8 = b'i';
+
+/// Ctrl+C: on an idle agent with something typed, clears the whole input —
+/// every line of it, wherever the cursor is — so a draft left in the box
+/// takes no `/clear` and goes as a prompt to the cold session, the one
+/// thing Start fresh is there to save. Claude and Codex keep the draft for
+/// Up.
+const CLEAR_INPUT: u8 = 0x03;
+
+/// Around [`CLEAR_INPUT`], so the agent reads it as a key of its own rather
+/// than in one read with the letters beside it.
+const CLEAR_GAP: Duration = Duration::from_millis(50);
+
+/// Between keys typed into the agent, as `ket_core::agent_model` types its
+/// commands: a burst reads as a paste to some agents.
+const KEY_GAP: Duration = Duration::from_millis(4);
+
+/// Between a command's last key and Enter, so its `/` menu has settled.
+const SETTLE: Duration = Duration::from_millis(300);
+
+/// The command that starts a new conversation in the same session of
+/// `agent`, or `None` for one ket doesn't know it for.
+fn fresh_command(agent: &str) -> Option<&'static str> {
+    match ket_core::agents::harness(agent) {
+        "claude" => Some("/clear"),
+        "codex" | "opencode" => Some("/new"),
+        _ => None,
+    }
+}
+
 /// The question, while it is up.
 pub(crate) struct ColdResume {
     /// The tab whose session went cold.
@@ -69,6 +104,10 @@ pub(crate) struct ColdResumeState {
     /// Whether the window was the one in front last frame: coming back to
     /// it is opening the tab again, as far as the reader is concerned.
     active: bool,
+    /// Tabs Start fresh is typing its command into, each with what the
+    /// reader typed there meanwhile: that goes in after its Enter, in turn,
+    /// rather than into the command — see [`Shell::terminal_input`].
+    pub(crate) typing: HashMap<TerminalId, Vec<u8>>,
 }
 
 impl Shell {
@@ -203,7 +242,7 @@ impl Shell {
             .answered
             .insert(dialog.session.clone(), dialog.at_ms);
         if let Err(why) =
-            self.start_fresh_beside(dialog.terminal, &dialog.session, dialog.at_ms, None, cx)
+            self.start_fresh_in_place(dialog.terminal, &dialog.session, dialog.at_ms, None, cx)
         {
             self.toast(Tone::Error, why, cx);
         }
@@ -227,7 +266,7 @@ impl Shell {
                 );
                 continue;
             };
-            let started = self.start_fresh_beside(
+            let started = self.start_fresh_in_place(
                 terminal,
                 &fresh.session,
                 fresh.since_ms,
@@ -254,22 +293,18 @@ impl Shell {
         }
     }
 
-    /// Opens a fresh session of `terminal`'s agent in its pane, beside the
-    /// cold one, which stays open: a prompt half-written in it — typed here,
-    /// or from a phone, which goes through the host and leaves the window no
-    /// trace of it — is not ket's to close, and an idle session costs nothing
-    /// until it is sent to. The old conversation stays in the agent's
-    /// history. `Err` says why nothing was started.
+    /// Starts `terminal`'s agent on a new conversation in the same tab: what
+    /// is typed in its input is cleared, then its own command for a new
+    /// conversation — `/clear` for Claude — is typed and entered. The old
+    /// conversation stays in the agent's history. `Err` says why nothing was
+    /// started.
     ///
     /// Refused unless `terminal` is still idle in `session` and its last
     /// request is still the one at `at_ms`: one used since — from the
     /// phone, or a prompt whose turn is still in flight — is not cold. When
-    /// `req` names a phone's request, the host is told the fresh tab's key
-    /// once its agent has reported itself started, or why there is none.
-    ///
-    /// Its worktree is selected first when it is not, the way a phone's new
-    /// session is: a tab opens in the worktree on screen.
-    fn start_fresh_beside(
+    /// `req` names a phone's request, the host is told the tab's key once
+    /// its agent has reported the new session, or why it hasn't.
+    fn start_fresh_in_place(
         &mut self,
         terminal: TerminalId,
         session: &str,
@@ -288,59 +323,83 @@ impl Shell {
             .get(&terminal)
             .and_then(|handle| handle.agent.clone())
             .ok_or("That tab isn't an agent's any more")?;
-        let (worktree, pane) = self
-            .spaces
-            .iter()
-            .find_map(|(worktree, space)| {
-                space
-                    .root
-                    .find_tab(&TabKind::Terminal(terminal))
-                    .map(|(pane, _)| (worktree.clone(), pane))
-            })
-            .ok_or("That tab isn't open any more")?;
-        if self.selected_id().as_ref() != Some(&worktree) {
-            let selection = self
-                .position_of(&worktree)
-                .ok_or("That worktree isn't in the sidebar any more")?;
-            self.suppress_auto_session = true;
-            self.select(selection, cx);
-            self.suppress_auto_session = false;
+        let command = fresh_command(&agent)
+            .ok_or_else(|| format!("ket doesn't know how to start {agent} fresh"))?;
+        let key = self
+            .terminal_keys
+            .get(&terminal)
+            .cloned()
+            .ok_or("That tab has no key to find it by")?;
+        // Keys typed into a sleeping tab wake it and go nowhere.
+        if self.asleep_terminals.contains_key(&terminal) {
+            return Err("That tab is asleep — open it first".to_owned());
         }
-        let before = self.next_terminal;
-        self.open_agent_tab_in(pane, &agent, cx);
-        if self.next_terminal == before {
-            return Err(format!("Couldn't open a fresh {agent} session"));
+        if self.cold_resume.typing.contains_key(&terminal) {
+            return Err("ket is already starting this one fresh".to_owned());
         }
-        let fresh = TerminalId(before);
-        let Some(req) = req else {
-            return Ok(());
-        };
-        // Told to the phone only once the fresh agent has said it started, so
-        // the phone is never sent to a shell whose agent failed to.
-        let fresh_key = self.terminal_keys.get(&fresh).cloned();
+        self.cold_resume.typing.insert(terminal, Vec::new());
         let session = session.to_owned();
         cx.spawn(async move |shell: WeakEntity<Shell>, cx: &mut AsyncApp| {
+            // Each key after the wait before it.
+            let keys = [(Duration::ZERO, NOT_EMPTY), (CLEAR_GAP, CLEAR_INPUT)]
+                .into_iter()
+                .chain(
+                    command
+                        .bytes()
+                        .enumerate()
+                        .map(|(at, byte)| (if at == 0 { CLEAR_GAP } else { KEY_GAP }, byte)),
+                )
+                .chain([(SETTLE, b'\r')]);
+            let mut typed = true;
+            for (wait, byte) in keys {
+                cx.background_executor().timer(wait).await;
+                typed = shell
+                    .update(cx, |shell, cx| {
+                        shell.type_into_terminal(terminal, vec![byte], cx)
+                    })
+                    .unwrap_or(false);
+                if !typed {
+                    break;
+                }
+            }
+            // What the reader typed meanwhile, now that the command is in.
+            let _ = shell.update(cx, |shell, cx| {
+                let held = shell.cold_resume.typing.remove(&terminal);
+                if let Some(held) = held.filter(|held| !held.is_empty()) {
+                    shell.type_into_terminal(terminal, held, cx);
+                }
+            });
+            let Some(req) = req else {
+                return;
+            };
+            if !typed {
+                ket_core::host::finish_phone_fresh(
+                    req,
+                    Err("the tab closed before it was started fresh".to_owned()),
+                );
+                return;
+            }
+            // Told to the phone only once the agent has reported the new
+            // session, so the phone's chat follows it rather than reading
+            // the old one again.
             let mut waited = Duration::ZERO;
             let answer = loop {
                 let state = shell
                     .update(cx, |shell, _| {
                         (
-                            shell.terminal_keys.contains_key(&fresh),
+                            shell.terminal_keys.contains_key(&terminal),
                             shell
-                                .reported_session(fresh)
+                                .reported_session(terminal)
                                 .is_some_and(|reported| reported != session),
                         )
                     })
                     .ok();
                 match state {
-                    // Gone: the window, or the fresh tab closed meanwhile.
+                    // Gone: the window, or the tab closed meanwhile.
                     None | Some((false, _)) => {
-                        break Err("the fresh tab was closed before it started".to_owned());
+                        break Err("the tab was closed before it started fresh".to_owned());
                     }
-                    Some((true, true)) => {
-                        break fresh_key
-                            .ok_or_else(|| "the fresh tab has no key to find it by".to_owned());
-                    }
+                    Some((true, true)) => break Ok(key),
                     Some((true, false)) if waited >= FRESH_OPEN => {
                         break Err("the fresh session didn't start on your Mac".to_owned());
                     }

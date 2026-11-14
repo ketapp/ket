@@ -281,7 +281,7 @@ impl Doc<'_> {
                     .bg(paint(self.t.panel))
                     .border_1()
                     .border_color(paint(self.t.border))
-                    .font_family(crate::fonts::chrome())
+                    .font_family(crate::fonts::code())
                     .text_size(self.size * 0.86)
                     .line_height(relative(1.45))
                     .overflow_hidden()
@@ -404,7 +404,7 @@ impl Doc<'_> {
             .map(|(index, (start, style))| {
                 let end = spans.get(index + 1).map_or(text.len(), |(next, _)| *next);
                 let mut face = font(if style.code {
-                    crate::fonts::chrome()
+                    crate::fonts::code()
                 } else {
                     crate::fonts::prose()
                 });

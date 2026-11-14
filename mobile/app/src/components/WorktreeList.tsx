@@ -86,6 +86,7 @@ import {
   type Filter,
   WAKING,
   agentOf,
+  colorOf,
   agentTerminal,
   asleepTab,
   detail,
@@ -115,7 +116,7 @@ import {
   saveHiddenProjects,
   savePinnedProjects,
 } from '../lib/store';
-import { font, size, t, tint } from '../lib/theme';
+import { font, sessionColor, size, t, tint } from '../lib/theme';
 
 /** Between the last card, at rest, and the tab bar under it. */
 const FOOT_GAP = 10;
@@ -985,7 +986,9 @@ function WorktreeRow({
   onLongPress?: () => void;
 }) {
   const agent = agentOf(worktree);
-  const mark = agent ? <AgentMark agent={agent} size={16} /> : null;
+  const session = colorOf(worktree);
+  const mark = agent ? <AgentMark agent={agent} size={16} session={session} /> : null;
+  const titleColor = sessionColor(session)?.label;
   if (filterOf(worktree.activity) !== 'running') {
     // Asleep: nothing runs, but the agent's session is there to wake.
     const asleep = worktree.asleep.length > 0 && !worktree.terminals.some((x) => !x.closed);
@@ -994,6 +997,7 @@ function WorktreeRow({
         marker={marker}
         mark={mark}
         title={worktree.name || 'Other terminals'}
+        titleColor={titleColor}
         detail={waking ? 'Waking on your Mac…' : detail(worktree)}
         detailColor={detailColor(worktree.activity)}
         state={waking ? WAKING : (stateOf(worktree.activity) ?? (asleep ? ASLEEP : undefined))}
@@ -1025,7 +1029,7 @@ function WorktreeRow({
       {marker ? <View style={styles.marker} /> : null}
       <View style={styles.panelHead}>
         <View style={styles.mark}>{mark}</View>
-        <Text style={styles.panelName} numberOfLines={1}>
+        <Text style={[styles.panelName, titleColor ? { color: titleColor } : null]} numberOfLines={1}>
           {worktree.name || 'Other terminals'}
         </Text>
         {worktree.pinned ? <PinMark /> : null}

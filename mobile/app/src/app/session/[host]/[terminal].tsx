@@ -809,8 +809,10 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
   const openTerminal = () => router.push(`/terminal/${hostId}/${terminal}`);
   // A card waiting on you, as `tuck` has it: the one asked, or the last one
   // as it tucks away.
-  // Start fresh: the desktop opens a fresh session beside the cold one, which
-  // stays open as it was; the chat follows to the fresh one.
+  // Start fresh: the desktop clears the cold session in place — `/clear` in
+  // the same terminal — and the chat follows the terminal to its new
+  // session. A desktop before ket 0.3 opens one beside it instead, and the
+  // chat moves there.
   const onScreen = useRef(false);
   useFocusEffect(
     useCallback(() => {
@@ -823,8 +825,9 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
   const startFresh = async (spell: ColdCache) => {
     if (!conn || freshing) return;
     setFreshing(true);
-    // A message sent here while the fresh one starts goes to this session,
-    // as typed, and this chat stays on it.
+    // A message sent here while the fresh one starts goes in after the
+    // desktop's `/clear`, to the new session. From a desktop before ket 0.3,
+    // it goes to this session, as typed, and this chat stays on it.
     const sentBefore = sentCount.current;
     let started: bigint | undefined;
     await controlled(
@@ -842,6 +845,12 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
       return;
     }
     answerCold();
+    // The same terminal: its next read is the new session's, and this chat
+    // swaps to it where it stands.
+    if (started === terminalId) {
+      setFreshing(false);
+      return;
+    }
     await conn.awaitTerminal(started);
     setFreshing(false);
     // Only from this chat, still on screen: one left meanwhile is not to

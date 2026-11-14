@@ -15,8 +15,13 @@
 //! an address are not flagged: a session that touches a repository would
 //! otherwise be flagged on every turn, and a flag that is always there is
 //! one nobody reads.
+//!
+//! **Muted, still found.** A kind the person muted in Settings › Network
+//! (`agent.network.muted`) is found and kept with the request all the same:
+//! muting is the window's to apply, so turning a kind back on brings back
+//! every flag of it the log already holds.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ops::Range;
 use std::sync::LazyLock;
 
@@ -46,6 +51,17 @@ pub enum Kind {
 }
 
 impl Kind {
+    /// Every kind, most serious first.
+    pub const ALL: [Kind; 7] = [
+        Kind::Secret,
+        Kind::Ssn,
+        Kind::Card,
+        Kind::Birth,
+        Kind::Phone,
+        Kind::Email,
+        Kind::Ip,
+    ];
+
     /// What a row's tag calls it.
     pub fn label(self) -> &'static str {
         match self {
@@ -117,20 +133,42 @@ pub enum Source {
     Tool(String),
 }
 
-/// Where what is flagged in `kept` came from, in the order first met: the
-/// message that carried it, or the tool call whose output did.
-pub fn sources(kept: &Value) -> Vec<Source> {
+/// Where what is flagged in `kept` came from, in the order first met — the
+/// message that carried it, or the tool call whose output did — with the
+/// kinds each carried, so a muted kind's source can be left out.
+pub fn sources(kept: &Value) -> Vec<(Source, BTreeSet<Kind>)> {
     let mut found = sources_of_messages(kept);
-    for source in sources_of_input(kept) {
-        if !found.contains(&source) {
-            found.push(source);
-        }
+    for (source, kinds) in sources_of_input(kept) {
+        add_source(&mut found, source, kinds);
     }
     found
 }
 
+/// Adds `source`, with `kinds`, to `found`: once, carrying every kind it
+/// was met with.
+fn add_source(found: &mut Vec<(Source, BTreeSet<Kind>)>, source: Source, kinds: BTreeSet<Kind>) {
+    if kinds.is_empty() {
+        return;
+    }
+    match found.iter_mut().find(|(known, _)| *known == source) {
+        Some((_, known)) => known.extend(kinds),
+        None => found.push((source, kinds)),
+    }
+}
+
+/// The kinds flagged in `content`'s text.
+fn kinds_in(content: Option<&Value>) -> BTreeSet<Kind> {
+    let mut texts = Vec::new();
+    collect(content, &mut texts);
+    texts
+        .iter()
+        .flat_map(|text| find(text))
+        .map(|(_, kind)| kind)
+        .collect()
+}
+
 /// The same, for a Messages API body.
-fn sources_of_messages(kept: &Value) -> Vec<Source> {
+fn sources_of_messages(kept: &Value) -> Vec<(Source, BTreeSet<Kind>)> {
     let messages: Vec<&Value> = turns(kept, "messages").collect();
     // A tool's result names its call by id; the call says what was read.
     let calls: HashMap<&str, &Value> = messages
@@ -142,12 +180,7 @@ fn sources_of_messages(kept: &Value) -> Vec<Source> {
         .filter(|block| block.get("type").and_then(Value::as_str) == Some("tool_use"))
         .filter_map(|block| Some((block.get("id")?.as_str()?, block)))
         .collect();
-    let flagged = |content: Option<&Value>| {
-        let mut texts = Vec::new();
-        collect(content, &mut texts);
-        texts.iter().any(|text| !find(text).is_empty())
-    };
-    let mut found: Vec<Source> = Vec::new();
+    let mut found = Vec::new();
     for message in messages {
         if message.get("role").and_then(Value::as_str) != Some("user") {
             continue;
@@ -158,26 +191,26 @@ fn sources_of_messages(kept: &Value) -> Vec<Source> {
             _ => Vec::new(),
         };
         for block in blocks {
-            let source = match block {
-                Value::String(text) if flagged(Some(block)) => Some(said(text)),
+            let (source, kinds) = match block {
+                Value::String(text) => (said(text), kinds_in(Some(block))),
                 _ => match block.get("type").and_then(Value::as_str) {
-                    Some("text") if flagged(block.get("text")) => {
-                        Some(said(block["text"].as_str().unwrap_or_default()))
-                    }
-                    Some("tool_result") if flagged(block.get("content")) => Some(called(
-                        block
-                            .get("tool_use_id")
-                            .and_then(Value::as_str)
-                            .and_then(|id| calls.get(id).copied()),
-                    )),
-                    _ => None,
+                    Some("text") => (
+                        said(block["text"].as_str().unwrap_or_default()),
+                        kinds_in(block.get("text")),
+                    ),
+                    Some("tool_result") => (
+                        called(
+                            block
+                                .get("tool_use_id")
+                                .and_then(Value::as_str)
+                                .and_then(|id| calls.get(id).copied()),
+                        ),
+                        kinds_in(block.get("content")),
+                    ),
+                    _ => continue,
                 },
             };
-            if let Some(source) = source
-                && !found.contains(&source)
-            {
-                found.push(source);
-            }
+            add_source(&mut found, source, kinds);
         }
     }
     found
@@ -185,38 +218,29 @@ fn sources_of_messages(kept: &Value) -> Vec<Source> {
 
 /// The same, for a Responses API body: its `input`, where a tool's output
 /// is an item of its own.
-fn sources_of_input(kept: &Value) -> Vec<Source> {
+fn sources_of_input(kept: &Value) -> Vec<(Source, BTreeSet<Kind>)> {
     // An output names its call by id; the call says what was run.
     let calls: HashMap<&str, Value> = turns(kept, "input")
         .filter_map(|item| Some((item.get("call_id")?.as_str()?, as_call(item)?)))
         .collect();
-    let flagged = |content: Option<&Value>| {
-        let mut texts = Vec::new();
-        collect(content, &mut texts);
-        texts.iter().any(|text| !find(text).is_empty())
-    };
-    let mut found: Vec<Source> = Vec::new();
+    let mut found = Vec::new();
     for item in turns(kept, "input") {
-        let source = if said_by_user(item) {
+        if said_by_user(item) {
+            // Each text by what it is: the person's words, or what their
+            // agent put in a message of theirs.
             let mut texts = Vec::new();
             collect(item.get("content"), &mut texts);
-            texts
-                .into_iter()
-                .find(|text| !find(text).is_empty())
-                .map(said)
-        } else if is_output(item) && flagged(item.get("output")) {
-            Some(called(
+            for text in texts {
+                let kinds = find(text).into_iter().map(|(_, kind)| kind).collect();
+                add_source(&mut found, said(text), kinds);
+            }
+        } else if is_output(item) {
+            let source = called(
                 item.get("call_id")
                     .and_then(Value::as_str)
                     .and_then(|id| calls.get(id)),
-            ))
-        } else {
-            None
-        };
-        if let Some(source) = source
-            && !found.contains(&source)
-        {
-            found.push(source);
+            );
+            add_source(&mut found, source, kinds_in(item.get("output")));
         }
     }
     found

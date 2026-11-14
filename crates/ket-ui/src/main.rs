@@ -94,6 +94,7 @@ mod release;
 mod review;
 mod savings;
 mod search;
+mod session_color;
 mod setup;
 mod shortcuts;
 mod sidebar_rail;
@@ -892,6 +893,8 @@ struct Shell {
     /// Whether to pick up a session whose prompt cache went cold — see
     /// `crate::cold_resume`.
     pub(crate) cold_resume: crate::cold_resume::ColdResumeState,
+    /// The sessions' `/color` — see `crate::session_color`.
+    pub(crate) session_colors: crate::session_color::SessionColors,
     /// Open editor tabs' buffers and UI state, keyed by absolute path. See
     /// `editor.rs`'s module doc for why a buffer lives here rather than on
     /// the `Tab` itself.
@@ -1158,6 +1161,7 @@ impl Shell {
             self.persist_view();
         }
         self.refresh_savings();
+        self.refresh_session_colors(cx);
         // Only for a bar someone can see. See `crate::overhead`.
         if self.status_bar_open {
             let _t = crate::frametrace::tick("refresh_overhead");
@@ -1341,6 +1345,7 @@ impl Shell {
         };
         let theme_config = config.theme;
         let audio_enabled = config.viewer.audio;
+        let network_muted = config.agent.network.muted.clone();
         let theme = crate::appearance::current(&theme_config, cx);
         // Resolved together, against the families the config chose: `resolve`
         // is also what hands the chrome pair to `fonts::prose` and
@@ -1527,6 +1532,7 @@ impl Shell {
                     confirm_remove_worktree: None,
                     confirm_close_session: None,
                     cold_resume: Default::default(),
+                    session_colors: Default::default(),
                     editors: HashMap::new(),
                     window_bounds: None,
                     view_saved: None,
@@ -1610,7 +1616,7 @@ impl Shell {
             panel_width: px(280.0),
             panel_view: Default::default(),
             git_panel: Default::default(),
-            network_panel: Default::default(),
+            network_panel: crate::network_panel::NetworkPanel::muting(network_muted),
             network_requests: Default::default(),
             diffs: Default::default(),
             reviews: HashMap::new(),
@@ -1714,6 +1720,7 @@ impl Shell {
             confirm_remove_worktree: None,
             confirm_close_session: None,
             cold_resume: Default::default(),
+            session_colors: Default::default(),
             editors: HashMap::new(),
             window_bounds: None,
             view_saved: None,
@@ -2101,18 +2108,22 @@ impl Render for Shell {
             .when(self.status_bar_open, |el| el.pb(px(4.0)))
             .bg(backdrop)
             .text_color(paint(self.theme.text.primary))
-            // The chrome's own mono, inherited by everything: only the panes
+            // The chrome's own face, inherited by everything: only the panes
             // that show code or a grid ask for `self.font_family`, and only
             // the lines that are words ask for `fonts::prose`.
             .font_family(self.chrome_family.clone())
-            // Fira Code's ligatures are contextual alternates: off for the
-            // whole window, so a branch or path keeps its own characters
-            // (`->`, `www`, `0x` included). The terminal and editor turn
-            // them off for their grids as well.
+            // Tabular figures, so a count or a size that changes keeps its
+            // width and the text beside it stays put. Contextual alternates
+            // off, so a branch or path keeps its own characters (`->`, `www`,
+            // `0x` included) in a face that draws ligatures; the terminal
+            // and editor turn them off for their grids as well.
             .map(|mut el| {
                 el.text_style()
                     .get_or_insert_with(Default::default)
-                    .font_features = Some(gpui::FontFeatures::disable_ligatures());
+                    .font_features = Some(gpui::FontFeatures(std::sync::Arc::new(vec![
+                    ("calt".into(), 0),
+                    ("tnum".into(), 1),
+                ])));
                 el
             })
             // Stated once, for everything under it. gpui's default is the

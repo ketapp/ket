@@ -1957,9 +1957,9 @@ fn wake_from_phone(
     }
 }
 
-/// Opens a fresh session beside a terminal's cold one for a phone — see
-/// `crate::host::server::Host::start_fresh` — answering with the terminal it
-/// opened. Refused unless it is still the cold spell the phone was shown and
+/// Starts a terminal whose session went cold on a new conversation for a
+/// phone, in place — see `crate::host::server::Host::start_fresh` —
+/// answering with the terminal it is in. Refused unless it is still the cold spell the phone was shown and
 /// the agent is idle: a prompt sent since may not have reached the
 /// transcript yet, and a session at work is not cold.
 fn fresh_from_phone(
@@ -2040,9 +2040,19 @@ fn fresh_from_phone(
     let tab = key.clone();
     let session = fresh.session.clone();
     let since_ms = fresh.since_ms;
+    let typing = phone.phones.typing.clone();
+    let terminal_id = fresh.terminal_id;
     let spawned = std::thread::Builder::new()
         .name("ket-host-fresh".into())
         .spawn(move || {
+            // What phones type into it waits while the window types its
+            // `/clear` and the new session starts: a message sent meanwhile
+            // goes in after, to the new session, rather than into the
+            // command. Released when this thread is done with it.
+            let (_release, released) = mpsc::channel();
+            if let Some(terminal) = host.find(terminal_id) {
+                let _ = typing.files(terminal_id, terminal, Typed::Hold(released));
+            }
             let answer = match host.start_fresh(&tab, &session, since_ms) {
                 Ok(terminal_id) => Payload::FreshStarted(proto::FreshStarted { terminal_id }),
                 Err(message) => Payload::Error(proto::Error {

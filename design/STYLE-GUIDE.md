@@ -53,23 +53,26 @@ also differ in lightness. Waiting is blue so it never reads as the marker.
 
 ### Type
 
-Two faces: Geist (Sans below) for words, Fira Code (Mono) for anything you
-would quote — branches, paths, figures, keys — and for code and terminals,
-with its ligatures off. Sentence case everywhere; no tracked uppercase labels.
+Two faces: Geist (Sans below) for everything the interface says — words,
+branches, paths, figures, keys — with tabular figures, and Fira Code (Mono)
+for code: terminals, the editor, code blocks and inline code, and pictures
+drawn in characters, with its ligatures off. Sentence case everywhere; no
+tracked uppercase labels.
 
 | Role       | Face | Size / weight | Example                         |
 | ---------- | ---- | ------------- | ------------------------------- |
-| Value      | Mono | 15 / 500      | `41%`, `+128 −14`, a branch     |
+| Value      | Sans | 15 / 500      | `41%`, `+128 −14`, a branch     |
 | Title      | Sans | 15 / 600      | Dialog and popover titles       |
 | Control    | Sans | 13 / 500      | Button and segment labels       |
 | Body       | Sans | 13 / 400      | Dialog copy, field text         |
-| Identifier | Mono | 12.5 / 400    | Worktree branch in a row        |
+| Identifier | Sans | 12.5 / 400    | Worktree branch in a row        |
 | Label      | Sans | 12.5 / 500    | Field labels, figure labels     |
 | Secondary  | Sans | 11–12 / 400   | A row's detail line (11), help text (12) |
-| Caption    | Mono | 11 / 400      | Key hints, resets, counts       |
-| Code       | Mono | 11 / 400      | Terminal and editor             |
+| Caption    | Sans | 11 / 400      | Key hints, resets, counts       |
+| Code       | Mono | 11 / 400      | Terminal, editor, code in text  |
 
-`fonts.rs` owns the families; reach prose through `.prose()`. The chrome's
+`fonts.rs` owns the families; reach prose through `.prose()` and code
+through `fonts::code()`. The chrome's
 line height is 1.3, set once on the window's root; text read at length
 (markdown, release notes) states its own.
 

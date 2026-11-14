@@ -1,6 +1,9 @@
 //! What the network inspector flags in a request, and what it lets pass.
 
-use ket_core::network::flags::{Kind, find};
+use std::collections::BTreeSet;
+
+use ket_core::network::flags::{Kind, Source, find, sources};
+use serde_json::json;
 
 fn kinds(text: &str) -> Vec<Kind> {
     find(text).into_iter().map(|(_, kind)| kind).collect()
@@ -39,4 +42,69 @@ fn an_address_after_a_url_is_still_an_email() {
 fn noreply_and_git_remotes_pass() {
     assert_eq!(kinds("From: noreply@example.com"), vec![]);
     assert_eq!(kinds("git@example.com:org/repo.git"), vec![]);
+}
+
+fn set(kinds: &[Kind]) -> BTreeSet<Kind> {
+    kinds.iter().copied().collect()
+}
+
+#[test]
+fn each_source_carries_the_kinds_it_sent() {
+    // A file read by a tool, and the person's own words.
+    let kept = json!({
+        "messages": [
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "t1", "name": "Read",
+                 "input": {"file_path": "/repo/contacts.csv"}}
+            ]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1",
+                 "content": "jane@example.com, 203.0.113.7"},
+                {"type": "text", "text": "call (415) 555-0100 about it"}
+            ]}
+        ]
+    });
+    assert_eq!(
+        sources(&kept),
+        [
+            (
+                Source::File("/repo/contacts.csv".to_owned()),
+                set(&[Kind::Email, Kind::Ip])
+            ),
+            (Source::Message, set(&[Kind::Phone])),
+        ]
+    );
+}
+
+#[test]
+fn a_responses_message_names_each_text_by_what_it_is() {
+    let kept = json!({
+        "input": [
+            {"type": "message", "role": "user", "content": [
+                {"type": "input_text", "text": "<environment_context>ip 203.0.113.7</environment_context>"},
+                {"type": "input_text", "text": "mail jane@example.com"}
+            ]}
+        ]
+    });
+    assert_eq!(
+        sources(&kept),
+        [
+            (Source::Context, set(&[Kind::Ip])),
+            (Source::Message, set(&[Kind::Email])),
+        ]
+    );
+}
+
+#[test]
+fn a_source_met_twice_is_listed_once_with_every_kind() {
+    let kept = json!({
+        "messages": [
+            {"role": "user", "content": "mail jane@example.com"},
+            {"role": "user", "content": "or call (415) 555-0100"}
+        ]
+    });
+    assert_eq!(
+        sources(&kept),
+        [(Source::Message, set(&[Kind::Phone, Kind::Email]))]
+    );
 }

@@ -285,6 +285,12 @@ pub(super) fn snapshot(host: &Host, phones: &Phones) -> proto::HostSnapshot {
         let compacting = key
             .as_deref()
             .is_some_and(|key| panes.iter().any(|pane| pane.pane == key && pane.compacting));
+        // Its `/color`, for the phone to wear where the desktop does.
+        let color = session
+            .as_deref()
+            .and_then(|session| crate::agent_color::of(&agent, session))
+            .map(|color| color.name().to_owned())
+            .unwrap_or_default();
         let summary = proto::TerminalSummary {
             id,
             title: terminal.title().unwrap_or_else(|| {
@@ -303,6 +309,7 @@ pub(super) fn snapshot(host: &Host, phones: &Phones) -> proto::HostSnapshot {
             running,
             running_since_ms,
             compacting,
+            color,
             ..Default::default()
         };
         match worktrees.iter_mut().find(|w| w.id == worktree) {
@@ -400,6 +407,11 @@ pub(super) fn snapshot(host: &Host, phones: &Phones) -> proto::HostSnapshot {
             let now_doing = activity.activity(&id, now);
             worktree.agent_state = now_doing.detail();
             worktree.agent = now_doing.agent().unwrap_or_default().to_owned();
+            worktree.agent_color = activity
+                .leading_session(&id, now)
+                .and_then(|(agent, session)| crate::agent_color::of(agent, session))
+                .map(|color| color.name().to_owned())
+                .unwrap_or_default();
             worktree.subagents = activity
                 .subagents(&id, now)
                 .into_iter()

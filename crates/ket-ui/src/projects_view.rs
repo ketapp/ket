@@ -1,7 +1,8 @@
 //! Compact, status-first project list used to find active worktrees.
 
 use gpui::{
-    AnyElement, Context, MouseButton, MouseDownEvent, SharedString, Window, div, prelude::*, px,
+    AnyElement, Context, MouseButton, MouseDownEvent, Pixels, SharedString, Window, div,
+    prelude::*, px,
 };
 use ket_core::activity::Signal;
 use ket_core::theme::Color;
@@ -15,6 +16,11 @@ use crate::ui::agent::MARK;
 use crate::ui::row::block_row_with_rail;
 use crate::ui::{CAPTION, ICON_GAP, LABEL};
 
+/// A row's padding above and below, roomier than the grouped tree's: with
+/// no heading between them, rows from different projects run together, and
+/// the space is what keeps each one a thing to read on its own.
+const ROW_PAD_Y: Pixels = px(9.0);
+
 struct Entry {
     project: usize,
     worktree: usize,
@@ -26,9 +32,6 @@ struct Entry {
     project_color: Color,
     branch: SharedString,
     signal: Signal,
-    /// What the agent is actually doing, in its own words — empty when
-    /// nothing has ever run here. See [`ket_core::activity::Activity::detail`].
-    detail: String,
     /// Pinned rows lead the list, ahead of the status order.
     pinned: bool,
 }
@@ -50,18 +53,14 @@ impl Shell {
                 node.worktrees
                     .iter()
                     .enumerate()
-                    .map(move |(worktree, worktree_node)| {
-                        let activity = self.activity.activity(&worktree_node.id, now);
-                        Entry {
-                            project,
-                            worktree,
-                            project_name: node.name.clone(),
-                            project_color: node.color,
-                            branch: worktree_node.label(),
-                            signal: self.row_signal(worktree_node, now),
-                            detail: activity.detail(),
-                            pinned: worktree_node.pinned,
-                        }
+                    .map(move |(worktree, worktree_node)| Entry {
+                        project,
+                        worktree,
+                        project_name: node.name.clone(),
+                        project_color: node.color,
+                        branch: worktree_node.label(),
+                        signal: self.row_signal(worktree_node, now),
+                        pinned: worktree_node.pinned,
                     })
             })
             // The sidebar's filter holds here too: sorted or grouped, it is
@@ -95,6 +94,7 @@ impl Shell {
                 let t = &self.theme;
                 let rail = rail_colour(entry.project_color, t);
                 block_row_with_rail(("activity-worktree", row_id), selected, rail, t)
+                    .py(ROW_PAD_Y)
                     .group(crate::tree::worktree_row_group(project, worktree))
                     .flex_row()
                     .items_center()
@@ -118,6 +118,9 @@ impl Shell {
                             .child(div().truncate().child(entry.branch))
                             // Which project, in its own colour: a list sorted
                             // across repositories is scanned by whose a row is.
+                            // Nothing after it: this list is for finding a
+                            // worktree, and the state word at the row's end
+                            // already says whether it needs anyone.
                             .child(
                                 div()
                                     .prose()
@@ -137,12 +140,7 @@ impl Shell {
                                                     .rounded(px(2.0))
                                                     .bg(paint(entry.project_color)),
                                             )
-                                            .child(div().truncate().child(entry.project_name))
-                                            .when(!entry.detail.is_empty(), |el| {
-                                                el.child(div().flex_none().child("·")).child(
-                                                    div().truncate().child(entry.detail.clone()),
-                                                )
-                                            }),
+                                            .child(div().truncate().child(entry.project_name)),
                                     ),
                             ),
                     )

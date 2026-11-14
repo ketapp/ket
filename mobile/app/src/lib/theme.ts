@@ -2,8 +2,8 @@
 // (crates/ket-core/themes/dark.toml) and the spec in design/STYLE-GUIDE.md.
 // The screen is a desk of cards: a near-black ground, cards on a 10px gutter,
 // wells set into them, floats above. Two faces, as on the desktop: Geist for
-// words, and Fira Code for anything you would quote and for what a terminal
-// draws. Colour is spent on
+// everything the app says, figures and names included, and Fira Code for
+// code and for what a terminal draws. Colour is spent on
 // state, never decoration.
 //
 // The colours follow the desktop. Whatever theme ket is drawn in there, the
@@ -207,9 +207,9 @@ export function blend(under: string, over: string, alpha: number): string {
 }
 
 export const font = {
-  chrome: 'FiraCode_400Regular',
-  chromeMedium: 'FiraCode_500Medium',
-  chromeSemibold: 'FiraCode_600SemiBold',
+  chrome: 'Geist_400Regular',
+  chromeMedium: 'Geist_500Medium',
+  chromeSemibold: 'Geist_600SemiBold',
   prose: 'Geist_400Regular',
   proseMedium: 'Geist_500Medium',
   proseSemibold: 'Geist_600SemiBold',
@@ -264,12 +264,60 @@ export const PROJECT_COLORS = [
 /** Agent brand colours, as ket's sidebar draws their marks. */
 export const AGENT_COLORS: Record<string, string> = {
   claude: '#d97757',
-  codex: '#aab0b8',
-  opencode: '#e8b339',
+  // OpenAI's grey, as the desktop draws it.
+  codex: '#6e6e80',
+  // OpenCode's mark is one colour, and its brand allows no other.
+  opencode: t.text,
   gemini: '#8e7bf5',
   // xAI's mark has no colour of its own; the shape tells it apart.
   grok: t.text,
 };
+
+/** A Claude session's `/color` (protocol 1.31) as the desktop paints it:
+ * Tailwind's 500 — see `ket_core::agent_color`. */
+const SESSION_COLORS: Record<string, string> = {
+  red: '#ef4444',
+  blue: '#3b82f6',
+  green: '#22c55e',
+  yellow: '#eab308',
+  purple: '#a855f7',
+  orange: '#f97316',
+  pink: '#ec4899',
+  cyan: '#06b6d4',
+};
+
+function luminance(hex: string): number {
+  const n = parseInt(hex.slice(1), 16);
+  const [r, g, b] = [16, 8, 0].map((shift) => {
+    const c = ((n >> shift) & 255) / 255;
+    return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+  });
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+
+function contrast(a: string, b: string): number {
+  const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
+  return (hi + 0.05) / (lo + 0.05);
+}
+
+/** How a session's `/color` is worn, as the desktop wears it: its mark's
+ * tile, the mark on it in whichever of the card and the text stands off it
+ * more, and its name moved towards the text until it reads at 4.5:1 on a
+ * card. `undefined` for none, or a colour this build doesn't know. */
+export function sessionColor(name: string | undefined): { tile: string; ink: string; label: string } | undefined {
+  const tile = name ? SESSION_COLORS[name] : undefined;
+  if (!tile) return undefined;
+  const ink = contrast(t.card, tile) >= contrast(t.text, tile) ? t.card : t.text;
+  let label = t.text;
+  for (let step = 0; step <= 20; step++) {
+    const candidate = mix(tile, t.text, step / 20);
+    if (contrast(candidate, t.card) >= 4.5) {
+      label = candidate;
+      break;
+    }
+  }
+  return { tile, ink, label };
+}
 
 /** The program behind an agent's name: `opencode:ollama/<model>` is OpenCode,
  * `ollama:<model>` is Ollama. What a mark or a colour is looked up by. */

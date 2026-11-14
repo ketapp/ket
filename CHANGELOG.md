@@ -19,12 +19,44 @@ words; no internal names, no commit hashes. ket reads this file
   again instead of closing, and the app keeps a report you can share from
   Settings › About › Error reports. Nothing is sent anywhere unless you
   share it.
+- Mute a kind of flag in the Network view, such as emails or IP addresses:
+  press Mute on its alert, use the bell on a flagged request, or turn it off
+  under Flags in Settings › Network. A muted kind no longer raises alerts or
+  tints requests. Requests are still logged in full, and turning the kind
+  back on brings its flags back.
+- A Claude session you give a colour with `/color` wears it in ket: its
+  worktree's row in the sidebar and its tab show Claude's mark on a tile of
+  that colour, with the name in it, and so do its rows on the phone.
 
 ### Improved
 
 - ket's download is smaller: it carries only the two fonts it uses, Fira
   Code and Geist. If you picked Monaspace, Mona Sans, Geist Mono or Atkinson
   Hyperlegible Mono in Settings, install it on your Mac to keep using it.
+- Branch names, numbers and labels are set in Geist on the Mac and the
+  phone, with numbers that keep their width as they change. Fira Code stays
+  for the terminal, the editor and code.
+- The sidebar gives its projects and worktrees more room.
+- Sorted by status, the sidebar lists each worktree with just its name and
+  its project, with more space between rows.
+- Start fresh on a session that went cold clears it in the same tab, as
+  `/clear` does, rather than opening a new tab beside it, and on the phone
+  the chat moves to the new conversation. The old one stays in `/resume`,
+  and anything left typed in the box is cleared first, for Up to bring back.
+- Settings opens taller and a little wider, so a long section shows more at
+  once.
+
+### Fixed
+
+- Claude, Codex and OpenCode wear their own logos in ket, on the Mac and
+  the phone: Claude's spark, OpenAI's logo for Codex, and OpenCode's mark in
+  one colour.
+- Removing ket's hooks from your agents says when an agent's settings file
+  could not be read, instead of saying ket is still in it.
+- The file where ket's hooks keep agent updates for later no longer grows
+  without limit: it skips updates from agents ket didn't start, which ket
+  never used, and stops at 8 MB, even if ket is deleted with its hooks
+  still in place.
 
 ## 0.2.0 — 2026-11-12
 

@@ -11,6 +11,7 @@ import { describe, expect, jest, test } from '@jest/globals';
 import {
   agentOf,
   agentTerminal,
+  colorOf,
   asleepName,
   asleepTab,
   detail,
@@ -32,10 +33,10 @@ jest.mock('@ket/remote', () => ({
 const terminal = (agent: string, closed = false): TerminalSummary =>
   ({ agent, closed }) as TerminalSummary;
 
-type WorktreeFields = Partial<Pick<WorktreeSummary, 'id' | 'agentState' | 'terminals' | 'agent' | 'asleep'>>;
+type WorktreeFields = Partial<Pick<WorktreeSummary, 'id' | 'agentState' | 'terminals' | 'agent' | 'asleep' | 'agentColor'>>;
 
 const worktree = (activity: Activity, fields: WorktreeFields = {}): WorktreeSummary =>
-  ({ activity, agentState: '', agent: '', terminals: [], asleep: [], ...fields }) as WorktreeSummary;
+  ({ activity, agentState: '', agent: '', agentColor: '', terminals: [], asleep: [], ...fields }) as WorktreeSummary;
 
 const asleep = (agent: string, title = '', key = agent): AsleepTerminal =>
   ({ key, title, agent, sinceMs: 0n, freedBytes: 0n }) as AsleepTerminal;
@@ -181,5 +182,27 @@ describe('asleep tabs', () => {
     expect(asleepName(asleep('claude', '✳ Fixing the build'))).toBe('Fixing the build');
     expect(asleepName(asleep('codex'))).toBe(agentLabel('codex'));
     expect(asleepName(asleep('', ''))).toBe('Terminal');
+  });
+});
+
+describe('session colours', () => {
+  test('a row wears its reporting session\'s colour', () => {
+    expect(colorOf(worktree(Activity.WORKING, { agent: 'claude', agentColor: 'red' }))).toBe('red');
+  });
+
+  test('a row with no colour, or a host too old to say, wears none', () => {
+    expect(colorOf(worktree(Activity.WORKING, { agent: 'claude' }))).toBeUndefined();
+  });
+
+  test('a mark borrowed from a terminal is not the reporting session\'s', () => {
+    // No agent reports, so the mark is the terminal's agent — and the
+    // colour, if any, belongs to no session the row speaks for.
+    const borrowed = worktree(Activity.QUIET, { agentColor: 'red', terminals: [terminal('claude')] });
+    expect(agentOf(borrowed)).toBe('claude');
+    expect(colorOf(borrowed)).toBeUndefined();
+  });
+
+  test('a program at work wears no agent\'s colour', () => {
+    expect(colorOf(worktree(Activity.RUNNING, { agentColor: 'red', terminals: [terminal('claude')] }))).toBeUndefined();
   });
 });

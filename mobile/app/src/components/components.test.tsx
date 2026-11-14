@@ -365,11 +365,51 @@ describe('small components', () => {
     const view = await render(
       <View>
         <Icons.BrandMark />
-        {['codex', 'grok', 'claude', 'gemini'].map((agent) => <Icons.AgentMark key={agent} agent={agent} />)}
+        {['codex', 'grok', 'claude', 'gemini', 'opencode'].map((agent) => <Icons.AgentMark key={agent} agent={agent} />)}
         {iconComponents.map((Icon, index) => <Icon key={index} size={20} />)}
       </View>,
     );
     expect(view.toJSON()).toBeTruthy();
+    await view.unmount();
+  });
+});
+
+describe('session colours', () => {
+  type Rendered = { props: { style?: unknown }; children: (Rendered | string)[] | null };
+  // Every rendered node filled with `color`.
+  const filled = (tree: unknown, color: string): Rendered[] => {
+    if (!tree || typeof tree === 'string') return [];
+    if (Array.isArray(tree)) return tree.flatMap((node) => filled(node, color));
+    const node = tree as Rendered;
+    const own = StyleSheet.flatten(node.props.style as never)?.backgroundColor === color ? [node] : [];
+    return [...own, ...filled(node.children, color)];
+  };
+
+  test('a mark given its session\'s colour sits on a tile of it', async () => {
+    const view = await render(<Icons.AgentMark agent="claude" size={16} session="red" />);
+    const tiles = filled(view.toJSON(), '#ef4444');
+    expect(tiles.length).toBeGreaterThan(0);
+    expect(StyleSheet.flatten(tiles[0].props.style as never)).toMatchObject({ width: 22, height: 22 });
+    await view.unmount();
+  });
+
+  test('a mark with no colour, or one this build does not know, sits on none', async () => {
+    for (const session of [undefined, '', 'magenta']) {
+      const view = await render(<Icons.AgentMark agent="claude" size={16} session={session} />);
+      expect(filled(view.toJSON(), '#ef4444')).toHaveLength(0);
+      await view.unmount();
+    }
+  });
+
+  test('a row\'s title takes its colour, unless the row is faded', async () => {
+    const view = await render(
+      <Card>
+        <Row title="coloured" titleColor="#ef4444" />
+        <Row title="faded" titleColor="#ef4444" faded />
+      </Card>,
+    );
+    expect(StyleSheet.flatten(view.getByText('coloured').props.style).color).toBe('#ef4444');
+    expect(StyleSheet.flatten(view.getByText('faded').props.style).color).not.toBe('#ef4444');
     await view.unmount();
   });
 });

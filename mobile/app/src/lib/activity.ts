@@ -135,6 +135,13 @@ export function agentOf(worktree: WorktreeSummary): string {
   return worktree.agent || agentTerminal(worktree)?.agent || worktree.asleep[0]?.agent || '';
 }
 
+/** The `/color` a worktree's row wears (protocol 1.31): its reporting
+ * session's, while that session's agent is the one its mark shows. */
+export function colorOf(worktree: WorktreeSummary): string | undefined {
+  const agent = agentOf(worktree);
+  return agent && agent === worktree.agent && worktree.agentColor ? worktree.agentColor : undefined;
+}
+
 /** Busy with a program in one of its tabs — a build, a dev server — rather
  * than an agent. An agent starting or signing in lights the same, but the
  * host names it. */

@@ -53,7 +53,7 @@ const LOW: [char; 4] = ['.', ':', '-', '~'];
 /// The planet, filling whatever it is given, in `ink`.
 pub(crate) fn horizon(ink: Rgba) -> AnyElement {
     let seconds = crate::motion::phase(CYCLE) * CYCLE.as_secs_f32();
-    let family = crate::fonts::chrome();
+    let family = crate::fonts::code();
     canvas(
         |_, _, _| {},
         move |bounds: Bounds<Pixels>, _, window, cx| {

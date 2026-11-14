@@ -169,6 +169,7 @@ impl Shell {
                 format!("You have {}.", build_info::VERSION),
                 Alert {
                     subject: "update-available".into(),
+                    secondary: None,
                     action: Some((
                         "Download".into(),
                         Rc::new(|_: &mut Shell, cx: &mut Context<Shell>| {

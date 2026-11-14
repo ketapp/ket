@@ -52,7 +52,7 @@ type Cell = Option<(char, Ink)>;
 /// `text` lights the planet, `dim` the ring and the stars, `moon` the moon.
 pub(crate) fn orbit(text: Rgba, dim: Rgba, moon: Rgba) -> AnyElement {
     let angle = crate::motion::phase(CYCLE) * TAU;
-    let family = crate::fonts::chrome();
+    let family = crate::fonts::code();
     canvas(
         |_, _, _| {},
         move |bounds, _, window, cx| {

@@ -21,22 +21,26 @@
 //!
 //! So there are three roles, and two faces fill them:
 //!
-//! - [`chrome_family`] — Fira Code. The window root, and anything that is an
-//!   identifier: branch names, commit shas, paths, figures.
-//! - [`prose_family`] — Geist. Anything that is words. Reached through [`prose`] or the [`Prose`] extension trait
-//!   rather than threaded through every component — see below.
-//! - [`monospace_family`] — Fira Code again. The terminal grid and the
-//!   editor.
+//! - [`chrome_family`] — Geist. The window root, and anything that is an
+//!   identifier: branch names, commit shas, paths, figures. Its figures are
+//!   set tabular at the window root, so a count that changes does not shift
+//!   the text beside it.
+//! - [`prose_family`] — Geist again. Anything that is words. Reached through
+//!   [`prose`] or the [`Prose`] extension trait rather than threaded through
+//!   every component — see below. A role of its own still, so a chosen
+//!   interface face and the defaults can part again without a sweep.
+//! - [`monospace_family`] — Fira Code. The terminal grid and the editor, and
+//!   anything drawn on a grid of cells or quoted as code — reached through
+//!   [`code`].
 //!
-//! One mono and one sans, and no more: the terminal and the labels that name
-//! what runs in it are the same kind of text, so they share a face. Each
-//! sister sans tried beside a mono — Atkinson Hyperlegible Next, Fira Sans —
-//! read worse in the sidebar than Geist, so the pair is two families rather
-//! than one. Before it, GitHub's Monaspace and Mona Sans held these roles
-//! across three voices; Geist Mono, IBM Plex Mono, Monaspace Argon and Neon
-//! and Atkinson Hyperlegible Mono each held a mono slot, and Intel One Mono
-//! held both for a day. Atkinson read well in the chrome and badly in the
-//! terminal, and draws no box-drawing characters for a TUI's borders.
+//! One mono and one sans, and no more. The chrome's identifiers shared the
+//! terminal's mono for a long run of rounds — Geist Mono, IBM Plex Mono,
+//! Monaspace Argon and Neon, Atkinson Hyperlegible Mono, Intel One Mono and
+//! last Fira Code — and each in turn read as code where it was a label;
+//! Geist, the prose face already beside them, read better in every place it
+//! was tried, so it took the role. Each sister sans tried beside a mono —
+//! Atkinson Hyperlegible Next, Fira Sans — read worse in the sidebar than
+//! Geist.
 //!
 //! # What is bundled
 //!
@@ -103,24 +107,23 @@ const MONOSPACE: [&str; 3] = ["Fira Code", "SF Mono", "Menlo"];
 /// The chrome's default face, in order of preference: the face for the
 /// chrome's *identifiers* rather than for all of it.
 ///
-/// Fira Code, the same face the terminal and editor are set in, so the
-/// chrome and the code it names are one mono. Its ligatures are switched off
-/// at the window root, so `->` in a branch name stays two characters. Inter
-/// was tried here first and rejected on sight; Instrument Sans held the slot
-/// for a week; Spline Sans Mono for rather longer; Red Hat Text, Recursive
-/// and Intel One Mono each had a morning; Monaspace Argon, Geist Mono, whose
-/// narrow, light letters at 12.5px were too hard to read, and Atkinson
-/// Hyperlegible Mono each held it before Fira Code.
+/// Geist, the prose face, with tabular figures switched on at the window
+/// root. Inter was tried here first and rejected on sight; Instrument Sans
+/// held the slot for a week; Spline Sans Mono for rather longer; Red Hat
+/// Text, Recursive and Intel One Mono each had a morning; Monaspace Argon,
+/// Geist Mono, whose narrow, light letters at 12.5px were too hard to read,
+/// Atkinson Hyperlegible Mono and Fira Code each held it before Geist. Fira
+/// Code was the terminal's face as well, and its figures and branch names
+/// read as code in a sidebar.
 ///
-/// `Menlo` is the floor should registering the bundled faces ever fail: a
-/// mono on every Mac. `.SystemUIFont`, `gpui`'s name for the face the
-/// platform draws its own UI in, is the one family guaranteed to resolve, so
-/// it ends the list.
-const CHROME: [&str; 3] = ["Fira Code", "Menlo", ".SystemUIFont"];
+/// `.SystemUIFont`, `gpui`'s name for the face the platform draws its own UI
+/// in, is the floor should registering the bundled faces ever fail, and the
+/// one family guaranteed to resolve.
+const CHROME: [&str; 2] = ["Geist", ".SystemUIFont"];
 
 /// The chrome's prose face, in order of preference.
 ///
-/// Geist, beside Fira Code: proportional, which is the point. This is the
+/// Geist: proportional, which is the point. This is the
 /// face for the lines that are words, and it buys back the width a mono
 /// spends on them. SF Pro, Mona Sans, Atkinson Hyperlegible Next and Fira
 /// Sans each held or tried for the slot; Fira Sans, beside Fira Code, was set
@@ -181,6 +184,7 @@ pub(crate) fn resolve(installed: &[String], code: Option<&str>, ui: Option<&str>
     let (code, chrome, prose) = pick(installed, code, ui);
     *RESOLVED_PROSE.write().unwrap_or_else(|e| e.into_inner()) = Some(prose);
     *RESOLVED_CHROME.write().unwrap_or_else(|e| e.into_inner()) = Some(chrome.clone());
+    *RESOLVED_CODE.write().unwrap_or_else(|e| e.into_inner()) = Some(code.clone());
     Faces { code, chrome }
 }
 
@@ -284,19 +288,35 @@ fn is_fixed_width(text_system: &TextSystem, family: &str) -> bool {
 /// answer the picker gives for a host with nothing installed. That only
 /// happens in a test or a component built outside a window; a real frame is
 /// always drawn after `load`.
-/// The chrome's mono, once the shell has resolved it — for a figure inside
+/// The chrome's face, once the shell has resolved it — for a figure inside
 /// a component that has been set in prose, such as a count in a segment.
 /// See [`RESOLVED_PROSE`] for why this is a global.
 static RESOLVED_CHROME: RwLock<Option<SharedString>> = RwLock::new(None);
 
-/// The chrome's mono face: what the window root wears. Only needed where a
-/// prose parent has to be undone for a figure.
+/// The code face, once the shell has resolved it — for the parts of the
+/// chrome that are code or are drawn on a grid of cells. See
+/// [`RESOLVED_PROSE`] for why this is a global.
+static RESOLVED_CODE: RwLock<Option<SharedString>> = RwLock::new(None);
+
+/// The chrome's identifier face: what the window root wears. Only needed
+/// where a prose parent has to be undone for a figure.
 pub(crate) fn chrome() -> SharedString {
     RESOLVED_CHROME
         .read()
         .unwrap_or_else(|e| e.into_inner())
         .clone()
         .unwrap_or_else(|| CHROME[CHROME.len() - 1].into())
+}
+
+/// The code face: the terminal's and the editor's, and what the chrome sets
+/// code in — a fenced block, an inline span, a picture drawn in characters.
+/// Before [`resolve`] has run this is the last entry of [`MONOSPACE`].
+pub(crate) fn code() -> SharedString {
+    RESOLVED_CODE
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+        .unwrap_or_else(|| MONOSPACE[MONOSPACE.len() - 1].into())
 }
 
 pub(crate) fn prose() -> SharedString {
@@ -363,7 +383,7 @@ mod tests {
     fn nothing_chosen_is_the_shipped_pair() {
         let (code, chrome, prose) = pick(&installed(&["Fira Code", "Geist"]), None, None);
         assert_eq!(code.as_ref(), "Fira Code");
-        assert_eq!(chrome.as_ref(), "Fira Code");
+        assert_eq!(chrome.as_ref(), "Geist");
         assert_eq!(prose.as_ref(), "Geist");
     }
 
@@ -389,7 +409,7 @@ mod tests {
             Some("Gone Sans"),
         );
         assert_eq!(code.as_ref(), "Fira Code");
-        assert_eq!(chrome.as_ref(), "Fira Code");
+        assert_eq!(chrome.as_ref(), "Geist");
         assert_eq!(prose.as_ref(), "Geist");
     }
 }

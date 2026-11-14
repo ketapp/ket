@@ -148,6 +148,8 @@ pub(crate) enum Icon {
     /// came out, and it stays for when notifications are real.
     #[allow(dead_code)]
     Bell,
+    /// Mute: a kind of network flag, from a request tab's alert.
+    BellOff,
     /// Group several things.
     Layers,
     /// The sidebar sorted by status: three square pads, each on a trace cut
@@ -390,6 +392,7 @@ impl Icon {
             Icon::PinOff => "icons/pin-off.svg",
             Icon::Primary => "icons/primary.svg",
             Icon::Bell => "icons/bell.svg",
+            Icon::BellOff => "icons/bell-off.svg",
             Icon::PiggyBank => "icons/piggy-bank.svg",
             Icon::Layers => "icons/layers.svg",
             Icon::ViewStatus => "icons/view-status.svg",
@@ -500,7 +503,7 @@ pub(crate) fn sized_icon(which: Icon, size: Pixels, colour: Rgba) -> Svg {
 pub(crate) struct Assets;
 
 /// The bytes for every path [`Icon::asset`] can return.
-const FILES: [(&str, &[u8]); 117] = [
+const FILES: [(&str, &[u8]); 118] = [
     (
         "icons/chevron-down.svg",
         include_bytes!("../../assets/icons/chevron-down.svg"),
@@ -640,6 +643,10 @@ const FILES: [(&str, &[u8]); 117] = [
     (
         "icons/bell.svg",
         include_bytes!("../../assets/icons/bell.svg"),
+    ),
+    (
+        "icons/bell-off.svg",
+        include_bytes!("../../assets/icons/bell-off.svg"),
     ),
     (
         "icons/piggy-bank.svg",
@@ -1074,6 +1081,7 @@ mod tests {
             Icon::PinOff,
             Icon::Primary,
             Icon::Bell,
+            Icon::BellOff,
             Icon::Layers,
             Icon::ViewStatus,
             Icon::ViewProject,

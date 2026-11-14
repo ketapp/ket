@@ -73,7 +73,7 @@ import { useHost } from '../../../lib/hosts';
 import { confirmIdentity } from '../../../lib/lock';
 import { askMerge, prActions } from '../../../lib/pr-actions';
 import { commentsSaid, review, sendReview, useReview } from '../../../lib/review';
-import { agentLabel, font, size, t } from '../../../lib/theme';
+import { agentLabel, font, sessionColor, size, t } from '../../../lib/theme';
 import { useNow } from '../../../lib/usage';
 
 export default function Worktree() {
@@ -326,7 +326,7 @@ export default function Worktree() {
         {blocked || failed ? (
           <Banner tone={blocked ? t.attention : t.failed}>
             <View style={styles.askHead}>
-              {worktree.agent ? <AgentMark agent={worktree.agent} size={16} /> : null}
+              {worktree.agent ? <AgentMark agent={worktree.agent} size={16} session={worktree.agentColor || undefined} /> : null}
               <Text style={styles.askTitle}>
                 {question ? asking(agentName, question.tool) : blocked ? `${agentName} is waiting on you` : `${agentName} failed`}
               </Text>
@@ -482,8 +482,9 @@ function Tabs({
           return (
             <Row
               key={terminal.id.toString()}
-              mark={<AgentMark agent={agent} size={16} />}
+              mark={<AgentMark agent={agent} size={16} session={terminal.color} />}
               title={terminalName(terminal)}
+              titleColor={sessionColor(terminal.color)?.label}
               detail={knows && !state ? `${agentLabel(agent)} · ready` : agentLabel(agent)}
               state={state}
               chevron

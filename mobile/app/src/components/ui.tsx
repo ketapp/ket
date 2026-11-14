@@ -207,6 +207,7 @@ export interface RowState {
 export function Row({
   mark,
   title,
+  titleColor,
   detail,
   detailColor,
   state,
@@ -222,6 +223,9 @@ export function Row({
 }: {
   mark?: ReactNode;
   title: string;
+  /** The title's own colour: a session's `/color`, as `sessionColor`
+   * gives it. */
+  titleColor?: string;
   detail?: string;
   detailColor?: string;
   state?: RowState;
@@ -266,7 +270,10 @@ export function Row({
       {marker ? <View style={styles.marker} /> : null}
       {mark !== undefined ? <View style={[styles.mark, faded && styles.faded]}>{mark}</View> : null}
       <View style={styles.rowText}>
-        <Text style={[styles.name, small && { fontFamily: font.prose }, faded && { color: t.dim }]} numberOfLines={1}>
+        <Text
+          style={[styles.name, small && { fontFamily: font.prose }, titleColor ? { color: titleColor } : null, faded && { color: t.dim }]}
+          numberOfLines={1}
+        >
           {title}
         </Text>
         {detail && live ? (
@@ -672,7 +679,7 @@ export function Tag({
     <Text
       style={[
         styles.tag,
-        mono && { fontFamily: font.chrome },
+        mono && { fontFamily: font.chrome, fontVariant: ['tabular-nums'] },
         color ? { color, backgroundColor: tint(color, 0.16) } : null,
         style,
       ]}

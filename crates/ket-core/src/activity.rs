@@ -772,13 +772,38 @@ impl Tracker {
     /// rank, and the one heard from last between equals — its subagents
     /// included, since their work is the lead's.
     fn leading(&self, worktree: &WorktreeId, now_ms: u64) -> Option<(Activity, Signal)> {
+        self.leading_pane(worktree, now_ms)
+            .map(|(_, activity, signal)| (activity, signal))
+    }
+
+    /// The pane `worktree`'s own reports are read from — the most pressing,
+    /// then the latest heard — with what it says.
+    fn leading_pane<'a>(
+        &'a self,
+        worktree: &'a WorktreeId,
+        now_ms: u64,
+    ) -> Option<(&'a PaneAgentStatus, Activity, Signal)> {
         self.panes_in(worktree, now_ms)
             .map(|pane| {
                 let (activity, signal) = self.project(pane, now_ms);
-                (rank(signal), pane.heard_at_ms(), activity, signal)
+                (rank(signal), pane.heard_at_ms(), pane, activity, signal)
             })
             .max_by_key(|(rank, at_ms, ..)| (*rank, *at_ms))
-            .map(|(_, _, activity, signal)| (activity, signal))
+            .map(|(_, _, pane, activity, signal)| (pane, activity, signal))
+    }
+
+    /// The agent and session of the pane `worktree`'s row speaks for, while
+    /// one reports: whose `/color` the row wears.
+    pub fn leading_session<'a>(
+        &'a self,
+        worktree: &'a WorktreeId,
+        now_ms: u64,
+    ) -> Option<(&'a str, &'a str)> {
+        self.leading_pane(worktree, now_ms).and_then(|(pane, ..)| {
+            pane.session
+                .as_deref()
+                .map(|session| (pane.agent.as_str(), session))
+        })
     }
 
     /// What `worktree` is doing, as of the last time it was told.

@@ -401,7 +401,7 @@ const styles = StyleSheet.create({
   },
   words: { flex: 1, gap: 3 },
   label: { fontFamily: font.prose, fontSize: 15, color: t.text },
-  mono: { fontFamily: font.chrome },
+  mono: { fontFamily: font.chrome, fontVariant: ['tabular-nums'] },
   message: { fontFamily: font.prose, fontSize: size.label, lineHeight: 19, color: t.dim },
   detailRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   dot: { width: 6, height: 6, borderRadius: 3 },

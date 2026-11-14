@@ -26,6 +26,7 @@ use ket_core::config::{
     FONT_SIZE_RANGE, LINE_HEIGHT_RANGE, OpenCodeGoConfig, UpdateCheck,
 };
 use ket_core::id::WorktreeId;
+use ket_core::network::flags::Kind;
 use ket_core::rate_limits::Provider;
 use ket_core::theme::{Appearance, AppearancePreference, Color, Theme};
 
@@ -55,10 +56,11 @@ mod browser_settings;
 /// Wide enough that a setting's description does not wrap after four words,
 /// which is what makes a settings screen feel like a form to fill in rather
 /// than something to read.
-const WIDTH: gpui::Pixels = px(1120.0);
+const WIDTH: gpui::Pixels = px(1240.0);
 
-/// How tall.
-const HEIGHT: gpui::Pixels = px(760.0);
+/// How tall: more than most windows have room for, so on most the clamp
+/// below decides it and a long section shows as much as it can.
+const HEIGHT: gpui::Pixels = px(1100.0);
 
 /// The most of the window the card may take.
 ///
@@ -1014,6 +1016,48 @@ impl Shell {
         if view.error.is_some() {
             view.config = before;
         }
+    }
+
+    /// Mutes `kinds` of network flag, or flags them again, in the config:
+    /// through Settings' own copy while it is open, so a later change there
+    /// does not write the old list back. The kinds muted after, or what
+    /// went wrong.
+    pub(crate) fn save_network_muted(
+        &mut self,
+        kinds: &[Kind],
+        muted: bool,
+    ) -> Result<std::collections::BTreeSet<Kind>, String> {
+        let change = |config: &mut Config| {
+            let list = &mut config.agent.network.muted;
+            for kind in kinds {
+                if muted {
+                    list.insert(*kind);
+                } else {
+                    list.remove(kind);
+                }
+            }
+        };
+        if let Some(view) = self.preferences.as_mut() {
+            if !view.writable {
+                return Err(view
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "Settings could not be read".to_owned()));
+            }
+            let before = view.config.clone();
+            change(&mut view.config);
+            if let Err(error) = view.config.save() {
+                view.config = before;
+                view.error = Some(error.to_string());
+                return Err(error.to_string());
+            }
+            view.error = None;
+            return Ok(view.config.agent.network.muted.clone());
+        }
+        let mut config = Config::load().map_err(|error| error.to_string())?;
+        change(&mut config);
+        config.save().map_err(|error| error.to_string())?;
+        Ok(config.agent.network.muted)
     }
 
     /// Closes whichever pane dropdown is open. Returns whether one was, so
@@ -4457,14 +4501,15 @@ impl Shell {
         entries
     }
 
-    /// The Network pane: the switch that logs what agents send, and the logs
-    /// kept so far, each with Delete.
+    /// The Network pane: the switch that logs what agents send, a switch for
+    /// each kind of flag, and the logs kept so far, each with Delete.
     fn network_settings(&self, t: &Theme, cx: &mut Context<Self>) -> Vec<Entry> {
         let Some(view) = self.preferences.as_ref() else {
             return Vec::new();
         };
         let writable = view.writable;
         let log = view.config.agent.network.log;
+        let muted = &view.config.agent.network.muted;
         let logs = &view.network_logs;
 
         let mut entries = vec![setting(
@@ -4483,6 +4528,37 @@ impl Shell {
                 .into_any_element(),
             t,
         )];
+
+        // A switch a kind, on while it is flagged: off mutes it. Headed as
+        // the stored logs are below.
+        let flags = [div()
+            .pt(px(14.0))
+            .pb(px(12.0))
+            .border_b_1()
+            .border_color(paint(t.border))
+            .child(subsection(
+                "Flags",
+                "A flagged request raises an alert and is tinted in the Network panel. Turn \
+                     a kind off to mute it: requests are still logged in full, and turning it \
+                     back on brings its flags back.",
+                t,
+            ))
+            .into_any_element()];
+        entries.push(together("Flags flagged mute muted alert", flags));
+        for (index, kind) in Kind::ALL.into_iter().enumerate() {
+            let on = !muted.contains(&kind);
+            let (name, description) = flag_kind_words(kind);
+            let control = switch(("network-flag", index), on, t)
+                .when(writable, |el| {
+                    el.cursor_pointer()
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.mute_network_kinds(&[kind], on, false, cx);
+                            cx.notify();
+                        }))
+                })
+                .into_any_element();
+            entries.push(setting(name, description, control, t));
+        }
 
         let total: u64 = logs.list.iter().map(|(_, bytes)| *bytes).sum();
         let heading = match (logs.known, logs.list.is_empty()) {
@@ -5388,6 +5464,40 @@ pub(crate) fn row(name: &str, description: &str, control: AnyElement, t: &Theme)
         .into_any_element()
 }
 
+/// A kind of network flag as Settings › Network names it, and what it
+/// catches — in words, so this file is not itself flagged when an agent
+/// reads it.
+fn flag_kind_words(kind: Kind) -> (&'static str, &'static str) {
+    match kind {
+        Kind::Secret => (
+            "API keys and tokens",
+            "Anthropic, OpenAI, GitHub, GitLab, AWS, Slack, Stripe and Google keys, signed \
+             tokens and private keys.",
+        ),
+        Kind::Ssn => (
+            "Social Security numbers",
+            "Nine digits grouped three, two and four with dashes.",
+        ),
+        Kind::Card => (
+            "Card numbers",
+            "Numbers from a card issuer that pass the card checksum.",
+        ),
+        Kind::Birth => ("Birth dates", "A date beside DOB, date of birth or born."),
+        Kind::Phone => (
+            "Phone numbers",
+            "North American numbers, and others written with a country code.",
+        ),
+        Kind::Email => (
+            "Email addresses",
+            "Not noreply or git@ addresses, or the user and host in a web address.",
+        ),
+        Kind::Ip => (
+            "Public IP addresses",
+            "Not loopback, private or reserved addresses, or version numbers.",
+        ),
+    }
+}
+
 /// Where the website explains Economy as a whole.
 const ECONOMY_DOCS: &str = "https://ketapp.dev/docs/concepts/economy/";
 
@@ -5507,6 +5617,13 @@ fn unhook_summary(removed: &[ket_core::agent_hooks::Removed]) -> String {
         .filter(|entry| entry.outcome == Removal::Removed)
         .map(name)
         .collect();
+    let unreadable: Vec<String> = removed
+        .iter()
+        .filter_map(|entry| match &entry.outcome {
+            Removal::Unreadable(why) => Some(format!("{}: {why}", name(entry))),
+            _ => None,
+        })
+        .collect();
     let failed: Vec<String> = removed
         .iter()
         .filter_map(|entry| match &entry.outcome {
@@ -5519,6 +5636,9 @@ fn unhook_summary(removed: &[ket_core::agent_hooks::Removed]) -> String {
     } else {
         format!("Removed from {}.", list(taken))
     };
+    if !unreadable.is_empty() {
+        said.push_str(&format!(" Could not read {}.", unreadable.join("; ")));
+    }
     if !failed.is_empty() {
         said.push_str(&format!(" Could not change {}.", failed.join("; ")));
     }

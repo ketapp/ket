@@ -456,6 +456,9 @@ message WorktreeSummary {
   // Since 1.23. Agent tabs the desktop put to sleep: their processes are
   // stopped and their sessions kept, so each has no terminal until woken.
   repeated AsleepTerminal asleep = 18;
+  // Since 1.31. The `/color` of the session `agent_state` is read from, by
+  // name as TerminalSummary.color has it: what the worktree's row wears.
+  string agent_color = 19;
 }
 
 // Since 1.11. A pull request open from a worktree's branch.
@@ -678,6 +681,10 @@ message TerminalSummary {
   // conversation: from its hook saying it has started until its next report.
   // A message sent meanwhile waits in its queue.
   bool compacting = 12;
+  // Since 1.31. The colour the agent's session was given with Claude's
+  // `/color`, by Claude's name for it — red, blue, green, yellow, purple,
+  // orange, pink or cyan — and empty for none, or an agent without it.
+  string color = 13;
 }
 
 // Since 1.28. A session whose prompt cache has gone cold: its next prompt
@@ -698,19 +705,22 @@ message ColdCache {
   string summary = 5;
 }
 
-// Since 1.28. Opens a fresh session beside a terminal whose session went
-// cold, in the same pane on the desktop, as its Start fresh does; the old
-// terminal stays open as it was. `session` and `since_ms` are `ColdCache`'s, so a
-// session used again since the phone asked is left alone, and so is one
-// whose agent is busy. A mutation; answered with FreshStarted once the
-// fresh session's terminal is open, or an Error saying why not.
+// Since 1.28. Starts a terminal whose session went cold on a new
+// conversation, as the desktop's Start fresh does: in the same terminal,
+// with the agent's own command for it (`/clear` for Claude), the old
+// conversation left in the agent's history. Hosts before ket 0.3 opened a
+// new terminal beside it instead; FreshStarted names which. `session` and `since_ms` are `ColdCache`'s, so a session used
+// again since the phone asked is left alone, and so is one whose agent is
+// busy. A mutation; answered with FreshStarted once the agent has reported
+// the new session, or an Error saying why not.
 message StartFresh {
   uint64 terminal_id = 1;
   string session = 2;
   uint64 since_ms = 3;
 }
 
-// Since 1.28. The terminal a StartFresh opened beside the cold one.
+// Since 1.28. The terminal the fresh session is in: the one StartFresh
+// named, or, from a host before ket 0.3, a new one beside it.
 message FreshStarted {
   uint64 terminal_id = 1;
 }

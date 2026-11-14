@@ -5,7 +5,7 @@
 //! will start is a bad first run. The file only needs to exist to *override*
 //! something.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
@@ -403,6 +403,12 @@ pub struct NetworkConfig {
     /// Whether agents started from now on are logged. One already running
     /// keeps going as it started.
     pub log: bool,
+    /// Kinds of flag the person muted: still found and kept with each
+    /// request, but no request is tinted, marked or alerted on for them —
+    /// see [`crate::network::flags`]. Empty, and left out of the file,
+    /// unless they muted one.
+    #[serde(skip_serializing_if = "BTreeSet::is_empty")]
+    pub muted: BTreeSet<crate::network::flags::Kind>,
 }
 
 /// Settings for the web shell's local server (Epic 5).
@@ -1930,6 +1936,25 @@ mod tests {
             assert!(config.agent.asks_on_cold_resume());
             assert_eq!(config.agent.cold_resume_min_tokens(), 100_000);
         }
+    }
+
+    #[test]
+    fn muted_flags_survive_a_round_trip_and_are_left_out_until_there_are_some() {
+        use crate::network::flags::Kind;
+
+        let config = Config::default();
+        assert!(config.agent.network.muted.is_empty());
+        assert!(!toml::to_string(&config).unwrap().contains("muted"));
+
+        let config: Config =
+            toml::from_str("[agent.network]\nlog = true\nmuted = [\"ip\", \"email\"]\n").unwrap();
+        let restored: Config = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
+        assert!(restored.agent.network.log);
+        assert_eq!(
+            restored.agent.network.muted.into_iter().collect::<Vec<_>>(),
+            [Kind::Email, Kind::Ip]
+        );
+        assert!(toml::from_str::<Config>("[agent.network]\nmuted = [\"names\"]\n").is_err());
     }
 
     #[test]

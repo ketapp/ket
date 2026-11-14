@@ -873,3 +873,25 @@ fn uninstall_hooks_takes_out_kets_entries_and_gives_back_the_status_line() {
     let again = sandbox.ket(&["uninstall-hooks"]).ok().stdout();
     assert!(!again.contains(": removed"), "{again}");
 }
+
+#[test]
+fn uninstall_hooks_says_a_settings_file_it_cannot_parse_could_not_be_read() {
+    let sandbox = Sandbox::new("unhook-unreadable");
+    let codex = sandbox.path("home/.codex");
+    fs::create_dir_all(&codex).unwrap();
+    fs::write(codex.join("hooks.json"), "{ not json").unwrap();
+
+    let run = sandbox.ket(&["uninstall-hooks"]);
+    assert!(
+        run.stdout().contains("codex: could not read it: "),
+        "{}",
+        run.stdout()
+    );
+    let said = run.err();
+    // Whether ket is in a file it could not read is not known.
+    assert!(
+        said.contains("1 agent setting(s) could not be read"),
+        "{said}"
+    );
+    assert!(!said.contains("still have ket"), "{said}");
+}

@@ -792,6 +792,7 @@ impl Shell {
             "Its savings aren't counted. A new chat measures the new level.",
             crate::toasts::Alert {
                 subject: format!("economy-resume-{session}").into(),
+                secondary: None,
                 action: Some((
                     "New chat".into(),
                     std::rc::Rc::new(move |shell: &mut Shell, cx: &mut Context<Shell>| {
@@ -2295,7 +2296,24 @@ impl Shell {
     /// echo will carry, is drawn now: a scrolled-back view snapping to the
     /// bottom, or a selection going away.
     /// Says whether the terminal took them: not when it has closed.
+    ///
+    /// While Start fresh is typing its command into the tab, held until its
+    /// Enter and typed then — see `crate::cold_resume`.
     fn terminal_input(&mut self, id: TerminalId, bytes: Vec<u8>, cx: &mut Context<Self>) -> bool {
+        if let Some(held) = self.cold_resume.typing.get_mut(&id) {
+            held.extend(bytes);
+            return true;
+        }
+        self.type_into_terminal(id, bytes, cx)
+    }
+
+    /// [`Self::terminal_input`], never held: what ket types for itself.
+    pub(crate) fn type_into_terminal(
+        &mut self,
+        id: TerminalId,
+        bytes: Vec<u8>,
+        cx: &mut Context<Self>,
+    ) -> bool {
         if self.asleep_terminals.contains_key(&id) {
             self.wake_terminal(id, cx);
             return true;

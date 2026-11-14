@@ -152,6 +152,7 @@ impl Shell {
             format!("from {}", target.branch),
             Alert {
                 subject: subject.clone().into(),
+                secondary: None,
                 action: None,
             },
             cx,
@@ -229,6 +230,7 @@ impl Shell {
                     why,
                     Alert {
                         subject: subject.into(),
+                        secondary: None,
                         action: Some(("Try again".into(), retry)),
                     },
                     cx,

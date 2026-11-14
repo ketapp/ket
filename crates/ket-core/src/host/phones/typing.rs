@@ -62,6 +62,9 @@ pub(super) enum Typed {
         effort: String,
         done: Box<dyn FnOnce(std::result::Result<(), String>) + Send>,
     },
+    /// Nothing typed until the sender of this is dropped: what phones send
+    /// meanwhile waits its turn behind it — see `fresh_from_phone`.
+    Hold(std::sync::mpsc::Receiver<()>),
 }
 
 impl Typing {
@@ -157,6 +160,9 @@ impl Typing {
                     &model,
                     &effort,
                 )),
+                Typed::Hold(released) => {
+                    let _ = released.recv();
+                }
             }
         }
     }

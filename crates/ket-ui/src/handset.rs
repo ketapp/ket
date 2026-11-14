@@ -226,7 +226,7 @@ fn handset(
         now,
         booted: 1.0 - (-pose.booting().as_secs_f32() / BOOT).exp(),
     };
-    let family = crate::fonts::chrome();
+    let family = crate::fonts::code();
     canvas(
         |_, _, _| {},
         move |bounds, _, window, cx| {

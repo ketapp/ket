@@ -1236,6 +1236,14 @@ export declare type WorktreeSummary = Message<"ket.remote.v1.WorktreeSummary"> &
    * @generated from field: repeated ket.remote.v1.AsleepTerminal asleep = 18;
    */
   asleep: AsleepTerminal[];
+
+  /**
+   * Since 1.31. The `/color` of the session `agent_state` is read from, by
+   * name as TerminalSummary.color has it: what the worktree's row wears.
+   *
+   * @generated from field: string agent_color = 19;
+   */
+  agentColor: string;
 };
 
 /**
@@ -1908,6 +1916,15 @@ export declare type TerminalSummary = Message<"ket.remote.v1.TerminalSummary"> &
    * @generated from field: bool compacting = 12;
    */
   compacting: boolean;
+
+  /**
+   * Since 1.31. The colour the agent's session was given with Claude's
+   * `/color`, by Claude's name for it — red, blue, green, yellow, purple,
+   * orange, pink or cyan — and empty for none, or an agent without it.
+   *
+   * @generated from field: string color = 13;
+   */
+  color: string;
 };
 
 /**
@@ -1969,12 +1986,14 @@ export declare type ColdCache = Message<"ket.remote.v1.ColdCache"> & {
 export declare const ColdCacheSchema: GenMessage<ColdCache>;
 
 /**
- * Since 1.28. Opens a fresh session beside a terminal whose session went
- * cold, in the same pane on the desktop, as its Start fresh does; the old
- * terminal stays open as it was. `session` and `since_ms` are `ColdCache`'s, so a
- * session used again since the phone asked is left alone, and so is one
- * whose agent is busy. A mutation; answered with FreshStarted once the
- * fresh session's terminal is open, or an Error saying why not.
+ * Since 1.28. Starts a terminal whose session went cold on a new
+ * conversation, as the desktop's Start fresh does: in the same terminal,
+ * with the agent's own command for it (`/clear` for Claude), the old
+ * conversation left in the agent's history. Hosts before ket 0.3 opened a
+ * new terminal beside it instead; FreshStarted names which. `session` and `since_ms` are `ColdCache`'s, so a session used
+ * again since the phone asked is left alone, and so is one whose agent is
+ * busy. A mutation; answered with FreshStarted once the agent has reported
+ * the new session, or an Error saying why not.
  *
  * @generated from message ket.remote.v1.StartFresh
  */
@@ -2002,7 +2021,8 @@ export declare type StartFresh = Message<"ket.remote.v1.StartFresh"> & {
 export declare const StartFreshSchema: GenMessage<StartFresh>;
 
 /**
- * Since 1.28. The terminal a StartFresh opened beside the cold one.
+ * Since 1.28. The terminal the fresh session is in: the one StartFresh
+ * named, or, from a host before ket 0.3, a new one beside it.
  *
  * @generated from message ket.remote.v1.FreshStarted
  */

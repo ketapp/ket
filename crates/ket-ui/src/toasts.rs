@@ -70,6 +70,8 @@ pub(crate) struct Alert {
     pub(crate) subject: SharedString,
     /// Its button's label, and what pressing it does. Dismisses it too.
     pub(crate) action: Option<(SharedString, AlertAction)>,
+    /// A quieter second button beside it, which also dismisses it.
+    pub(crate) secondary: Option<(SharedString, AlertAction)>,
 }
 
 /// What an alert's button does.
@@ -118,6 +120,21 @@ impl Shell {
             height: Rc::default(),
         });
         cx.notify();
+    }
+
+    /// Takes the alert about `subject` away, if one is up: what it warned of
+    /// no longer holds.
+    pub(crate) fn dismiss_alert(&mut self, subject: &str, cx: &mut Context<Self>) {
+        let up = self.toasts.iter().find(|toast| {
+            toast.leaving.is_none()
+                && toast
+                    .alert
+                    .as_ref()
+                    .is_some_and(|alert| alert.subject == subject)
+        });
+        if let Some(id) = up.map(|toast| toast.id) {
+            self.dismiss_toast(id, cx);
+        }
     }
 
     /// Whether an alert about `subject` is up and not leaving.
@@ -304,11 +321,13 @@ impl Shell {
                 .children(order.into_iter().map(|item| {
                     let id = item.id;
                     let actions = item.alert.as_ref().map(|alert| {
-                        let action = alert.action.as_ref().map(|(label, run)| {
+                        let press = |which: &'static str,
+                                     (label, run): &(SharedString, AlertAction),
+                                     primary: bool| {
                             let run = run.clone();
-                            button(("toast-action", id as usize), label.clone())
-                                .small()
-                                .primary()
+                            let pressed = button((which, id as usize), label.clone()).small();
+                            let pressed = if primary { pressed.primary() } else { pressed };
+                            pressed
                                 .render(t)
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     cx.stop_propagation();
@@ -319,11 +338,21 @@ impl Shell {
                                     this.dismiss_toast(id, cx);
                                     run(this, cx);
                                 }))
-                        });
+                        };
+                        let action = alert
+                            .action
+                            .as_ref()
+                            .map(|action| press("toast-action", action, true));
+                        let secondary = alert
+                            .secondary
+                            .as_ref()
+                            .map(|action| press("toast-secondary", action, false));
                         div()
                             .flex()
+                            .flex_wrap()
                             .gap(gpui::px(6.0))
                             .children(action)
+                            .children(secondary)
                             .child(
                                 button(("toast-dismiss", id as usize), "Dismiss")
                                     .small()

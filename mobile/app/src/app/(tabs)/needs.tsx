@@ -14,11 +14,11 @@ import { HORIZON, Horizon } from '../../components/Horizon';
 import { AgentMark, Check, Chevron, Close, TerminalWindow } from '../../components/icons';
 import { RiskBadge } from '../../components/Risk';
 import { Button, Card, Dot, Heading, MARK_GAP, MARK_SLOT, Prose, Row, Screen, TAB_BAR_ROOM, TabBar } from '../../components/ui';
-import { type Located, agentOf, detail, detailColor, everyWorktree, promptKind, stateOf } from '../../lib/activity';
+import { type Located, agentOf, colorOf, detail, detailColor, everyWorktree, promptKind, stateOf } from '../../lib/activity';
 import type { HostConnection, PromptAnswer } from '../../lib/connection';
 import { useHosts } from '../../lib/hosts';
 import { confirmIdentity } from '../../lib/lock';
-import { agentLabel, font, size, t } from '../../lib/theme';
+import { agentLabel, font, sessionColor, size, t } from '../../lib/theme';
 
 export default function Needs() {
   const conns = useHosts() ?? [];
@@ -81,8 +81,9 @@ export default function Needs() {
               {failed.map(({ conn, project, worktree }) => (
                 <Row
                   key={`${conn.host.id}/${worktree.id}`}
-                  mark={agentOf(worktree) ? <AgentMark agent={agentOf(worktree)} size={16} /> : null}
+                  mark={agentOf(worktree) ? <AgentMark agent={agentOf(worktree)} size={16} session={colorOf(worktree)} /> : null}
                   title={worktree.name}
+                  titleColor={sessionColor(colorOf(worktree))?.label}
                   detail={[many ? conn.host.name : null, project.name, detail(worktree)].filter(Boolean).join(' · ')}
                   detailColor={detailColor(worktree.activity)}
                   state={stateOf(worktree.activity)}
@@ -283,9 +284,9 @@ function Waiting({
         accessibilityLabel={`${worktree.name}, open the chat`}
         style={({ pressed }) => [styles.head, pressed && { backgroundColor: t.selection }]}
       >
-        <View style={styles.mark}>{agent ? <AgentMark agent={agent} size={16} /> : null}</View>
+        <View style={styles.mark}>{agent ? <AgentMark agent={agent} size={16} session={colorOf(worktree)} /> : null}</View>
         <View style={styles.headText}>
-          <Text style={styles.name} numberOfLines={1}>
+          <Text style={[styles.name, { color: sessionColor(colorOf(worktree))?.label ?? t.text }]} numberOfLines={1}>
             {worktree.name}
           </Text>
           <Text style={styles.detail} numberOfLines={1}>

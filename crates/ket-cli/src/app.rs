@@ -167,7 +167,7 @@ pub(super) fn toml_of(config: &Config) -> Result<String, KetError> {
 pub(super) fn uninstall_hooks() -> Result<(), KetError> {
     use ket_core::agent_hooks::Removal;
     let removed = ket_core::agent_hooks::remove_everywhere();
-    let mut failed = 0;
+    let (mut unreadable, mut failed) = (0, 0);
     for entry in &removed {
         let place = match entry.detail.as_deref() {
             Some(detail) => format!("{} ({detail})", entry.agent),
@@ -176,17 +176,29 @@ pub(super) fn uninstall_hooks() -> Result<(), KetError> {
         match &entry.outcome {
             Removal::Removed => println!("{place}: removed"),
             Removal::NotThere => println!("{place}: not there"),
+            Removal::Unreadable(why) => {
+                unreadable += 1;
+                println!("{place}: could not read it: {why}");
+            }
             Removal::Failed(why) => {
                 failed += 1;
                 println!("{place}: could not change it: {why}");
             }
         }
     }
-    match failed {
-        0 => Ok(()),
-        n => Err(KetError::Conflict(format!(
-            "{n} agent setting(s) still have ket in them"
-        ))),
+    // An unreadable file may or may not have ket in it; only one ket was
+    // found in and could not take out is known to still have it.
+    let mut why = Vec::new();
+    if unreadable > 0 {
+        why.push(format!("{unreadable} agent setting(s) could not be read"));
+    }
+    if failed > 0 {
+        why.push(format!("{failed} agent setting(s) still have ket in them"));
+    }
+    if why.is_empty() {
+        Ok(())
+    } else {
+        Err(KetError::Conflict(why.join("; ")))
     }
 }
 

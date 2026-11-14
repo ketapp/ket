@@ -1,6 +1,6 @@
 import '../lib/polyfills';
 
-import { FiraCode_400Regular, FiraCode_500Medium, FiraCode_600SemiBold, useFonts } from '@expo-google-fonts/fira-code';
+import { FiraCode_400Regular, FiraCode_600SemiBold, useFonts } from '@expo-google-fonts/fira-code';
 import { Geist_400Regular, Geist_500Medium, Geist_600SemiBold, Geist_900Black } from '@expo-google-fonts/geist';
 import { DarkTheme, DefaultTheme, Stack, type Theme, ThemeProvider, usePathname } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
@@ -49,7 +49,6 @@ export default function Layout() {
     Geist_600SemiBold,
     Geist_900Black,
     FiraCode_400Regular,
-    FiraCode_500Medium,
     FiraCode_600SemiBold,
   });
   const lock = useLock();

@@ -22,7 +22,7 @@ import { font, t, tint } from '../lib/theme';
 const GLYPH = 10;
 const ROW = 12;
 
-/** A cell's width: the chrome face's advance, Fira Code's, is 0.615 of its
+/** A cell's width: the code face's advance, Fira Code's, is 0.615 of its
  * size. */
 const CELL = GLYPH * 0.615;
 
@@ -198,5 +198,5 @@ function hash(x: number, y: number, step: number): number {
 
 const styles = StyleSheet.create({
   field: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, overflow: 'hidden' },
-  row: { fontFamily: font.chrome, fontSize: GLYPH, lineHeight: ROW, letterSpacing: 0, color: t.dim },
+  row: { fontFamily: font.code, fontSize: GLYPH, lineHeight: ROW, letterSpacing: 0, color: t.dim },
 });

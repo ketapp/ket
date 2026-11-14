@@ -46,14 +46,6 @@ const CODEX: Rgba = Rgba {
     a: 1.0,
 };
 
-/// OpenCode's amber.
-const OPENCODE: Rgba = Rgba {
-    r: 0.910,
-    g: 0.702,
-    b: 0.224,
-    a: 1.0,
-};
-
 /// Gemini's violet.
 const GEMINI: Rgba = Rgba {
     r: 0.557,
@@ -117,7 +109,9 @@ pub(crate) fn provider(agent: &str, t: &Theme) -> (Icon, Rgba) {
         // Chosen to clear 3:1 on a light card and a dark one as it is.
         (Icon::Codex, CODEX)
     } else if is("opencode") {
-        (Icon::OpenCode, on_ground(OPENCODE, t))
+        // OpenCode's mark is one colour and its brand allows no other: the
+        // theme's text, as Grok's is.
+        (Icon::OpenCode, paint(t.text.primary))
     } else if is("gemini") {
         (Icon::Gemini, on_ground(GEMINI, t))
     } else if is("grok") {

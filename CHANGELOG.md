@@ -22,7 +22,8 @@ words; no internal names, no commit hashes. ket reads this file
   read them. A Mac sends one only while the phone isn't connected to it,
   and only if it is still so 20 seconds later, so a prompt answered at the
   Mac doesn't buzz the phone too. While you're using the Mac it holds them,
-  and once it has gone two minutes untouched it sends what is still so. Tap one to open its chat; one that's no
+  and once it has gone two minutes untouched it sends what is still so. Tap one to open its chat, and Back
+  goes to Worktrees from there; one that's no
   longer so is taken back when the phone next hears from that Mac.
   Settings › Devices on the Mac marks the phones it notifies, and its Send
   test button pushes one a test notification at once and says what Apple

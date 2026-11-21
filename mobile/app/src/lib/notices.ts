@@ -20,12 +20,12 @@
 import { Activity, CheckSummary_State, type HostSnapshot, type WorktreeSummary } from '@ket/remote';
 import * as Notifications from 'expo-notifications';
 import { AndroidImportance } from 'expo-notifications';
-import { router } from 'expo-router';
 import { useEffect, useState } from 'react';
 import { AppState, Linking, Platform } from 'react-native';
 
 import { agentOf, agentTerminal, everyWorktree } from './activity';
 import { connection, type HostConnection } from './connection';
+import { showOverWorktrees } from './layout';
 import { type Pushed, forgetToken, pushable, pushedOf, pushedPath, syncPush } from './push';
 import { DEFAULT_NOTIFY, type NotifyConfig, getNotify, listHosts, saveNotify } from './store';
 import { agentLabel } from './theme';
@@ -307,7 +307,7 @@ function stillSo(pushed: Pushed, snapshot: HostSnapshot): boolean {
  * both hand over the same tap, and a second push stacked a second chat. */
 const opened = new Set<string>();
 
-/** A tapped notice opens what it is about. */
+/** A tapped notice opens what it is about, over Worktrees. */
 function open(response: Notifications.NotificationResponse | null | undefined): void {
   if (!response) return;
   const tap = `${response.notification.request.identifier}@${response.notification.date}`;
@@ -320,7 +320,7 @@ function open(response: Notifications.NotificationResponse | null | undefined): 
     opened.add(tap);
     void listHosts()
       .then((hosts) => {
-        if (hosts.some((host) => host.id === pushed.host)) router.push(pushedPath(pushed));
+        if (hosts.some((host) => host.id === pushed.host)) showOverWorktrees(pushedPath(pushed));
       })
       .catch(() => {});
     return;
@@ -328,7 +328,7 @@ function open(response: Notifications.NotificationResponse | null | undefined): 
   const path = data?.path;
   if (typeof path !== 'string' || !path.startsWith('/')) return;
   opened.add(tap);
-  router.push(path);
+  showOverWorktrees(path);
 }
 
 /** How often the paired desktops are listed again, so one paired since the

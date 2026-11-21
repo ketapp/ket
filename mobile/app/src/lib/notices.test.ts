@@ -31,7 +31,10 @@ jest.mock('expo-notifications', () => ({
   getPresentedNotificationsAsync: jest.fn(async () => []),
   useLastNotificationResponse: () => mockResponse,
 }));
-jest.mock('expo-router', () => ({ router: { push: (path: string) => mockPush(path) } }));
+// Over Worktrees, whatever was open: the stack is cleared down to it first.
+jest.mock('expo-router', () => ({
+  router: { dismissTo: () => {}, navigate: () => {}, push: (path: string) => mockPush(path) },
+}));
 jest.mock('./connection', () => ({ connection: jest.fn() }));
 jest.mock('./store', () => ({
   DEFAULT_NOTIFY: { on: false, waiting: true, finished: true, checks: true },

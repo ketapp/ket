@@ -44,6 +44,17 @@ export function showBeside(href: string): void {
   router.replace(href);
 }
 
+/** Opens what a tapped notice is about over Worktrees, in place of whatever
+ * the app was last showing: Back from it goes to the list, never to a chat or
+ * a tab that happened to be open when the notice came. Down to Worktrees when
+ * it is in the stack; beside the sidebar a chat may have replaced it, and it
+ * takes that chat's place. Then its tab, if another was in front. */
+export function showOverWorktrees(href: string): void {
+  router.dismissTo('/');
+  router.navigate('/');
+  router.push(href);
+}
+
 /** The worktree a screen's path is about, by its id, when it is one of
  * `hostId`'s — what the sidebar marks as open. `null` for any other screen. */
 export function worktreeAt(path: string, hostId: string, snapshot: HostSnapshot | null): string | null {

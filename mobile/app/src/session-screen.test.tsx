@@ -9,18 +9,11 @@ const mockConfirmIdentity = jest.fn(async (_reason: string) => true);
 let mockConn: any;
 let mockParams = { host: 'host', terminal: '7' };
 
-// The stack's slide-in has always ended: the conversation paints at once.
-const mockNavigation = {
-  addListener: (_type: string, listener: () => void) => {
-    listener();
-    return () => {};
-  },
-};
 jest.mock('expo-router', () => ({
   router: { push: (path: string) => mockRouter.push(path), replace: (path: string) => mockRouter.replace(path) },
   useFocusEffect: (callback: () => void) => mockUseEffect(callback, [callback]),
+  useIsFocused: () => true,
   useLocalSearchParams: () => mockParams,
-  useNavigation: () => mockNavigation,
 }));
 jest.mock('react-native-safe-area-context', () => ({ useSafeAreaInsets: () => ({ top: 0, bottom: 0 }) }));
 jest.mock('@ket/remote', () => ({
@@ -29,7 +22,7 @@ jest.mock('@ket/remote', () => ({
   BackgroundSession_State: { STATE_UNSPECIFIED: 0, DONE: 1, WORKING: 2, NEEDS_YOU: 3 },
   Turn_Kind: { USER: 1, ASSISTANT: 2, TOOL: 3 },
 }));
-jest.mock('./lib/hosts', () => ({ useHost: () => mockConn }));
+jest.mock('./lib/hosts', () => ({ useHost: () => mockConn, useHostState: (conn: unknown) => conn }));
 jest.mock('./components/FloatMenu', () => ({
   ...jest.requireActual<typeof import('./components/FloatMenu')>('./components/FloatMenu'),
   placeOf: (_view: unknown, then: (place: object) => void) => then({ x: 10, y: 200, width: 120, height: 40 }),
@@ -89,6 +82,13 @@ const connection = (worktree = tree(), fields: object = {}) => ({
   releaseControl: jest.fn(),
   answer: jest.fn(async () => null),
   onChange: jest.fn(() => () => {}),
+  // A fake connection is its own state: what the screen draws from.
+  id: 'host',
+  starting: [],
+  asked: [],
+  get state(): object {
+    return this;
+  },
   ...fields,
 });
 
@@ -100,6 +100,19 @@ beforeEach(() => {
 });
 
 describe('Session', () => {
+  test('draws only the turns near the screen of a long conversation', async () => {
+    const turns = Array.from({ length: 60 }, (_, n) => ({ kind: 2, text: `Turn ${(n + 1).toString()}` }));
+    mockConn = connection(tree(), {
+      conversation: jest.fn(async () => ({ supported: true, reason: '', fresh: true, session: 'long', next: 60n, queued: [], turns })),
+    });
+    const view = await render(<Session />);
+    await waitFor(() => expect(view.queryAllByText(/^Turn \d+$/).length).toBeGreaterThan(0));
+    // Only those near the screen. Which ones is the list's: jest has no
+    // scrolling, so not the newest it opens on in the app.
+    expect(view.queryAllByText(/^Turn \d+$/).length).toBeLessThan(60);
+    await view.unmount();
+  });
+
   test('picks a mode from the pill in the bar without leaving chat or sending a message', async () => {
     const view = await render(<Session />);
     await fireEvent.press(view.getByLabelText('Mode. Change it'));
@@ -302,7 +315,7 @@ describe('Session', () => {
     await view.unmount();
   });
 
-  test('a program busy in another tab neither spins nor reads busy here, where the agent starting does', async () => {
+  test('a program busy in another tab does not show the agent working here, where the agent starting does', async () => {
     // npm start in a shell beside Codex at rest: busy, and the host names no agent.
     mockConn = connection(
       tree({
@@ -324,8 +337,31 @@ describe('Session', () => {
     mockConn = connection(tree({ activity: 1, agent: 'codex', agentState: 'starting' }));
     const starting = await render(<Session />);
     await waitFor(() => expect(starting.getByLabelText(/^Codex is working: Starting/)).toBeTruthy());
-    expect(starting.getByText('busy')).toBeTruthy();
+    // The header no longer carries a state word: the chat says it.
+    expect(starting.queryByText('busy')).toBeNull();
     await starting.unmount();
+  });
+
+  test('a failed agent says so in the note under the header, and takes it back once it is not', async () => {
+    const failure = 'Codex failed. Open the terminal to see why.';
+    mockConn = connection(tree({ activity: 5 }));
+    const view = await render(<Session />);
+    // A chat that has already failed says so as it opens.
+    await waitFor(() => expect(view.getByText(failure)).toBeTruthy());
+    expect(view.queryByText('failed')).toBeNull();
+    // Working again: the note is no longer so, and goes.
+    mockConn.snapshot = connection(tree({ activity: 2 })).snapshot;
+    await view.rerender(<Session />);
+    await waitFor(() => expect(view.queryByText(failure)).toBeNull());
+    // Failing again says it again; a tap puts it away, and it stays away.
+    mockConn.snapshot = connection(tree({ activity: 5 })).snapshot;
+    await view.rerender(<Session />);
+    await waitFor(() => expect(view.getByText(failure)).toBeTruthy());
+    await fireEvent.press(view.getByText(failure));
+    await waitFor(() => expect(view.queryByText(failure)).toBeNull());
+    await view.rerender(<Session />);
+    expect(view.queryByText(failure)).toBeNull();
+    await view.unmount();
   });
 
   test('says the agent is compacting above the composer, and a message sent meanwhile is still on its way', async () => {

@@ -1,5 +1,3 @@
-'use no memo'; // Reads a live HostConnection — see lib/hosts.ts.
-
 // A worktree's branch pushed and opened as a pull request, as the desktop's
 // Pull request… dialog does it (desktop 1.16): ket commits what is
 // uncommitted, pushes the branch, and opens the pull request into its base —
@@ -22,16 +20,21 @@ import { MicButton } from '../../../components/Mic';
 import { Bar, Button, Card, Figure, Prose, Screen, Toggle, field, oneLine } from '../../../components/ui';
 import { everyWorktree } from '../../../lib/activity';
 import { useDictation } from '../../../lib/dictation';
-import { useHost } from '../../../lib/hosts';
+import { useHost, useHostState } from '../../../lib/hosts';
 import { confirmIdentity } from '../../../lib/lock';
 import { font, size, t, tint } from '../../../lib/theme';
 import { canDictate } from '../../../lib/voice';
+
+/** What the desktop sends when the worktree has no pull request yet. Out
+ * here because the React Compiler skips a component with a BigInt literal. */
+const NONE = 0n;
 
 export default function PullRequest() {
   const { host: hostId, worktree: raw } = useLocalSearchParams<{ host: string; worktree: string }>();
   const id = decodeURIComponent(raw);
   const conn = useHost(hostId);
-  const found = everyWorktree(conn?.snapshot ?? null).find((l) => l.worktree.id === id);
+  const hostState = useHostState(conn);
+  const found = everyWorktree(hostState?.snapshot ?? null).find((l) => l.worktree.id === id);
 
   const [draft, setDraft] = useState<PullRequestDraft | null>(null);
   const [unread, setUnread] = useState('');
@@ -52,7 +55,7 @@ export default function PullRequest() {
   const dictation = useDictation({ local: false, draft: words, selection, write, onNote: (note) => setRefusal(note) });
 
   // The words offered, once: read again, they would undo what was typed.
-  const connected = conn?.status === 'connected';
+  const connected = hostState?.status === 'connected';
   const asked = useRef(false);
   useEffect(() => {
     if (!conn || !connected || asked.current) return;
@@ -72,7 +75,7 @@ export default function PullRequest() {
       });
   }, [conn, connected, id]);
 
-  const existing = draft && draft.existingNumber > 0n ? `#${draft.existingNumber.toString()}` : '';
+  const existing = draft && draft.existingNumber > NONE ? `#${draft.existingNumber.toString()}` : '';
 
   const open = async () => {
     if (!conn || !draft) return;

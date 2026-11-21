@@ -1,5 +1,3 @@
-'use no memo'; // Reads a live HostConnection — see lib/hosts.ts.
-
 // One paired desktop, as this phone sees it: whether it can be reached right
 // now and over what, the ways there are to reach it with the live one marked,
 // the phones it trusts, and a way to cut any of them off — this one included,
@@ -19,13 +17,15 @@ import { ADDRESS_ICON, Close, Desktop, Link, Padlock, Phone, Plus, Refresh, Tabl
 import { Bar, Button, Card, Figure, Heading, IconButton, Prose, Row, Screen, Tag, Value, field, oneLine } from '../../components/ui';
 import { confirm } from '../../lib/confirm';
 import { dropConnection, type HostConnection } from '../../lib/connection';
-import { statusLine, useHost } from '../../lib/hosts';
+import { statusLine, useHost, useHostState } from '../../lib/hosts';
+import { stopPushing } from '../../lib/push';
 import { forgetHost } from '../../lib/store';
 import { font, size, t } from '../../lib/theme';
 
 export default function Devices() {
   const { host: id } = useLocalSearchParams<{ host: string }>();
   const conn = useHost(id);
+  const hostState = useHostState(conn);
   const [devices, setDevices] = useState<Device[] | null>(null);
   const [error, setError] = useState('');
   const [adding, setAdding] = useState(false);
@@ -43,7 +43,7 @@ export default function Devices() {
 
   // Asked once the desktop is there to ask: a list fetched while it was
   // down would only ever be the error.
-  const up = conn?.status === 'connected';
+  const up = hostState?.status === 'connected';
   useEffect(() => {
     if (!conn || !up) return;
     let live = true;
@@ -70,11 +70,12 @@ export default function Devices() {
   };
 
   const forget = async () => {
-    const yes = await confirm(`Forget ${conn?.host.name ?? 'this desktop'}?`, 'This phone will have to pair again to use it.', 'Forget');
+    const yes = await confirm(`Forget ${hostState?.host.name ?? 'this desktop'}?`, 'This phone will have to pair again to use it.', 'Forget');
     if (!yes) return;
     const self = devices?.find((d) => d.thisDevice);
     // Tell the desktop first, while there is still a session to say it in; the
     // phone forgets the desktop whether or not that works.
+    await stopPushing(conn ?? undefined);
     if (conn && self) await conn.revoke(self.id).catch(() => {});
     dropConnection(id);
     await forgetHost(id);
@@ -98,14 +99,14 @@ export default function Devices() {
     await conn.removeAddress(url).catch((cause: Error) => setAddressError(cause.message));
   };
 
-  const fromDesktop = conn ? (conn.host.addresses?.length ? conn.host.addresses : [conn.host.relay]) : [];
-  const manual = conn?.host.manualAddresses ?? [];
-  const failures = conn?.failures ?? {};
-  const status = conn?.status ?? 'connecting';
+  const fromDesktop = hostState ? (hostState.host.addresses?.length ? hostState.host.addresses : [hostState.host.relay]) : [];
+  const manual = hostState?.host.manualAddresses ?? [];
+  const failures = hostState?.failures ?? {};
+  const status = hostState?.status ?? 'connecting';
 
   return (
     <Screen>
-      <Bar back title={conn?.host.name ?? 'Desktop'} detail="Settings" />
+      <Bar back title={hostState?.host.name ?? 'Desktop'} detail="Settings" />
       <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
         {conn ? <Status conn={conn} /> : null}
 
@@ -168,7 +169,7 @@ export default function Devices() {
               {addressError}
             </Prose>
           ) : null}
-          {conn && !reachesAway(conn.host) ? (
+          {hostState && !reachesAway(hostState.host) ? (
             <Prose color={t.dim} style={styles.note}>
               Only on the Mac’s own network for now. To reach it from anywhere, turn on Tailscale on both, then scan
               Show code under Away from home in the Mac’s Settings › Devices.
@@ -184,7 +185,7 @@ export default function Devices() {
               small
               mark={isTablet(device.name) ? <Tablet size={16} color={t.dim} /> : <Phone size={16} color={t.dim} />}
               title={device.name || 'Unnamed phone'}
-              detail={`${device.connected ? 'Connected now' : 'Not connected'} · paired ${day(Number(device.pairedAt) * 1000)}`}
+              detail={`${device.connected ? 'Connected now' : 'Not connected'} · paired ${day(Number(device.pairedAt) * 1000)}${device.push ? ' · notifications on' : ''}`}
               meta={device.thisDevice ? <Tag>this phone</Tag> : <Text style={styles.action}>Revoke</Text>}
               onPress={device.thisDevice ? undefined : () => void revoke(device)}
             />
@@ -214,14 +215,15 @@ export default function Devices() {
 /** How the desktop stands: reachable or not, over what, since when — and
  * when it is not, what to do about it. */
 function Status({ conn }: { conn: HostConnection }) {
-  const status = conn.status;
+  const hostState = useHostState(conn);
+  const status = hostState.status;
   const color = status === 'connected' ? t.running : status === 'offline' ? t.modified : t.dim;
   const title = status === 'connected' ? 'Connected' : status === 'offline' ? 'Can’t reach it' : 'Connecting…';
   const detail =
     status === 'connected'
-      ? `${statusLine(conn).text}${conn.upSince ? ` · since ${when(conn.upSince)}` : ''}`
+      ? `${statusLine(hostState).text}${hostState.upSince ? ` · since ${when(hostState.upSince)}` : ''}`
       : status === 'offline'
-        ? `${conn.downSince ? `Down since ${when(conn.downSince)} · ` : ''}attempt ${Math.max(conn.attempts, 1)}`
+        ? `${hostState.downSince ? `Down since ${when(hostState.downSince)} · ` : ''}attempt ${Math.max(hostState.attempts, 1)}`
         : 'Trying every saved address';
   return (
     <Card style={styles.status}>
@@ -238,10 +240,10 @@ function Status({ conn }: { conn: HostConnection }) {
         {status === 'connected' ? (
           <View style={styles.facts}>
             <Figure label="Protocol" style={styles.fact}>
-              <Value>1.{conn.hostMinor}</Value>
+              <Value>1.{hostState.hostMinor}</Value>
             </Figure>
             <Figure label="Paired" style={styles.fact}>
-              <Value>{day(conn.host.pairedAt)}</Value>
+              <Value>{day(hostState.host.pairedAt)}</Value>
             </Figure>
             <Figure label="Encrypted" style={styles.fact}>
               <View style={styles.lock}>
@@ -278,7 +280,8 @@ function AddressRow({
   failure?: string;
   children?: ReactNode;
 }) {
-  const live = conn?.status === 'connected' && conn.activeAddress === url;
+  const hostState = useHostState(conn);
+  const live = hostState?.status === 'connected' && hostState.activeAddress === url;
   const way = wayOf(url, manual);
   const Icon = manual ? Link : ADDRESS_ICON[addressKind(url)];
   const said = failure ? outcome(failure) : null;

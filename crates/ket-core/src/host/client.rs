@@ -85,7 +85,7 @@ pub(crate) static PHONE_REVIEWS: Mutex<Vec<super::PhoneReview>> = Mutex::new(Vec
 /// Worktrees phones asked this window to delete — see
 /// [`super::take_phone_delete`].
 pub(crate) static PHONE_DELETES: Mutex<Vec<super::PhoneDelete>> = Mutex::new(Vec::new());
-/// Terminals phones asked this window to start fresh sessions beside — see
+/// Terminals phones asked this window to start fresh in place — see
 /// [`super::take_phone_fresh`].
 pub(crate) static PHONE_FRESHES: Mutex<Vec<super::PhoneFresh>> = Mutex::new(Vec::new());
 /// Asleep tabs phones asked this window to wake, each with the host's
@@ -790,7 +790,7 @@ fn route(conn: &Arc<Connection>, reply: Reply) {
                 session,
                 since_ms,
             });
-            PHONE_ASKED.store(true, Ordering::Release);
+            ask_window();
         }
         Reply::FixChecks {
             req,
@@ -849,6 +849,7 @@ fn route(conn: &Arc<Connection>, reply: Reply) {
         | Reply::PairingCode { .. }
         | Reply::Devices { .. }
         | Reply::Revoked { .. }
+        | Reply::PushTested { .. }
         | Reply::Phones { .. }
         | Reply::Pairings { .. }
         | Reply::PairingDecided { .. }
@@ -1154,6 +1155,32 @@ mod tests {
         route(&conn, Reply::WorktreesChanged);
         assert!(super::super::take_phone_asked());
         assert!(super::super::take_worktrees_changed());
+
+        // Consume the earlier notification. With no foreground frames or
+        // activity tick, Start fresh must wake the window on its own.
+        use std::future::Future;
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        let mut previous = Box::pin(super::super::phone_asked());
+        assert!(previous.as_mut().poll(&mut context).is_ready());
+        let mut fresh_wake = Box::pin(super::super::phone_asked());
+        assert!(fresh_wake.as_mut().poll(&mut context).is_pending());
+        route(
+            &conn,
+            Reply::StartFresh {
+                req: 42,
+                key: "wt|claude|cold".to_owned(),
+                session: "cold-session".to_owned(),
+                since_ms: 123,
+            },
+        );
+        assert!(fresh_wake.as_mut().poll(&mut context).is_ready());
+        assert!(super::super::take_phone_asked());
+        let fresh = super::super::take_phone_fresh().expect("the cold session to clear");
+        assert_eq!(fresh.req, 42);
+        assert_eq!(fresh.key, "wt|claude|cold");
+        assert_eq!(fresh.session, "cold-session");
+        assert_eq!(fresh.since_ms, 123);
+        assert!(super::super::take_phone_fresh().is_none());
     }
 
     #[test]

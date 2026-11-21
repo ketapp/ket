@@ -16,11 +16,12 @@ let mockParams = { host: 'host', terminal: '7' };
 
 jest.mock('expo-router', () => ({
   router: { setParams: (params: object) => mockRouter.setParams(params) },
+  useIsFocused: () => true,
   useLocalSearchParams: () => mockParams,
 }));
 jest.mock('react-native-safe-area-context', () => ({ useSafeAreaInsets: () => ({ top: 0, bottom: 0 }) }));
 jest.mock('@ket/remote', () => ({ Activity: { QUIET: 0, RUNNING: 1, WORKING: 2, MERGING: 3, BLOCKED: 4, FAILED: 5 } }));
-jest.mock('./lib/hosts', () => ({ useHost: () => mockConn }));
+jest.mock('./lib/hosts', () => ({ useHost: () => mockConn, useHostState: (conn: unknown) => conn }));
 jest.mock('./components/TerminalView', () => {
   return { TerminalView: mockReact.forwardRef(function MockTerminalView(props: any, ref: any) {
     mockReact.useImperativeHandle(ref, () => ({
@@ -61,6 +62,11 @@ const makeConnection = () => ({
   type: jest.fn(async () => true),
   resize: jest.fn(async () => {}),
   interrupt: jest.fn(),
+  // A fake connection is its own state: what the screen draws from.
+  id: 'host',
+  get state() {
+    return this;
+  },
 });
 
 beforeEach(() => {

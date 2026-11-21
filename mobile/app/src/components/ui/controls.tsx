@@ -1,0 +1,480 @@
+// What a person presses or sets: buttons, a segmented track, a stat filter,
+// toggles, choices, a meter, and a text field's well.
+
+import { Fragment, type ReactNode } from 'react';
+import {
+  Platform,
+  Pressable,
+  StyleSheet,
+  Text,
+  View,
+  type StyleProp,
+  type TextStyle,
+  type ViewStyle,
+} from 'react-native';
+import Animated, { Easing, Keyframe, ReduceMotion } from 'react-native-reanimated';
+
+import { font, size, t, tint } from '../../lib/theme';
+import { Check } from '../icons';
+import { Dot } from './marks';
+import { shared } from './shared';
+
+/** One answer in a segmented track. */
+export interface Segment<K extends string> {
+  key: K;
+  label: string;
+  count?: number;
+  /** A mark before the label. */
+  icon?: ReactNode;
+  /** What a screen reader calls it, for a segment with no label of its own. */
+  name?: string;
+}
+
+/**
+ * A segmented track: a sunken well, the chosen segment raised. A filter
+ * shares the width; a count rides in the label a step under it.
+ */
+export function Segmented<K extends string>({
+  segments,
+  value,
+  onChange,
+  disabled,
+  tall,
+  height,
+  round,
+  style,
+}: {
+  segments: Segment<K>[];
+  value: K;
+  onChange: (key: K) => void;
+  /** Kept in place at 55%, as a disabled button is. */
+  disabled?: boolean;
+  /** As tall as a field, for a track set among fields. */
+  tall?: boolean;
+  /** The segments' own height, to stand as tall as a button beside the
+   * track: the track is 6 more. */
+  height?: number;
+  /** A capsule, track and segments, for a track beside a capsule button. */
+  round?: boolean;
+  style?: StyleProp<ViewStyle>;
+}) {
+  const segmentHeight = height ?? (tall ? size.control - 6 : 30);
+  return (
+    <View style={[styles.track, round && { borderRadius: (segmentHeight + 6) / 2 }, disabled && { opacity: 0.55 }, style]}>
+      {segments.map((segment) => {
+        const on = segment.key === value;
+        return (
+          <Pressable
+            key={segment.key}
+            accessibilityRole="button"
+            accessibilityLabel={segment.name}
+            accessibilityState={{ selected: on, disabled }}
+            disabled={disabled}
+            onPress={() => onChange(segment.key)}
+            style={[
+              styles.segment,
+              tall && styles.segmentTall,
+              height !== undefined && { height },
+              round && { borderRadius: segmentHeight / 2 },
+              on && shared.segmentOn,
+            ]}
+          >
+            {segment.icon}
+            {segment.label ? (
+              <Text style={[styles.segmentText, on && { color: t.text }]} numberOfLines={1}>
+                {segment.label}
+              </Text>
+            ) : null}
+            {segment.count !== undefined ? (
+              <Text style={[styles.segmentCount, on && { color: t.dim }]}>{segment.count}</Text>
+            ) : null}
+          </Pressable>
+        );
+      })}
+    </View>
+  );
+}
+
+/** One tile in a {@link StatFilter}: a count that is also a filter. */
+export interface Stat<K extends string> {
+  key: K;
+  label: string;
+  count: number;
+  /** The dot beside the count, in the state's own colour. Left out for a
+   * tile with no single state of its own, such as "All". */
+  color?: string;
+}
+
+/**
+ * A row of figures that doubles as a filter: the resting state already is
+ * the summary, so a screen that would otherwise show the same count twice
+ * — once as a figure, once as a filter's label — shows it once.
+ */
+export function StatFilter<K extends string>({
+  stats,
+  value,
+  onChange,
+  style,
+}: {
+  stats: Stat<K>[];
+  value: K;
+  onChange: (key: K) => void;
+  style?: StyleProp<ViewStyle>;
+}) {
+  return (
+    <View style={[styles.statsRow, style]}>
+      {stats.map((stat) => {
+        const on = stat.key === value;
+        const zero = stat.count === 0;
+        return (
+          <Pressable
+            key={stat.key}
+            accessibilityRole="button"
+            accessibilityState={{ selected: on }}
+            accessibilityLabel={`${stat.label}, ${stat.count}`}
+            onPress={() => onChange(stat.key)}
+            style={({ pressed }) => [styles.stat, on && styles.statOn, pressed && !on && { backgroundColor: t.hover }]}
+          >
+            <Text style={styles.statLabel} numberOfLines={1}>
+              {stat.label}
+            </Text>
+            <View style={styles.statValue}>
+              {stat.color ? <Dot color={zero ? t.border : stat.color} size={7} /> : null}
+              <Text style={[styles.statNum, zero && { color: t.dim }]}>{stat.count}</Text>
+            </View>
+          </Pressable>
+        );
+      })}
+    </View>
+  );
+}
+
+/** A button's mark landing over its words: a little pop. */
+const MARK_IN = new Keyframe({
+  0: { opacity: 0, transform: [{ scale: 0.4 }] },
+  100: { opacity: 1, transform: [{ scale: 1 }], easing: Easing.bezier(0.34, 1.56, 0.64, 1) },
+})
+  .duration(240)
+  .reduceMotion(ReduceMotion.System);
+
+export function Button({
+  title,
+  onPress,
+  kind = 'secondary',
+  icon,
+  mark,
+  disabled,
+  style,
+}: {
+  title: string;
+  onPress: () => void;
+  kind?: 'primary' | 'brand' | 'secondary' | 'ghost' | 'danger';
+  icon?: ReactNode;
+  /** Pressed, and what it did is done: its mark stands over its words, at
+   * full strength, and it takes no more presses. */
+  mark?: ReactNode;
+  disabled?: boolean;
+  style?: StyleProp<ViewStyle>;
+}) {
+  const marked = mark != null;
+  return (
+    <Pressable
+      onPress={onPress}
+      disabled={disabled || marked}
+      style={({ pressed }) => [
+        styles.button,
+        kind === 'primary' && styles.primary,
+        kind === 'brand' && styles.brand,
+        kind === 'secondary' && styles.secondary,
+        kind === 'danger' && styles.danger,
+        pressed &&
+          (kind === 'primary'
+            ? { backgroundColor: t.accentPressed }
+            : kind === 'brand'
+              ? { backgroundColor: '#9aeaa4' }
+              : { backgroundColor: t.hover }),
+        disabled && !marked && { opacity: 0.55 },
+        style,
+      ]}
+    >
+      {marked && icon ? <View style={styles.unseen}>{icon}</View> : icon}
+      <Text
+        style={[
+          styles.buttonText,
+          kind === 'primary' && { color: t.onAccent, fontFamily: font.proseSemibold },
+          kind === 'brand' && styles.brandText,
+          kind === 'ghost' && { color: t.dim },
+          kind === 'danger' && { color: t.failed },
+          marked && styles.unseen,
+        ]}
+      >
+        {title}
+      </Text>
+      {marked ? (
+        <Animated.View entering={MARK_IN} pointerEvents="none" style={styles.buttonMark}>
+          {mark}
+        </Animated.View>
+      ) : null}
+    </Pressable>
+  );
+}
+
+export function IconButton({
+  label,
+  onPress,
+  children,
+  well,
+  style,
+}: {
+  label: string;
+  onPress: () => void;
+  children: ReactNode;
+  /** Set in a sunken well, for an icon button standing alone on a card. */
+  well?: boolean;
+  style?: StyleProp<ViewStyle>;
+}) {
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={label}
+      onPress={onPress}
+      hitSlop={4}
+      style={({ pressed }) => [styles.iconButton, well && { backgroundColor: t.sunken }, pressed && { backgroundColor: t.selection }, style]}
+    >
+      {children}
+    </Pressable>
+  );
+}
+
+/**
+ * Related glyph buttons in one frame — the desktop's `icon_cluster`: the
+ * mode pill's edge, fill and height, touching cells with a hairline between.
+ * The cells are 34 tall; hit-slop makes up the rest of the touch target.
+ */
+export function IconCluster({ actions }: { actions: { label: string; onPress: () => void; icon: ReactNode }[] }) {
+  return (
+    <View style={styles.cluster}>
+      {actions.map((action, index) => (
+        <Fragment key={action.label}>
+          {index > 0 ? <View style={styles.clusterRule} /> : null}
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={action.label}
+            onPress={action.onPress}
+            hitSlop={{ top: 5, bottom: 5 }}
+            style={({ pressed }) => [styles.clusterCell, pressed && { backgroundColor: t.selection }]}
+          >
+            {action.icon}
+          </Pressable>
+        </Fragment>
+      ))}
+    </View>
+  );
+}
+
+/**
+ * A meter: how full something is, as a length on a rounded track — the
+ * desktop's `ui::progress`. `fraction` is 0 to 1.
+ */
+export function Meter({
+  fraction,
+  color = t.accent,
+  height = 6,
+  style,
+}: {
+  fraction: number;
+  color?: string;
+  height?: number;
+  style?: StyleProp<ViewStyle>;
+}) {
+  const share = Number.isFinite(fraction) ? Math.min(1, Math.max(0, fraction)) : 0;
+  return (
+    <View style={[styles.meter, { height, borderRadius: height / 2 }, style]}>
+      {share > 0 ? (
+        <View style={{ width: `${share * 100}%`, minWidth: height, height, borderRadius: height / 2, backgroundColor: color }} />
+      ) : null}
+    </View>
+  );
+}
+
+/** A switch: on is the accent track, off a well with an edge. */
+export function Toggle({ on, onChange, label }: { on: boolean; onChange: (on: boolean) => void; label: string }) {
+  return (
+    <Pressable
+      accessibilityRole="switch"
+      accessibilityLabel={label}
+      accessibilityState={{ checked: on }}
+      onPress={() => onChange(!on)}
+      hitSlop={6}
+      style={[styles.toggle, on ? styles.toggleOn : null]}
+    >
+      <View style={[styles.knob, on ? styles.knobOn : null]} />
+    </Pressable>
+  );
+}
+
+/**
+ * One option to pick: a round mark when only one can be, a square one when
+ * any number can, then its label over what it means. Picked, the mark fills
+ * with the accent and the row takes the selection fill.
+ */
+export function Choice({
+  many,
+  on,
+  label,
+  description,
+  onPress,
+  disabled,
+}: {
+  many?: boolean;
+  on: boolean;
+  label: string;
+  description?: string;
+  onPress: () => void;
+  disabled?: boolean;
+}) {
+  return (
+    <Pressable
+      accessibilityRole={many ? 'checkbox' : 'radio'}
+      accessibilityLabel={label}
+      accessibilityState={{ checked: on, disabled }}
+      onPress={onPress}
+      disabled={disabled}
+      style={({ pressed }) => [styles.choice, (on || pressed) && { backgroundColor: t.selection }, disabled && { opacity: 0.55 }]}
+    >
+      <View
+        style={[
+          styles.choiceMark,
+          many ? { borderRadius: size.radiusSm } : { borderRadius: 9 },
+          on && { borderColor: t.accent, backgroundColor: many ? t.accent : 'transparent' },
+        ]}
+      >
+        {on ? many ? <Check size={13} color={t.onAccent} weight={2.6} /> : <View style={styles.choiceDot} /> : null}
+      </View>
+      <View style={shared.rowText}>
+        <Text style={styles.choiceLabel}>{label}</Text>
+        {description ? <Text style={shared.detail}>{description}</Text> : null}
+      </View>
+    </Pressable>
+  );
+}
+
+/**
+ * For a one-line `TextInput` with a placeholder. React Native 0.88 hands a
+ * field the native view of one that has gone, and one taken over from a
+ * multiline field with a `lineHeight` (the chat's composer) keeps that line
+ * height on its placeholder, which then sits low. A line-break mode gives
+ * the placeholder a paragraph style of its own (react-native#59132, fixed
+ * after 0.88.0).
+ */
+export const oneLine = { lineBreakModeIOS: 'tail' } as const;
+
+/** A text field's well, for a `TextInput`. */
+export const field: TextStyle = {
+  height: size.control,
+  borderRadius: size.radius,
+  backgroundColor: t.sunken,
+  paddingHorizontal: 12,
+  color: t.text,
+  fontFamily: font.prose,
+  fontSize: size.body,
+};
+
+const styles = StyleSheet.create({
+  meter: { backgroundColor: t.border, overflow: 'hidden' },
+  track: { flexDirection: 'row', gap: 2, padding: 3, backgroundColor: t.sunken, borderRadius: size.radius },
+  segment: {
+    flex: 1,
+    height: 30,
+    borderRadius: size.radiusSm,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    paddingHorizontal: 4,
+  },
+  segmentTall: { height: size.control - 6 },
+  segmentText: { fontFamily: font.proseMedium, fontSize: size.label, color: t.dim },
+  segmentCount: { fontFamily: font.chrome, fontSize: 11, color: t.faint },
+  statsRow: { flexDirection: 'row', gap: 4 },
+  stat: { flex: 1, minWidth: 0, gap: 3, paddingVertical: 7, paddingHorizontal: 9, borderRadius: size.radiusRow },
+  statOn: { backgroundColor: t.selection },
+  statLabel: { fontFamily: font.prose, fontSize: 12, color: t.dim },
+  statValue: { flexDirection: 'row', alignItems: 'center', gap: 7 },
+  statNum: { fontFamily: font.chromeMedium, fontSize: size.value, color: t.text },
+  button: {
+    height: size.control,
+    borderRadius: size.radius,
+    paddingHorizontal: 16,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+  },
+  primary: { backgroundColor: t.accent },
+  /** The one call to action on a screen that has nothing else yet: green, tall. */
+  brand: {
+    height: 54,
+    gap: 10,
+    backgroundColor: t.brand,
+  },
+  // The system's own sans, not a brand face: the one call to action reads
+  // as the phone's.
+  brandText: {
+    color: t.onBrand,
+    fontFamily: Platform.select({ ios: 'System', default: 'sans-serif' }),
+    fontWeight: '600',
+    fontSize: 16,
+  },
+  secondary: { borderWidth: 1, borderColor: t.border },
+  danger: { borderWidth: 1, borderColor: tint(t.failed, 0.45) },
+  buttonText: { fontFamily: font.proseMedium, fontSize: size.body, color: t.text },
+  // Over the words it stands for, which keep the button its width.
+  buttonMark: { ...StyleSheet.absoluteFill, alignItems: 'center', justifyContent: 'center' },
+  unseen: { opacity: 0 },
+  iconButton: { width: 40, height: 40, borderRadius: size.radius, alignItems: 'center', justifyContent: 'center' },
+  cluster: {
+    height: 34,
+    flexDirection: 'row',
+    alignItems: 'stretch',
+    borderRadius: 17,
+    borderWidth: 1,
+    borderColor: t.border,
+    backgroundColor: t.sunken,
+    overflow: 'hidden',
+  },
+  clusterRule: { width: 1, backgroundColor: t.border },
+  clusterCell: { width: 40, alignItems: 'center', justifyContent: 'center' },
+  toggle: {
+    width: 44,
+    height: 26,
+    borderRadius: 13,
+    padding: 2,
+    backgroundColor: t.sunken,
+    borderWidth: 1,
+    borderColor: t.border,
+    justifyContent: 'center',
+  },
+  toggleOn: { backgroundColor: t.accent, borderColor: t.accent, alignItems: 'flex-end' },
+  choice: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 11,
+    paddingVertical: 9,
+    paddingHorizontal: 10,
+    borderRadius: size.radiusRow,
+  },
+  choiceMark: {
+    width: 18,
+    height: 18,
+    marginTop: 1,
+    borderWidth: 1.5,
+    borderColor: t.dim,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  choiceDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: t.accent },
+  choiceLabel: { fontFamily: font.proseMedium, fontSize: size.body, color: t.text },
+  knob: { width: 20, height: 20, borderRadius: 10, backgroundColor: t.dim },
+  knobOn: { backgroundColor: t.onAccent },
+});

@@ -22,6 +22,8 @@ const mockSaveLock = jest.fn(async (value: LockConfig | null) => {
 });
 const mockForgetHost = jest.fn(async (_id: string) => {});
 const mockDropConnection = jest.fn();
+const mockStopPushing = jest.fn(async (_conn: unknown) => {});
+const mockForgetPushKey = jest.fn(async () => {});
 const mockLocalAuth = {
   hasHardwareAsync: jest.fn(async () => true),
   isEnrolledAsync: jest.fn(async () => true),
@@ -42,9 +44,14 @@ jest.mock('expo-crypto', () => ({
   getRandomBytes: jest.fn(() => Uint8Array.of(1, 2, 3)),
 }));
 jest.mock('@ket/remote', () => ({ toBase64Url: () => 'salt' }));
-jest.mock('./connection', () => ({ dropConnection: (id: string) => mockDropConnection(id) }));
+jest.mock('./connection', () => ({
+  dropConnection: (id: string) => mockDropConnection(id),
+  liveConnection: (id: string) => ({ id }),
+}));
+jest.mock('./push', () => ({ stopPushing: (conn: unknown) => mockStopPushing(conn) }));
 jest.mock('./store', () => ({
   forgetHost: (id: string) => mockForgetHost(id),
+  forgetPushKey: () => mockForgetPushKey(),
   getLock: jest.fn(async () => mockStoredLock),
   listHosts: jest.fn(async () => [{ id: 'one' }, { id: 'two' }] as SavedHost[]),
   saveLock: (value: LockConfig | null) => mockSaveLock(value),
@@ -69,9 +76,6 @@ describe('app lock', () => {
   });
 
   test('names available biometrics by platform', async () => {
-    setPlatform('web');
-    await expect(biometry()).resolves.toBeNull();
-
     setPlatform('ios');
     mockLocalAuth.hasHardwareAsync.mockResolvedValueOnce(false);
     await expect(biometry()).resolves.toBeNull();
@@ -144,8 +148,11 @@ describe('app lock', () => {
   test('forgotten PIN removes every paired desktop and lock', async () => {
     await setPin('654321');
     await forgetEverything();
+    // Each Mac stops pushing to this phone before the phone forgets it.
+    expect(mockStopPushing.mock.calls).toEqual([[{ id: 'one' }], [{ id: 'two' }]]);
     expect(mockDropConnection.mock.calls).toEqual([['one'], ['two']]);
     expect(mockForgetHost.mock.calls).toEqual([['one'], ['two']]);
+    expect(mockForgetPushKey).toHaveBeenCalledTimes(1);
     expect(mockStoredLock).toBeNull();
   });
 });

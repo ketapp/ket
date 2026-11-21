@@ -348,10 +348,17 @@ impl Shell {
             centered(
                 card("clear-build", px(460.0), t)
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .child(header(
-                        format!("Clear {} of build output?", format_bytes(confirm.total)),
-                        t,
-                    ))
+                    .child(
+                        header(
+                            "close-clear-build",
+                            format!("Clear {} of build output?", format_bytes(confirm.total)),
+                        )
+                        .on_close(cx.listener(|this, _, _, cx| {
+                            this.confirm_clear_build = None;
+                            cx.notify();
+                        }))
+                        .render(t),
+                    )
                     .child(
                         div()
                             .text_size(LABEL)

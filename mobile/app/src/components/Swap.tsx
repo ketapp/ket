@@ -55,7 +55,9 @@ function useSwap<T>(token: string, item: T, still: boolean) {
   // The newest, for the swap to land on.
   const latest = useRef({ token, item });
   const busy = useRef(false);
-  const [, poke] = useState(0);
+  // Swaps landed. Each one runs the swap below again, which takes up a token
+  // that changed while it ran.
+  const [landings, poke] = useState(0);
 
   // Still, nothing is held back: what is drawn is simply the newest.
   if (still && drawn.token !== token) setDrawn({ token, item });
@@ -91,7 +93,7 @@ function useSwap<T>(token: string, item: T, still: boolean) {
         if (done) runOnJS(arrive)();
       }),
     );
-  }, [still, token, drawn.token, gone, arrive]);
+  }, [still, token, drawn.token, gone, arrive, landings]);
 
   const live = still || token === drawn.token;
   return { gone, shown: live ? item : drawn.item };

@@ -5,7 +5,7 @@
 // is still making its worktree — see app/starting.
 
 import { useEffect, useId, useState } from 'react';
-import { Pressable, StyleSheet, Text, TextInput, useWindowDimensions, View, type TextInputProps, type ViewStyle } from 'react-native';
+import { Pressable, type StyleProp, StyleSheet, Text, TextInput, useWindowDimensions, View, type TextInputProps, type TextStyle, type ViewStyle } from 'react-native';
 import Animated, {
   cancelAnimation,
   Easing,
@@ -27,6 +27,7 @@ import { agentLabel, blend, font, size, t, tint } from '../lib/theme';
 import { FileChip, SentFiles } from './Attachments';
 import { AgentMark, Bubble, Retry, TerminalWindow } from './icons';
 import { Slide } from './Swap';
+import { Prose } from './ui';
 
 const AnimatedCircle = Animated.createAnimatedComponent(Circle);
 const AnimatedGradient = Animated.createAnimatedComponent(LinearGradient);
@@ -450,7 +451,10 @@ function CompactingWords({ shine }: { shine: SharedValue<number> }) {
   );
 }
 
-/** A message of yours: a bubble on the right, its tail at the foot. */
+/** A message of yours: a bubble on the right, its tail at the foot — round
+ * all over but the corner nearest the composer, which is tighter, a hint of
+ * where the message came from. An images chip read back sits over its
+ * words. */
 export const bubble: ViewStyle = {
   backgroundColor: t.selection,
   borderRadius: 18,
@@ -561,6 +565,31 @@ export function CantFind({ agent, onRetry, onTerminal }: { agent: string; onRetr
         </Pressable>
       </View>
     </View>
+  );
+}
+
+export function Status({
+  text,
+  onCopy,
+  style,
+  color,
+}: {
+  text: string;
+  onCopy: (text: string) => void;
+  style?: StyleProp<TextStyle>;
+  color?: string;
+}) {
+  return (
+    <Pressable
+      accessibilityHint="Hold to copy"
+      delayLongPress={350}
+      onLongPress={() => onCopy(text)}
+      style={({ pressed }) => (pressed ? styles.held : null)}
+    >
+      <Prose style={style} color={color}>
+        {text}
+      </Prose>
+    </Pressable>
   );
 }
 

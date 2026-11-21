@@ -4,12 +4,13 @@ import { useEffect as mockUseEffect } from 'react';
 import { Alert, Linking } from 'react-native';
 import Needs from './app/(tabs)/needs';
 import Settings from './app/(tabs)/settings';
-import Usage from './app/(tabs)/usage';
+import Usage from './app/usage';
 import Worktrees from './app/(tabs)/index';
 import { WorktreeList } from './components/WorktreeList';
 import { SplitContext } from './lib/layout';
 import Host from './app/host/[host]';
 import NewTask from './app/new/[host]';
+import RenameWorktree from './app/rename/[host]/[worktree]';
 import Worktree from './app/worktree/[host]/[worktree]';
 import StartingTask from './app/starting/[host]/[at]';
 import { STARTING_FOR_MS } from './lib/connection';
@@ -19,6 +20,7 @@ import type { HostConnection } from './lib/connection';
 const mockNavigation = { setParams: jest.fn() };
 const mockRouter = {
   push: jest.fn(),
+  navigate: jest.fn(),
   back: jest.fn(),
   replace: jest.fn(),
   setParams: jest.fn(),
@@ -28,8 +30,11 @@ const mockRouter = {
 };
 let mockPath = '/';
 let mockParams: Record<string, string> = {};
-let mockConns: HostConnection[] = [];
-let mockHost: HostConnection | null = null;
+/** A fake connection as these tests make it: what the screens ask of it and
+ * the state they draw from, in one object a test can change as it goes. */
+type FakeConnection = any;
+let mockConns: FakeConnection[] = [];
+let mockHost: FakeConnection = null;
 const mockSaveDesktop = jest.fn(async (_id: string) => {});
 const mockSaveCollapsed = jest.fn(async (_host: string, _projects: string[]) => {});
 let mockHidden: string[] = [];
@@ -42,6 +47,7 @@ jest.mock('expo-router', () => {
     Redirect: () => null,
     router: {
       push: (path: string) => mockRouter.push(path),
+      navigate: (path: string) => mockRouter.navigate(path),
       back: () => mockRouter.back(),
       replace: (path: string) => mockRouter.replace(path),
       setParams: (params: object) => mockRouter.setParams(params),
@@ -84,6 +90,10 @@ jest.mock('./lib/hosts', () => ({
   statusLine: jest.requireActual<typeof import('./lib/hosts')>('./lib/hosts').statusLine,
   useHost: () => mockHost,
   useHosts: () => mockConns,
+  // A fake connection stands for its own state.
+  useHostState: (conn: unknown) => conn,
+  useHostStates: (conns: unknown) => conns,
+  usePairedHosts: () => mockConns.map((conn) => ({ conn, hostState: conn })),
 }));
 jest.mock('./lib/store', () => ({
   getDesktop: jest.fn(async () => 'host'),
@@ -102,7 +112,6 @@ const mockQuiet = jest.fn(async () => {});
 const mockChoose = jest.fn(async (_kind: string, _on: boolean) => {});
 let mockNotices = { config: { on: false, waiting: true, finished: true, checks: true }, refused: false };
 jest.mock('./lib/notices', () => ({
-  available: true,
   choose: (kind: string, on: boolean) => mockChoose(kind, on),
   openPhoneSettings: jest.fn(),
   turnOff: () => mockQuiet(),
@@ -141,7 +150,7 @@ const tree = (id: string, activity: number, extra: object = {}) => ({
   ...extra,
 });
 const project = (worktrees: object[]) => ({ id: 'project', name: 'Project', color: '#22c55e', worktrees });
-const connection = (projects: object[], usage: object[] = []) =>
+const connection = (projects: object[], usage: object[] = []): FakeConnection =>
   ({
     host: { id: 'host', name: 'Studio Mac', relay: 'ws://studio.local:7979', hostPublic: '', pairedAt: 0 },
     hostMinor: 7,
@@ -154,8 +163,13 @@ const connection = (projects: object[], usage: object[] = []) =>
     answer: jest.fn(async () => null),
     merge: jest.fn(async () => null),
     retry: jest.fn(),
-    addressForDisplay: () => 'ws://studio.local:7979',
-  }) as unknown as HostConnection;
+    id: 'host',
+    displayAddress: 'ws://studio.local:7979',
+    // A fake connection is its own state: what the screens draw from.
+    get state() {
+      return this;
+    },
+  });
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -190,10 +204,11 @@ describe('top-level screens', () => {
     mockConns = [first, second];
     const view = await render(<Worktrees />);
     expect(view.getByText('1 waiting on you')).toBeTruthy();
+    expect(view.getByText('helper 1')).toBeTruthy();
     expect(view.getByText('+1 more')).toBeTruthy();
     await fireEvent.press(view.getByLabelText('Start a task'));
-    expect(mockRouter.push).toHaveBeenCalledWith('/new/host');
-    await fireEvent.press(view.getByLabelText('Waiting, 1'));
+    expect(mockRouter.navigate).toHaveBeenCalledWith('/new/host');
+    await fireEvent.press(view.getByLabelText('Active, 1'));
     await fireEvent.press(view.getByText('Project'));
     expect(mockSaveCollapsed).toHaveBeenCalled();
     await fireEvent.press(view.getByLabelText('Switch desktop'));
@@ -224,10 +239,10 @@ describe('top-level screens', () => {
     expect(view.getByLabelText('Side actions')).toBeTruthy();
     expect(mockMenuOpened).toHaveBeenCalledTimes(1);
     await fireEvent.press(view.getByText('New task in Side'));
-    expect(mockRouter.push).toHaveBeenLastCalledWith('/new/host?project=side');
+    expect(mockRouter.navigate).toHaveBeenLastCalledWith('/new/host?project=side');
     await hold('Side');
     await fireEvent.press(view.getByText('Backlog'));
-    expect(mockRouter.push).toHaveBeenLastCalledWith('/backlog/host/side');
+    expect(mockRouter.navigate).toHaveBeenLastCalledWith('/backlog/host/side');
 
     // Pinned, it leads the list; held again, it unpins.
     await hold('Side');
@@ -276,7 +291,7 @@ describe('top-level screens', () => {
     const conn = Object.assign(
       connection([
         project([
-          tree('busy', 2, { agentState: 'compile workspace', pullRequest: pr }),
+          tree('busy', 2, { agentState: 'editing `src/main.rs`', pullRequest: pr }),
           tree('fresh', 0),
           tree('main', 0, { base: '' }),
         ]),
@@ -296,7 +311,8 @@ describe('top-level screens', () => {
 
     // At work, a worktree opens up: its step in a terminal's well, its lines,
     // its pull request.
-    expect(view.getByText('Compile workspace')).toBeTruthy();
+    expect(view.getByText('Editing src/main.rs')).toBeTruthy();
+    expect(view.queryByText(/`src\/main.rs`/)).toBeNull();
     expect(view.getByText('#21')).toBeTruthy();
 
     // The badge says how the line is kept, and marks the way it runs.
@@ -316,7 +332,7 @@ describe('top-level screens', () => {
     expect(view.queryByText('Address comments with agent')).toBeNull();
     await fireEvent.press(view.getByText('Fix checks with agent'));
     await waitFor(() => expect(conn.fixChecks).toHaveBeenCalledWith('busy'));
-    expect(mockRouter.push).toHaveBeenLastCalledWith('/session/host/7');
+    expect(mockRouter.navigate).toHaveBeenLastCalledWith('/session/host/7');
 
     await holdAt('busy');
     await fireEvent.press(view.getByText('Update branch'));
@@ -333,7 +349,7 @@ describe('top-level screens', () => {
     // checkout, the base one would merge into, offers nothing.
     await holdAt('fresh');
     await fireEvent.press(view.getByText('Open pull request…'));
-    expect(mockRouter.push).toHaveBeenLastCalledWith('/pull-request/host/fresh');
+    expect(mockRouter.navigate).toHaveBeenLastCalledWith('/pull-request/host/fresh');
     await holdAt('main');
     expect(view.queryByText('Open pull request…')).toBeNull();
 
@@ -429,6 +445,72 @@ describe('top-level screens', () => {
     await view.unmount();
   });
 
+  test('Worktrees renames a worktree from its menu from 1.33, in a sheet that says why not', async () => {
+    const trees = () => [project([tree('fresh', 0), tree('main', 0, { base: '' })])];
+    const renameWorktree = jest.fn(async (_worktree: string, name: string) =>
+      name === 'taken' ? "a worktree can't be called that" : null,
+    );
+    const conn = Object.assign(connection(trees()), { hostMinor: 33, renameWorktree });
+    mockConns = [conn];
+    const view = await render(<Worktrees />);
+    const hold = async (id: string) => fireEvent(view.getByText(id), 'longPress');
+
+    await hold('fresh');
+    await fireEvent.press(view.getByText('Rename…'));
+    expect(mockRouter.push).toHaveBeenLastCalledWith('/rename/host/fresh');
+    // The repository's own checkout has no name of its own to change.
+    await hold('main');
+    expect(view.queryByText('Rename…')).toBeNull();
+    await view.unmount();
+
+    // A desktop from before 1.33 can't take one.
+    mockConns = [Object.assign(connection(trees()), { hostMinor: 32 })];
+    const older = await render(<Worktrees />);
+    await fireEvent(older.getByText('fresh'), 'longPress');
+    expect(older.queryByText('Rename…')).toBeNull();
+    expect(older.getByText('Pin')).toBeTruthy();
+    await older.unmount();
+
+    // From the sidebar too, the sheet goes over what is open beside it
+    // rather than in its place.
+    mockConns = [conn];
+    const sidebar = await render(
+      <SplitContext.Provider value>
+        <WorktreeList sidebar refresh={mockPath} />
+      </SplitContext.Provider>,
+    );
+    await fireEvent(sidebar.getByText('fresh'), 'longPress');
+    await fireEvent.press(sidebar.getByText('Rename…'));
+    expect(mockRouter.push).toHaveBeenLastCalledWith('/rename/host/fresh');
+    expect(mockRouter.replace).not.toHaveBeenCalled();
+    expect(mockRouter.dismissAll).not.toHaveBeenCalled();
+    await sidebar.unmount();
+
+    // The sheet waits for the desktop to say what the worktree is called,
+    // starts from that, says the desktop's refusal, and goes once the
+    // desktop has it.
+    mockParams = { host: 'host', worktree: 'fresh' };
+    mockHost = Object.assign(connection(trees()), { hostMinor: 33, renameWorktree, snapshot: null });
+    const sheet = await render(<RenameWorktree />);
+    expect(sheet.getByText('Connecting…')).toBeTruthy();
+    expect(sheet.queryByLabelText('Worktree name')).toBeNull();
+    mockHost = conn;
+    await sheet.rerender(<RenameWorktree />);
+    expect(sheet.getByText('Git branch: branch-fresh')).toBeTruthy();
+    const field = sheet.getByLabelText('Worktree name');
+    expect(field.props.value).toBe('fresh');
+    await fireEvent.changeText(field, 'taken');
+    await fireEvent.press(sheet.getByText('Rename'));
+    await waitFor(() => expect(sheet.getByText("A worktree can't be called that.")).toBeTruthy());
+    expect(mockRouter.back).not.toHaveBeenCalled();
+    await fireEvent.changeText(field, 'Checkout flow');
+    expect(sheet.queryByText("A worktree can't be called that.")).toBeNull();
+    await fireEvent(field, 'submitEditing');
+    await waitFor(() => expect(renameWorktree).toHaveBeenLastCalledWith('fresh', 'Checkout flow'));
+    await waitFor(() => expect(mockRouter.back).toHaveBeenCalled());
+    await sheet.unmount();
+  });
+
   test('Worktrees, beside the sidebar, waits for a pick; the sidebar opens beside itself', async () => {
     mockConns = [connection([project([tree('waiting', 4, { question: { subject: 'Approve', terminalId: 9n } }), tree('quiet', 0)])])];
     const empty = await render(
@@ -465,7 +547,7 @@ describe('top-level screens', () => {
     mockConns = [Object.assign(connection([]), { snapshot: null, snapshotAt: null, freshSince: Date.now() })];
     const loading = await render(<Worktrees />);
     expect(loading.getByLabelText('Loading worktrees')).toBeTruthy();
-    expect(loading.getByLabelText('Running')).toBeTruthy();
+    expect(loading.getByLabelText('Active')).toBeTruthy();
     expect(loading.queryByText('Nothing running')).toBeNull();
     await loading.unmount();
 
@@ -489,7 +571,7 @@ describe('top-level screens', () => {
       expect(quiet.queryByLabelText('Loading worktrees')).toBeNull();
       expect(quiet.getByText('Nothing running')).toBeTruthy();
       expect(quiet.getByText('Agents and terminals you start on Studio Mac show up here.')).toBeTruthy();
-      expect(quiet.getByLabelText('Running, 0')).toBeTruthy();
+      expect(quiet.getByLabelText('Active, 0')).toBeTruthy();
 
       // The desktop restarts long after, its list arriving empty with nothing
       // having redrawn the screen's clock since: still settled on time.
@@ -525,9 +607,9 @@ describe('top-level screens', () => {
     expect(view.getByText('Waiting on you')).toBeTruthy();
     expect(view.getByText('Failed')).toBeTruthy();
     await fireEvent.press(view.getAllByText('waiting')[0]);
-    expect(mockRouter.push).toHaveBeenCalledWith('/session/host/9');
+    expect(mockRouter.navigate).toHaveBeenCalledWith('/session/host/9');
     await fireEvent.press(view.getAllByText('failed')[0]);
-    expect(mockRouter.push).toHaveBeenCalledWith('/worktree/host/failed');
+    expect(mockRouter.navigate).toHaveBeenCalledWith('/worktree/host/failed');
     await view.unmount();
   });
 
@@ -542,16 +624,16 @@ describe('top-level screens', () => {
     expect(view.getByText('npm test')).toBeTruthy();
     await fireEvent.press(view.getByText('Allow once'));
     await waitFor(() => expect(conn.answer).toHaveBeenCalledWith(permission, 1));
-    expect(mockRouter.push).not.toHaveBeenCalled();
+    expect(mockRouter.navigate).not.toHaveBeenCalled();
 
     // One question, one pick: the tap is the answer.
     expect(view.getByText('Asks · Scope')).toBeTruthy();
     await fireEvent.press(view.getByText('One'));
     await waitFor(() => expect(conn.respond).toHaveBeenCalledWith(question, { picks: [{ choices: [1], other: '' }] }));
-    expect(mockRouter.push).not.toHaveBeenCalled();
+    expect(mockRouter.navigate).not.toHaveBeenCalled();
     // The rest of the conversation, or words of your own: the chat.
     await fireEvent.press(view.getByText('Write your own in the chat'));
-    expect(mockRouter.push).toHaveBeenCalledWith('/session/host/8');
+    expect(mockRouter.navigate).toHaveBeenCalledWith('/session/host/8');
     await view.unmount();
   });
 
@@ -660,7 +742,7 @@ describe('work screens', () => {
     await waitFor(() => expect(view.getByText('Fix the login')).toBeTruthy());
     expect(view.getByText(/Making the worktree on Studio Mac · \d+ s/)).toBeTruthy();
     await fireEvent.press(view.getByText('Fix the login'));
-    expect(mockRouter.push).toHaveBeenCalledWith('/starting/host/1234');
+    expect(mockRouter.navigate).toHaveBeenCalledWith('/starting/host/1234');
     await view.unmount();
   });
 
@@ -680,7 +762,7 @@ describe('work screens', () => {
     expect(view.queryByText('Always allow')).toBeNull();
     expect(view.getByText('Codex wants to run a command')).toBeTruthy();
     await fireEvent.press(view.getByText('Open the terminal'));
-    expect(mockRouter.push).toHaveBeenCalledWith('/terminal/host/7');
+    expect(mockRouter.navigate).toHaveBeenCalledWith('/terminal/host/7');
     await view.unmount();
   });
 
@@ -869,7 +951,7 @@ describe('work screens', () => {
     expect(mockRouter.push).toHaveBeenCalledWith('/pull-request/host/work');
     // The agent's tab opens its chat, and a new one starts from the card.
     await fireEvent.press(view.getByText('codex'));
-    expect(mockRouter.push).toHaveBeenCalledWith('/session/host/7');
+    expect(mockRouter.navigate).toHaveBeenCalledWith('/session/host/7');
     await fireEvent.press(view.getByText('New session or shell'));
     expect(mockRouter.push).toHaveBeenCalledWith('/new/host?worktree=work');
     await fireEvent.press(view.getByLabelText('More'));
@@ -920,9 +1002,9 @@ describe('work screens', () => {
     expect(view.getByText('asleep')).toBeTruthy();
 
     await fireEvent.press(view.getByText('Fix chat table scroll'));
-    expect(mockRouter.push).toHaveBeenLastCalledWith('/session/host/7');
+    expect(mockRouter.navigate).toHaveBeenLastCalledWith('/session/host/7');
     await fireEvent.press(view.getByText('npm start'));
-    expect(mockRouter.push).toHaveBeenLastCalledWith('/terminal/host/8');
+    expect(mockRouter.navigate).toHaveBeenLastCalledWith('/terminal/host/8');
     await fireEvent.press(view.getByText('Economy resume gate'));
     await waitFor(() => expect(mockRouter.push).toHaveBeenLastCalledWith('/session/host/12'));
     expect(wakeTerminal).toHaveBeenCalledWith('tabs', 'gate');
@@ -950,7 +1032,7 @@ describe('work screens', () => {
     expect(view.getAllByText('Terminal')).toHaveLength(2);
     expect(view.queryByText('busy')).toBeNull();
     await fireEvent.press(view.getByText('claude'));
-    expect(mockRouter.push).toHaveBeenLastCalledWith('/session/host/7');
+    expect(mockRouter.navigate).toHaveBeenLastCalledWith('/session/host/7');
     await view.unmount();
   });
 
@@ -1097,7 +1179,7 @@ describe('starting chat', () => {
       mockHost = host;
       const view = await render(<StartingTask />);
       expect(view.getByLabelText('Fix the login. Waiting on your Mac.')).toBeTruthy();
-      expect(view.getByText('not started')).toBeTruthy();
+      expect(view.getByLabelText('Not started')).toBeTruthy();
       expect(view.getByText(/took the task 2 min ago/)).toBeTruthy();
       await fireEvent.changeText(view.getByLabelText('A message for the agent, once it is running'), 'and the tests');
       // Asked again with the same picks; the screen follows the new request
@@ -1105,8 +1187,8 @@ describe('starting chat', () => {
       await fireEvent.press(view.getByText('Ask again'));
       await waitFor(() => expect(startWork).toHaveBeenCalledWith('project', 'Fix the login', 'codex', choices));
       spy.mockReturnValue(2_000_000 + 5_000);
-      await waitFor(() => expect(view.getByText('starting')).toBeTruthy());
-      expect(view.getByLabelText('Fix the login. Sending.')).toBeTruthy();
+      await waitFor(() => expect(view.getByLabelText('Fix the login. Sending.')).toBeTruthy());
+      expect(view.queryByLabelText('Not started')).toBeNull();
       expect(view.getByLabelText('A message for the agent, once it is running').props.value).toBe('and the tests');
       expect(mockRouter.replace).not.toHaveBeenCalled();
       await view.unmount();
@@ -1136,7 +1218,7 @@ describe('starting chat', () => {
   });
 
   test('is the chat named in its address, with the request gone', async () => {
-    // Loaded again on the web after the hand-off: the request is not kept.
+    // Loaded again after the hand-off: the request is not kept.
     mockParams = { host: 'host', at: '42', terminal: '9' };
     mockHost = connection([project([])]);
     const view = await render(<StartingTask />);
@@ -1207,12 +1289,12 @@ describe('starting chat', () => {
       host.asked.push(asked());
       mockHost = host;
       const view = await render(<StartingTask />);
-      expect(view.getByText('not started')).toBeTruthy();
+      expect(view.getByLabelText('Not started')).toBeTruthy();
       expect(mockChat).not.toHaveBeenCalled();
       host.snapshot = { projects: [project([tree('one', 1), made(1, { terminals: [terminal(9n)] })])], usage: [] } as never;
       await view.rerender(<StartingTask />);
       expect(mockChat).toHaveBeenLastCalledWith({ started: { host: 'host', terminal: '9', seed: { text: 'Fix the login', draft: '' } } });
-      expect(view.queryByText('not started')).toBeNull();
+      expect(view.queryByLabelText('Not started')).toBeNull();
       expect(mockRouter.replace).not.toHaveBeenCalled();
       await view.unmount();
     } finally {

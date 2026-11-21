@@ -57,7 +57,7 @@ export function bindTasks(asked: Starting[], snapshot: HostSnapshot | null, now 
 }
 
 /** The original task for a bound terminal, including when its chat is reopened. */
-export function taskForTerminal(asked: Starting[], terminal: bigint): Starting | undefined {
+export function taskForTerminal(asked: readonly Starting[], terminal: bigint): Starting | undefined {
   return asked.find((work) => work.terminal === terminal);
 }
 
@@ -137,7 +137,7 @@ export interface Seed {
 export function startingAt(
   path: string,
   hostId: string,
-  asked: Starting[],
+  asked: readonly Starting[],
   snapshot: HostSnapshot | null,
   terminal?: string,
 ): string | null {

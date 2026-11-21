@@ -19,8 +19,9 @@ import { AppState, Platform } from 'react-native';
 
 import { toBase64Url } from '@ket/remote';
 
-import { dropConnection } from './connection';
-import { type LockConfig, forgetHost, getLock, listHosts, saveLock } from './store';
+import { dropConnection, liveConnection } from './connection';
+import { stopPushing } from './push';
+import { type LockConfig, forgetHost, forgetPushKey, getLock, listHosts, saveLock } from './store';
 
 /** Digits in a PIN. */
 export const PIN_LENGTH = 6;
@@ -103,7 +104,6 @@ export function useLock(): LockState {
 /** What this phone unlocks with besides the PIN, by its own name — or
  * `null` when it has nothing enrolled. */
 export async function biometry(): Promise<string | null> {
-  if (Platform.OS === 'web') return null;
   const [hardware, enrolled] = await Promise.all([
     LocalAuthentication.hasHardwareAsync(),
     LocalAuthentication.isEnrolledAsync(),
@@ -231,9 +231,13 @@ export async function turnOff(): Promise<void> {
  * is what stood between them and whoever holds the phone. */
 export async function forgetEverything(): Promise<void> {
   for (const host of await listHosts()) {
+    await stopPushing(liveConnection(host.id));
     dropConnection(host.id);
     await forgetHost(host.id);
   }
+  // A desktop out of reach still has this phone's push key: without it here,
+  // nothing it pushes can be read on this phone again.
+  await forgetPushKey();
   await turnOff();
   cancelConfirm();
 }

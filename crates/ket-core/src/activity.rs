@@ -569,6 +569,40 @@ impl Tracker {
         self.local.escape(pane, now_ms)
     }
 
+    /// One of this process's own terminals is in front of someone — see
+    /// [`StatusStore::seen`].
+    pub fn seen(&mut self, pane: &str) -> bool {
+        self.local.seen(pane)
+    }
+
+    /// Whether any of `worktree`'s agents has finished a turn nobody has
+    /// looked at since, or someone marked it unread.
+    pub fn unread(&self, worktree: &WorktreeId) -> bool {
+        self.marked(worktree)
+            || self
+                .panes()
+                .any(|pane| pane.unread && pane.worktree == worktree.as_str())
+    }
+
+    /// Whether someone marked `worktree` unread, here or at the host — see
+    /// [`StatusStore::mark_unread`].
+    pub fn marked(&self, worktree: &WorktreeId) -> bool {
+        self.local.marked(worktree.as_str())
+            || self.hosted.as_ref().is_some_and(|snapshot| {
+                snapshot
+                    .marked
+                    .iter()
+                    .any(|marked| marked == worktree.as_str())
+            })
+    }
+
+    /// Marks `worktree` unread in this process's own store, or takes the
+    /// mark off — for a window no host hears. See
+    /// [`StatusStore::mark_unread`].
+    pub fn mark_unread(&mut self, worktree: &WorktreeId, unread: bool) -> bool {
+        self.local.mark_unread(worktree.as_str(), unread)
+    }
+
     /// Forgets one of this process's own terminals, which has closed or
     /// exited.
     pub fn clear_pane(&mut self, pane: &str) -> bool {
@@ -673,6 +707,38 @@ impl Tracker {
                 .iter()
                 .flat_map(|snapshot| snapshot.panes.iter()),
         )
+    }
+
+    /// The latest known turn milestone in a worktree, in Unix milliseconds.
+    ///
+    /// Includes every pane, even a report whose status has expired, and the
+    /// saved conversation when no pane or live driven session reports.
+    /// Transcript writes and heartbeats during a turn must not reorder rows.
+    /// Returns `None` when no source has a timestamp; merely observing a
+    /// process does not make it newly active.
+    pub fn last_updated_ms(&self, worktree: &WorktreeId) -> Option<u64> {
+        let session = self.sessions.get(worktree);
+        let active = self
+            .panes()
+            .filter(|pane| pane.worktree == worktree.as_str())
+            .map(|pane| pane.recency_at_ms)
+            .chain(
+                session
+                    .filter(|session| matches!(session.status, SessionStatus::Live(_)))
+                    .map(|session| session.started_at_ms),
+            )
+            .max();
+        active.or_else(|| {
+            session
+                .map(|session| session.heartbeat_ms.max(session.started_at_ms))
+                .into_iter()
+                .chain(
+                    self.recorded
+                        .get(worktree)
+                        .map(|session| session.updated_at_ms),
+                )
+                .max()
+        })
     }
 
     /// Whether a pane's report is still the best thing known about it.
@@ -804,6 +870,41 @@ impl Tracker {
                 .as_deref()
                 .map(|session| (pane.agent.as_str(), session))
         })
+    }
+
+    /// The agent and session of each of `worktree`'s panes that has sent
+    /// one, its report standing or not, latest heard first: where a row
+    /// looks for a `/color` when its reporting pane has none. A `/color`
+    /// fires no hook, so the pane given it is often one whose report lapsed.
+    pub fn pane_sessions<'a>(&'a self, worktree: &WorktreeId) -> Vec<(&'a str, &'a str)> {
+        let mut panes: Vec<&PaneAgentStatus> = self
+            .panes()
+            .filter(|pane| pane.worktree == worktree.as_str() && pane.session.is_some())
+            .collect();
+        panes.sort_by_key(|pane| std::cmp::Reverse(pane.heard_at_ms()));
+        panes
+            .into_iter()
+            .filter_map(|pane| Some((pane.agent.as_str(), pane.session.as_deref()?)))
+            .collect()
+    }
+
+    /// Every agent session a row may be drawn for, as (agent, session): each
+    /// pane's, standing or not, and each worktree's newest on disk. What a
+    /// window reads the `/color` of, including for worktrees whose tabs it
+    /// has not opened since it started.
+    pub fn known_sessions(&self) -> Vec<(String, String)> {
+        let mut sessions: Vec<(String, String)> = self
+            .panes()
+            .filter_map(|pane| Some((pane.agent.clone(), pane.session.clone()?)))
+            .chain(
+                self.recorded
+                    .values()
+                    .map(|found| (found.agent.clone(), found.id.clone())),
+            )
+            .collect();
+        sessions.sort_unstable();
+        sessions.dedup();
+        sessions
     }
 
     /// What `worktree` is doing, as of the last time it was told.

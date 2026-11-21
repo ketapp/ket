@@ -11,6 +11,9 @@ import { addressKind } from './address-kind';
 import { dialAddresses, normalizeHost } from './addresses';
 
 const KEY = 'ket.phone.key';
+/** The key pushed notices are sealed to — see lib/push.ts. The notification
+ * extension reads it from the Keychain by this name to open them. */
+const PUSH_KEY = 'ket.push.key';
 const HOSTS = 'ket.hosts';
 const hostEntry = (id: string) => `ket.host.${id}`;
 const DESKTOP = 'ket.desktop';
@@ -107,6 +110,23 @@ export async function phoneKey(): Promise<Keypair> {
   const keys = generateKeypair();
   await set(KEY, toBase64Url(keys.privateKey));
   return keys;
+}
+
+/** The key pair a desktop seals this phone's pushed notices to, made the
+ * first time it is asked for: its own, so the pairing key is used for
+ * nothing else. Kept in the class the rest is, readable after the first
+ * unlock, which is when the notification extension needs it. */
+export async function pushKey(): Promise<Keypair> {
+  const stored = await get(PUSH_KEY);
+  if (stored) return keypairFrom(fromBase64Url(stored));
+  const keys = generateKeypair();
+  await set(PUSH_KEY, toBase64Url(keys.privateKey));
+  return keys;
+}
+
+/** Forgets the push key, so nothing already sealed to it opens here again. */
+export async function forgetPushKey(): Promise<void> {
+  await del(PUSH_KEY);
 }
 
 export async function listHosts(): Promise<SavedHost[]> {

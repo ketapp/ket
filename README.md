@@ -150,8 +150,8 @@ your agents run.
 
 The desktop application and release bundle target macOS 13 or newer, the oldest the bundled Chromium supports. Core and
 CLI code may compile elsewhere, but non-macOS desktop behavior is not a
-supported release target yet. The companion phone app is built with Expo and
-reaches the Mac on the local network or over Tailscale; see
+supported release target yet. The companion app runs on iOS and Android and
+reaches the Mac on the local network or over Tailscale. See
 `mobile/app/README.md`. ket's own relay for reaching a Mac from anywhere is
 built (`deploy/relay`) but not offered yet.
 
@@ -217,7 +217,7 @@ npm ci --prefix mobile/remote
 npm ci --prefix mobile/app
 npm run typecheck --prefix mobile/remote
 npm run typecheck --prefix mobile/app
-npm run start --prefix mobile/app
+npm run ios --prefix mobile/app      # or npm run android --prefix mobile/app
 ```
 
 See `mobile/app/README.md` for device and native-build instructions.

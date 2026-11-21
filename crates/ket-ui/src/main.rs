@@ -100,6 +100,7 @@ mod shortcuts;
 mod sidebar_rail;
 mod snippet_picker;
 mod snippets;
+mod starting;
 mod status_bar;
 mod storage;
 mod tabs;
@@ -873,6 +874,9 @@ struct Shell {
     /// the layout, and what the tab asks for to get its terminal back after a
     /// restart. Also what its agent's hooks report as their pane.
     pub(crate) terminal_keys: HashMap<TerminalId, String>,
+    /// The worktree in front the last time this window was — see
+    /// `Shell::read_arrived_worktree`.
+    pub(crate) front_worktree: Option<WorktreeId>,
     /// Prevent automatic resume while a phone opens a fresh session.
     pub(crate) suppress_auto_session: bool,
     /// The worktrees last handed to the status owners — see
@@ -992,6 +996,8 @@ struct Shell {
     pub(crate) preferences: Option<crate::preferences::Preferences>,
     /// The create-worktree dialog, while it is open.
     pub(crate) new_worktree: Option<crate::worktree_dialog::NewWorktree>,
+    /// Worktrees being made, shown before they exist — see `crate::starting`.
+    pub(crate) starting: crate::starting::Starts,
     /// The remove-project confirmation, while it is up.
     pub(crate) confirm_remove: Option<RemoveConfirm>,
     /// The command catalogue. Built once — it does not change at runtime.
@@ -1525,6 +1531,7 @@ impl Shell {
                     owed_terminals: HashMap::new(),
                     owed_restores: HashMap::new(),
                     terminal_keys: HashMap::new(),
+                    front_worktree: None,
                     suppress_auto_session: false,
                     status_worktrees: Vec::new(),
                     tab_drop: None,
@@ -1567,6 +1574,7 @@ impl Shell {
                     settings: None,
                     adding_project: None,
                     new_worktree: None,
+                    starting: Default::default(),
                     confirm_remove: None,
                     registry,
                     keymap,
@@ -1713,6 +1721,7 @@ impl Shell {
             owed_terminals: HashMap::new(),
             owed_restores: HashMap::new(),
             terminal_keys: HashMap::new(),
+            front_worktree: None,
             suppress_auto_session: false,
             status_worktrees: Vec::new(),
             tab_drop: None,
@@ -1755,6 +1764,7 @@ impl Shell {
             settings: None,
             adding_project: None,
             new_worktree: None,
+            starting: Default::default(),
             confirm_remove: None,
             registry,
             keymap,
@@ -1947,6 +1957,8 @@ impl Render for Shell {
         self.sync_ios_simulator_visibility(cx);
         self.sync_terminal_views(cx);
         self.check_cold_resume(window, cx);
+        self.see_front_tab(window, cx);
+        self.read_arrived_worktree(window, cx);
         // Pictures whose tabs have closed since the last frame, while the
         // window is here to free their textures.
         self.prune_images(window, cx);
@@ -1995,7 +2007,7 @@ impl Render for Shell {
         let sidebar_divider = self.sidebar_open.then(|| self.sidebar_divider());
         let content = {
             let _span = crate::frametrace::span("build:panes");
-            self.pane_layout(window, cx)
+            self.panes(window, cx)
         };
         let panel_divider = self.panel_open.then(|| self.panel_divider());
         let panel = {
@@ -2040,6 +2052,9 @@ impl Render for Shell {
         if !self.typing(window, cx) && !native_child_owns_focus && !self.focus.is_focused(window) {
             window.focus(&self.focus);
         }
+        // gpui's focus is no use if AppKit sends the keys nowhere.
+        #[cfg(target_os = "macos")]
+        crate::window_drag::reclaim_keyboard(window);
         let new_worktree = self.new_worktree_view(window, cx);
         let confirm_remove = self.confirm_remove_view(cx);
         let worktree_menu = (!modal_open).then(|| self.worktree_menu_view(cx)).flatten();
@@ -2852,13 +2867,16 @@ impl Render for Shell {
             // Before anything under it can stop the click: a click that
             // reaches GPUI at all missed the phone, whose native view takes
             // its own, so the keyboard comes back to ket.
-            .capture_any_mouse_down(cx.listener(|this, _, _, cx| {
+            .capture_any_mouse_down(cx.listener(|this, _, window, cx| {
                 #[cfg(target_os = "macos")]
-                if this.release_ios_simulator_keyboard() {
-                    cx.notify();
+                {
+                    if this.release_ios_simulator_keyboard() {
+                        cx.notify();
+                    }
+                    crate::window_drag::reclaim_keyboard(window);
                 }
                 #[cfg(not(target_os = "macos"))]
-                let _ = (this, cx);
+                let _ = (this, window, cx);
             }))
             // Tab and sidebar clicks change selection on mouse-up. Defer the
             // menu refresh until their click handlers have run, even when a

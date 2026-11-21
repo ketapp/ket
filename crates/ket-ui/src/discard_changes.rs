@@ -23,7 +23,6 @@ use ket_core::status::ChangeKind;
 
 use crate::Shell;
 use crate::paint::paint;
-use crate::ui::banner::banner;
 use crate::ui::button::button;
 use crate::ui::dialog::{body, card, centered, footer, header};
 use crate::ui::icon::Icon;
@@ -42,11 +41,6 @@ pub(crate) struct DiscardConfirm {
     pub(crate) old_path: Option<SharedString>,
     /// How it changed, which decides what discarding it does.
     pub(crate) kind: ChangeKind,
-    /// Set while git is running, so the button says so and nothing starts it
-    /// twice.
-    pub(crate) pending: bool,
-    /// Why the last attempt failed, if it did.
-    pub(crate) failure: Option<SharedString>,
 }
 
 impl DiscardConfirm {
@@ -83,28 +77,18 @@ impl Shell {
             rela,
             old_path,
             kind,
-            pending: false,
-            failure: None,
         });
     }
 
-    /// Discards, off the window's thread.
-    ///
-    /// The dialog holds until git answers — Escape and Cancel are refused
-    /// while it runs — so the dialog the answer lands on is always the one
-    /// that asked.
+    /// Closes the dialog and discards, off the window's thread. The answer
+    /// is a notification: the file's row leaves the change list once git is
+    /// done, or a notification says why it couldn't be.
     fn discard_confirmed(&mut self, cx: &mut Context<Self>) {
-        let Some(confirm) = self.confirm_discard.as_mut() else {
+        let Some(confirm) = self.confirm_discard.take() else {
             return;
         };
-        if confirm.pending {
-            return;
-        }
-        confirm.pending = true;
-        confirm.failure = None;
-
-        let root = confirm.root.clone();
-        let rela = confirm.rela.clone();
+        let root = confirm.root;
+        let rela = confirm.rela;
         let mut paths = vec![rela.to_string()];
         paths.extend(confirm.old_path.as_ref().map(ToString::to_string));
 
@@ -118,32 +102,32 @@ impl Shell {
             let _ = shell.update(cx, |shell, cx| {
                 match outcome {
                     Ok(()) => {
-                        shell.confirm_discard = None;
                         shell.toast_detail(Tone::Success, "Discarded changes", rela, cx);
                         // The watcher would get there, but only for the
                         // selected worktree; the view may be showing another.
                         shell.refresh_git_panel(cx);
                     }
-                    Err(error) => {
-                        if let Some(confirm) = shell.confirm_discard.as_mut() {
-                            confirm.pending = false;
-                            confirm.failure = Some(error.to_string().into());
-                        }
-                    }
+                    Err(error) => shell.toast_detail(
+                        Tone::Error,
+                        format!("Changes to {rela} not discarded"),
+                        error.to_string(),
+                        cx,
+                    ),
                 }
                 cx.notify();
             });
         })
         .detach();
+        cx.notify();
     }
 
     /// Handles a key while the dialog is up. It takes every key; only Escape
     /// does anything. See the module docs on Enter.
     pub(crate) fn discard_key(&mut self, event: &KeyDownEvent) -> bool {
-        let Some(confirm) = self.confirm_discard.as_ref() else {
+        if self.confirm_discard.is_none() {
             return false;
-        };
-        if event.keystroke.key == "escape" && !confirm.pending {
+        }
+        if event.keystroke.key == "escape" {
             self.confirm_discard = None;
         }
         true
@@ -153,22 +137,17 @@ impl Shell {
     pub(crate) fn discard_view(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let confirm = self.confirm_discard.as_ref()?;
         let t = &self.theme;
-        let pending = confirm.pending;
 
         let cancel = button("cancel-discard", "Cancel")
             .ghost()
-            .enabled(!pending)
             .render(t)
-            .when(!pending, |el| {
-                el.on_click(cx.listener(|this, _, _, cx| {
-                    this.confirm_discard = None;
-                    cx.notify();
-                }))
-            });
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.confirm_discard = None;
+                cx.notify();
+            }));
         let discard = button("confirm-discard", "Discard")
             .danger()
             .leading(Icon::RotateCcw)
-            .loading_if(pending, "Discarding…")
             .render(t)
             .on_click(cx.listener(|this, _, _, cx| {
                 this.discard_confirmed(cx);
@@ -188,15 +167,16 @@ impl Shell {
             centered(
                 card("discard-changes", WIDTH, t)
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .child(header("Discard changes?", t))
+                    .child(
+                        header("close-discard", "Discard changes?")
+                            .on_close(cx.listener(|this, _, _, cx| {
+                                this.confirm_discard = None;
+                                cx.notify();
+                            }))
+                            .render(t),
+                    )
                     .child(path)
                     .child(body(confirm.consequence(), t))
-                    .children(
-                        confirm
-                            .failure
-                            .clone()
-                            .map(|why| banner("discard-failure", Tone::Error, why, t)),
-                    )
                     .child(footer().child(cancel).child(discard)),
             )
             .into_any_element(),

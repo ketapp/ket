@@ -89,6 +89,11 @@ impl Places {
         let Ok(state) = crate::store::Store::open_default().and_then(|store| store.load()) else {
             return Self::default();
         };
+        Self::of(state)
+    }
+
+    /// What `state` says.
+    fn of(state: crate::store::State) -> Self {
         // The sidebar's own order, so a phone lists everything where the
         // desktop does.
         let projects = crate::workspace::sidebar_projects(&state);
@@ -222,5 +227,52 @@ impl Phones {
                 read
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::id::ProjectId;
+    use crate::project::{Project, ProjectSettings};
+    use crate::store::State;
+
+    fn listed(settings: ProjectSettings) -> (String, String, String) {
+        let id = ProjectId::new("acme-0123456789ab".to_owned());
+        let mut state = State::default();
+        state.projects.push(Project {
+            id: id.clone(),
+            name: "acme".to_owned(),
+            root: std::path::PathBuf::from("/nowhere/acme"),
+            default_base: "main".to_owned(),
+            preferred_agent: None,
+            last_opened_ms: 0,
+        });
+        state.project_settings.insert(id, settings);
+        let place = Places::of(state).projects.remove(0);
+        (place.name, place.color, place.icon)
+    }
+
+    #[test]
+    fn a_project_with_a_badge_image_looks_to_a_phone_as_it_did_without_one() {
+        // The phone draws the glyph and colour; the picture is the Mac's own.
+        let without = ProjectSettings {
+            display_name: Some("Acme".to_owned()),
+            color: Some("#22c55e".to_owned()),
+            icon: Some("glyph:leaf".to_owned()),
+            ..ProjectSettings::default()
+        };
+        let with = ProjectSettings {
+            image: Some("0123456789abcdef.png".to_owned()),
+            ..without.clone()
+        };
+        assert_eq!(listed(with), listed(without));
+        assert_eq!(
+            listed(ProjectSettings {
+                image: Some("0123456789abcdef.png".to_owned()),
+                ..ProjectSettings::default()
+            }),
+            ("acme".to_owned(), String::new(), String::new())
+        );
     }
 }

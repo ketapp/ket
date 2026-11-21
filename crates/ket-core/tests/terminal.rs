@@ -119,6 +119,55 @@ fn codex_startup_waits_for_input_without_putting_the_prompt_in_its_launch() {
 }
 
 #[test]
+fn codex_update_picker_keeps_the_task_until_the_restarted_composer_is_ready() {
+    let sandbox = Sandbox::new("codex-update-prompt");
+    let gate = sandbox.path("restart-ready");
+    let decision = sandbox.path("update-choice");
+    let received = sandbox.path("prompt");
+    let mut spec = shell(
+        sandbox.root(),
+        "stty -echo; \
+         printf '\\033[?2004h\\033[?25h\\033[18;1HUpdate available\\033[20;1H› 1. Update now\\033[21;1H  2. Skip\\033[24;1H? for shortcuts\\033[20;3H'; \
+         IFS= read -r choice; printf '%s' \"$choice\" > \"$UPDATE_CHOICE\"; \
+         printf '\\033[2J\\033[HUpdating Codex and restarting'; \
+         while [ ! -f \"$READY_GATE\" ]; do sleep 0.01; done; \
+         printf '\\033[2J\\033[H\\033[22;1H› Explain this codebase\\033[24;1H? for shortcuts\\033[22;3H'; \
+         IFS= read -r message; printf '%s' \"$message\" > \"$RECEIVED_PROMPT\"",
+    );
+    for (name, path) in [
+        ("READY_GATE", &gate),
+        ("UPDATE_CHOICE", &decision),
+        ("RECEIVED_PROMPT", &received),
+    ] {
+        spec.env.insert(name.to_owned(), path.display().to_string());
+    }
+    let terminal = LocalTerminal::open(&spec).unwrap();
+    assert!(wait_for_text(&terminal, "Update now"));
+    assert!(!terminal.with_term(|term| ket_core::screen::codex_prompt_ready(term)));
+    assert!(
+        !decision.exists(),
+        "no choice has been typed in this fixture"
+    );
+    assert!(!received.exists());
+
+    // The person accepts the update. Keep the task out of its installer and
+    // the restart screen, then hand it over to the new composer exactly once.
+    terminal.send_input(b"1\n".to_vec()).unwrap();
+    assert!(wait_for_text(&terminal, "Updating Codex and restarting"));
+    assert_eq!(std::fs::read_to_string(&decision).unwrap(), "1");
+    assert!(!terminal.with_term(|term| ket_core::screen::codex_prompt_ready(term)));
+    assert!(!received.exists());
+    std::fs::write(gate, "").unwrap();
+    assert!(wait_until(Duration::from_secs(10), || {
+        terminal.with_term(|term| ket_core::screen::codex_prompt_ready(term))
+    }));
+    let prompt = "Build the project from the new worktree dialog";
+    terminal.send_input(format!("{prompt}\n")).unwrap();
+    assert!(wait_until(Duration::from_secs(10), || terminal.is_closed()));
+    assert_eq!(std::fs::read_to_string(received).unwrap(), prompt);
+}
+
+#[test]
 fn what_the_program_printed_ends_up_in_the_grid() {
     let sandbox = Sandbox::new("terminal-basic");
     let terminal = LocalTerminal::open(&shell(sandbox.root(), "printf 'hello from the pty\\n'"))

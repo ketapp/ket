@@ -1,0 +1,39 @@
+// ket's push service: a Cloudflare Worker that forwards a Mac's encrypted
+// notification to Apple's push service. It holds the APNs key and stores
+// nothing. See README.md for setting it up.
+{
+  "$schema": "https://unpkg.com/wrangler@4.157.0/config-schema.json",
+  "name": "ket-push",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-11-18",
+  // push.ketapp.dev is where the Mac sends by default; deploying makes its
+  // DNS record and certificate. No workers.dev address: one more public door
+  // to the same key, and nothing uses it.
+  "routes": [{ "pattern": "push.ketapp.dev", "zone_name": "ketapp.dev", "custom_domain": true }],
+  "workers_dev": false,
+  // No per-version preview addresses: each would be another public door to
+  // the same key.
+  "preview_urls": false,
+  "vars": {
+    // Not secret: the app's bundle id is in the App Store listing, and the
+    // team and key ids name the key without unlocking it. The key itself is
+    // the APNS_KEY secret: `wrangler secret put APNS_KEY`.
+    "BUNDLE_ID": "dev.ketapp.ket",
+    "TEAM_ID": "VY92G8Y5C8",
+    "KEY_ID": "NM4965XPC9"
+  },
+  // Per Cloudflare location and eventually consistent: a brake on a runaway
+  // Mac or a stolen token, not an exact quota. Periods may only be 10 or 60.
+  "ratelimits": [
+    { "name": "BY_TOKEN", "namespace_id": "4801", "simple": { "limit": 30, "period": 60 } },
+    { "name": "BY_IP", "namespace_id": "4802", "simple": { "limit": 120, "period": 60 } }
+  ],
+  // Logs, never traces: a trace records each outbound fetch's URL, and
+  // Apple's carries the device token (`/3/device/<token>`), which would then
+  // be kept. The Worker's own log line carries only the status and reason.
+  "observability": {
+    "enabled": true,
+    "logs": { "enabled": true, "head_sampling_rate": 1 },
+    "traces": { "enabled": false }
+  }
+}

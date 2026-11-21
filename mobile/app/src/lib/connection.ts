@@ -10,6 +10,8 @@ import './polyfills';
 import * as Device from 'expo-device';
 import { AppState, type AppStateStatus, type NativeEventSubscription } from 'react-native';
 import {
+  Activity,
+  BackgroundSession_State,
   type Answer_Choice,
   AnswerSchema,
   type Backlog,
@@ -34,6 +36,11 @@ import {
   ReadyPullRequestSchema,
   ReopenPullRequestSchema,
   PinWorktreeSchema,
+  RenameWorktreeSchema,
+  RegisterPushSchema,
+  UnregisterPushSchema,
+  type PushEnvironment,
+  type PushKind,
   DeleteWorktreeSchema,
   WakeTerminalSchema,
   type PullRequestDraft,
@@ -66,6 +73,8 @@ import {
   Respond_PickSchema,
   RespondSchema,
   Signal_Kind,
+  MarkSeenSchema,
+  MarkUnreadSchema,
   SignalSchema,
   StartFreshSchema,
   SubscribeSchema,
@@ -150,11 +159,19 @@ function newKey(): string {
   return toBase64Url(nonce);
 }
 
-/** Away longer than this — locked, or in another app — and the phone dials
- * the desktop again as it comes back rather than trusting the old socket.
- * iOS suspends an app in the background, and its socket seldom outlives more
- * than a moment of that, often without a close the phone ever hears. */
+/** Away longer than this — locked, or in another app — and the phone checks
+ * the session still works as it comes back, rather than trusting it: iOS
+ * suspends an app in the background, and its socket can die meanwhile
+ * without a close the phone ever hears. See `probe`. */
 const RESUME_AFTER_MS = 5_000;
+
+/** How long a session back from the background has to show it still works
+ * — any frame from the desktop, the answer to a cheap request among them —
+ * before the phone drops it and dials again. Mostly it does: the host's log
+ * showed the old socket still open on nearly every return, so dialling
+ * again each time threw away a working session for a second or more of
+ * handshake and snapshot. */
+const PROBE_MS = 1_500;
 
 /** New work this phone asked for that the desktop has not shown yet: the
  * desktop answers as soon as it has the request, and makes the worktree —
@@ -202,38 +219,77 @@ export const STARTING_FOR_MS = 120_000;
  * asks for costly things. Not a failure; asking again shortly is. */
 export class DesktopBusy extends Error {}
 
-export class HostConnection {
-  readonly host: SavedHost;
-  status: Status = 'connecting';
-  snapshot: HostSnapshot | null = null;
+/** What a connection is at one moment, for a screen to draw from: made anew
+ * whenever any of it changes and never edited, so React, and the React
+ * Compiler, which reuses what it worked out from a value it has seen before,
+ * can tell one moment from the next. Read it with `useHostState` (lib/hosts.ts);
+ * outside React, from `HostConnection.state`. What a connection does stays
+ * on the connection. */
+export interface ConnectionState {
+  /** The paired desktop as saved, but for the cursor it resumes from. */
+  readonly host: Readonly<Omit<SavedHost, 'cursor'>>;
+  readonly status: Status;
+  readonly snapshot: HostSnapshot | null;
   /** See [`Starting`]: new work asked for whose worktree is not listed yet. */
-  starting: Starting[] = [];
+  readonly starting: readonly Starting[];
   /** Every request this connection made, oldest first, the last few: for the
    * chat that follows one (see app/starting), which may open after the
    * worktree is listed and the row for it is gone. */
-  asked: Starting[] = [];
-  error: string | null = null;
+  readonly asked: readonly Starting[];
+  readonly error: string | null;
   /** The desktop's protocol minor, from its welcome — what it can answer.
    * 7 reads sessions as conversations and takes new work. */
-  hostMinor = 0;
+  readonly hostMinor: number;
   /** The address of the open session, or null between sessions. */
-  activeAddress: string | null = null;
+  readonly activeAddress: string | null;
+  /** The live address, or the last one that worked while reconnecting. */
+  readonly displayAddress: string | null;
   /** When the phone last lost the desktop — or first tried to reach it —
    * while it has not got it back; `null` while connected. */
-  downSince: number | null = Date.now();
+  readonly downSince: number | null;
   /** Attempts since the last time it connected. */
-  attempts = 0;
+  readonly attempts: number;
   /** When the open session was welcomed; `null` between sessions. */
-  upSince: number | null = null;
+  readonly upSince: number | null;
   /** What each saved address said the last time none of them answered,
    * by address; empty while connected or after a failure past the dial. */
-  failures: Record<string, string> = {};
+  readonly failures: Readonly<Record<string, string>>;
   /** When the phone first heard from the desktop as it is now: this
    * connection's first welcome, or the first after the desktop restarted.
    * Its list can still be filling for a moment after — see lib/settling. */
-  freshSince: number | null = null;
+  readonly freshSince: number | null;
   /** When the snapshot came; `null` before the first. */
-  snapshotAt: number | null = null;
+  readonly snapshotAt: number | null;
+}
+
+/** Whether `kept`, a connection state's copy of a saved host, still matches
+ * `host` field for field, the cursor aside. */
+function sameHost(kept: ConnectionState['host'], host: SavedHost): boolean {
+  const keys = (Object.keys(host) as (keyof SavedHost)[]).filter((key) => key !== 'cursor');
+  return keys.length === Object.keys(kept).length && keys.every((key) => (kept as SavedHost)[key] === host[key]);
+}
+
+export class HostConnection {
+  /** The paired desktop's id, which never changes. */
+  readonly id: string;
+  // What `state` is made from: changed in place as the connection goes, so
+  // read by screens only through `state`.
+  private readonly host: SavedHost;
+  private status: Status = 'connecting';
+  private snapshot: HostSnapshot | null = null;
+  private starting: Starting[] = [];
+  private asked: Starting[] = [];
+  private error: string | null = null;
+  private hostMinor = 0;
+  private activeAddress: string | null = null;
+  private downSince: number | null = Date.now();
+  private attempts = 0;
+  private upSince: number | null = null;
+  private failures: Record<string, string> = {};
+  private freshSince: number | null = null;
+  private snapshotAt: number | null = null;
+  /** The last `state` made, handed out again until something in it changes. */
+  private made: ConnectionState | null = null;
 
   private remote: Remote | null = null;
   /** The epoch of the desktop the last session was welcomed by, to tell
@@ -245,6 +301,9 @@ export class HostConnection {
   private readonly pending = new Map<bigint, { resolve: (reply: Envelope) => void; reject: (error: Error) => void }>();
   private readonly listeners = new Set<Listener>();
   private readonly changed = new Set<() => void>();
+  /** Prompts the desktop accepted or says are gone, held until a snapshot
+   * stops listing them. A delayed snapshot must not bring a card back. */
+  private readonly settledQuestions = new Set<string>();
   private readonly leases = new Map<bigint, ReturnType<typeof setInterval>>();
   private closed = false;
   private backoff = 1000;
@@ -252,19 +311,25 @@ export class HostConnection {
   private wake: (() => void) | null = null;
   /** When the app went to the background, while it is there. */
   private backgroundedAt: number | null = null;
+  /** Frames had from the desktop, over every session: a count going up is
+   * a session that works — see `probe`. */
+  private heard = 0;
   /** The session is being ended on purpose, so its end is not an error. */
   private redialing = false;
   private readonly appState: NativeEventSubscription;
 
   constructor(host: SavedHost) {
+    this.id = host.id;
     this.host = host;
     this.appState = AppState.addEventListener('change', (next) => this.foreground(next));
     void this.run();
   }
 
-  /** Coming back from the lock screen or another app: a fresh session if it
-   * was away for long, so a screen asking the desktop gets an answer now
-   * rather than after its request times out on a dead socket. */
+  /** Coming back from the lock screen or another app, after a while away: a
+   * session still up is kept if it shows it works (see `probe`), so a screen
+   * asking the desktop gets its answer on it at once; one still dialling is
+   * dialled again, and one down is dialled now rather than after its
+   * backoff. */
   private foreground(next: AppStateStatus): void {
     if (next === 'background') {
       this.backgroundedAt ??= Date.now();
@@ -275,11 +340,34 @@ export class HostConnection {
     this.backgroundedAt = null;
     if (away < RESUME_AFTER_MS || this.closed) return;
     this.backoff = 0;
-    if (this.remote) {
-      this.redialing = true;
-      this.remote.close();
-    }
+    if (this.remote && this.status === 'connected') this.probe(this.remote);
+    else if (this.remote) this.redial(this.remote);
     this.wake?.();
+  }
+
+  /** Keeps `remote` if anything comes from the desktop within PROBE_MS —
+   * the answer to the snippets, the cheapest thing to ask, or whatever it
+   * sent meanwhile — and otherwise drops it and dials again. */
+  private probe(remote: Remote): void {
+    const heard = this.heard;
+    let settled = false;
+    const settle = (works: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (!works && this.remote === remote && !this.closed) this.redial(remote);
+    };
+    const timer = setTimeout(() => settle(this.heard > heard), PROBE_MS);
+    this.request({ case: 'getSnippets', value: create(GetSnippetsSchema, {}) }, '', PROBE_MS).then(
+      () => settle(true),
+      () => settle(this.heard > heard),
+    );
+  }
+
+  /** Ends `remote` to dial again at once, which is not a failure to show. */
+  private redial(remote: Remote): void {
+    this.redialing = true;
+    remote.close();
   }
 
   /** Called whenever status, snapshot or error change. */
@@ -298,8 +386,52 @@ export class HostConnection {
     for (const callback of this.changed) callback();
   }
 
+  /** What this connection is now — see `ConnectionState`. The same object
+   * until something in it changes, then a new one. */
+  get state(): ConnectionState {
+    const was = this.made;
+    if (
+      was &&
+      was.status === this.status &&
+      was.snapshot === this.snapshot &&
+      was.starting === this.starting &&
+      was.asked === this.asked &&
+      was.error === this.error &&
+      was.hostMinor === this.hostMinor &&
+      was.activeAddress === this.activeAddress &&
+      was.downSince === this.downSince &&
+      was.attempts === this.attempts &&
+      was.upSince === this.upSince &&
+      was.failures === this.failures &&
+      was.freshSince === this.freshSince &&
+      was.snapshotAt === this.snapshotAt &&
+      sameHost(was.host, this.host)
+    ) {
+      return was;
+    }
+    const { cursor: _cursor, ...host } = this.host;
+    this.made = {
+      host,
+      status: this.status,
+      snapshot: this.snapshot,
+      starting: this.starting,
+      asked: this.asked,
+      error: this.error,
+      hostMinor: this.hostMinor,
+      activeAddress: this.activeAddress,
+      displayAddress: this.addressForDisplay(),
+      downSince: this.downSince,
+      attempts: this.attempts,
+      upSince: this.upSince,
+      failures: this.failures,
+      freshSince: this.freshSince,
+      snapshotAt: this.snapshotAt,
+    };
+    return this.made;
+  }
+
   /** The live address, or the last one that worked while reconnecting. */
-  addressForDisplay(): string | null {
+  private addressForDisplay(): string | null {
     const addresses = dialAddresses(this.host);
     return this.activeAddress ?? this.host.lastAddress ?? (addresses.length === 1 ? addresses[0] : null);
   }
@@ -393,13 +525,17 @@ export class HostConnection {
           : await remote.recv(WELCOME_TIMEOUT_MS).catch(() => {
               throw new Error('the desktop did not answer');
             });
+      this.heard += 1;
       if (message.seq > seq) seq = message.seq;
       switch (message.payload.case) {
         case 'welcome':
           this.hostMinor = message.minor;
           if (message.payload.value.hostEpoch !== epoch) seq = message.seq;
           epoch = message.payload.value.hostEpoch;
-          if (this.hostEpoch !== epoch) this.freshSince = Date.now();
+          if (this.hostEpoch !== epoch) {
+            this.freshSince = Date.now();
+            this.settledQuestions.clear();
+          }
           this.hostEpoch = epoch;
           this.status = 'connected';
           this.error = null;
@@ -420,7 +556,7 @@ export class HostConnection {
               void saveHost(this.host);
             }
           }
-          this.snapshot = message.payload.value;
+          this.snapshot = this.withoutSettledQuestions(message.payload.value, true);
           this.snapshotAt = Date.now();
           this.settleStarting();
           this.notify();
@@ -865,6 +1001,33 @@ export class HostConnection {
     return reply.payload.case === 'error' ? reply.payload.value.message : null;
   }
 
+  /** Renames a worktree as the desktop's worktree menu does (desktop 1.33):
+   * the name ket shows for it, not its branch or folder. Empty goes back to
+   * the branch's. `null` once it is, or the desktop's reason it is not. */
+  async renameWorktree(worktreeId: string, name: string): Promise<string | null> {
+    const reply = await this.send(
+      { case: 'renameWorktree', value: create(RenameWorktreeSchema, { worktreeId, name }) },
+      true,
+    );
+    return reply.payload.case === 'error' ? reply.payload.value.message : null;
+  }
+
+  /** Where the desktop sends this phone its notices while it is not
+   * connected (desktop 1.34) — see lib/push. The newest replaces the last. */
+  async registerPush(token: Uint8Array, environment: PushEnvironment, pushKey: Uint8Array, kinds: PushKind[]): Promise<void> {
+    const reply = await this.send({
+      case: 'registerPush',
+      value: create(RegisterPushSchema, { token, environment, pushKey, kinds }),
+    });
+    if (reply.payload.case === 'error') throw new Error(reply.payload.value.message);
+  }
+
+  /** Tells the desktop to push this phone nothing more (desktop 1.34). */
+  async unregisterPush(): Promise<void> {
+    const reply = await this.send({ case: 'unregisterPush', value: create(UnregisterPushSchema, {}) });
+    if (reply.payload.case === 'error') throw new Error(reply.payload.value.message);
+  }
+
   /** Deletes a worktree — its checkout and its branch — as the desktop's
    * worktree menu does (desktop 1.20). The branch it kept because it has
    * unmerged commits, empty when that went too; or why not. Unforced, a
@@ -1136,8 +1299,8 @@ export class HostConnection {
    * Answers one permission prompt — the `Question` the phone showed, by its
    * id and the terminal it is in; the desktop presses the agent's own key
    * only if that terminal is still showing that very prompt. Needs no
-   * control. Resolves `null` once pressed, or the desktop's reason it would
-   * not — most often that the prompt was answered or replaced meanwhile.
+   * control. Resolves `null` once pressed or when that prompt is already
+   * gone, otherwise the desktop's reason it could not answer.
    */
   async answer(question: { id: bigint; terminalId: bigint }, choice: Answer_Choice): Promise<string | null> {
     const reply = await this.send(
@@ -1147,7 +1310,7 @@ export class HostConnection {
       },
       true,
     );
-    return reply.payload.case === 'error' ? reply.payload.value.message : null;
+    return this.settleQuestion(question, reply);
   }
 
   /**
@@ -1156,7 +1319,8 @@ export class HostConnection {
    * question, one pick per question in order: the indexes chosen, or what was
    * written instead. For a plan, approve, or keep planning with feedback.
    * The desktop hands it to the agent only if that terminal is still showing
-   * that very prompt. Resolves `null` once it has, or the desktop's reason.
+   * that very prompt. Resolves `null` once answered or already gone,
+   * otherwise the desktop's reason it could not answer.
    */
   async respond(question: { id: bigint; terminalId: bigint }, answer: PromptAnswer): Promise<string | null> {
     const reply = await this.send(
@@ -1172,7 +1336,67 @@ export class HostConnection {
       },
       true,
     );
-    return reply.payload.case === 'error' ? reply.payload.value.message : null;
+    return this.settleQuestion(question, reply);
+  }
+
+  /** An accepted answer or an obsolete prompt is finished. Other refusals
+   * and transport failures leave the question available for another try. */
+  private settleQuestion(question: { id: bigint; terminalId: bigint }, reply: Envelope): string | null {
+    if (reply.payload.case === 'error' && reply.payload.value.code !== ErrorCode.NOT_FOUND) {
+      return reply.payload.value.message;
+    }
+    this.settledQuestions.add(`${question.terminalId}/${question.id}`);
+    if (this.snapshot) this.snapshot = this.withoutSettledQuestions(this.snapshot);
+    this.notify();
+    return null;
+  }
+
+  /** Clear only the answered prompt, including its waiting status. A new
+   * prompt in the same terminal, or another pane's prompt, stays visible. */
+  private withoutSettledQuestions(snapshot: HostSnapshot, prune = false): HostSnapshot {
+    if (this.settledQuestions.size === 0) return snapshot;
+    const listed = new Set<string>();
+    const key = (question: { id: bigint; terminalId: bigint }) => `${question.terminalId}/${question.id}`;
+    const projects = snapshot.projects.map((project) => ({
+      ...project,
+      worktrees: project.worktrees.map((worktree) => {
+        const all = [...worktree.questions, ...(worktree.question ? [worktree.question] : [])];
+        for (const question of all) listed.add(key(question));
+        const removed = all.filter((question) => this.settledQuestions.has(key(question)));
+        if (removed.length === 0) return worktree;
+        const remaining = all.filter((question) => !this.settledQuestions.has(key(question)));
+        const questions = worktree.questions.filter((question) => !this.settledQuestions.has(key(question)));
+        const question = worktree.question && !this.settledQuestions.has(key(worktree.question))
+          ? worktree.question
+          : questions[0];
+        const terminals = worktree.terminals.map((terminal) =>
+          terminal.activity === Activity.BLOCKED
+          && removed.some((question) => question.terminalId === terminal.id)
+          && !remaining.some((question) => question.terminalId === terminal.id)
+          && !terminal.agentView?.sessions.some((session) => session.state === BackgroundSession_State.NEEDS_YOU)
+            ? { ...terminal, activity: Activity.QUIET }
+            : terminal,
+        );
+        const activity = worktree.activity === Activity.BLOCKED && remaining.length === 0
+          ? [Activity.BLOCKED, Activity.WORKING, Activity.MERGING, Activity.RUNNING, Activity.FAILED]
+            .find((activity) => terminals.some((terminal) => !terminal.closed && terminal.activity === activity)) ?? Activity.QUIET
+          : worktree.activity;
+        return {
+          ...worktree,
+          questions,
+          question,
+          terminals,
+          activity,
+          agentState: worktree.activity === Activity.BLOCKED && remaining.length === 0 ? '' : worktree.agentState,
+        };
+      }),
+    }));
+    if (prune) {
+      for (const settled of this.settledQuestions) {
+        if (!listed.has(settled)) this.settledQuestions.delete(settled);
+      }
+    }
+    return { ...snapshot, projects };
   }
 
   /** Fits a terminal to the phone's screen, control or not; the desktop's
@@ -1181,6 +1405,22 @@ export class HostConnection {
   async resize(terminalId: bigint, cols: number, rows: number): Promise<boolean> {
     const reply = await this.send({ case: 'resize', value: create(ResizeSchema, { terminalId, cols, rows }) }, true);
     return reply.payload.case !== 'error';
+  }
+
+  /** Since 1.32: says the terminal's conversation is on screen, so what
+   * its agent last said is read here, on other phones and on the desktop.
+   * Needs no control, and nothing waits on it. */
+  markSeen(terminalId: bigint): void {
+    if (this.hostMinor < 32) return;
+    void this.send({ case: 'markSeen', value: create(MarkSeenSchema, { terminalId }) }, true).catch(() => {});
+  }
+
+  /** Marks a worktree unread, as the desktop's worktree menu does, or with
+   * `unread` false takes the mark off as one of its terminals is opened
+   * (desktop 1.35). */
+  markUnread(worktreeId: string, unread: boolean): void {
+    if (this.hostMinor < 35) return;
+    void this.send({ case: 'markUnread', value: create(MarkUnreadSchema, { worktreeId, unread }) }, true).catch(() => {});
   }
 
   /** Interrupts what runs in a terminal. Needs no control. */
@@ -1205,6 +1445,13 @@ const connections = new Map<string, HostConnection>();
 export function dropConnection(id: string): void {
   connections.get(id)?.close();
   connections.delete(id);
+}
+
+/** The connection to host `id` this app already holds, if one has been made:
+ * a screen opened from Worktrees has it on its first draw, rather than after
+ * the Keychain gives the saved host back. */
+export function liveConnection(id: string): HostConnection | undefined {
+  return connections.get(id);
 }
 
 /** The one connection to a host, made on first use. */

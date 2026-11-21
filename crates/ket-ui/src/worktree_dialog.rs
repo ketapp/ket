@@ -43,15 +43,14 @@ use crate::tabs::TabKind;
 use crate::terminal::{SessionLaunch, TerminalId};
 use crate::ui::CARD_PAD;
 use crate::ui::agent::{agent_label, mark, provider};
-use crate::ui::button::{button, icon_button};
-use crate::ui::chip::{badge, caption, tag, token_reduction_ring};
-use crate::ui::dialog::{card, centered, footer, header, header_with};
+use crate::ui::button::button;
+use crate::ui::chip::{caption, image_badge, tag, token_reduction_ring};
+use crate::ui::dialog::{card, centered, footer, header};
 use crate::ui::field::{error, label};
 use crate::ui::icon::Icon;
 use crate::ui::menu::{MenuEntry, MenuItem, MenuKey, OpenMenu, dropdown};
 use crate::ui::select::select;
 use crate::ui::textarea::{FORM_INSET, textarea};
-use crate::ui::toast::Tone;
 
 /// The picker's name for whichever level is currently chosen.
 fn token_reduction_label(level: u8) -> &'static str {
@@ -911,14 +910,12 @@ impl Shell {
     ///
     /// With a prompt: the branch is named from it (or typed), the worktree
     /// made as a phone's work is, and the agent started on the prompt with
-    /// the model and effort picked here — the dialog closes at once and a
-    /// toast says how it went, as the quick prompt does. Without one: a
-    /// worktree and a shell, which the dialog stays open to see refused.
+    /// the model and effort picked here. Without one: a worktree and a shell.
     ///
-    /// Creation fetches the remote first so the branch is cut from the main
-    /// everyone else can see, and a fetch is a network round trip that may
-    /// take seconds or time out. The dialog refuses a second submit while
-    /// one runs; the bare result lands in [`Shell::finish_create_worktree`].
+    /// Either way the dialog closes once the branch is known to be free, and
+    /// the worktree's row is shown at once while it is made — the fetch,
+    /// which is a network round trip, the checkout and the agent — with
+    /// what went wrong, if anything did. See `crate::starting`.
     pub(crate) fn create_worktree(&mut self, cx: &mut Context<Self>) {
         let Some(dialog) = self.new_worktree.as_ref() else {
             return;
@@ -947,53 +944,20 @@ impl Shell {
             .id
             .clone();
 
-        if prompt.is_empty() {
-            // The model and effort picked are for the first session, which
-            // the landing opens — carried there rather than lost.
-            let launch =
-                (dialog.model.is_some() || dialog.effort.is_some()).then(|| SessionLaunch {
-                    model: dialog.model.clone(),
-                    effort: dialog.effort.clone(),
-                });
-            if let Some(dialog) = self.new_worktree.as_mut() {
-                dialog.error = None;
-                dialog.busy = true;
-            }
-            // `Workspace` is opened inside the task rather than passed in,
-            // as the merge does: it owns a store handle and a mutex of live
-            // sessions.
-            let work = cx.background_executor().spawn(async move {
-                let workspace = Workspace::open()?;
-                let (created, prepared) = workspace.create_worktree_prepared_with_economy(
-                    &project,
-                    &branch,
-                    None,
-                    agent.as_deref(),
-                    Some(&economy_level_id),
-                )?;
-                Ok::<_, KetError>((created, prepared))
-            });
-            cx.spawn(async move |shell: gpui::WeakEntity<Shell>, cx| {
-                let result = work.await;
-                let _ = shell.update(cx, |shell, cx| {
-                    shell.finish_create_worktree(result, launch, cx);
-                });
-            })
-            .detach();
-            cx.notify();
-            return;
-        }
-
-        let Some(agent) = agent else {
+        if !prompt.is_empty() && agent.is_none() {
             self.refuse_new_worktree("pick an agent to give the prompt to", cx);
             return;
-        };
+        }
         let model = dialog.model.clone();
         let effort = dialog.effort.clone();
         if let Some(dialog) = self.new_worktree.as_mut() {
             dialog.error = None;
             dialog.busy = true;
         }
+        // Only the quick part waits on the dialog: whether the branch is
+        // taken, which a typed name is refused for there. The rest — the
+        // fetch, the checkout, the agent — is shown as it happens, in the
+        // sidebar; see `crate::starting`.
         let root = project.clone();
         let named = cx.background_executor().spawn(async move {
             let workspace = Workspace::open()?;
@@ -1010,33 +974,100 @@ impl Shell {
                 if let Some(dialog) = shell.new_worktree.as_mut() {
                     dialog.busy = false;
                 }
-                match named {
-                    Ok((branch, prompt)) => {
-                        shell.close_new_worktree();
-                        shell.toast(Tone::Info, format!("Starting {branch}…"), cx);
-                        shell.start_work(
-                            NewWork {
-                                project,
-                                branch,
-                                prompt,
-                                attachments: Vec::new(),
-                                agent: Some(agent),
-                                base: None,
-                                economy: Some(token_reduction),
-                                model,
-                                effort,
-                                origin: WorkOrigin::Dialog,
-                            },
-                            cx,
-                        );
+                let (branch, prompt) = match named {
+                    Ok(named) => named,
+                    Err(e) => {
+                        shell.refuse_new_worktree(e.to_string(), cx);
+                        cx.notify();
+                        return;
                     }
-                    Err(e) => shell.refuse_new_worktree(e.to_string(), cx),
+                };
+                shell.close_new_worktree();
+                let step = shell.begin_start(crate::starting::Draft {
+                    project: project.clone(),
+                    prompt: prompt.clone(),
+                    branch: branch.clone(),
+                    branch_edited: edited,
+                    agent: agent.clone(),
+                    model: model.clone(),
+                    effort: effort.clone(),
+                    economy: token_reduction,
+                });
+                if prompt.is_empty() {
+                    // The model and effort picked are for the first session,
+                    // which the landing opens — carried there rather than lost.
+                    let launch = (model.is_some() || effort.is_some())
+                        .then_some(SessionLaunch { model, effort });
+                    shell.create_bare_worktree(
+                        project,
+                        branch,
+                        agent,
+                        economy_level_id,
+                        step,
+                        launch,
+                        cx,
+                    );
+                } else {
+                    shell.start_work(
+                        NewWork {
+                            project,
+                            branch,
+                            prompt,
+                            attachments: Vec::new(),
+                            agent,
+                            base: None,
+                            economy: Some(token_reduction),
+                            model,
+                            effort,
+                            origin: WorkOrigin::Dialog,
+                        },
+                        cx,
+                    );
                 }
                 cx.notify();
             });
         })
         .detach();
         cx.notify();
+    }
+
+    /// Makes a worktree with no prompt — a shell in it, or its agent's
+    /// session — reporting to `step` as it goes, and lands in it.
+    #[allow(clippy::too_many_arguments)]
+    fn create_bare_worktree(
+        &mut self,
+        project: ProjectId,
+        branch: String,
+        agent: Option<String>,
+        economy_level_id: String,
+        step: crate::starting::Step,
+        launch: Option<SessionLaunch>,
+        cx: &mut Context<Self>,
+    ) {
+        let (root, name) = (project.clone(), branch.clone());
+        // `Workspace` is opened inside the task rather than passed in, as the
+        // merge does: it owns a store handle and a mutex of live sessions.
+        let work = cx.background_executor().spawn(async move {
+            Workspace::open()?.create_worktree_reporting(
+                &root,
+                &name,
+                None,
+                agent.as_deref(),
+                Some(&economy_level_id),
+                &mut |at| {
+                    *step
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(at)
+                },
+            )
+        });
+        cx.spawn(async move |shell: gpui::WeakEntity<Shell>, cx| {
+            let result = work.await;
+            let _ = shell.update(cx, |shell, cx| {
+                shell.finish_create_worktree(result, launch, &project, &branch, cx);
+            });
+        })
+        .detach();
     }
 
     /// Keeps the dialog open with `why` under the fields and the branch
@@ -1060,17 +1091,16 @@ impl Shell {
         &mut self,
         result: Result<(Worktree, PreparedBase), KetError>,
         launch: Option<SessionLaunch>,
+        project: &ProjectId,
+        branch: &str,
         cx: &mut Context<Self>,
     ) {
-        if let Some(dialog) = self.new_worktree.as_mut() {
-            dialog.busy = false;
-        }
         match result {
             Ok((created, prepared)) => {
                 if let Some(notice) = prepared.notice() {
                     tracing::info!(worktree = %created.id, "{notice}");
                 }
-                self.close_new_worktree();
+                self.start_settled(project, branch);
                 self.reload(cx);
                 // Otherwise the sidebar shows a worktree with no size at all
                 // until the next launch's sweep or someone opens the storage
@@ -1105,9 +1135,52 @@ impl Shell {
                     }
                 }
             }
-            Err(e) => self.refuse_new_worktree(e.to_string(), cx),
+            Err(e) => {
+                // The row's line is cut short; the toast holds all of it.
+                self.start_failed(project, branch, e.to_string());
+                self.toast(
+                    crate::ui::toast::Tone::Error,
+                    format!("Couldn't start the worktree {branch}: {e}"),
+                    cx,
+                );
+            }
         }
         cx.notify();
+    }
+
+    /// Opens the dialog again holding `draft`, for Edit on a worktree that
+    /// could not be made.
+    pub(crate) fn reopen_new_worktree(
+        &mut self,
+        draft: &crate::starting::Draft,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(index) = self.projects.iter().position(|p| p.id == draft.project) else {
+            return;
+        };
+        self.open_new_worktree(index, false, cx);
+        self.open_composer(PROMPT_EDITOR, &draft.prompt);
+        self.set_composer_size(PROMPT_EDITOR, PROMPT_TEXT);
+        let Some(dialog) = self.new_worktree.as_mut() else {
+            return;
+        };
+        if let Some(agent) = draft
+            .agent
+            .as_ref()
+            .and_then(|agent| dialog.agents.iter().position(|name| name == agent))
+        {
+            Self::set_new_worktree_agent(dialog, agent);
+        }
+        dialog.model = draft.model.clone();
+        dialog.effort = draft.effort.clone();
+        dialog.token_reduction = draft.economy;
+        dialog.branch_edited = draft.branch_edited;
+        if draft.branch_edited {
+            let name = dialog.name.clone();
+            name.update(cx, |input, _| input.set_text(&draft.branch));
+        } else {
+            self.sync_branch_from_prompt(cx);
+        }
     }
 
     /// Applies an Edit menu action to the prompt, while it has the keys.
@@ -1332,12 +1405,14 @@ impl Shell {
         // which project this is, rather than as a field that looks editable
         // and is not. From the sidebar's foot it is a field, since there it
         // is not known.
-        let colour = self
+        let (colour, image) = self
             .projects
             .iter()
             .find(|node| node.id == dialog.project)
-            .map(|node| node.color)
-            .unwrap_or_else(crate::projects::default_color);
+            .map_or_else(
+                || (crate::projects::default_color(), None),
+                |node| (node.color, node.image.clone()),
+            );
         let initial = dialog
             .project_name
             .chars()
@@ -1345,17 +1420,15 @@ impl Shell {
             .map(|c| c.to_uppercase().to_string())
             .unwrap_or_default();
         let title = if dialog.choose_project {
-            header("New worktree", t)
+            header("new-worktree-close", "New worktree")
         } else {
-            header_with(
-                "New worktree in",
+            header("new-worktree-close", "New worktree in").after(
                 div()
                     .flex()
                     .items_center()
                     .gap(px(6.0))
-                    .child(badge(colour, initial.clone(), t))
+                    .child(image_badge(image.clone(), colour, initial.clone(), t))
                     .child(dialog.project_name.clone()),
-                t,
             )
         };
         let project_select = dialog.choose_project.then(|| {
@@ -1378,7 +1451,7 @@ impl Shell {
             dropdown(
                 "new-worktree-project-select",
                 select("new-worktree-project", dialog.project_name.clone())
-                    .leading(badge(colour, initial.clone(), t))
+                    .leading(image_badge(image.clone(), colour, initial.clone(), t))
                     .open(dialog.project_menu.is_some())
                     .focused(dialog.project_focus.is_focused(window))
                     .render(t),
@@ -1708,14 +1781,6 @@ impl Shell {
             .flatten()
             .map(|text| caption(text, t).font_family(chrome.clone()));
 
-        let close = icon_button("new-worktree-close", Icon::Close)
-            .circle()
-            .render(t)
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.close_new_worktree();
-                cx.notify();
-            }));
-
         let cancel = button("new-worktree-cancel", "Cancel")
             .render(t)
             .on_click(cx.listener(|this, _, _, cx| {
@@ -1784,7 +1849,14 @@ impl Shell {
                             cx.notify();
                         },
                     ))
-                    .child(title.child(close))
+                    .child(
+                        title
+                            .on_close(cx.listener(|this, _, _, cx| {
+                                this.close_new_worktree();
+                                cx.notify();
+                            }))
+                            .render(t),
+                    )
                     .children(
                         project_select.map(|select| row("Project", select.into_any_element())),
                     )

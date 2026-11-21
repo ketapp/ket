@@ -1,5 +1,3 @@
-'use no memo'; // Reads a live HostConnection — see lib/hosts.ts.
-
 // A terminal on the desktop, drawn on the phone.
 //
 // View-only until the phone types: focusing the message line, sending, or a
@@ -22,16 +20,19 @@ import {
   type TextInputInstance,
   View,
 } from 'react-native';
-import { KeyboardAvoidingView } from 'react-native-keyboard-controller';
+import { KeyboardAvoidingView, useReanimatedKeyboardAnimation } from 'react-native-keyboard-controller';
+import Animated, { interpolate, useAnimatedStyle } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { COMPOSER_GAP, composerRest } from '../../../components/Composer';
 import { CommandMenu } from '../../../components/Commands';
 import { TerminalView, type TerminalHandle } from '../../../components/TerminalView';
 import { AgentMark, Keyboard, Send, TerminalGlyph } from '../../../components/icons';
 import { Bar, Card, Dot, Marked, Prose, Screen, Segmented, TabStrip, oneLine } from '../../../components/ui';
 import { agentTerminal, everyWorktree, stateOf, terminalName } from '../../../lib/activity';
+import { useReadOnArrival } from '../../../lib/arrival';
 import { type Command, commandsFor, matching } from '../../../lib/commands';
-import { useHost } from '../../../lib/hosts';
+import { useHost, useHostState } from '../../../lib/hosts';
 import { font, size, t, tint } from '../../../lib/theme';
 
 /** The pause between a message and its Enter — see `send`. */
@@ -74,8 +75,15 @@ export default function TerminalScreen() {
   const { host: hostId, terminal } = useLocalSearchParams<{ host: string; terminal: string }>();
   const terminalId = BigInt(terminal);
   const insets = useSafeAreaInsets();
+  // Under the composer: the chat's, so the field and its buttons stand where
+  // the chat's do — off the foot with the keyboard down, just over it up.
+  // The keyboard itself is made room for by the screen's avoiding view.
+  const rest = composerRest(insets.bottom);
+  const { progress: keyboardUp } = useReanimatedKeyboardAnimation();
+  const foot = useAnimatedStyle(() => ({ paddingBottom: interpolate(keyboardUp.get(), [0, 1], [rest, COMPOSER_GAP]) }));
   const view = useRef<TerminalHandle>(null);
   const conn = useHost(hostId);
+  const hostState = useHostState(conn);
   const [ready, setReady] = useState(false);
   // Which terminal the desktop has sent a picture of, and why not when it
   // refused: an empty terminal said nothing about either. By terminal, since
@@ -156,10 +164,17 @@ export default function TerminalScreen() {
     liveQueue.current = Promise.resolve();
   };
 
-  const located = everyWorktree(conn?.snapshot ?? null)
+  const located = everyWorktree(hostState?.snapshot ?? null)
     .map((l) => ({ ...l, terminal: l.worktree.terminals.find((x) => x.id === terminalId) }))
     .find((l) => l.terminal);
   const summary = located?.terminal;
+  // The terminal on screen is its agent's answer read, as its chat is (1.32).
+  const unread = summary?.unread ?? false;
+  useEffect(() => {
+    if (conn && unread) conn.markSeen(terminalId);
+  }, [conn, unread, terminalId]);
+  // And a worktree marked unread from its menu, as the terminal is come to (1.35).
+  useReadOnArrival(conn, located?.worktree);
   // The worktree's state belongs to its agent's terminal, and rides on that
   // terminal's mark — in the tabs, or beside the title when there is one.
   const agentId = located ? agentTerminal(located.worktree)?.id : undefined;
@@ -168,11 +183,11 @@ export default function TerminalScreen() {
   // Subscribe once the page can draw, and again after every reconnect.
   useEffect(() => {
     if (!conn || !ready) return;
-    let wasConnected = conn.status === 'connected';
+    let wasConnected = conn.state.status === 'connected';
     const onRefused = (why: string) => setRefusal({ terminal: terminalId, why });
     if (wasConnected) conn.subscribe(terminalId, onRefused);
     const offChange = conn.onChange(() => {
-      const connected = conn.status === 'connected';
+      const connected = conn.state.status === 'connected';
       if (connected && !wasConnected) {
         conn.subscribe(terminalId, onRefused);
         held.current = false;
@@ -203,7 +218,7 @@ export default function TerminalScreen() {
   // Fitted with or without control: the phone watches at its own size too.
   // Said again on every reconnect — the desktop gives its size back when a
   // phone's session ends, so a new session has to ask afresh.
-  const online = conn?.status === 'connected';
+  const online = hostState?.status === 'connected';
   useEffect(() => view.current?.setFit(ready), [ready, online]);
 
   const fitTo = (cols: number, rows: number) => {
@@ -415,7 +430,7 @@ export default function TerminalScreen() {
               {drawn ? null : (
                 <View pointerEvents="none" style={styles.waiting} accessibilityLiveRegion="polite">
                   <Prose>
-                    {conn?.status !== 'connected'
+                    {hostState?.status !== 'connected'
                       ? 'Waiting for the desktop…'
                       : refused
                         ? `The desktop isn’t sending this terminal: ${refused}. Still trying.`
@@ -426,7 +441,7 @@ export default function TerminalScreen() {
             </View>
           </Card>
 
-          <Card style={[styles.panel, { marginBottom: Math.max(insets.bottom, size.gutter) }]}>
+          <Card style={styles.panel}>
             {note ? <Prose style={styles.small}>{note}</Prose> : null}
             {!live && suggested.length > 0 ? <CommandMenu commands={suggested} onPick={pick} /> : null}
             {keysOpen ? (
@@ -446,87 +461,86 @@ export default function TerminalScreen() {
               value={typing}
               onChange={switchTyping}
             />
-            <View style={styles.composer}>
+          </Card>
+          {/* Out of the card, on the page as the chat's composer is: the
+              keys button where the chat's + is, the field and Send alike. */}
+          <Animated.View style={[styles.composer, foot]}>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={keysOpen ? 'Hide keys' : 'Show keys'}
+              accessibilityState={{ expanded: keysOpen }}
+              onPress={() => setKeysOpen(!keysOpen)}
+              style={[styles.menu, keysOpen && { backgroundColor: t.selection }]}
+            >
+              <Keyboard size={18} color={keysOpen ? t.text : t.dim} />
+            </Pressable>
+            {live ? (
+              <TextInput
+                // A new field for each terminal: what the last one holds
+                // was typed into that terminal, not this one.
+                key={`live-${terminal}`}
+                ref={liveField}
+                autoFocus={focusOnSwitch}
+                defaultValue=""
+                onChangeText={changeLive}
+                // Backspace on an empty field changes nothing, so it is
+                // only heard as a key; one that changes the field is left
+                // to `changeLive` — see `unpaired`.
+                onKeyPress={(e) => {
+                  if (e.nativeEvent.key !== 'Backspace') return;
+                  if (waiting('change')) unpaired.current = null;
+                  else if (liveText.current !== '') unpaired.current = { by: 'key', at: Date.now() };
+                  else press(BACKSPACE);
+                }}
+                onFocus={() => void ensureControl()}
+                onSubmitEditing={enterLive}
+                // The field stays up for the next key.
+                submitBehavior="submit"
+                accessibilityLabel="Live keys"
+                placeholder="Each key goes straight in"
+                placeholderTextColor={t.faint}
+                {...oneLine}
+                autoCapitalize="none"
+                autoCorrect={false}
+                spellCheck={false}
+                smartInsertDelete={false}
+                returnKeyType="default"
+                style={[styles.input, styles.liveInput]}
+              />
+            ) : (
+              <TextInput
+                key="message"
+                autoFocus={focusOnSwitch}
+                value={message}
+                onChangeText={setMessage}
+                onFocus={() => void ensureControl()}
+                onSubmitEditing={() => void send()}
+                placeholder={`Message ${agent || 'the terminal'}…`}
+                placeholderTextColor={t.faint}
+                {...oneLine}
+                autoCapitalize="none"
+                autoCorrect
+                spellCheck
+                returnKeyType="send"
+                style={styles.input}
+              />
+            )}
+            {live ? (
+              <Pressable accessibilityRole="button" accessibilityLabel="Enter" onPress={enterLive} style={styles.send}>
+                <Text style={styles.enterText}>⏎</Text>
+              </Pressable>
+            ) : (
               <Pressable
                 accessibilityRole="button"
-                accessibilityLabel={keysOpen ? 'Hide keys' : 'Show keys'}
-                accessibilityState={{ expanded: keysOpen }}
-                onPress={() => setKeysOpen(!keysOpen)}
-                style={[styles.menu, keysOpen && { backgroundColor: t.selection }]}
+                accessibilityLabel="Send"
+                disabled={!message}
+                onPress={() => void send()}
+                style={[styles.send, message ? styles.sendReady : null]}
               >
-                <Keyboard size={18} color={keysOpen ? t.text : t.dim} />
+                <Send size={18} color={message ? t.onBrand : t.faint} weight={2.3} />
               </Pressable>
-              {live ? (
-                <TextInput
-                  // A new field for each terminal: what the last one holds
-                  // was typed into that terminal, not this one.
-                  key={`live-${terminal}`}
-                  ref={liveField}
-                  autoFocus={focusOnSwitch}
-                  defaultValue=""
-                  onChangeText={changeLive}
-                  // Backspace on an empty field changes nothing, so it is
-                  // only heard as a key; one that changes the field is left
-                  // to `changeLive` — see `unpaired`.
-                  onKeyPress={(e) => {
-                    if (e.nativeEvent.key !== 'Backspace') return;
-                    if (waiting('change')) unpaired.current = null;
-                    else if (liveText.current !== '') unpaired.current = { by: 'key', at: Date.now() };
-                    else press(BACKSPACE);
-                  }}
-                  onFocus={() => void ensureControl()}
-                  onSubmitEditing={enterLive}
-                  // The field stays up for the next key: `submitBehavior` on
-                  // the phone, `blurOnSubmit` in the browser, which knows
-                  // only that.
-                  submitBehavior="submit"
-                  blurOnSubmit={false}
-                  accessibilityLabel="Live keys"
-                  placeholder="Each key goes straight in"
-                  placeholderTextColor={t.faint}
-                  {...oneLine}
-                  autoCapitalize="none"
-                  autoCorrect={false}
-                  spellCheck={false}
-                  smartInsertDelete={false}
-                  returnKeyType="default"
-                  style={[styles.input, styles.liveInput]}
-                />
-              ) : (
-                <TextInput
-                  key="message"
-                  autoFocus={focusOnSwitch}
-                  value={message}
-                  onChangeText={setMessage}
-                  onFocus={() => void ensureControl()}
-                  onSubmitEditing={() => void send()}
-                  placeholder={`Message ${agent || 'the terminal'}…`}
-                  placeholderTextColor={t.faint}
-                  {...oneLine}
-                  autoCapitalize="none"
-                  autoCorrect
-                  spellCheck
-                  returnKeyType="send"
-                  style={styles.input}
-                />
-              )}
-              {live ? (
-                <Pressable accessibilityRole="button" accessibilityLabel="Enter" onPress={enterLive} style={styles.send}>
-                  <Text style={styles.enterText}>⏎</Text>
-                </Pressable>
-              ) : (
-                <Pressable
-                  accessibilityRole="button"
-                  accessibilityLabel="Send"
-                  disabled={!message}
-                  onPress={() => void send()}
-                  style={[styles.send, message ? styles.sendReady : null]}
-                >
-                  <Send size={18} color={message ? t.onBrand : t.faint} weight={2.3} />
-                </Pressable>
-              )}
-            </View>
-          </Card>
+            )}
+          </Animated.View>
         </View>
       </KeyboardAvoidingView>
     </Screen>

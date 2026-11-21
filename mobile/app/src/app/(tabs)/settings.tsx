@@ -1,5 +1,3 @@
-'use no memo'; // Reads a live HostConnection — see lib/hosts.ts.
-
 // Settings: the desktops this phone is paired with, and pairing another;
 // which notices the phone shows; the app lock; and About.
 
@@ -12,14 +10,14 @@ import { BrandMark, Desktop, External } from '../../components/icons';
 import { Button, Card, Heading, Prose, Row, Screen, Segmented, TAB_BAR_ROOM, TabBar, Tag, Toggle } from '../../components/ui';
 import { everyWorktree } from '../../lib/activity';
 import { reportText, useErrorReports } from '../../lib/crashes';
-import { statusLine, useHosts } from '../../lib/hosts';
+import { statusLine, useHosts, useHostStates } from '../../lib/hosts';
 import { LOCK_AFTER, biometry, confirmIdentity, setLockAfter, turnOff, useLock } from '../../lib/lock';
-import { type Kind, available as noticesAvailable, choose, openPhoneSettings, turnOff as quiet, turnOn as notify, useNotices } from '../../lib/notices';
+import { type Kind, choose, openPhoneSettings, turnOff as quiet, turnOn as notify, useNotices } from '../../lib/notices';
 import { font, size, t } from '../../lib/theme';
 import { build, version } from '../../lib/version';
 
 export default function Settings() {
-  const conns = useHosts() ?? [];
+  const hostStates = useHostStates(useHosts()) ?? [];
   const lock = useLock();
   const [kind, setKind] = useState<string | null>(null);
   useEffect(() => {
@@ -45,8 +43,8 @@ export default function Settings() {
     if (on) await notify();
     else await quiet();
   };
-  const waiting = conns.reduce(
-    (n, c) => n + everyWorktree(c.snapshot).filter((l) => l.worktree.activity === Activity.BLOCKED).length,
+  const waiting = hostStates.reduce(
+    (n, h) => n + everyWorktree(h.snapshot).filter((l) => l.worktree.activity === Activity.BLOCKED).length,
     0,
   );
   return (
@@ -57,61 +55,59 @@ export default function Settings() {
           <Text style={styles.wordmark}>ket</Text>
         </View>
         <Card style={styles.card}>
-          <Heading count={conns.length}>Paired desktops</Heading>
-          {conns.map((conn) => (
+          <Heading count={hostStates.length}>Paired desktops</Heading>
+          {hostStates.map((hostState) => (
             <Row
-              key={conn.host.id}
+              key={hostState.host.id}
               small
               chevron
               mark={<Desktop size={16} />}
-              title={conn.host.name}
-              detail={`${statusLine(conn).text} · ${conn.addressForDisplay() ? hostOf(conn.addressForDisplay()!) : 'trying saved addresses'}`}
-              onPress={() => router.push(`/devices/${conn.host.id}`)}
+              title={hostState.host.name}
+              detail={`${statusLine(hostState).text} · ${hostState.displayAddress ? hostOf(hostState.displayAddress) : 'trying saved addresses'}`}
+              onPress={() => router.push(`/devices/${hostState.host.id}`)}
             />
           ))}
-          {conns.length === 0 ? <Prose style={styles.note}>No desktop paired yet.</Prose> : null}
+          {hostStates.length === 0 ? <Prose style={styles.note}>No desktop paired yet.</Prose> : null}
           <View style={styles.actions}>
             <Button kind="primary" title="Pair a desktop" onPress={() => router.push('/pair')} />
           </View>
         </Card>
-        {noticesAvailable ? (
-          <Card style={styles.card}>
-            <Heading>Notifications</Heading>
-            <View style={styles.setting}>
-              <View style={styles.settingText}>
-                <Text style={styles.settingName}>Notify me</Text>
-                <Prose style={styles.settingDetail}>
-                  A banner while ket is not in front, and a badge counting the prompts waiting on you. Nothing is sent
-                  anywhere: the phone posts them itself from what the desktop tells it.
-                </Prose>
-              </View>
-              <Toggle on={notices.config.on} onChange={(on) => void changeNotify(on)} label="Notify me" />
+        <Card style={styles.card}>
+          <Heading>Notifications</Heading>
+          <View style={styles.setting}>
+            <View style={styles.settingText}>
+              <Text style={styles.settingName}>Notify me</Text>
+              <Prose style={styles.settingDetail}>
+                A banner while ket is not in front, and a badge counting the prompts waiting on you. Once ket is
+                closed, your Mac sends them through ket&apos;s push service, sealed so only this phone can read them.
+              </Prose>
             </View>
-            {notices.config.on && notices.refused ? (
-              <>
-                <Prose style={styles.note} color={t.attention}>
-                  Notifications are turned off for ket in this phone&apos;s Settings, so none can be shown.
-                </Prose>
-                <Row small chevron title="Open this phone's Settings" onPress={openPhoneSettings} />
-              </>
-            ) : null}
-            {notices.config.on
-              ? NOTICES.map((notice) => (
-                  <View key={notice.kind} style={styles.setting}>
-                    <View style={styles.settingText}>
-                      <Text style={styles.settingName}>{notice.name}</Text>
-                      <Prose style={styles.settingDetail}>{notice.detail}</Prose>
-                    </View>
-                    <Toggle
-                      on={notices.config[notice.kind]}
-                      onChange={(on) => void choose(notice.kind, on)}
-                      label={notice.name}
-                    />
+            <Toggle on={notices.config.on} onChange={(on) => void changeNotify(on)} label="Notify me" />
+          </View>
+          {notices.config.on && notices.refused ? (
+            <>
+              <Prose style={styles.note} color={t.attention}>
+                Notifications are turned off for ket in this phone&apos;s Settings, so none can be shown.
+              </Prose>
+              <Row small chevron title="Open this phone's Settings" onPress={openPhoneSettings} />
+            </>
+          ) : null}
+          {notices.config.on
+            ? NOTICES.map((notice) => (
+                <View key={notice.kind} style={styles.setting}>
+                  <View style={styles.settingText}>
+                    <Text style={styles.settingName}>{notice.name}</Text>
+                    <Prose style={styles.settingDetail}>{notice.detail}</Prose>
                   </View>
-                ))
-              : null}
-          </Card>
-        ) : null}
+                  <Toggle
+                    on={notices.config[notice.kind]}
+                    onChange={(on) => void choose(notice.kind, on)}
+                    label={notice.name}
+                  />
+                </View>
+              ))
+            : null}
+        </Card>
         <Card style={styles.card}>
           <Heading>Security</Heading>
           <View style={styles.setting}>

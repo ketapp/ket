@@ -1,5 +1,3 @@
-'use no memo'; // Reads a live HostConnection — see lib/hosts.ts.
-
 // The chat for work just asked for, before it has a worktree: what the agent
 // was asked, as a message on its way, and under it what the desktop is doing
 // to get the agent running. Start task lands here the moment the desktop
@@ -21,7 +19,7 @@
 
 import { router, useLocalSearchParams, useNavigation } from 'expo-router';
 import { useEffect, useState } from 'react';
-import { ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { ScrollView, StyleSheet, TextInput, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as Clipboard from 'expo-clipboard';
 
@@ -30,9 +28,9 @@ import { SendButton } from '../../../components/Composer';
 import { KeyboardLift } from '../../../components/KeyboardLift';
 import { Track } from '../../../components/Track';
 import { Changes } from '../../../components/icons';
-import { Bar, Button, Dot, IconCluster, Prose, Screen } from '../../../components/ui';
+import { Bar, Button, IconCluster, Prose, Screen } from '../../../components/ui';
 import { STARTING_FOR_MS } from '../../../lib/connection';
-import { useHost } from '../../../lib/hosts';
+import { useHost, useHostState } from '../../../lib/hosts';
 import { type Seed, elapsed, firstLine, progressOf, segments, stageText } from '../../../lib/starting';
 import { Chat } from '../../session/[host]/[terminal]';
 import { agentLabel, font, size, t } from '../../../lib/theme';
@@ -40,6 +38,7 @@ import { agentLabel, font, size, t } from '../../../lib/theme';
 export default function StartingTask() {
   const { host: hostId, at, terminal: opened } = useLocalSearchParams<{ host: string; at: string; terminal?: string }>();
   const conn = useHost(hostId);
+  const hostState = useHostState(conn);
   const insets = useSafeAreaInsets();
   // This screen's own route: another screen may be on top of it when the
   // agent opens, and `router.setParams` would name the terminal in that one.
@@ -50,7 +49,7 @@ export default function StartingTask() {
   // in for one on Worktrees: the row goes the moment the worktree is listed,
   // which can be before this screen has opened.
   const key = following === null ? at : String(following);
-  const work = conn?.asked.find((asked) => String(asked.at) === key) ?? null;
+  const work = hostState?.asked.find((asked) => String(asked.at) === key) ?? null;
   const [now, setNow] = useState(() => Date.now());
   // The terminal whose chat this screen has become — see below.
   const [chat, setChat] = useState<{ terminal: string; seed?: Seed } | null>(() => (opened ? { terminal: opened } : null));
@@ -68,10 +67,10 @@ export default function StartingTask() {
   const [note, setNote] = useState('');
   const [asking, setAsking] = useState(false);
 
-  const progress = work ? progressOf(work, conn?.snapshot ?? null) : { step: 'asked' as const };
+  const progress = work ? progressOf(work, hostState?.snapshot ?? null) : { step: 'asked' as const };
   const waited = now - (since ?? work?.at ?? now);
   const stalled = progress.step !== 'ready' && waited > STARTING_FOR_MS;
-  const mac = conn?.host.name || 'your Mac';
+  const mac = hostState?.host.name || 'your Mac';
   const agent = work?.agent ?? '';
 
   // Its agent's tab is open: from here on this screen is that terminal's
@@ -102,7 +101,7 @@ export default function StartingTask() {
       setNote(why.charAt(0).toUpperCase() + why.slice(1));
       return;
     }
-    const again = conn.asked.at(-1);
+    const again = conn.state.asked.at(-1);
     if (again) {
       setSince(null);
       setFollowing(again.at);
@@ -127,7 +126,6 @@ export default function StartingTask() {
     );
   }
 
-  const state = stalled ? { word: 'not started', color: t.quotaWarm } : { word: 'starting', color: t.brand };
   const worktree = progress.step === 'asked' ? undefined : progress.worktree;
   const minutes = Math.max(1, Math.round((now - work.at) / 60_000));
   return (
@@ -136,12 +134,6 @@ export default function StartingTask() {
         <Bar
           back
           title={worktree?.name || firstLine(work.prompt)}
-          lead={
-            <View style={styles.state}>
-              <Dot size={6} color={state.color} />
-              <Text style={[styles.stateText, { color: state.color }]}>{state.word}</Text>
-            </View>
-          }
           right={
             worktree ? (
               <IconCluster
@@ -175,7 +167,7 @@ export default function StartingTask() {
                 {worktree ? (
                   <Button title="Open the worktree" onPress={() => router.push(`/worktree/${hostId}/${encodeURIComponent(worktree.id)}`)} />
                 ) : (
-                  <Button title="Ask again" disabled={asking || conn?.status !== 'connected'} onPress={() => void askAgain()} />
+                  <Button title="Ask again" disabled={asking || hostState?.status !== 'connected'} onPress={() => void askAgain()} />
                 )}
                 <Button kind="danger" title="Forget it" onPress={leave} />
               </View>
@@ -213,8 +205,6 @@ export default function StartingTask() {
 const styles = StyleSheet.create({
   fill: { flex: 1 },
   gone: { gap: 12, padding: size.gutter, alignItems: 'flex-start' },
-  state: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  stateText: { fontFamily: font.chrome, fontSize: size.caption },
   segments: { flexDirection: 'row', gap: 4, paddingHorizontal: size.gutter, paddingBottom: 10 },
   page: { paddingHorizontal: size.gutter + 4, paddingTop: 4, paddingBottom: 18, gap: 12 },
   stalled: { gap: 12, paddingVertical: 12, alignItems: 'flex-start' },

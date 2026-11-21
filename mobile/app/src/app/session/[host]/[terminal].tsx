@@ -1,5 +1,3 @@
-'use no memo'; // Reads a live HostConnection — see lib/hosts.ts.
-
 // An agent's session as a conversation: what you said, what it said back,
 // and each tool it used as one line, a run of them shut under their count —
 // read from its transcript on the desktop, not drawn from a terminal screen.
@@ -13,76 +11,97 @@ import {
   Answer_Choice,
   BackgroundSession_State,
   type ColdCache,
+  type Conversation,
   type Question,
   type Turn,
   Turn_Kind,
 } from '@ket/remote';
 import * as Clipboard from 'expo-clipboard';
-import { router, useFocusEffect, useLocalSearchParams, useNavigation } from 'expo-router';
-import { Fragment, type ReactNode, useCallback, useEffect, useRef, useState } from 'react';
+import { router, useFocusEffect, useIsFocused, useLocalSearchParams } from 'expo-router';
+import { FlashList, type FlashListRef } from '@shopify/flash-list';
+import {
+  createContext,
+  forwardRef,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import {
   AppState,
-  Linking,
-  Platform,
   Pressable,
   ScrollView,
-  type StyleProp,
+  type ScrollViewProps,
   StyleSheet,
   Text,
   TextInput,
   type TextInputInstance,
-  type TextStyle,
   View,
-  type ViewInstance,
-  type ViewStyle,
 } from 'react-native';
-import { KeyboardChatScrollView } from 'react-native-keyboard-controller';
-import Animated, { useAnimatedStyle, useSharedValue, withTiming } from 'react-native-reanimated';
+import { KeyboardChatScrollView, type KeyboardChatScrollViewRef } from 'react-native-keyboard-controller';
+import Animated, { type SharedValue, useAnimatedStyle, useSharedValue, withTiming } from 'react-native-reanimated';
 import Svg, { Defs, LinearGradient, Rect, Stop as GradientStop } from 'react-native-svg';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { FileChip, ImagesChip, SentFiles, type Source, Tray, attachSections } from '../../../components/Attachments';
-import { AgentViewList, backgroundState, terminalAt } from '../../../components/AgentView';
-import { CantFind, Compacting, Outgoing, type OutgoingStatus, StatusMark, Working } from '../../../components/ChatRows';
+import { attachSections, type Source, Tray } from '../../../components/Attachments';
+import { AgentViewList, terminalAt } from '../../../components/AgentView';
+import { CantFind, Compacting, Outgoing, type OutgoingStatus, Status, Working } from '../../../components/ChatRows';
+import { ChatBar, ChatNote, type Tone } from '../../../components/ChatBar';
+import { Asking, cardStyles } from '../../../components/ChatCards';
+import { Tools, TurnView } from '../../../components/ChatTurns';
 import { commandRow } from '../../../components/Commands';
-import { PlusButton, SendButton, plusMenu, slashMenu } from '../../../components/Composer';
-import { FloatMenu, type Place, placeOf } from '../../../components/FloatMenu';
+import { COMPOSER_GAP, PlusButton, SendButton, composerRest, plusMenu, slashMenu } from '../../../components/Composer';
+import { FloatMenu } from '../../../components/FloatMenu';
 import { KeyboardLift } from '../../../components/KeyboardLift';
-import { ModelSheet } from '../../../components/ModelSheet';
 import { KeyCommands } from '../../../components/KeyCommands';
 import { MicButton } from '../../../components/Mic';
 import { RiskBadge } from '../../../components/Risk';
+import { SessionPickers, useSessionPicks } from '../../../components/SessionPicks';
 import { Dim, Tucked, type Tuckable, useTuck } from '../../../components/Tuck';
-import { AgentMark, Bolt, Bookmark, Changes, Check, Chevron, ChevronDown, Close, Pause, Pencil, Send, Shield, Sliders, Snowflake, TerminalWindow } from '../../../components/icons';
-import { Bar, Button, Choice, Dot, IconCluster, Prose, Screen, field, oneLine } from '../../../components/ui';
-import { detail, everyWorktree, programBusy, promptKind, stateOf } from '../../../lib/activity';
+import {
+  Bookmark,
+  Check,
+  ChevronDown,
+  Close,
+  Snowflake,
+  TerminalWindow,
+} from '../../../components/icons';
+import { Bar, Button, Prose, Screen } from '../../../components/ui';
+import { detail, everyWorktree, programBusy, promptKind } from '../../../lib/activity';
+import { useReadOnArrival } from '../../../lib/arrival';
 import {
   type Attachment,
-  MAX_BYTES,
-  MAX_FILES,
   canPaste,
-  fileName,
   fromCamera,
   fromClipboard,
   fromFiles,
   fromPhotos,
+  MAX_BYTES,
+  MAX_FILES,
   splitFiles,
 } from '../../../lib/attach';
 import { type Command, commandsFor, matching } from '../../../lib/commands';
-import { DesktopBusy, type PromptAnswer, STARTING_FOR_MS } from '../../../lib/connection';
-import { useHost } from '../../../lib/hosts';
-import { type Block, type Run, markdown } from '../../../lib/markdown';
+import { DesktopBusy, type HostConnection, type PromptAnswer, STARTING_FOR_MS } from '../../../lib/connection';
+import { useHost, useHostState } from '../../../lib/hosts';
+import { carries, fits, grouped, join, type Pending, type Said, saidIn } from '../../../lib/chat';
 import { type Seed, reconcileTask, taskForTerminal } from '../../../lib/starting';
 import { useDictation } from '../../../lib/dictation';
 import { confirmIdentity } from '../../../lib/lock';
 import { Refused } from '../../../lib/refused';
-import { agentLabel, blend, font, size, t, tint } from '../../../lib/theme';
+import { agentLabel, font, size, t, tint } from '../../../lib/theme';
 import { canDictate } from '../../../lib/voice';
+import { reasonOf, sentence } from '../../../lib/text';
 
 /** How often the conversation is asked for while it is on screen: more
  * often while the agent is working or a message is on its way. */
 const POLL_MS = 1500;
 const POLL_BUSY_MS = 700;
+
+/** A cursor that reads the conversation from its beginning. Out here
+ * because the React Compiler skips a component with a BigInt literal in it. */
+const FROM_THE_START = 0n;
 
 /** The pause between a message and its Enter — see the terminal screen. */
 const ENTER_AFTER_MS = 80;
@@ -108,23 +127,6 @@ const STILL_OPENING = ['no agent has reported from this terminal yet', NOT_THERE
  * Send tapped mid-autocorrect, the correction lands after the clearing. */
 const SETTLE_MS = 300;
 
-/** A message sent from here that the conversation has not shown yet. */
-type Pending = {
-  key: number;
-  text: string;
-  at: number;
-  /** Sent while the agent was working, so it waits in the agent's queue,
-   * after the step in progress. Sent while it was idle, it is what starts
-   * the next step, and belongs before the step's indicator. */
-  behind: boolean;
-  /** The photos and files sent with it. */
-  files: Attachment[];
-};
-
-/** A message of yours as the conversation reads it back: its words, without
- * the paths the desktop listed under them, and how many images it carried. */
-type Said = { words: string; images: number };
-
 /** A card over the conversation's foot while something waits on you: a
  * background session's question, answered in agent view on the Mac; a
  * question or a plan; or a permission, with the answer just given here. */
@@ -142,15 +144,21 @@ type WaitingCard = Tuckable &
 const carriedFiles = new Map<string, Attachment[]>();
 const carriedKey = (where: string, said: Said) => `${where}\n${said.images}\n${said.words}`;
 
+/** Photos, one just taken, files, or what was copied: at most `room`. */
+function pickFiles(source: Source, room: number): Promise<Attachment[]> {
+  if (source === 'photos') return fromPhotos(room);
+  if (source === 'camera') return fromCamera();
+  if (source === 'files') return fromFiles(room);
+  return fromClipboard();
+}
+
 /** How tall the fade over the conversation's foot is, and how long it
  * takes to come and go. */
 const EDGE_H = 28;
 const EDGE_MS = 180;
 
-/** Whether a card waiting on you floats over the conversation's foot, which
- * scrolls clear of it. Not on the web, whose scroll view has no content
- * inset to keep clear with: there the card sits in line over the composer. */
-const FLOATS = Platform.OS !== 'web';
+/** How far the desk under the composer reaches below it: see `styles.desk`. */
+const DESK_BELOW = 48;
 
 /** One-tap replies every session has. Chips over the composer while the
  * draft is empty, after `/` and the desktop's snippets. */
@@ -161,6 +169,15 @@ const REPLIES = ['Continue', 'Looks good', 'Run the tests', 'Commit it'];
  * was, rather than starting over at "Loading the conversation…". */
 const kept = new Map<string, { turns: Turn[]; cursor: bigint; session: string }>();
 
+/** Tells the desktop the terminal's conversation is read, while this screen
+ * is the one in front and its agent has an answer nobody has looked at. */
+function useSeen(conn: HostConnection | null, terminalId: bigint, unread: boolean) {
+  const showing = useIsFocused();
+  useEffect(() => {
+    if (conn && unread && showing) conn.markSeen(terminalId);
+  }, [conn, unread, showing, terminalId]);
+}
+
 /** Cold spells already answered, by host, session and the request the spell
  * began after, while the app runs: each is asked about once (1.28). */
 const coldAnswered = new Set<string>();
@@ -169,10 +186,53 @@ const coldAnswered = new Set<string>();
  * to, by host and terminal: taken once, by that chat as it opens. */
 const carried = new Map<string, { draft: string; files: Attachment[] }>();
 
-/** How long the conversation waits for the push to finish before painting
- * anyway: a screen that arrived without an animation, or a platform that
- * never says one ended, is not left blank. Longer than the stack's slide. */
-const SETTLE_BOUND_MS = 600;
+/** How far past the screen the conversation draws turns ahead of being
+ * scrolled to, in points: room for the keyboard's lift, so a turn coming
+ * into view as it rises is already there rather than drawn mid-slide. */
+const DRAW_AHEAD = 600;
+
+/** What the conversation's scroll view lifts by, from the chat drawing it:
+ * see ChatScroll. */
+const ChatScrollContext = createContext<{ lift: number; room?: SharedValue<number> }>({ lift: 0 });
+
+/** The conversation's scroll view, under the list that draws only the turns
+ * near the screen: lifted with the keyboard, frame for frame, while the
+ * newest turn is in view, and someone scrolled up to read is left there. A
+ * card waiting on you floats over the conversation's foot (`room`): the
+ * conversation scrolls clear of it, and follows it down as it goes. One
+ * component for the list's whole life, so the list never makes its scroll
+ * view again; what changes comes through ChatScrollContext. */
+const ChatScroll = forwardRef<KeyboardChatScrollViewRef, ScrollViewProps>(function ChatScroll(props, ref) {
+  const { lift, room } = useContext(ChatScrollContext);
+  return (
+    <KeyboardChatScrollView
+      ref={ref}
+      keyboardLiftBehavior="whenAtEnd"
+      offset={lift}
+      extraContentPadding={room}
+      automaticallyAdjustContentInsets={false}
+      contentInsetAdjustmentBehavior="never"
+      {...props}
+    />
+  );
+});
+
+/** A row of the conversation: a turn, or a run of tool lines by the turn
+ * that starts it; and last, `FOOT`, what is on its way — messages sent from
+ * here and the agent working. The foot is always there, so starting at the
+ * last row starts at the end of everything. */
+type Row = { key: string; at: number; tools?: Turn[] };
+
+/** The foot row's `at`. */
+const FOOT = -1;
+
+const FOOT_ROW: Row = { key: 'foot', at: FOOT };
+
+/** The space between rows, but not over the foot, which spaces itself only
+ * while it holds something. */
+function Gap({ trailingItem }: { trailingItem?: Row }) {
+  return trailingItem?.at === FOOT ? null : <View style={styles.gap} />;
+}
 
 /** Each agent view session's name, by chat, for its title while agent view
  * isn't listing it — a cold start, or the listing being read again. */
@@ -191,7 +251,8 @@ const sessionNames = new Map<string, string>();
 export default function Session() {
   const { host: hostId, terminal, chat } = useLocalSearchParams<{ host: string; terminal: string; chat?: string }>();
   const conn = useHost(hostId);
-  const snapshot = conn?.snapshot ?? null;
+  const hostState = useHostState(conn);
+  const snapshot = hostState?.snapshot ?? null;
   const at = terminalAt(snapshot, BigInt(terminal));
   const [mode, setMode] = useState<'list' | 'chat' | undefined>(chat ? 'chat' : undefined);
   const [last, setLast] = useState<AgentView | undefined>(undefined);
@@ -214,7 +275,7 @@ export default function Session() {
       hostId={hostId}
       terminal={terminal}
       view={view}
-      reading={!view.listed && (conn?.hostMinor ?? 0) >= 22}
+      reading={!view.listed && (hostState?.hostMinor ?? 0) >= 22}
       left={!showing}
     />
   );
@@ -235,33 +296,15 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
   const background = started ? '' : (params.session ?? '');
   const terminalId = BigInt(terminal);
   const conn = useHost(hostId);
+  const hostState = useHostState(conn);
   const insets = useSafeAreaInsets();
-  // The stack renders this screen before it slides it in, and painting a
-  // kept conversation — every turn, unvirtualised — on that first frame held
-  // the tap for as long as the paint took. So the turns wait for the
-  // transition to end; the header and composer come up at once. Drawn in
-  // place, nothing slides in: painted at once.
-  const navigation = useNavigation<{ addListener(type: 'transitionEnd', listener: () => void): () => void }>();
-  const [settled, setSettled] = useState(started !== undefined);
-  useEffect(() => {
-    if (settled) return;
-    let done = false;
-    const settle = () => {
-      if (done) return;
-      done = true;
-      setSettled(true);
-    };
-    const off = navigation.addListener('transitionEnd', settle);
-    const bound = setTimeout(settle, SETTLE_BOUND_MS);
-    return () => {
-      off();
-      clearTimeout(bound);
-    };
-  }, [navigation, settled]);
   const keptKey = background ? `${hostId}:${terminal}:${background}` : `${hostId}:${terminal}`;
-  const [turns, setTurns] = useState<Turn[]>(() => kept.get(keptKey)?.turns ?? []);
   // The task a new worktree was started on from this phone: see `started`.
-  const task = background ? undefined : taskForTerminal(conn?.asked ?? [], terminalId);
+  // Before any state: the compiler can't tell a BigInt won't change, so
+  // everything between `terminalId` and its last use here is held as still
+  // changing, and a setter in that stretch is treated as one that does.
+  const task = background ? undefined : taskForTerminal(hostState?.asked ?? [], terminalId);
+  const [turns, setTurns] = useState<Turn[]>(() => kept.get(keptKey)?.turns ?? []);
   const seed = task?.delivery ? undefined : (started?.seed ?? (task ? { text: task.prompt, draft: '' } : undefined));
   // The normal hand-off starts a new delivery timer. Worktree creation and
   // agent startup may already have taken longer than that timer allows.
@@ -310,7 +353,11 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
     draft.current = text;
     setMessage(text);
   };
-  const [note, setNote] = useState('');
+  // A line for the reader, in a capsule over the top of the conversation,
+  // and what kind it is: done, copied, a heads-up, or by the way.
+  const [notice, setNotice] = useState<{ text: string; tone: Tone }>({ text: '', tone: 'warn' });
+  const note = notice.text;
+  const setNote = (text: string, tone: Tone = 'warn') => setNotice({ text, tone });
   // The note is about a permission that is off: Settings, under it.
   const [toSettings, setToSettings] = useState(false);
   // Photos and files for the next message, in the field above its words.
@@ -339,26 +386,12 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
   const [stopping, setStopping] = useState(false);
   // Sends so far: each one launches the arrow on the Send button.
   const [launches, setLaunches] = useState(0);
-  // The agent's mode, from the pill in the bar: its menu, and the mode
-  // being switched to while the desktop presses for it.
-  const [modeMenu, setModeMenu] = useState<Place | null>(null);
-  const [switching, setSwitching] = useState('');
-  // How the last pick went, said in the sheet that made it: the chat's own
-  // note is under the sheet while it is up.
-  const [said, setSaid] = useState<{ text: string; failed: boolean } | null>(null);
-  // Picks the desktop has made, each with what the snapshot said when it was
-  // picked: shown in its place until the snapshot moves off that — to the
-  // pick, a second or so later — rather than flicking back in between.
-  const [landed, setLanded] = useState<Landed | null>(null);
-  // The session sheet — mode, model and effort — for an agent with models (1.26).
-  const [sheet, setSheet] = useState(false);
   // A cold session’s card (1.28): redrawn once it is answered, and held
   // while its fresh session is on the way.
   const [, setColdTick] = useState(0);
   const [freshing, setFreshing] = useState(false);
-  const modePill = useRef<ViewInstance>(null);
   const [snippets, setSnippets] = useState<{ name: string; body: string }[]>([]);
-  const cursor = useRef(kept.get(keptKey)?.cursor ?? 0n);
+  const cursor = useRef(kept.get(keptKey)?.cursor ?? FROM_THE_START);
   const session = useRef(kept.get(keptKey)?.session ?? '');
   // Kept with the cursor that produced it: a later read that moved the cursor
   // without new turns only leaves the kept cursor behind, over records that
@@ -367,7 +400,8 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
     if (turns.length > 0) kept.set(keptKey, { turns, cursor: cursor.current, session: session.current });
   }, [keptKey, turns]);
   const held = useRef(false);
-  const scroll = useRef<Animated.ScrollView>(null);
+  // The conversation's list, for scrolls to its end (see `toEnd`).
+  const list = useRef<FlashListRef<Row>>(null);
   const input = useRef<TextInputInstance>(null);
   // Just cleared by Send, for a moment — see `SETTLE_MS`.
   const settling = useRef(false);
@@ -379,7 +413,7 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
   const [away, setAway] = useState(false);
   const [fresh, setFresh] = useState(false);
 
-  const located = everyWorktree(conn?.snapshot ?? null)
+  const located = everyWorktree(hostState?.snapshot ?? null)
     .map((l) => ({ ...l, terminal: l.worktree.terminals.find((x) => x.id === terminalId) }))
     .find((l) => l.terminal);
   const worktree = located?.worktree;
@@ -388,13 +422,6 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
     ? located?.terminal?.agentView?.sessions.find((s) => s.session === background)
     : undefined;
   if (backgroundSession) sessionNames.set(keptKey, backgroundSession.name);
-  // A program busy in another of the worktree's tabs — a dev server, say —
-  // is not this conversation's agent at work, and says nothing here.
-  const state = background
-    ? backgroundState(backgroundSession?.state)
-    : worktree && !programBusy(worktree)
-      ? stateOf(worktree.activity)
-      : undefined;
   // Working, as the desktop's sidebar sees it: the agent thinks for a while
   // before anything reaches its transcript, and this says so meanwhile.
   const working = background
@@ -424,10 +451,16 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
   // Mac, where a message from here would land in its prompt.
   const waiting = !!background && backgroundSession?.state === BackgroundSession_State.NEEDS_YOU;
   const asking = !!question && (question.answerable || prompt !== undefined);
+  // An answer nobody has looked at is read once this screen shows it, and
+  // again each time one lands while it is the screen in front (1.32).
+  const unread = located?.terminal?.unread ?? false;
+  useSeen(conn, terminalId, unread);
+  // A worktree marked unread from its menu, read as its chat is come to (1.35).
+  useReadOnArrival(conn, worktree);
   // A session whose prompt cache has gone cold since it last ran (1.28):
   // asked about once a spell, as the chat opens — never at Send, since a
   // message always goes as typed, and sending one is the answer Continue.
-  const cold = !background && (conn?.hostMinor ?? 0) >= 28 ? located?.terminal?.cold : undefined;
+  const cold = !background && (hostState?.hostMinor ?? 0) >= 28 ? located?.terminal?.cold : undefined;
   const coldKey = cold ? `${hostId}:${cold.session}:${cold.sinceMs}` : '';
   const askCold = cold !== undefined && !coldAnswered.has(coldKey);
   const answerCold = () => {
@@ -458,7 +491,7 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
   // last. A new session in the same terminal starts the list over.
   // A desktop from before 1.7 has no conversations to give, and ignores
   // the asking: said plainly rather than left blank.
-  const tooOld = conn !== null && conn.status === 'connected' && conn.hostMinor < 7;
+  const tooOld = hostState !== null && hostState.status === 'connected' && hostState.hostMinor < 7;
 
   // Only while this screen is the one showing. The terminal opens on top of
   // it, and a conversation polled out of sight spent the desktop's budget for
@@ -472,73 +505,82 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
       let asking = false;
       // Failures in a row; a few say so on screen, one does not.
       let failures = 0;
+      // What the desktop answered, taken in.
+      const take = (reply: Conversation) => {
+        if (stopped) return;
+        failures = 0;
+        setLoaded(true);
+        setFailing('');
+        if (!reply.supported) {
+          // A chat already on screen stays as it is: one read the desktop
+          // couldn't make is not news, and said mid-chat it read as
+          // though the conversation were gone.
+          if (session.current === '') setUnreadable(reply.reason);
+          return;
+        }
+        setUnreadable('');
+        const task = background ? undefined : taskForTerminal(conn.state.asked, terminalId);
+        const taskSettled = task && reconcileTask(
+          task,
+          reply.session,
+          reply.turns.some((turn) => turn.kind === Turn_Kind.USER && carries(saidIn(turn).words, task.prompt)),
+          reply.turns.some((turn) => turn.kind === Turn_Kind.USER || turn.kind === Turn_Kind.TOOL),
+        );
+        const restart = reply.fresh || reply.session !== session.current;
+        session.current = reply.session;
+        cursor.current = reply.next;
+        if (restart) setTurns(reply.turns);
+        else if (reply.turns.length > 0) {
+          setTurns((before) => join(before, reply.turns));
+          if (!atEnd.current) setFresh(true);
+        }
+        setQueued(reply.queued);
+        // A message that has reached the conversation is no longer pending.
+        // After a fresh read, only the newest few can be one just sent. One
+        // with photos keeps them, now it is delivered.
+        const arrived = (restart ? reply.turns.slice(-6) : reply.turns)
+          .filter((turn) => turn.kind === Turn_Kind.USER)
+          .map(saidIn);
+        if (reply.turns.length > 0 || taskSettled) {
+          setPending((before) => {
+            const left = [...arrived];
+            return before.filter((p) => {
+              if (p.key === 0 && taskSettled) return false;
+              // A recovered task can be older than the newest six turns
+              // used to match messages just sent from this chat.
+              if (p.key === 0 && reply.turns.some((turn) => turn.kind === Turn_Kind.USER && carries(saidIn(turn).words, p.text))) return false;
+              const at = left.findIndex((said) => fits(said, p));
+              if (at < 0) return true;
+              if (p.files.length > 0) carriedFiles.set(carriedKey(keptKey, left[at]), p.files);
+              left.splice(at, 1);
+              return false;
+            });
+          });
+        }
+        setNow(Date.now());
+      };
+      // Offline for a moment, or the desktop busy: the next tick asks again,
+      // and a run of failures says why rather than staying blank. A desktop
+      // turning a read away for a moment isn't failing: the next tick is soon
+      // enough, and saying so would only alarm.
+      const fail = (e: unknown) => {
+        if (e instanceof DesktopBusy) return;
+        failures += 1;
+        if (!stopped && failures >= 3) setFailing(reasonOf(e));
+      };
+      // Chained rather than in a try: the React Compiler skips a component
+      // with a conditional inside a try. A reply that can't be taken in
+      // counts as a failure too.
       const tick = async () => {
         if (asking) return;
         asking = true;
-        try {
-          const reply = await conn.conversation(terminalId, cursor.current, background);
-          if (stopped) return;
-          failures = 0;
-          setLoaded(true);
-          setFailing('');
-          if (!reply.supported) {
-            // A chat already on screen stays as it is: one read the desktop
-            // couldn't make is not news, and said mid-chat it read as
-            // though the conversation were gone.
-            if (session.current === '') setUnreadable(reply.reason);
-            return;
-          }
-          setUnreadable('');
-          const task = background ? undefined : taskForTerminal(conn.asked ?? [], terminalId);
-          const taskSettled = task && reconcileTask(
-            task,
-            reply.session,
-            reply.turns.some((turn) => turn.kind === Turn_Kind.USER && carries(saidIn(turn).words, task.prompt)),
-            reply.turns.some((turn) => turn.kind === Turn_Kind.USER || turn.kind === Turn_Kind.TOOL),
-          );
-          const restart = reply.fresh || reply.session !== session.current;
-          session.current = reply.session;
-          cursor.current = reply.next;
-          if (restart) setTurns(reply.turns);
-          else if (reply.turns.length > 0) {
-            setTurns((before) => join(before, reply.turns));
-            if (!atEnd.current) setFresh(true);
-          }
-          setQueued(reply.queued);
-          // A message that has reached the conversation is no longer pending.
-          // After a fresh read, only the newest few can be one just sent. One
-          // with photos keeps them, now it is delivered.
-          const arrived = (restart ? reply.turns.slice(-6) : reply.turns)
-            .filter((turn) => turn.kind === Turn_Kind.USER)
-            .map(saidIn);
-          if (reply.turns.length > 0 || taskSettled) {
-            setPending((before) => {
-              const left = [...arrived];
-              return before.filter((p) => {
-                if (p.key === 0 && taskSettled) return false;
-                // A recovered task can be older than the newest six turns
-                // used to match messages just sent from this chat.
-                if (p.key === 0 && reply.turns.some((turn) => turn.kind === Turn_Kind.USER && carries(saidIn(turn).words, p.text))) return false;
-                const at = left.findIndex((said) => fits(said, p));
-                if (at < 0) return true;
-                if (p.files.length > 0) carriedFiles.set(carriedKey(keptKey, left[at]), p.files);
-                left.splice(at, 1);
-                return false;
-              });
-            });
-          }
-          setNow(Date.now());
-        } catch (e) {
-          // Offline for a moment, or the desktop busy: the next tick asks
-          // again, and a run of failures says why rather than staying blank.
-          // A desktop turning a read away for a moment isn't failing: the
-          // next tick is soon enough, and saying so would only alarm.
-          if (e instanceof DesktopBusy) return;
-          failures += 1;
-          if (!stopped && failures >= 3) setFailing(e instanceof Error ? e.message : String(e));
-        } finally {
-          asking = false;
-        }
+        await conn
+          .conversation(terminalId, cursor.current, background)
+          .then(take)
+          .catch(fail)
+          .finally(() => {
+            asking = false;
+          });
       };
       // One timer at a time: every path here clears it before setting it.
       let timer: ReturnType<typeof setTimeout> | undefined;
@@ -557,9 +599,9 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
         void loop();
       };
       lookNow.current = now;
-      let wasConnected = conn.status === 'connected';
+      let wasConnected = conn.state.status === 'connected';
       const offChange = conn.onChange(() => {
-        const connected = conn.status === 'connected';
+        const connected = conn.state.status === 'connected';
         if (connected && !wasConnected) now();
         wasConnected = connected;
       });
@@ -615,14 +657,15 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
   const controlled = async (
     act: () => Promise<boolean>,
     failed: (why: string) => string,
-    say: (text: string) => void = setNote,
+    say?: (text: string) => void,
   ): Promise<boolean> => {
+    const tell = say ?? ((text: string) => setNote(text));
     if (!conn) return false;
     for (let attempt = 0; attempt < 2; attempt += 1) {
       if (!held.current) {
         held.current = await conn.takeControl(terminalId).catch(() => false);
         if (!held.current) {
-          say('Another device is typing in this terminal.');
+          tell('Another device is typing in this terminal.');
           return false;
         }
       }
@@ -630,11 +673,11 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
         if (await act()) return true;
         held.current = false;
       } catch (e) {
-        say(failed(e instanceof Error ? e.message : String(e)));
+        tell(failed(reasonOf(e)));
         return false;
       }
     }
-    say('Your desktop took control back.');
+    tell('Your desktop took control back.');
     return false;
   };
   const type = (text: string) => controlled(() => conn?.type(terminalId, text) ?? Promise.resolve(false), (why) => `Not sent: ${why}`);
@@ -663,7 +706,7 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
   const send = async (said?: string) => {
     if (said === undefined) await dictation.finish();
     if (waiting) {
-      setNote('It’s waiting on an answer in agent view on your Mac. Answer it there first.');
+      setNote('It’s waiting on an answer in agent view on your Mac. Answer it there first.', 'info');
       return;
     }
     const text = (said ?? draft.current).trim();
@@ -719,8 +762,13 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
       return;
     }
     setListing(false);
-    setAttaching(true);
-    void canPaste().then(setPasteable);
+    // The clipboard first, then the menu, opened with every row it will
+    // have. Opened first, a chat's first + changed under it as the answer
+    // came — a copied image adding Paste image — and drew nothing.
+    void canPaste().then((has) => {
+      setPasteable(has);
+      setAttaching(true);
+    });
   };
   const attach = async (source: Source) => {
     setAttaching(false);
@@ -731,15 +779,9 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
       setNote(`A message carries ${MAX_FILES} photos and files at most. Send these, then the rest.`);
       return;
     }
+    // No `?:` in here: the React Compiler skips a component with one in a try.
     try {
-      const picked =
-        source === 'photos'
-          ? await fromPhotos(room)
-          : source === 'camera'
-            ? await fromCamera()
-            : source === 'files'
-              ? await fromFiles(room)
-              : await fromClipboard();
+      const picked = await pickFiles(source, room);
       if (picked.length === 0) return;
       const all = [...files, ...picked].slice(0, MAX_FILES);
       if (all.reduce((sum, file) => sum + file.bytes.length, 0) > MAX_BYTES) {
@@ -748,18 +790,22 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
       }
       setFiles(all);
     } catch (e) {
-      const why = e instanceof Error ? e.message : String(e);
-      setNote(e instanceof Refused ? why : `Couldn’t attach it: ${why}`);
-      setToSettings(e instanceof Refused);
+      const why = reasonOf(e);
+      const refused = e instanceof Refused;
+      if (refused) setNote(why);
+      else setNote(`Couldn’t attach it: ${why}`);
+      setToSettings(refused);
     }
   };
 
   // Held on a message or a code block: its words, on the clipboard.
-  const copy = (text: string) => {
+  // The same function every draw, so a turn already on screen is not drawn
+  // again for a poll that brought nothing new to it (see TurnView).
+  const copy = useCallback((text: string) => {
     void Clipboard.setStringAsync(text);
-    setNote('Copied');
-    setTimeout(() => setNote((shown) => (shown === 'Copied' ? '' : shown)), 1500);
-  };
+    setNotice({ text: 'Copied', tone: 'copied' });
+    setTimeout(() => setNotice((shown) => (shown.text === 'Copied' ? { text: '', tone: 'warn' } : shown)), 1500);
+  }, [setNotice]);
 
   // The turn stopped, as Escape stops it at the desktop; needs no control.
   const stop = () => {
@@ -801,11 +847,22 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
   );
 
   const agent = located?.terminal?.agent ?? worktree?.agent ?? '';
+  // Failed: the agent ended on an error the conversation may never show,
+  // and the header says no state. Said in the note as it happens, or as a
+  // chat that has already failed opens; taken back once it is not so.
+  const failed = !background && worktree?.activity === Activity.FAILED;
+  const failure = `${agent ? agentLabel(agent) : 'The agent'} failed. Open the terminal to see why.`;
+  const [toldFailed, setToldFailed] = useState(false);
+  if (failed !== toldFailed) {
+    setToldFailed(failed);
+    if (failed) setNote(failure);
+    else if (note === failure) setNote('');
+  }
   // Under the composer at rest: clear of the home indicator rather than the
   // whole safe area. With the keyboard up the composer rides on it, 6pt
   // above, so it and the conversation are lifted by the keyboard less this.
-  const rest = Math.max(insets.bottom - 18, 6);
-  const lift = rest - 6;
+  const rest = composerRest(insets.bottom);
+  const lift = rest - COMPOSER_GAP;
   const openTerminal = () => router.push(`/terminal/${hostId}/${terminal}`);
   // A card waiting on you, as `tuck` has it: the one asked, or the last one
   // as it tucks away.
@@ -861,7 +918,7 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
     await dictation.finish();
     if (!onScreen.current) return;
     if (sentCount.current !== sentBefore) {
-      setNote('Your message went to this session, so the chat stays on it. The fresh one is open beside it on your Mac.');
+      setNote('Your message went to this session, so the chat stays on it. The fresh one is open beside it on your Mac.', 'info');
       return;
     }
     carried.set(`${hostId}:${started}`, { draft: draft.current, files: filesNow.current });
@@ -873,33 +930,33 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
         <View style={styles.cold}>
           <View style={styles.coldTitle}>
             <Snowflake size={18} color={t.dim} />
-            <Text style={styles.askTitle} numberOfLines={1}>
+            <Text style={cardStyles.askTitle} numberOfLines={1}>
               This session went cold
             </Text>
           </View>
-          <Text style={styles.askLead}>
+          <Text style={cardStyles.askLead}>
             {freshing ? 'Starting a fresh session on your Mac…' : `Continuing ${c.cold.summary}.`}
           </Text>
-          <View style={styles.askButtons}>
+          <View style={cardStyles.askButtons}>
             <Button
               kind="secondary"
               title="Start fresh"
-              style={styles.grow}
+              style={cardStyles.grow}
               disabled={freshing}
               onPress={() => void startFresh(c.cold)}
             />
-            <Button kind="primary" title="Continue" style={styles.grow} disabled={freshing} onPress={answerCold} />
+            <Button kind="primary" title="Continue" style={cardStyles.grow} disabled={freshing} onPress={answerCold} />
           </View>
         </View>
       );
     }
     if (c.kind === 'background') {
       return (
-        <View style={styles.ask}>
-          <Text style={styles.askTitle} numberOfLines={1}>
+        <View style={cardStyles.ask}>
+          <Text style={cardStyles.askTitle} numberOfLines={1}>
             Waiting on you
           </Text>
-          <Text style={styles.askLead} numberOfLines={3}>
+          <Text style={cardStyles.askLead} numberOfLines={3}>
             It’s asking something in agent view on your Mac. Answer it there; a message from here would land in its
             prompt.
           </Text>
@@ -926,28 +983,28 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
         <Check size={20} color={color} weight={2.4} />
       );
     return (
-      <View style={styles.ask}>
-        <Dim on={done} style={styles.askBody}>
-          <Text style={styles.askTitle} numberOfLines={1}>
+      <View style={cardStyles.ask}>
+        <Dim on={done} style={cardStyles.askBody}>
+          <Text style={cardStyles.askTitle} numberOfLines={1}>
             Wants to use {c.question.tool}
           </Text>
           <RiskBadge risk={c.question.risk} />
           {c.question.subject ? (
-            <Text style={styles.askSubject} numberOfLines={4}>
+            <Text style={cardStyles.askSubject} numberOfLines={4}>
               {c.question.tool === 'Bash' ? '$ ' : ''}
               {c.question.subject}
             </Text>
           ) : null}
         </Dim>
         {c.question.answerable ? (
-          <View style={styles.askButtons}>
+          <View style={cardStyles.askButtons}>
             <Button
               kind="primary"
               title="Allow once"
               mark={markOf(Answer_Choice.ALLOW_ONCE, t.onAccent)}
               disabled={done}
               onPress={() => void answer(Answer_Choice.ALLOW_ONCE)}
-              style={styles.grow}
+              style={cardStyles.grow}
             />
             {c.question.always ? (
               <Button
@@ -955,7 +1012,7 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
                 mark={markOf(Answer_Choice.ALLOW_ALWAYS, t.text)}
                 disabled={done}
                 onPress={() => void answer(Answer_Choice.ALLOW_ALWAYS)}
-                style={styles.grow}
+                style={cardStyles.grow}
               />
             ) : null}
             <Button
@@ -964,7 +1021,7 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
               mark={markOf(Answer_Choice.DENY, t.failed)}
               disabled={done}
               onPress={() => void answer(Answer_Choice.DENY)}
-              style={styles.grow}
+              style={cardStyles.grow}
             />
           </View>
         ) : (
@@ -978,93 +1035,21 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
       </View>
     );
   };
-  // The agent's modes, as the desktop can tell them (1.24): Claude's
-  // permission mode, OpenCode's agent, Codex's collaboration mode. Picking
-  // one has the desktop press the agent's own key until it reports it —
-  // a message asking it to implement cannot change its mode.
-  const reported = background ? undefined : located?.terminal?.modes;
-  // Its model and reasoning effort (1.26), Claude's and Codex's: read off
-  // its transcript, changed by its own commands on the desktop.
-  const told = background ? undefined : located?.terminal?.settings;
-  // Each with a pick just made standing in until the snapshot moves. Retired
-  // the moment it does — to the pick, or past it from the Mac — so it never
-  // stands in again over a later change.
-  const reporting: Record<keyof Landed, string | undefined> = {
-    mode: reported?.current,
-    model: told?.model,
-    effort: told?.effort,
-  };
-  const picks = Object.entries(landed ?? {}) as [keyof Landed, { to: string; from: string }][];
-  const standing = picks.filter(([what, pick]) => pick.from === reporting[what]);
-  if (landed && standing.length < picks.length) {
-    setLanded(standing.length > 0 ? Object.fromEntries(standing) : null);
-  }
-  const shown = (what: keyof Landed, value: string) => {
-    const pick = landed?.[what];
-    return pick && pick.from === value ? pick.to : value;
-  };
-  const modes = reported && landed?.mode ? { ...reported, current: shown('mode', reported.current) } : reported;
-  const settings =
-    told && (landed?.model || landed?.effort)
-      ? { ...told, model: shown('model', told.model), effort: shown('effort', told.effort) }
-      : told;
-  // A desktop that never reports it — a session with no transcript yet —
-  // has what it says shown again soon after.
-  useEffect(() => {
-    if (!landed) return;
-    const timer = setTimeout(() => setLanded(null), 5000);
-    return () => clearTimeout(timer);
-  }, [landed]);
-  const currentMode = modes?.choices.find((choice) => choice.id === modes.current);
-  const modelLabel = settings?.models.find((choice) => choice.id === settings.model)?.label;
-  const effortLabel = settings?.efforts.find((choice) => choice.id === settings.effort)?.label;
-  const pillLabel = switching
-    ? `${switching}…`
-    : modelLabel
-      ? effortLabel
-        ? `${modelLabel} · ${effortLabel}`
-        : modelLabel
-      : (currentMode?.label ?? 'Mode');
-  // A pick from the sheet or the mode menu: `act` has the desktop make it,
-  // and `made` is what then stands in until the snapshot reports it.
-  const pickWith = async (label: string, act: () => Promise<boolean>, made: Landed) => {
-    if (switching || busy.current || conn?.status !== 'connected') return;
-    setSwitching(label);
-    setNote('');
-    setSaid(null);
-    try {
-      const switched = await controlled(act, (why) => `Not switched: ${why}`, (text) => {
-        setNote(text);
-        setSaid({ text, failed: true });
-      });
-      if (switched) {
-        setLanded((before) => ({ ...before, ...made }));
-        setNote(`Switched to ${label}.`);
-        setSaid({ text: `Switched to ${label}.`, failed: false });
-      }
-    } finally {
-      setSwitching('');
-    }
-  };
-  const pickModel = (model: string, effort: string, label: string) =>
-    pickWith(
-      label,
-      () => conn?.setModel(terminalId, model, effort) ?? Promise.resolve(false),
-      model ? { model: { to: model, from: told?.model ?? '' } } : { effort: { to: effort, from: told?.effort ?? '' } },
-    );
-  const pickMode = async (choice: { id: string; label: string }) => {
-    setModeMenu(null);
-    await pickWith(
-      choice.label,
-      () => conn?.setMode(terminalId, choice.id) ?? Promise.resolve(false),
-      { mode: { to: choice.id, from: reported?.current ?? '' } },
-    );
-  };
+  // The agent's mode, model and effort: the bar's pill and what it opens.
+  const picks = useSessionPicks({
+    conn,
+    terminalId,
+    reported: background ? undefined : located?.terminal?.modes,
+    told: background ? undefined : located?.terminal?.settings,
+    busy,
+    controlled,
+    setNote,
+  });
 
   // Something to send: words, or photos and files on their own.
   const ready = !waiting && (message.trim() !== '' || files.length > 0);
   // A desktop from before 1.12 takes words and nothing else.
-  const canAttach = conn === null || conn.hostMinor >= 12;
+  const canAttach = hostState === null || hostState.hostMinor >= 12;
 
   // The `/` menu, while the draft is a slash and the start of a name.
   const commands = commandsFor(agent);
@@ -1107,8 +1092,18 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
   });
   // Sent from here and in neither the conversation nor the agent's queue yet.
   const unsent = left;
-  // Nothing kept paints at once; a kept conversation waits for the slide.
-  const painted = settled || turns.length === 0;
+  // The rows, made again only when the turns change: the list redraws the
+  // ones it has on screen, and only the ones that differ (see TurnView).
+  const rows = useMemo<Row[]>(
+    () => [...grouped(turns).map(({ at, tools }) => ({ key: `t${at.toString()}`, at, tools })), FOOT_ROW],
+    [turns],
+  );
+  const scrollContext = useMemo(() => ({ lift, room }), [lift, room]);
+  // Down to the very end, past the keyboard's lift and a card's room. The
+  // list first brings its last row in — rows not drawn yet have only a
+  // guessed height, and a scroll by those stops short — then has its scroll
+  // view finish, which knows the keyboard and the card.
+  const toEnd = (animated: boolean) => void list.current?.scrollToEnd({ animated });
   // The task this chat was started on, not in the conversation yet: its
   // message, sending, is the whole chat until it is. The conversation still
   // loading, or the agent not yet reading — see STILL_OPENING — is that
@@ -1116,7 +1111,7 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
   const opening = seed !== undefined && pending.some((p) => p.key === 0);
   // The conversation not found on the Mac: said in the middle of the chat,
   // with Try again and Open terminal.
-  const missing = painted && !tooOld && !opening && unreadable === NOT_THERE && turns.length === 0;
+  const missing = !tooOld && !opening && unreadable === NOT_THERE && turns.length === 0;
   const statusOf = (p: Pending): OutgoingStatus => {
     const age = now - p.at;
     if (age <= UNSEEN_MS) return 'sending';
@@ -1154,106 +1149,45 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
   const replied = turns.slice(lastYours + 1).some((turn) => turn.kind === Turn_Kind.ASSISTANT);
   const handingOver = handedAt > 0 && !working && !replied && now - handedAt < HAND_OVER_MS;
 
+  // The foot holds something — a message on its way, or the agent at work —
+  // and is spaced off the turns above it as they are from each other. With
+  // no turns, what says so above it brings its own room.
+  const spaced = turns.length > 0 && (unsent.length > 0 || inQueue.length > 0 || ((working || sending || handingOver) && !compacting));
   return (
     <Screen>
       <View style={styles.fill}>
-        <Bar
-          back
+        <ChatBar
           title={background ? (backgroundSession?.name ?? sessionNames.get(keptKey) ?? 'Session') : (worktree?.name ?? 'Session')}
-          lead={
-            state ? (
-              <View style={styles.state}>
-                <Dot size={6} color={state.color} />
-                <Text style={[styles.stateText, { color: state.color }]}>{state.word}</Text>
-              </View>
-            ) : undefined
-          }
-          right={
-            <View style={styles.barActions}>
-              {modes || settings ? (
-                <View ref={modePill} collapsable={false}>
-                  <Pressable
-                    accessibilityRole="button"
-                    accessibilityLabel={
-                      settings
-                        ? `${[currentMode?.label, modelLabel, effortLabel].filter(Boolean).join(', ') || 'Session settings'}. Change them`
-                        : currentMode
-                          ? `Mode: ${currentMode.label}. Change it`
-                          : 'Mode. Change it'
-                    }
-                    disabled={conn?.status !== 'connected' || switching !== '' || (!settings && isBusy)}
-                    onPress={() => {
-                      if (settings) {
-                        setSaid(null);
-                        setSheet(true);
-                      } else placeOf(modePill.current, setModeMenu);
-                    }}
-                    style={({ pressed }) => [styles.modePill, pressed && { backgroundColor: t.selection }]}
-                  >
-                    <ModeGlyph id={switching ? '' : (modes?.current ?? '')} />
-                    <Text style={[styles.modePillText, settings && { maxWidth: 150 }]} numberOfLines={1}>
-                      {pillLabel}
-                    </Text>
-                  </Pressable>
-                </View>
-              ) : null}
-              {/* Where you can go from here, in one frame; the pill stands
-                  alone because it changes the session rather than leaving it. */}
-              <IconCluster
-                actions={[
-                  ...(worktree
-                    ? [
-                        {
-                          label: 'The worktree',
-                          onPress: () => router.push(`/worktree/${hostId}/${encodeURIComponent(worktree.id)}`),
-                          icon: <Changes size={18} color={t.text} />,
-                        },
-                      ]
-                    : []),
-                  { label: 'Open the terminal', onPress: openTerminal, icon: <TerminalWindow size={18} color={t.text} /> },
-                ]}
-              />
-            </View>
-          }
+          picks={picks}
+          connected={hostState?.status === 'connected'}
+          busy={isBusy}
+          onWorktree={worktree ? () => router.push(`/worktree/${hostId}/${encodeURIComponent(worktree.id)}`) : undefined}
+          onTerminal={openTerminal}
         />
-        <KeyboardChatScrollView
-          ref={scroll}
-          // Lifted with the keyboard, frame for frame, while the newest turn
-          // is in view; someone scrolled up to read is left there.
-          keyboardLiftBehavior="whenAtEnd"
-          offset={lift}
-          // A card waiting on you floats over the conversation's foot: the
-          // conversation scrolls clear of it, and follows it down as it goes.
-          extraContentPadding={FLOATS ? room : undefined}
-          style={styles.fill}
-          contentContainerStyle={[styles.page, missing && styles.pageFill]}
-          // A tap in the conversation puts the keyboard away, and the draft
-          // stays. With it up, a tap on a message or a button only does that.
-          keyboardShouldPersistTaps="never"
-          onScroll={(e) => {
-            const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent;
-            // What is under a card waiting on you is not in view.
-            const hidden = FLOATS ? room.get() : 0;
-            const end = contentOffset.y + layoutMeasurement.height - hidden >= contentSize.height - 48;
-            atEnd.current = end;
-            if (end === away) setAway(!end);
-            if (end && fresh) setFresh(false);
-          }}
-          scrollEventThrottle={100}
-          // Shrunk by what grows under it — a taller draft, a note — while
-          // the newest turn was in view: kept in view. A card waiting on you
-          // floats over it instead (see FLOATS), kept clear by `room`.
-          onLayout={() => {
-            if (atEnd.current) scroll.current?.scrollToEnd({ animated: false });
-          }}
-          onContentSizeChange={() => {
-            if (atEnd.current) scroll.current?.scrollToEnd({ animated: false });
-          }}
-        >
-          {!painted ? null : tooOld ? (
+        <ChatNote text={note} tone={notice.tone} toSettings={toSettings} onDismiss={() => setNote('')} onCopy={copy} />
+        <ChatScrollContext.Provider value={scrollContext}>
+          <FlashList
+            ref={list}
+            data={rows}
+            keyExtractor={(row) => row.key}
+            getItemType={(row) => (row.at === FOOT ? 'foot' : row.tools ? 'tools' : turns[row.at].kind)}
+            // A conversation kept from before opens at its end: the foot is
+            // the last row, past every turn. The list takes this only as it
+            // is made, so one read after the chat opened is taken to its end
+            // by following it (see onContentSizeChange).
+            initialScrollIndex={rows.length - 1}
+            drawDistance={DRAW_AHEAD}
+            renderScrollComponent={ChatScroll}
+            ItemSeparatorComponent={Gap}
+            style={styles.fill}
+            contentContainerStyle={[styles.page, missing && styles.pageFill]}
+            // What the conversation is when it has no turns to show: why, or
+            // that it is on its way. The Mac's lost one fills the page, to
+            // say it in the middle.
+            ListHeaderComponent={tooOld ? (
             <View style={styles.empty}>
               <Status
-                text={`ket on ${conn?.host.name ?? 'your Mac'} is older than this app. Update it — rebuild ket and start a new host — to read sessions here.`}
+                text={`ket on ${hostState?.host.name ?? 'your Mac'} is older than this app. Update it — rebuild ket and start a new host — to read sessions here.`}
                 onCopy={copy}
               />
               <Button title="Open the terminal" onPress={openTerminal} />
@@ -1286,32 +1220,64 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
               <Button title="Open the terminal" onPress={openTerminal} />
             </View>
           ) : null}
-          {grouped(painted ? turns : []).map(({ at, tools }) =>
-            tools ? (
-              <Tools key={at} turns={tools} onCopy={copy} />
-            ) : (
-              <TurnView
-                key={at}
-                turn={turns[at]}
-                agent={agent}
-                carried={turns[at].kind === Turn_Kind.USER ? carriedFiles.get(carriedKey(keptKey, saidIn(turns[at]))) : undefined}
-                onCopy={copy}
-                delivered={at === lastYours && unsent.length === 0 && queued.length === 0}
-              />
-            ),
-          )}
-          {/* A message that starts the agent working goes before the
-              indicator: the desktop says the agent is working a moment
-              before its transcript has the message that set it off. */}
-          {unsent.filter((p) => !p.behind).map(outgoing)}
-          {(working || sending || handingOver) && !compacting ? <Working key={keptKey} agent={agent} what={working && worktree && !background ? detail(worktree) : ''} details /> : null}
-          {inQueue.map(({ words, named, files }, index) => (
-            <Outgoing key={`q${index}`} text={words} files={files} named={files.length > 0 ? [] : named} status="queued" onCopy={copy} />
-          ))}
-          {unsent.filter((p) => p.behind).map(outgoing)}
-        </KeyboardChatScrollView>
+            ListHeaderComponentStyle={missing ? styles.pageFill : undefined}
+            renderItem={({ item }) =>
+              item.at === FOOT ? (
+                <View style={[styles.trail, spaced && styles.trailSpaced]}>
+                {/* A message that starts the agent working goes before the
+                    indicator: the desktop says the agent is working a moment
+                    before its transcript has the message that set it off. */}
+                {unsent.filter((p) => !p.behind).map(outgoing)}
+                {(working || sending || handingOver) && !compacting ? <Working key={keptKey} agent={agent} what={working && worktree && !background ? detail(worktree) : ''} details /> : null}
+                {inQueue.map(({ words, named, files }, index) => (
+                  <Outgoing key={`q${index}`} text={words} files={files} named={files.length > 0 ? [] : named} status="queued" onCopy={copy} />
+                ))}
+                {unsent.filter((p) => p.behind).map(outgoing)}
+                </View>
+              ) : item.tools ? (
+                <Tools turns={item.tools} onCopy={copy} />
+              ) : (
+                <TurnView
+                  turn={turns[item.at]}
+                  agent={agent}
+                  carried={turns[item.at].kind === Turn_Kind.USER ? carriedFiles.get(carriedKey(keptKey, saidIn(turns[item.at]))) : undefined}
+                  onCopy={copy}
+                  delivered={item.at === lastYours && unsent.length === 0 && queued.length === 0}
+                />
+              )
+            }
+            // A tap in the conversation puts the keyboard away, and the draft
+            // stays. With it up, a tap on a message or a button only does that.
+            keyboardShouldPersistTaps="never"
+            onScroll={(e) => {
+              const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent;
+              // What is under a card waiting on you is not in view.
+              const hidden = room.get();
+              const end = contentOffset.y + layoutMeasurement.height - hidden >= contentSize.height - 48;
+              atEnd.current = end;
+              if (end === away) setAway(!end);
+              if (end && fresh) setFresh(false);
+            }}
+            // Every frame: the list draws what comes into view from these.
+            scrollEventThrottle={16}
+            // Shrunk by what grows under it — a taller draft, a note — while
+            // the newest turn was in view: kept in view. A card waiting on you
+            // floats over it, kept clear by `room`.
+            onLayout={() => {
+              if (atEnd.current) toEnd(false);
+            }}
+            onContentSizeChange={() => {
+              if (atEnd.current) toEnd(false);
+            }}
+          />
+        </ChatScrollContext.Provider>
 
         <KeyboardLift offset={{ closed: 0, opened: lift }}>
+        {/* The desk under the chips and the composer. At rest they sit below
+            the conversation, but the keyboard lifts them over it, and a
+            conversation scrolled behind them showed through, under a fade
+            that then looked like a dark band across it. */}
+        <View pointerEvents="none" style={styles.desk} />
         {/* Over the conversation's foot, riding with the composer: a card
             waiting on you, and above it the fade and the jump button. */}
         <View pointerEvents="box-none" style={styles.foot}>
@@ -1325,7 +1291,7 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
                   atEnd.current = true;
                   setAway(false);
                   setFresh(false);
-                  scroll.current?.scrollToEnd({ animated: true });
+                  toEnd(true);
                 }}
                 style={({ pressed }) => [styles.jump, pressed && { backgroundColor: t.selection }]}
               >
@@ -1343,19 +1309,8 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
             <View style={styles.hearingDot} />
             <Text style={styles.hearingText}>
               <Text style={{ color: t.text }}>Listening</Text>
-              {hearing.onDevice
-                ? ' · transcribed on this iPhone'
-                : Platform.OS === 'web'
-                  ? ' · transcribed by the browser'
-                  : ' · transcribed by Apple'}
+              {hearing.onDevice ? ' · transcribed on this iPhone' : ' · transcribed by Apple'}
             </Text>
-          </View>
-        ) : note ? (
-          <View style={styles.noteBox}>
-            <Status text={note} onCopy={copy} style={styles.noteText} color={t.dim} />
-            {toSettings ? (
-              <Button title="Open Settings" onPress={() => void Linking.openSettings()} style={styles.settings} />
-            ) : null}
           </View>
         ) : compacting ? (
           <Compacting style={styles.compacting} />
@@ -1426,7 +1381,7 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
             onClose={() => setAttaching(false)}
             label="Attach"
             sections={attachSections({
-              older: canAttach ? undefined : (conn?.host.name ?? 'your Mac'),
+              older: canAttach ? undefined : (hostState?.host.name ?? 'your Mac'),
               pasteable,
               onPick: (source) => void attach(source),
             })}
@@ -1483,77 +1438,17 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
             onPress={
               working && !ready
                 ? background
-                  ? () => setNote('A background session stops in agent view on your Mac. Open the terminal to stop it.')
+                  ? () => setNote('A background session stops in agent view on your Mac. Open the terminal to stop it.', 'info')
                   : stop
                 : () => void send()
             }
           />
         </KeyCommands>
         </KeyboardLift>
-        {settings ? (
-          <ModelSheet
-            open={sheet}
-            onClose={() => setSheet(false)}
-            agent={agent ? agentLabel(agent) : 'Agent'}
-            modes={modes}
-            settings={settings}
-            pending={switching}
-            said={said}
-            busy={isBusy}
-            onMode={(choice) => void pickMode(choice)}
-            onModel={(choice) => void pickModel(choice.id, '', choice.label)}
-            onEffort={(choice) => void pickModel('', choice.id, choice.label)}
-          />
-        ) : null}
-        <FloatMenu
-          open={modeMenu !== null}
-          anchor={modeMenu}
-          onClose={() => setModeMenu(null)}
-          label={`${agent ? agentLabel(agent) : 'Agent'} mode`}
-          sections={
-            modes
-              ? [
-                  {
-                    title: `${agent ? agentLabel(agent) : 'Agent'} mode`,
-                    items: modes.choices.map((choice) => ({
-                      key: choice.id,
-                      label: choice.label,
-                      detail: choice.detail || undefined,
-                      icon: choice.id === modes.current ? <Check size={16} color={t.brand} weight={2.4} /> : undefined,
-                      onPress: () => void pickMode(choice),
-                    })),
-                  },
-                ]
-              : []
-          }
-        />
+        <SessionPickers picks={picks} agent={agent ? agentLabel(agent) : 'Agent'} busy={isBusy} />
       </View>
     </Screen>
   );
-}
-
-/** Picks the desktop has made and its snapshot hasn't reported yet: each
- * the value picked, and what the snapshot said when it was picked. */
-type Landed = Partial<Record<'mode' | 'model' | 'effort', { to: string; from: string }>>;
-
-/** The glyph a mode's pill leads with: pause for planning, a pencil for
- * edits going in, a shield for asking first, a bolt for going unasked. */
-function ModeGlyph({ id }: { id: string }) {
-  switch (id) {
-    case 'plan':
-      return <Pause size={15} color={t.attention} weight={2.6} />;
-    case 'acceptEdits':
-    case 'build':
-      return <Pencil size={15} color={t.running} weight={2.2} />;
-    case 'auto':
-    case 'bypassPermissions':
-    case 'dontAsk':
-      return <Bolt size={15} color={t.brand} weight={2.2} />;
-    case 'default':
-      return <Shield size={15} color={t.dim} weight={2.2} />;
-    default:
-      return <Sliders size={15} color={t.dim} weight={2.2} />;
-  }
 }
 
 /** The conversation's foot, faded into the desk while there is more below
@@ -1581,756 +1476,17 @@ function FadingEdge({ shown }: { shown: boolean }) {
   );
 }
 
-/** Appends `more`, running an agent's reply on when it arrived in two reads. */
-function join(before: Turn[], more: Turn[]): Turn[] {
-  const last = before[before.length - 1];
-  const [first, ...rest] = more;
-  if (last && first && last.kind === Turn_Kind.ASSISTANT && first.kind === Turn_Kind.ASSISTANT) {
-    return [...before.slice(0, -1), { ...last, text: `${last.text}\n\n${first.text}` }, ...rest];
-  }
-  return [...before, ...more];
-}
-
-/** A question the agent asks with options, or a plan it wants to go ahead
- * with: answered here and handed to the agent by the desktop. When the
- * desktop cannot take the answer — an older ket, or a wait that ran out —
- * it says so and opens the terminal instead. */
-function Asking({
-  question,
-  kind,
-  busy,
-  onRespond,
-  onTerminal,
-}: {
-  question: Question;
-  kind: 'ask' | 'plan';
-  busy: boolean;
-  onRespond: (reply: PromptAnswer) => Promise<boolean>;
-  onTerminal: () => void;
-}) {
-  const [picks, setPicks] = useState<number[][]>(() => question.asks.map(() => []));
-  const [others, setOthers] = useState<string[]>(() => question.asks.map(() => ''));
-  const [refining, setRefining] = useState(false);
-  const [feedback, setFeedback] = useState('');
-  // Answered: held until the desktop's next snapshot takes the card away.
-  const [sent, setSent] = useState(false);
-  const idle = !busy && !sent;
-  const send = async (reply: PromptAnswer) => {
-    if (await onRespond(reply)) setSent(true);
-  };
-  // Sent: the button that sent it wears a tick until the card goes.
-  const sentMark = sent ? <Check size={20} color={t.onAccent} weight={2.4} /> : undefined;
-
-  if (!question.answerable || (kind === 'ask' && question.asks.length === 0)) {
-    return (
-      <View style={styles.ask}>
-        <Text style={styles.askTitle} numberOfLines={1}>
-          {kind === 'plan' ? 'Has a plan ready' : 'Has a question'}
-        </Text>
-        {question.subject ? (
-          <Text style={styles.askLead} numberOfLines={3}>
-            {question.subject}
-          </Text>
-        ) : null}
-        <Button
-          kind="primary"
-          title="Answer in the terminal"
-          icon={<TerminalWindow size={16} color={t.onAccent} />}
-          onPress={onTerminal}
-        />
-      </View>
-    );
-  }
-
-  if (kind === 'plan') {
-    return (
-      <View style={styles.ask}>
-        <Dim on={sent} style={styles.askBody}>
-          <Text style={styles.askTitle}>Ready to code?</Text>
-          {question.subject ? (
-            <Text style={styles.askLead} numberOfLines={2}>
-              {question.subject}
-            </Text>
-          ) : null}
-          {refining ? (
-            <TextInput
-              value={feedback}
-              onChangeText={setFeedback}
-              placeholder="Tell Claude what to change"
-              placeholderTextColor={t.faint}
-              multiline
-              autoFocus
-              editable={idle}
-              style={[field, styles.askInput]}
-            />
-          ) : null}
-        </Dim>
-        {refining ? (
-          <View style={styles.askButtons}>
-            <Button
-              kind="primary"
-              title="Send"
-              mark={sentMark}
-              disabled={!idle || !feedback.trim()}
-              onPress={() => void send({ approve: false, feedback: feedback.trim() })}
-              style={styles.grow}
-            />
-            <Button kind="ghost" title="Cancel" disabled={!idle} onPress={() => setRefining(false)} style={styles.grow} />
-          </View>
-        ) : (
-          <View style={styles.askButtons}>
-            <Button
-              kind="primary"
-              title="Approve"
-              mark={sentMark}
-              disabled={!idle}
-              onPress={() => void send({ approve: true })}
-              style={styles.grow}
-            />
-            <Button title="Keep planning" disabled={!idle} onPress={() => setRefining(true)} style={styles.grow} />
-          </View>
-        )}
-      </View>
-    );
-  }
-
-  const answered = question.asks.every((_, i) => picks[i].length > 0 || others[i].trim() !== '');
-  // A choice and words of your own are one answer or the other.
-  const choose = (i: number, j: number, many: boolean) => {
-    setPicks((before) =>
-      before.map((p, k) => (k !== i ? p : !many ? [j] : p.includes(j) ? p.filter((x) => x !== j) : [...p, j])),
-    );
-    setOthers((before) => before.map((o, k) => (k === i ? '' : o)));
-  };
-  const write = (i: number, text: string) => {
-    setOthers((before) => before.map((o, k) => (k === i ? text : o)));
-    if (text.trim()) setPicks((before) => before.map((p, k) => (k === i ? [] : p)));
-  };
-  return (
-    <View style={styles.ask}>
-      <Dim on={sent}>
-        <ScrollView style={styles.askScroll} contentContainerStyle={styles.askQuestions} keyboardShouldPersistTaps="handled">
-          {question.asks.map((asked, i) => (
-            <View key={i} style={styles.asked}>
-              {asked.header ? <Text style={styles.askHeader}>{asked.header}</Text> : null}
-              <Text style={styles.askTitle}>{asked.question}</Text>
-              {asked.multiSelect ? <Text style={styles.askLead}>Pick any</Text> : null}
-              <View>
-                {asked.choices.map((choice, j) => (
-                  <Choice
-                    key={j}
-                    many={asked.multiSelect}
-                    on={picks[i].includes(j)}
-                    label={choice.label}
-                    description={choice.description}
-                    disabled={!idle}
-                    onPress={() => choose(i, j, asked.multiSelect)}
-                  />
-                ))}
-              </View>
-              {question.tool === 'Dialog' || question.tool === 'request_user_input' ? null : (
-                // A dialog read off the agent's screen, or Codex's form, takes
-                // one of its own options and nothing else: the desktop types
-                // the option's number.
-                <TextInput
-                  value={others[i]}
-                  onChangeText={(text) => write(i, text)}
-                  placeholder="Or write your own"
-                  placeholderTextColor={t.faint}
-                  {...oneLine}
-                  editable={idle}
-                  style={field}
-                />
-              )}
-            </View>
-          ))}
-        </ScrollView>
-      </Dim>
-      <View style={styles.askButtons}>
-        <Button
-          kind="primary"
-          title={question.asks.length > 1 ? 'Send answers' : 'Send answer'}
-          mark={sentMark}
-          icon={<Send size={16} color={t.onAccent} weight={2.3} />}
-          disabled={!idle || !answered}
-          onPress={() =>
-            void send({ picks: question.asks.map((_, i) => ({ choices: picks[i], other: others[i].trim() })) })
-          }
-          style={styles.grow}
-        />
-        <Button
-          title="In the terminal"
-          icon={<TerminalWindow size={16} color={t.text} />}
-          onPress={onTerminal}
-          style={styles.grow}
-        />
-      </View>
-    </View>
-  );
-}
-
-/** A message of yours as the conversation reads it back. */
-function saidIn(turn: Turn): Said {
-  return { words: splitFiles(turn.text).words, images: turn.images ?? 0 };
-}
-
-/** Whether `said`, read back, is pending message `sent`: the same words —
- * see [`carries`] — or, for photos sent alone, images and no words. */
-function fits(said: Said, sent: Pending): boolean {
-  if (!sent.text) return said.words === '' && said.images > 0;
-  return carries(said.words, sent.text);
-}
-
-/** Whether a message the transcript or the agent's queue shows is one sent
- * from here: the same start, since the desktop clips long turns, or the same
- * end, since whatever the terminal's prompt already held when the phone
- * typed — a stray key at the desktop — arrives in front of it. */
-function carries(said: string, sent: string): boolean {
-  const flat = (text: string) => text.replace(/\s+/g, ' ').trim();
-  const whole = flat(said);
-  const mine = flat(sent);
-  return whole.slice(0, 200) === mine.slice(0, 200) || whole.endsWith(mine);
-}
-
-/** A line about the chat rather than in it — why it is empty, what went
- * wrong — which copies when held, as a message does, so it can be sent on. */
-function Status({
-  text,
-  onCopy,
-  style,
-  color,
-}: {
-  text: string;
-  onCopy: (text: string) => void;
-  style?: StyleProp<TextStyle>;
-  color?: string;
-}) {
-  return (
-    <Pressable
-      accessibilityHint="Hold to copy"
-      delayLongPress={350}
-      onLongPress={() => onCopy(text)}
-      style={({ pressed }) => (pressed ? styles.held : null)}
-    >
-      <Prose style={style} color={color}>
-        {text}
-      </Prose>
-    </Pressable>
-  );
-}
-
-/** A reason from the desktop as a sentence. */
-function sentence(text: string): string {
-  const s = text.charAt(0).toUpperCase() + text.slice(1);
-  return /[.!?]$/.test(s) ? s : `${s}.`;
-}
-
-/** The conversation as it is drawn: a run of tool lines — one alone too —
- * as one group, shut, every other turn on its own. Each is keyed by the turn
- * it starts at, so a group the agent is still adding to stays as open as it
- * was, and its first line does not open out and shut again as the second
- * arrives. */
-function grouped(turns: Turn[]): { at: number; tools?: Turn[] }[] {
-  const items: { at: number; tools?: Turn[] }[] = [];
-  let at = 0;
-  while (at < turns.length) {
-    let end = at;
-    while (end < turns.length && turns[end].kind === Turn_Kind.TOOL) end += 1;
-    if (end > at) {
-      items.push({ at, tools: turns.slice(at, end) });
-      at = end;
-    } else {
-      items.push({ at });
-      at += 1;
-    }
-  }
-  return items;
-}
-
-/** A run of tool lines, shut under how many there are and which tools: the
- * agent's words read straight through, and what it ran is a tap away — or
- * the whole of it, as it ran, in the terminal. */
-function Tools({ turns, onCopy }: { turns: Turn[]; onCopy: (text: string) => void }) {
-  const [open, setOpen] = useState(false);
-  const count = turns.length === 1 ? '1 tool call' : `${turns.length} tool calls`;
-  const names = [...new Set(turns.map((turn) => turn.tool).filter(Boolean))].join(', ');
-  return (
-    <View style={styles.tools}>
-      <Pressable
-        accessibilityRole="button"
-        accessibilityLabel={names ? `${count}: ${names}` : count}
-        accessibilityState={{ expanded: open }}
-        onPress={() => setOpen(!open)}
-        style={({ pressed }) => [styles.toolsHead, pressed && styles.held]}
-      >
-        <View style={open && styles.toolsOpen}>
-          <Chevron size={13} color={t.faint} weight={2} />
-        </View>
-        <Text style={styles.toolText} numberOfLines={1}>
-          {count}
-          {names ? <Text style={styles.toolNames}>{` · ${names}`}</Text> : null}
-        </Text>
-      </Pressable>
-      {open ? turns.map((turn, index) => <TurnView key={index} turn={turn} agent="" onCopy={onCopy} />) : null}
-    </View>
-  );
-}
-
-function TurnView({
-  turn,
-  agent,
-  carried,
-  onCopy,
-  delivered,
-}: {
-  turn: Turn;
-  agent: string;
-  /** The photos and files a message of yours carried, while the phone has
-   * them. */
-  carried?: Attachment[];
-  onCopy: (text: string) => void;
-  delivered?: boolean;
-}) {
-  // A tool line opened to its whole text.
-  const [open, setOpen] = useState(false);
-  switch (turn.kind) {
-    case Turn_Kind.USER: {
-      // Files the desktop named under the words, as files; images by their
-      // count, unless the phone still has their pictures.
-      const { words, files } = splitFiles(turn.text);
-      const images = carried ? 0 : (turn.images ?? 0);
-      const plain = !carried && images === 0 && files.length === 0;
-      const said = words ? (
-        <Text style={styles.youText}>
-          <Linked text={words} />
-        </Text>
-      ) : null;
-      const mark = delivered ? <StatusMark status="delivered" /> : null;
-      return (
-        <Pressable
-          accessibilityHint="Hold to copy"
-          delayLongPress={350}
-          onLongPress={() => onCopy(words)}
-          style={({ pressed }) => [plain ? styles.you : styles.yours, pressed && styles.held]}
-        >
-          {plain ? (
-            <>
-              {mark}
-              {said}
-            </>
-          ) : (
-            <>
-              {carried ? <SentFiles files={carried} /> : files.map((path) => <FileChip key={path} name={fileName(path)} />)}
-              {said || images > 0 ? (
-                <View style={styles.bubble}>
-                  {mark}
-                  {images > 0 ? <ImagesChip count={images} /> : null}
-                  {said}
-                </View>
-              ) : (
-                mark
-              )}
-            </>
-          )}
-        </Pressable>
-      );
-    }
-    case Turn_Kind.TOOL:
-      return (
-        <Pressable
-          accessibilityHint={open ? 'Tap to shorten' : 'Tap to show all of it'}
-          onPress={() => setOpen(!open)}
-          delayLongPress={350}
-          onLongPress={() => onCopy(turn.text)}
-          style={({ pressed }) => [styles.tool, pressed && styles.held]}
-        >
-          <View style={styles.toolMark} />
-          <Text style={styles.toolText} numberOfLines={open ? undefined : 2}>
-            {turn.text}
-          </Text>
-        </Pressable>
-      );
-    default:
-      return (
-        <Pressable
-          accessibilityHint="Hold to copy"
-          delayLongPress={350}
-          onLongPress={() => onCopy(turn.text)}
-          style={styles.agent}
-        >
-          {agent ? (
-            <View style={styles.agentMark}>
-              <AgentMark agent={agent} size={14} />
-            </View>
-          ) : null}
-          <View style={styles.agentBody}>
-            <Words text={turn.text} onCopy={onCopy} />
-          </View>
-        </Pressable>
-      );
-  }
-}
-
-/** An agent's words, read as markdown — see lib/markdown.ts: fenced code as
- * a block of its own, tables sideways, the rest as prose with its headings,
- * lists, quotes and emphasis drawn rather than shown as marks. */
-function Words({ text, onCopy }: { text: string; onCopy: (text: string) => void }) {
-  // Prose in a run of its own, so its lines keep their spacing; code and
-  // tables between.
-  const out: ReactNode[] = [];
-  let prose: Block[] = [];
-  const flush = () => {
-    if (prose.length === 0) return;
-    out.push(
-      <View key={out.length} style={styles.prose}>
-        {prose.map((block, n) => (
-          <Line key={n} block={block} />
-        ))}
-      </View>,
-    );
-    prose = [];
-  };
-  for (const block of markdown(text)) {
-    if (block.kind === 'code') {
-      flush();
-      out.push(<Code key={out.length} code={block.text} onHold={() => onCopy(text)} onCopy={onCopy} />);
-    } else if (block.kind === 'table') {
-      flush();
-      out.push(<Table key={out.length} table={block} onHold={() => onCopy(text)} />);
-    } else {
-      prose.push(block);
-    }
-  }
-  flush();
-  return <>{out}</>;
-}
-
-/** A fenced block of code, sideways to scroll, with its own Copy. */
-function Code({ code, onHold, onCopy }: { code: string; onHold: () => void; onCopy: (text: string) => void }) {
-  return (
-    <View style={styles.codeBlock}>
-      <ScrollView horizontal>
-        {/* The hold that copies the turn, inside the scroller — see `Table`. */}
-        <Pressable accessibilityHint="Hold to copy" delayLongPress={350} onLongPress={onHold} style={styles.codeBlockInner}>
-          <Text style={styles.codeText}>{code}</Text>
-        </Pressable>
-      </ScrollView>
-      <Pressable
-        accessibilityRole="button"
-        accessibilityLabel="Copy code"
-        hitSlop={6}
-        onPress={() => onCopy(code)}
-        style={({ pressed }) => [styles.codeCopy, pressed && { backgroundColor: t.selection }]}
-      >
-        <Text style={styles.codeCopyText}>Copy</Text>
-      </Pressable>
-    </View>
-  );
-}
-
-/** A heading's size, by level: the body's for the fourth and below. */
-const HEADING = [
-  { fontSize: 18, lineHeight: 25 },
-  { fontSize: 16.5, lineHeight: 23 },
-  { fontSize: 15, lineHeight: 22 },
-];
-
-/** One block of prose, drawn; dim inside a quote. A list item hangs its
- * wrapped lines under its words, not its marker. */
-function Line({ block, dim }: { block: Block; dim?: boolean }) {
-  const color = dim ? { color: t.dim } : null;
-  switch (block.kind) {
-    case 'heading':
-      return (
-        <Text style={[styles.agentText, styles.strong, HEADING[Math.min(block.level, 3) - 1], block.level <= 2 && styles.headingGap, color]}>
-          <Runs runs={block.runs} />
-        </Text>
-      );
-    case 'item':
-      return (
-        <View style={[styles.item, { paddingLeft: Math.min(block.depth, 4) * 16 }]}>
-          <Text style={[styles.agentText, styles.marker]}>{block.marker}</Text>
-          <Text style={[styles.agentText, styles.itemText, color]}>
-            <Runs runs={block.runs} />
-          </Text>
-        </View>
-      );
-    case 'task':
-      return (
-        <View style={[styles.item, { paddingLeft: Math.min(block.depth, 4) * 16 }]}>
-          <View style={[styles.box, block.done && styles.boxDone]}>
-            {block.done ? <Check size={11} color={t.onAccent} weight={3} /> : null}
-          </View>
-          <Text style={[styles.agentText, styles.itemText, (block.done || dim) && { color: t.dim }]}>
-            <Runs runs={block.runs} />
-          </Text>
-        </View>
-      );
-    case 'quote':
-      return (
-        <View style={[styles.quote, styles.prose]}>
-          {block.blocks.map((inner, n) =>
-            inner.kind === 'code' ? (
-              <Text key={n} style={[styles.codeText, { color: t.dim }]}>
-                {inner.text}
-              </Text>
-            ) : (
-              <Line key={n} block={inner} dim />
-            ),
-          )}
-        </View>
-      );
-    case 'rule':
-      return <View style={styles.rule} />;
-    case 'para':
-      return (
-        <Text style={[styles.agentText, color]}>
-          <Runs runs={block.runs} />
-        </Text>
-      );
-    default:
-      // A table in a quote, as its cells' words.
-      return block.kind === 'table' ? (
-        <Text style={[styles.agentText, color]}>
-          {[block.head, ...block.rows].map((row) => row.map(plain).join(' · ')).join('\n')}
-        </Text>
-      ) : null;
-  }
-}
-
-/** Runs of text as markdown marked them: `code`, **strong**, *emphasis*,
- * ~~struck~~ and links, nested as written. On one line — in a table's cell —
- * a break is a space. */
-function Runs({ runs, flat }: { runs: Run[]; flat?: boolean }) {
-  return (
-    <>
-      {runs.map((piece, at) => {
-        switch (piece.kind) {
-          case 'text':
-            return <Fragment key={at}>{flat ? piece.text.replace(/\n/g, ' ') : piece.text}</Fragment>;
-          case 'code':
-            return (
-              <Text key={at} style={styles.inlineCode}>
-                {piece.text}
-              </Text>
-            );
-          case 'strong':
-          case 'em':
-          case 'struck':
-            return (
-              <Text key={at} style={piece.kind === 'strong' ? styles.strong : piece.kind === 'em' ? styles.emphasis : styles.struck}>
-                <Runs runs={piece.runs} flat={flat} />
-              </Text>
-            );
-          case 'link':
-            return (
-              <Text key={at} style={styles.link} onPress={() => void Linking.openURL(piece.url)}>
-                <Runs runs={piece.runs} flat={flat} />
-              </Text>
-            );
-          case 'break':
-            return <Fragment key={at}>{flat ? ' ' : '\n'}</Fragment>;
-        }
-      })}
-    </>
-  );
-}
-
-/** Runs as their words alone. */
-function plain(runs: Run[]): string {
-  return runs.map((piece) => ('runs' in piece ? plain(piece.runs) : piece.kind === 'break' ? ' ' : piece.text)).join('');
-}
-
-/** A web address in a message of yours, `[words](https://…)` or bare. */
-const LINK = /\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)|(https?:\/\/[^\s<>"'`]+)/g;
-
-/** Your own words with their links made tappable, opened in the phone's
- * browser, and otherwise as you typed them. A bare address leaves the
- * punctuation that ends its sentence outside it. */
-function Linked({ text }: { text: string }) {
-  const out: ReactNode[] = [];
-  let from = 0;
-  for (const match of text.matchAll(LINK)) {
-    const at = match.index ?? 0;
-    let shown = match[1] ?? match[3];
-    let url = match[2] ?? match[3];
-    let rest = '';
-    if (match[3]) {
-      const trimmed = url.replace(/[.,:;!?)\]*_~]+$/, '');
-      rest = url.slice(trimmed.length);
-      url = shown = trimmed;
-    }
-    if (at > from) out.push(text.slice(from, at));
-    out.push(
-      <Text key={at} style={styles.link} onPress={() => void Linking.openURL(url)}>
-        {shown}
-      </Text>,
-    );
-    if (rest) out.push(rest);
-    from = at + match[0].length;
-  }
-  if (from < text.length) out.push(text.slice(from));
-  return <>{out}</>;
-}
-
-/** A table, column by column so each column takes its widest cell, and
- * sideways to scroll when it is wider than the phone. Cells stay on one line,
- * which keeps the rows of every column level with each other.
- *
- * The frame and its rounded clip are on a view around the scroller, not on the
- * scroller itself: `overflow: 'hidden'` on a ScrollView replaces the `scroll`
- * its layout depends on, and the columns are then squeezed to the phone's
- * width and cut off instead of running past it.
- *
- * The hold that copies the turn is here, inside the scroller, and not only on
- * the turn around it. On iOS a scroll view will not start a drag while a view
- * above it holds the touch, and the turn's Pressable takes every touch as it
- * lands: a sideways drag only got through when it beat that to the main
- * thread. A press inside the scroller takes the touch instead, and the scroll
- * view is free to cancel it and scroll. */
-function Table({ table, onHold }: { table: Extract<Block, { kind: 'table' }>; onHold: () => void }) {
-  return (
-    <View style={styles.table}>
-    <ScrollView horizontal>
-      <Pressable accessibilityHint="Hold to copy" delayLongPress={350} onLongPress={onHold} style={styles.tableInner}>
-      {table.head.map((title, col) => {
-        const align = { textAlign: table.align[col] ?? 'left' };
-        return (
-          <View key={col} style={[styles.tableColumn, col > 0 && styles.tableColumnRule]}>
-            <View style={[styles.tableCell, styles.tableHead]}>
-              <Text style={[styles.tableText, styles.strong, align]} numberOfLines={1}>
-                <Runs runs={title} flat />
-              </Text>
-            </View>
-            {table.rows.map((row, at) => (
-              <View key={at} style={[styles.tableCell, styles.tableRowRule]}>
-                <Text style={[styles.tableText, align]} numberOfLines={1}>
-                  <Runs runs={row[col] ?? []} flat />
-                </Text>
-              </View>
-            ))}
-          </View>
-        );
-      })}
-      </Pressable>
-    </ScrollView>
-    </View>
-  );
-}
-
-/** A message of yours: round all over but the corner nearest the composer,
- * which is tighter — a hint of where the message came from. An images chip
- * read back sits over its words. */
-const bubble: ViewStyle = {
-  backgroundColor: t.selection,
-  borderRadius: 18,
-  borderBottomRightRadius: 6,
-  paddingHorizontal: 12,
-  paddingVertical: 9,
-  gap: 6,
-};
-
 const styles = StyleSheet.create({
   fill: { flex: 1 },
-  page: { paddingHorizontal: size.gutter + 4, paddingTop: 4, paddingBottom: 18, gap: 12 },
-  state: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  stateText: { fontFamily: font.chrome, fontSize: size.caption },
-  barActions: { flexDirection: 'row', gap: 6, alignItems: 'center' },
-  modePill: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    height: 34,
-    paddingLeft: 10,
-    paddingRight: 12,
-    borderRadius: 17,
-    borderWidth: 1,
-    borderColor: t.border,
-    backgroundColor: t.sunken,
-  },
-  modePillText: { fontFamily: font.prose, fontSize: 13.5, fontWeight: '500', color: t.text, maxWidth: 104 },
+  page: { paddingHorizontal: size.gutter + 4, paddingTop: 4, paddingBottom: 18 },
+  // Between the conversation's rows, and between what its foot holds.
+  gap: { height: 12 },
+  trail: { gap: 12 },
+  trailSpaced: { paddingTop: 12 },
   empty: { gap: 12, paddingVertical: 24, alignItems: 'flex-start' },
   // With nothing to show, the chat's own height, for a mark in its middle.
   pageFill: { flexGrow: 1 },
   lost: { flex: 1, justifyContent: 'center', paddingVertical: 24 },
-  you: { ...bubble, alignSelf: 'flex-end', maxWidth: '86%' },
-  // A message of yours with photos or files: them, then its bubble.
-  yours: { alignSelf: 'flex-end', maxWidth: '86%', alignItems: 'flex-end', gap: 4 },
-  bubble,
-  youText: { fontFamily: font.prose, fontSize: size.body, lineHeight: 20, color: t.text },
-  agent: { flexDirection: 'row', gap: 10, alignItems: 'flex-start' },
-  // Centred on the first line of the words beside it — the body's 1pt top
-  // padding plus a 21pt line — however many lines they run to.
-  agentMark: { height: 22, paddingTop: 1, justifyContent: 'center' },
-  agentBody: { flex: 1, minWidth: 0, gap: 8, paddingTop: 1 },
-  agentText: { fontFamily: font.prose, fontSize: size.body, lineHeight: 21, color: t.text },
-  link: { color: t.attention, textDecorationLine: 'underline' },
-  strong: { fontFamily: font.proseSemibold },
-  emphasis: { fontStyle: 'italic' },
-  struck: { textDecorationLine: 'line-through', color: t.dim },
-  held: { opacity: 0.7 },
-  prose: { gap: 6 },
-  headingGap: { marginTop: 4 },
-  item: { flexDirection: 'row', gap: 7 },
-  marker: { minWidth: 12, color: t.dim },
-  itemText: { flex: 1, minWidth: 0 },
-  box: {
-    width: 15,
-    height: 15,
-    marginTop: 3,
-    borderRadius: 4,
-    borderWidth: 1.5,
-    borderColor: t.dim,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  boxDone: { backgroundColor: t.accent, borderColor: t.accent },
-  quote: { borderLeftWidth: 3, borderLeftColor: t.border, paddingLeft: 10 },
-  rule: { height: 1, backgroundColor: t.rule, marginVertical: 6 },
-  codeCopy: {
-    position: 'absolute',
-    top: 6,
-    right: 6,
-    height: 24,
-    paddingHorizontal: 8,
-    borderRadius: size.radiusSm,
-    backgroundColor: t.elevated,
-    justifyContent: 'center',
-  },
-  codeCopyText: { fontFamily: font.proseMedium, fontSize: 11.5, color: t.dim },
-  inlineCode: { fontFamily: font.code, fontSize: size.label, color: t.text, backgroundColor: t.sunken },
-  codeBlock: { backgroundColor: t.sunken, borderRadius: size.radius },
-  table: { borderWidth: 1, borderColor: t.border, borderRadius: size.radius, overflow: 'hidden' },
-  tableInner: { flexDirection: 'row' },
-  tableColumn: { minWidth: 56 },
-  tableColumnRule: { borderLeftWidth: 1, borderLeftColor: t.rule },
-  tableCell: { height: 34, justifyContent: 'center', paddingHorizontal: 10 },
-  tableHead: { backgroundColor: t.sunken },
-  tableRowRule: { borderTopWidth: 1, borderTopColor: t.rule },
-  tableText: { fontFamily: font.prose, fontSize: size.label, lineHeight: 18, color: t.text },
-  codeBlockInner: { padding: 10 },
-  codeText: { fontFamily: font.code, fontSize: 12.5, lineHeight: 18, color: t.text },
-  tool: { flexDirection: 'row', alignItems: 'flex-start', gap: 8, paddingLeft: 24 },
-  toolMark: { width: 5, height: 5, borderRadius: 3, marginTop: 6, backgroundColor: t.faint },
-  toolText: { flex: 1, minWidth: 0, fontFamily: font.chrome, fontSize: size.detail, color: t.dim },
-  tools: { gap: 10 },
-  // The chevron centred where a tool line's dot is, its words where theirs start.
-  toolsHead: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingLeft: 20 },
-  toolsOpen: { transform: [{ rotate: '90deg' }] },
-  toolNames: { color: t.faint },
-  ask: {
-    marginHorizontal: size.gutter,
-    marginBottom: 8,
-    padding: 12,
-    gap: 8,
-    borderRadius: size.radiusCard,
-    // Solid: it rides over the conversation with the keyboard, and the
-    // conversation must not read through it.
-    backgroundColor: blend(t.backdrop, t.attention, 0.1),
-    borderWidth: 1,
-    borderColor: blend(t.backdrop, t.attention, 0.35),
-  },
-  askTitle: { fontFamily: font.proseSemibold, fontSize: size.body, color: t.text },
   // A cold session's card: a fact to weigh rather than something waiting on
   // you, so the float's own ground, not the attention tint.
   cold: {
@@ -2344,19 +1500,6 @@ const styles = StyleSheet.create({
     borderColor: t.border,
   },
   coldTitle: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  askSubject: { fontFamily: font.code, fontSize: 12.5, lineHeight: 18, color: t.text },
-  askLead: { fontFamily: font.prose, fontSize: size.label, lineHeight: 19, color: t.dim },
-  askHeader: { fontFamily: font.chrome, fontSize: size.caption, color: t.attention },
-  askScroll: { flexGrow: 0, maxHeight: 380 },
-  askQuestions: { gap: 16 },
-  asked: { gap: 6 },
-  askInput: { height: undefined, minHeight: size.control, maxHeight: 120, paddingTop: 11, paddingBottom: 11, lineHeight: 20 },
-  askButtons: { flexDirection: 'row', gap: 8 },
-  askBody: { gap: 8 },
-  grow: { flex: 1 },
-  noteBox: { paddingHorizontal: size.gutter + 4, paddingBottom: 8, gap: 8, alignItems: 'flex-start' },
-  noteText: { fontSize: size.label, lineHeight: 19 },
-  settings: { height: 36, paddingHorizontal: 14 },
   // Dictating: a white dot and what is listening, where a note would be.
   hearing: { flexDirection: 'row', alignItems: 'center', gap: 7, paddingHorizontal: size.gutter + 4, paddingBottom: 8 },
   hearingDot: { width: 7, height: 7, borderRadius: 4, backgroundColor: t.accent },
@@ -2413,9 +1556,12 @@ const styles = StyleSheet.create({
   inputAlone: { paddingRight: 16 },
   inputUnderTray: { paddingTop: 9 },
   edge: { position: 'absolute', top: -EDGE_H, left: 0, right: 0, height: EDGE_H },
+  // Past the composer's foot by more than the keyboard's rounded corners,
+  // which would show the conversation beside them. Off the screen at rest.
+  desk: { position: 'absolute', top: 0, left: 0, right: 0, bottom: -DESK_BELOW, backgroundColor: t.backdrop },
   // Hung from the composer's top edge, as tall as the card in it: what
   // floats over the conversation's foot hangs from its top.
-  foot: FLOATS ? { position: 'absolute', left: 0, right: 0, bottom: '100%' } : {},
+  foot: { position: 'absolute', left: 0, right: 0, bottom: '100%' },
   jumpDock: { position: 'absolute', top: -54, right: size.gutter + 4 },
   jump: {
     width: 40,

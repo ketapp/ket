@@ -28,6 +28,7 @@ use crate::ui::group::{button_group, segment};
 use crate::ui::icon::{Icon, sized_icon};
 use crate::ui::popup::{Placement, anchored};
 use crate::ui::textarea::textarea;
+use crate::ui::toast::Tone;
 use crate::ui::toggle::checkbox;
 use crate::ui::tooltip::{Side, tooltip};
 
@@ -195,8 +196,10 @@ impl Shell {
 
     // ---- sending ---------------------------------------------------------------
 
-    /// Hands the report to core on a background thread; the answer comes
-    /// back to [`Shell::feedback_answered`].
+    /// Puts the popover away and hands the report to core on a background
+    /// thread; the answer comes back to [`Shell::feedback_answered`], as a
+    /// notification. A report that doesn't go keeps its draft, and the
+    /// popover says why when it's opened again.
     fn send_feedback(&mut self, cx: &mut Context<Self>) {
         let message = self.composer_text(MESSAGE_EDITOR);
         let Some(form) = self.feedback.form.as_mut() else {
@@ -217,6 +220,7 @@ impl Shell {
         };
         form.sending = true;
         form.error = None;
+        self.dismiss_feedback();
 
         let work = cx
             .background_executor()
@@ -224,7 +228,7 @@ impl Shell {
         cx.spawn(async move |shell: gpui::WeakEntity<Shell>, cx| {
             let result = work.await;
             let _ = shell.update(cx, |shell, cx| {
-                shell.feedback_answered(result);
+                shell.feedback_answered(result, cx);
                 cx.notify();
             });
         })
@@ -232,14 +236,16 @@ impl Shell {
     }
 
     /// Takes core's answer to a send.
-    fn feedback_answered(&mut self, result: ket_core::Result<()>) {
+    fn feedback_answered(&mut self, result: ket_core::Result<()>, cx: &mut Context<Self>) {
         match result {
             Ok(()) => {
-                // The draft went, so it goes; the popover stays up to say so.
+                // The draft went, so it goes; the popover thanks them if
+                // it's opened again this week.
                 self.close_composer(MESSAGE_EDITOR);
                 self.feedback.form = None;
                 self.feedback.wait_until = feedback::next_allowed_ms();
                 self.feedback.just_sent = true;
+                self.toast(Tone::Success, "Thanks — it's on its way.", cx);
             }
             Err(e) => {
                 // Another window may have sent one meanwhile; if so the
@@ -250,6 +256,7 @@ impl Shell {
                     form.sending = false;
                     form.error = Some(e.to_string().into());
                 }
+                self.toast_detail(Tone::Error, "Feedback not sent", e.to_string(), cx);
             }
         }
     }
@@ -425,6 +432,15 @@ impl Shell {
                     .text_size(TITLE_TEXT)
                     .font_weight(FontWeight::SEMIBOLD)
                     .child("Send feedback"),
+            )
+            .child(div().flex_grow())
+            .child(
+                crate::ui::dialog::close("feedback-x", t).on_click(cx.listener(
+                    |this, _, window, cx| {
+                        this.close_feedback(window);
+                        cx.notify();
+                    },
+                )),
             );
 
         let body = match self.feedback.wait_until {

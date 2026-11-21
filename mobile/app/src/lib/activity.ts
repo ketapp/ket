@@ -7,11 +7,13 @@ import {
   type AsleepTerminal,
   type HostSnapshot,
   type ProjectSummary,
+  PullRequestSummary_State,
   type TerminalSummary,
   type WorktreeSummary,
 } from '@ket/remote';
 
 import { PROJECT_COLORS, agentLabel, t } from './theme';
+import { capitalised } from './text';
 
 /**
  * The word a row ends in, in its colour — the desktop sidebar's words
@@ -35,14 +37,47 @@ export function stateOf(activity: Activity): { word: string; color: string } | u
   }
 }
 
-/** A filter over worktrees, as the desktop sidebar's filter has them. */
-export type Filter = 'all' | 'running' | 'waiting' | 'idle';
+/** A filter over the Worktrees list. What waits on you has a tab of its
+ * own, Needs you, so it is not one of them. */
+export type Filter = 'all' | 'active' | 'unread' | 'ready';
+
+/** Whether `worktree` belongs under `filter`. */
+export function passes(worktree: WorktreeSummary, filter: Filter): boolean {
+  switch (filter) {
+    case 'all':
+      return true;
+    case 'active':
+      return filterOf(worktree.activity) === 'running';
+    case 'unread':
+      return isUnread(worktree);
+    case 'ready':
+      return isReady(worktree);
+  }
+}
+
+/** An agent here has answered and nobody has looked since (1.32), or
+ * someone marked it unread from its menu (1.35). */
+export function isUnread(worktree: WorktreeSummary): boolean {
+  return worktree.unread || worktree.terminals.some((terminal) => terminal.unread);
+}
 
 /**
- * The one filter other than `all` a worktree falls in — the sidebar's
- * `SidebarFilter::of`: anything moving is running, a failure is idle.
+ * Work to land: quiet, nothing asked of you, and something to show for it —
+ * commits, changes not yet committed, or an open pull request. A
+ * repository's own checkout has no base and lands nowhere.
  */
-export function filterOf(activity: Activity): Exclude<Filter, 'all'> {
+export function isReady(worktree: WorktreeSummary): boolean {
+  if (worktree.base === '' || filterOf(worktree.activity) !== 'idle') return false;
+  const pr = worktree.pullRequest;
+  const open = pr !== undefined && pr.state !== PullRequestSummary_State.CLOSED && pr.state !== PullRequestSummary_State.MERGED;
+  return worktree.commitsAhead > 0 || worktree.filesChanged > 0 || open;
+}
+
+/**
+ * How a worktree is moving — the sidebar's `SidebarFilter::of`: anything
+ * moving is running, a failure is idle.
+ */
+export function filterOf(activity: Activity): 'running' | 'waiting' | 'idle' {
   switch (activity) {
     case Activity.WORKING:
     case Activity.RUNNING:
@@ -82,7 +117,7 @@ export const WAKING = { word: 'waking', color: t.faint };
 
 /** What the row says: the agent's own words, else the state itself. */
 export function detail(worktree: WorktreeSummary): string {
-  if (worktree.agentState) return sentence(worktree.agentState);
+  if (worktree.agentState) return capitalised(worktree.agentState);
   switch (worktree.activity) {
     case Activity.WORKING:
       return 'Working';
@@ -97,10 +132,6 @@ export function detail(worktree: WorktreeSummary): string {
     default:
       return worktree.terminals.some((x) => !x.closed) ? 'Ready' : worktree.asleep.length > 0 ? 'Asleep' : 'Nothing running';
   }
-}
-
-function sentence(text: string): string {
-  return text.charAt(0).toUpperCase() + text.slice(1);
 }
 
 /** A project's colour: the one chosen in ket, else ket's default. */

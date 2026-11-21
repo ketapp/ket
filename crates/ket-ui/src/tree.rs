@@ -21,11 +21,11 @@ use ket_core::theme::{Color, Theme, contrast_ratio};
 use ket_core::workspace::Workspace;
 
 use crate::Shell;
-use crate::paint::{alpha, paint};
+use crate::paint::{alpha, mix, paint};
 use crate::projects::{default_color, rail_colour};
 use crate::ui::agent::{MARK, mark, provider};
 use crate::ui::button::{button, icon_button};
-use crate::ui::chip::{BADGE, Motion, badge, readout, status_dot, tag};
+use crate::ui::chip::{BADGE, Motion, image_badge, readout, status_dot, tag};
 use crate::ui::group::{button_group, segment};
 use crate::ui::icon::{Icon, icon, sized_icon};
 use crate::ui::row::{BLOCK_LEAD, block_row, block_row_with_rail, heading_row, row};
@@ -266,6 +266,8 @@ pub(crate) struct ProjectDrag {
     pub(crate) color: Color,
     /// Badge contents — the project's icon, or its initial.
     pub(crate) icon: SharedString,
+    /// The badge's picture, when the project has one.
+    pub(crate) image: Option<Arc<std::path::Path>>,
     /// The theme. Its own view has no access to the shell's.
     pub(crate) theme: Theme,
     /// Where inside the heading the pointer was when the drag began.
@@ -379,7 +381,12 @@ impl Render for ProjectDrag {
             .gap(ICON_GAP)
             .w_full()
             .min_w_0()
-            .child(badge(self.color, self.icon.clone(), &t))
+            .child(image_badge(
+                self.image.clone(),
+                self.color,
+                self.icon.clone(),
+                &t,
+            ))
             .child(
                 div()
                     .flex_1()
@@ -480,12 +487,28 @@ fn clamped_sidebar_width(wanted: Pixels, extent: Pixels) -> Option<Pixels> {
 /// How many distinct paths a status reports, for a count a person reads.
 ///
 /// A file with both staged and unstaged edits is two entries in the status
-/// and one file to anybody looking at it.
+/// and one file to anybody looking at it. A status cut short kept only some
+/// of its files, so its total stands instead: over by any doubles, but never
+/// under, which a count that ends "and N more" mustn't be.
 pub(crate) fn changed_paths(status: &ket_core::status::WorktreeStatus) -> usize {
-    let mut paths: Vec<&str> = status.files.iter().map(|f| f.path.as_str()).collect();
-    paths.sort_unstable();
-    paths.dedup();
-    paths.len()
+    let distinct = distinct_paths(status).count();
+    if status.truncated {
+        status.total_changes.max(distinct)
+    } else {
+        distinct
+    }
+}
+
+/// A status's paths in its own order, each once.
+pub(crate) fn distinct_paths(
+    status: &ket_core::status::WorktreeStatus,
+) -> impl Iterator<Item = &str> {
+    let mut seen = std::collections::HashSet::new();
+    status
+        .files
+        .iter()
+        .map(|file| file.path.as_str())
+        .filter(move |path| seen.insert(*path))
 }
 
 /// Which worktrees the sidebar lists: every one, or only those in one state.
@@ -696,6 +719,10 @@ pub struct ProjectNode {
     pub(crate) color: Color,
     /// Icon, verbatim from core. Shown in the badge instead of the initial.
     pub(crate) icon: Option<SharedString>,
+    /// Where ket keeps the project's badge picture, if it has one: drawn in
+    /// place of the colour and icon — see [`crate::ui::chip::image_badge`].
+    /// The file may be gone; the badge falls back then.
+    pub(crate) image: Option<Arc<std::path::Path>>,
     /// Whether discovered worktrees are being hidden. Drives the menu label.
     pub(crate) hide_discovered: bool,
     /// Listed ahead of the projects that are not; a pin follows its name.
@@ -764,7 +791,12 @@ pub struct Selection {
 /// Replaces the state rail that ran down each row's leading edge: that edge
 /// now belongs to the selection marker, and a word is what the eye can read
 /// at a glance down a list without learning a colour code first.
-pub(crate) fn state_word(node: &WorktreeNode, signal: Signal, t: &Theme) -> Option<Div> {
+pub(crate) fn state_word(
+    node: &WorktreeNode,
+    signal: Signal,
+    unread: bool,
+    t: &Theme,
+) -> Option<Div> {
     let (word, colour, motion): (&str, Color, Option<Motion>) = match node.in_progress {
         Some(op) => (
             git_operation_label(op),
@@ -783,6 +815,15 @@ pub(crate) fn state_word(node: &WorktreeNode, signal: Signal, t: &Theme) -> Opti
             // Something is running that is not known to be an agent making
             // progress: worth a word, not a colour or a beat.
             Signal::Running => ("busy", t.text.dim, None),
+            // At rest with an answer nobody has looked at: a dot and no
+            // word, gone once its tab has been in front.
+            Signal::Quiet if unread => {
+                return Some(div().flex().flex_none().items_center().child(status_dot(
+                    paint(t.accent),
+                    Motion::Still,
+                    UNREAD_DOT,
+                )));
+            }
             Signal::Quiet => return None,
         },
     };
@@ -798,6 +839,9 @@ pub(crate) fn state_word(node: &WorktreeNode, signal: Signal, t: &Theme) -> Opti
             .child(word),
     )
 }
+
+/// The dot a row ends in while its agent's answer is unread.
+const UNREAD_DOT: Pixels = px(7.0);
 
 /// The mark at the head of a worktree row.
 ///
@@ -872,17 +916,10 @@ impl Shell {
                 .iter()
                 .any(|terminal| self.asleep_terminals.contains_key(terminal))
         });
-        match (asleep, color, activity) {
-            (true, ..) => sized_icon(Icon::Moon, MARK, paint(t.text.dim)).into_any_element(),
-            (false, Some(color), Activity::Session { agent, .. }) => crate::session_color::tiled(
-                provider(agent, t).0,
-                MARK,
-                crate::session_color::ROW_TILE,
-                color,
-                t,
-            )
-            .into_any_element(),
-            _ => row_mark(activity, dirty, missing, t),
+        if asleep {
+            sized_icon(Icon::Moon, MARK, paint(t.text.dim)).into_any_element()
+        } else {
+            crate::session_color::row_mark(activity, color, dirty, missing, t)
         }
     }
 }
@@ -939,8 +976,14 @@ const GUIDE_CLEARANCE: Pixels = px(3.0);
 
 /// The tree's line colour: the same faint ink the guide has always been
 /// drawn in, stated once because four elements now draw it.
+///
+/// Opaque: that ink already laid over the sidebar's ground. The pieces
+/// overlap where a branch leaves the trunk — the elbow's own vertical runs
+/// past where the line on to the next sibling starts, and its curve leaves
+/// tangent to that line — and a translucent ink paints every shared pixel
+/// twice, which showed as a brighter stroke beside the trunk at each junction.
 fn guide(t: &Theme) -> gpui::Rgba {
-    alpha(paint(t.text.primary), 0.22)
+    mix(paint(t.panel), paint(t.text.primary), 0.22)
 }
 
 /// Draws the small amount of Markdown an agent's one-line report can carry.
@@ -1133,9 +1176,8 @@ fn pin_mark(colour: Color, t: &Theme) -> Div {
 
 /// The top of the tree's trunk, drawn inside the worktree row itself.
 ///
-/// It starts just under the mark and runs out through the row's bottom edge
-/// — and through its hairline, which the row keeps but draws clear while it
-/// heads a tree — so it meets the first elbow without a seam. Positioned from
+/// It starts just under the mark and crosses the gap below the row so it
+/// meets the first elbow without a seam. Positioned from
 /// the row's middle, where `items_center` puts the mark, plus half the mark
 /// and the clearance, as a margin: a percentage and a length cannot be added
 /// in one inset.
@@ -1145,7 +1187,7 @@ fn trunk_head(t: &Theme) -> AnyElement {
         .left(mark_axis() - px(0.5))
         .top(gpui::relative(0.5))
         .mt(MARK / 2.0 + GUIDE_CLEARANCE)
-        .bottom(px(-1.0))
+        .bottom(-ROW_GAP)
         .w(px(1.0))
         .bg(guide(t))
         .into_any_element()
@@ -1371,6 +1413,9 @@ impl Shell {
             .when(node.missing, |el| {
                 el.child(tag("missing", t).text_size(px(8.5)))
             })
+            .when(self.deleting(&node.id), |el| {
+                el.child(tag("deleting", t).text_size(px(8.5)))
+            })
             // Only a level someone chose earns a mark: the default is what
             // every worktree has, and a ring on every row says nothing. Left
             // out rather than hidden, so the rest of the row ends flush with
@@ -1467,14 +1512,16 @@ impl Shell {
                             .border_color(line)
                             .rounded_bl(ELBOW_RADIUS),
                     )
-                    // │ on to the next sibling. Not under the last, which is
-                    // where the tree ends.
+                    // │ on to the next sibling, starting where the elbow
+                    // begins to curve away from the vertical. Starting at
+                    // the dot's centre leaves a break above every junction.
+                    // Not under the last, which is where the tree ends.
                     .when(i < last, |el| {
                         el.child(
                             div()
                                 .absolute()
                                 .left(axis - px(0.5))
-                                .top(SUBAGENT_ROW_H / 2.0)
+                                .top(SUBAGENT_ROW_H / 2.0 - ELBOW_RADIUS)
                                 .bottom_0()
                                 .w(px(1.0))
                                 .bg(line),
@@ -1634,6 +1681,9 @@ impl Shell {
                         .as_deref()
                         .and_then(crate::ui::glyph::drawable)
                         .map(|icon| SharedString::from(icon.to_owned())),
+                    image: workspace
+                        .project_image_path(&project.id, &settings)
+                        .map(Arc::from),
                     hide_discovered: settings.hide_discovered_worktrees,
                     pinned: settings.pinned,
                     hidden: settings.hidden,
@@ -1835,6 +1885,12 @@ impl Shell {
             return;
         };
         let id = node.id.clone();
+        // A worktree being deleted can't be opened until the delete is done
+        // or refused: its checkout passed the check for work it would lose,
+        // and anything typed or saved in it now would go with it unasked.
+        if self.deleting(&id) {
+            return;
+        }
         let missing = node.missing;
         let project_id = self.projects[selection.project].id.clone();
         self.selection = Some(selection);
@@ -1995,6 +2051,78 @@ impl Shell {
         };
 
         self.select(found, cx);
+    }
+
+    /// Puts the projects back in the order a reload gives them — pinned ones
+    /// first, each side in the registry's order — after a pin changed in
+    /// place. Reads the registry and nothing else: no git.
+    pub(crate) fn resort_projects(&mut self) {
+        let Ok(order) = Workspace::open().and_then(|workspace| workspace.projects()) else {
+            return;
+        };
+        let selected = self.selected_id();
+        let rank = |id: &ProjectId| {
+            order
+                .iter()
+                .position(|project| &project.id == id)
+                .unwrap_or(usize::MAX)
+        };
+        self.projects
+            .sort_by_key(|node| (!node.pinned, rank(&node.id)));
+        // Found again by id, as a reload finds it: the rows moved.
+        self.selection = selected.and_then(|id| self.position_of(&id));
+    }
+
+    /// Puts a project's rows back in the order a reload gives them — its own
+    /// checkout, then pinned rows, each side in the registry's order — after
+    /// a pin changed in place. Reads the registry and nothing else: no git.
+    pub(crate) fn resort_worktrees(&mut self, project: &ProjectId) {
+        let Ok(order) = Workspace::open().and_then(|workspace| workspace.worktrees(Some(project)))
+        else {
+            return;
+        };
+        let selected = self.selected_id();
+        let Some(node) = self.projects.iter_mut().find(|node| &node.id == project) else {
+            return;
+        };
+        let rank = |id: &WorktreeId| {
+            order
+                .iter()
+                .position(|worktree| &worktree.id == id)
+                .unwrap_or(usize::MAX)
+        };
+        node.worktrees
+            .sort_by_key(|row| (!row.primary, !row.pinned, rank(&row.id)));
+        self.selection = selected.and_then(|id| self.position_of(&id));
+    }
+
+    /// Takes a deleted worktree's row out of the sidebar in place, and lets go
+    /// of what a reload would have dropped with it. A reload asked git about
+    /// every project's worktrees, and read each one's status, to lose a row.
+    pub(crate) fn drop_row(&mut self, id: &WorktreeId, cx: &mut Context<Self>) {
+        let selected = self.selected_id();
+        for project in &mut self.projects {
+            project.worktrees.retain(|row| &row.id != id);
+        }
+        // Found again by id: the rows after it moved up. Only the index —
+        // the worktree in front hasn't changed, and selecting it again would
+        // drop a tab rename under way and unpin the file panel.
+        self.selection = selected.and_then(|id| self.position_of(&id));
+        self.refresh_savings();
+        // A worktree that went takes its browser tabs and profile with it.
+        #[cfg(feature = "chromium")]
+        if let Ok(workspace) = Workspace::open() {
+            self.chromium_registry_changed(&workspace, cx);
+        }
+        self.menu_dirty = true;
+        cx.notify();
+    }
+
+    /// Whether `id` is being deleted, behind no dialog: its row says so.
+    pub(crate) fn deleting(&self, id: &WorktreeId) -> bool {
+        self.confirm_remove_worktree
+            .as_ref()
+            .is_some_and(|confirm| confirm.pending && &confirm.target.id == id)
     }
 
     /// Reloads the tree, keeping what the reader had expanded.
@@ -2462,6 +2590,96 @@ impl Shell {
     /// from a host that could not start a listener, left its agents with
     /// ours, and so holds no status for them — this window is the only one
     /// hearing them.
+    /// Marks the agent in the tab in front as read, while this window is the
+    /// one in front: its worktree's row loses its dot here, in other windows
+    /// and on a phone. Asked each frame, so a tab already in front when its
+    /// agent answers is read at once.
+    pub(crate) fn see_front_tab(&mut self, window: &Window, cx: &mut Context<Self>) {
+        use std::sync::Mutex;
+        use std::time::{Duration, Instant};
+
+        // The pane last reported to the host, and when: its snapshot takes a
+        // moment to say so, and frames come faster than that.
+        static TOLD: Mutex<Option<(String, Instant)>> = Mutex::new(None);
+
+        if !window.is_window_active() {
+            return;
+        }
+        let Some(crate::tabs::TabKind::Terminal(terminal)) = self
+            .space()
+            .and_then(|space| space.active_tab())
+            .map(|tab| tab.kind.clone())
+        else {
+            return;
+        };
+        let Some(key) = self.terminal_keys.get(&terminal).cloned() else {
+            return;
+        };
+        if !self
+            .activity
+            .pane_status(&key)
+            .is_some_and(|pane| pane.unread)
+        {
+            return;
+        }
+        if self.activity.seen(&key) {
+            cx.notify();
+        }
+        let hosted = self
+            .terminals
+            .get(&terminal)
+            .is_some_and(|handle| handle.term.is_hosted());
+        if !hosted {
+            return;
+        }
+        let mut told = TOLD
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let recent = told
+            .as_ref()
+            .is_some_and(|(pane, at)| *pane == key && at.elapsed() < Duration::from_secs(1));
+        if !recent {
+            ket_core::host::seen(&key);
+            *told = Some((key, Instant::now()));
+        }
+    }
+
+    /// Marks `id` unread, as its menu's Mark as Unread does: its row has the
+    /// dot again, here, in other windows and on a phone, and is under a
+    /// phone's Unread filter, until someone next goes to it.
+    pub(crate) fn mark_worktree_unread(&mut self, id: &WorktreeId, cx: &mut Context<Self>) {
+        self.set_worktree_mark(id, true);
+        cx.notify();
+    }
+
+    /// The host's mark when there is a host to hold it, else this window's.
+    /// Taken off both, for one made here before the host was.
+    fn set_worktree_mark(&mut self, id: &WorktreeId, unread: bool) {
+        let hosted = ket_core::host::mark_unread(id.as_str(), unread);
+        if !hosted || !unread {
+            self.activity.mark_unread(id, unread);
+        }
+    }
+
+    /// Takes the mark off a worktree marked unread once someone comes to it
+    /// in this window — not while it stays in front, so one marked from its
+    /// own row keeps its dot until it is left and come back to. Asked each
+    /// frame, alongside [`Self::see_front_tab`].
+    pub(crate) fn read_arrived_worktree(&mut self, window: &Window, cx: &mut Context<Self>) {
+        if !window.is_window_active() {
+            return;
+        }
+        let front = self.selected_id();
+        if front == self.front_worktree {
+            return;
+        }
+        self.front_worktree.clone_from(&front);
+        if let Some(id) = front.filter(|id| self.activity.marked(id)) {
+            self.set_worktree_mark(&id, false);
+            cx.notify();
+        }
+    }
+
     fn pane_keys(&self) -> std::collections::HashSet<String> {
         self.terminals
             .keys()
@@ -3520,6 +3738,7 @@ impl Shell {
                                     name: project.name.clone(),
                                     color: project.color,
                                     icon: mark.clone(),
+                                    image: project.image.clone(),
                                     theme: *t,
                                     // Filled in by the listener, which is where
                                     // gpui says how far into the row the pointer
@@ -3536,7 +3755,7 @@ impl Shell {
                             // No hover effect on the badge or the name: the
                             // heading is still under the pointer, and the
                             // caret has its own well.
-                            .child(badge(project.color, mark, t))
+                            .child(image_badge(project.image.clone(), project.color, mark, t))
                             .child(
                                 div()
                                     .flex()
@@ -3674,16 +3893,10 @@ impl Shell {
                                     // files changed on disk are the least urgent thing
                                     // a row can report.
                                     let activity = self.activity.activity(&node.id, now);
-                                    // The `/color` of the session the row speaks
-                                    // for: its mark on a tile of it, and its name
-                                    // in it — see `crate::session_color`.
-                                    let session_color = match &activity {
-                                        Activity::Session { .. } => self
-                                            .activity
-                                            .leading_session(&node.id, now)
-                                            .and_then(|(_, session)| self.session_color(session)),
-                                        _ => None,
-                                    };
+                                    // The row's `/color`: its mark on a tile of
+                                    // it, and its name in it — see
+                                    // `Shell::row_color`.
+                                    let session_color = self.row_color(&node.id, &activity, now);
                                     let name_ink = session_color
                                         .map(|color| paint(crate::session_color::label(color, t)));
                                     let overridden = activity
@@ -3692,6 +3905,9 @@ impl Shell {
                                         .is_some_and(|agent| {
                                             project.agent_overrides.contains_key(agent)
                                         });
+                                    // The override's well, except behind a session's
+                                    // tile, which would wear it as an uneven ring.
+                                    let welled = overridden && session_color.is_none();
                                     let reported = activity.signal();
                                     let subagents = self.activity.subagents(&node.id, now);
                                     let folded = self.collapsed_subagents.contains(&node.id);
@@ -3708,16 +3924,31 @@ impl Shell {
                                     // state's own hue — see `state_word`. The subagents
                                     // roll up into it: one waiting on a person is the
                                     // worktree waiting on one.
-                                    let state = state_word(
-                                        node,
-                                        ket_core::activity::roll_up(reported, &subagents),
-                                        t,
-                                    );
-                                    // What it is doing, without the agent's name in it:
-                                    // the provider's own mark is drawn beside this, and
-                                    // "claude · thinking" next to Claude's logo says the
-                                    // same thing twice.
-                                    let detail = activity.detail();
+                                    let unread = self.activity.unread(&node.id);
+                                    // A worktree just made says it is starting until its
+                                    // agent has the prompt — see `crate::starting`.
+                                    //
+                                    // Otherwise, what it is doing, without the agent's
+                                    // name in it: the provider's own mark is drawn beside
+                                    // this, and "claude · thinking" next to Claude's logo
+                                    // says the same thing twice.
+                                    let (detail, state, starting_mark) = match self
+                                        .start_row_parts(&node.id)
+                                    {
+                                        Some((words, state, mark)) => {
+                                            (words, Some(state), Some(mark))
+                                        }
+                                        None => (
+                                            activity.detail(),
+                                            state_word(
+                                                node,
+                                                ket_core::activity::roll_up(reported, &subagents),
+                                                unread,
+                                                t,
+                                            ),
+                                            None,
+                                        ),
+                                    };
 
                                     // What state looks like on a selected row: nothing
                                     // extra. The rail beside the branch name is already
@@ -3893,7 +4124,7 @@ impl Shell {
                                                     // mark and outside its
                                                     // column, so the name beside
                                                     // it does not move.
-                                                    .when(overridden, |el| {
+                                                    .when(welled, |el| {
                                                         el.child(
                                                             div()
                                                                 .absolute()
@@ -3905,14 +4136,16 @@ impl Shell {
                                                                 .bg(paint(t.hover)),
                                                         )
                                                     })
-                                                    .child(self.worktree_row_mark(
-                                                        &node.id,
-                                                        &activity,
-                                                        session_color,
-                                                        node.dirty,
-                                                        node.missing,
-                                                        t,
-                                                    )),
+                                                    .child(starting_mark.unwrap_or_else(|| {
+                                                        self.worktree_row_mark(
+                                                            &node.id,
+                                                            &activity,
+                                                            session_color,
+                                                            node.dirty,
+                                                            node.missing,
+                                                            t,
+                                                        )
+                                                    })),
                                             )
                                             .child(
                                                 div()
@@ -3964,11 +4197,16 @@ impl Shell {
                                                                             el.text_color(ink)
                                                                         },
                                                                     )
-                                                                    .when(node.missing, |el| {
-                                                                        el.text_color(paint(
-                                                                            t.text.dim,
-                                                                        ))
-                                                                    })
+                                                                    .when(
+                                                                        node.missing
+                                                                            || self
+                                                                                .deleting(&node.id),
+                                                                        |el| {
+                                                                            el.text_color(paint(
+                                                                                t.text.dim,
+                                                                            ))
+                                                                        },
+                                                                    )
                                                                     .child(node.label()),
                                                             )
                                                             .children(primary_mark)
@@ -4230,6 +4468,7 @@ impl Shell {
                                     out
                                 }),
                         );
+                        rows = rows.children(self.starting_rows(pi, cx));
 
                         if !project.discovered.is_empty() && !filtering {
                             let count = project.discovered.len();

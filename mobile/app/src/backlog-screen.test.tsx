@@ -13,7 +13,7 @@ jest.mock('expo-router', () => ({
 }));
 jest.mock('react-native-safe-area-context', () => ({ useSafeAreaInsets: () => ({ top: 0, bottom: 0 }) }));
 jest.mock('@ket/remote', () => ({ BacklogPriority: { UNSPECIFIED: 0, LOW: 1, MEDIUM: 2, HIGH: 3, URGENT: 4 } }));
-jest.mock('./lib/hosts', () => ({ useHost: () => mockConn }));
+jest.mock('./lib/hosts', () => ({ useHost: () => mockConn, useHostState: (conn: unknown) => conn }));
 
 const note = (fields: object = {}) => ({
   id: 'n1',
@@ -36,6 +36,11 @@ const connection = (notes: object[]) => {
     backlog: jest.fn(async () => backlog),
     editBacklog: jest.fn(async () => backlog),
     startNote: jest.fn(async () => null),
+    // A fake connection is its own state: what the screen draws from.
+    id: 'host',
+    get state() {
+      return this;
+    },
   };
 };
 

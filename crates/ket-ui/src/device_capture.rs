@@ -29,6 +29,7 @@ use crate::fonts::Prose as _;
 use crate::paint::paint;
 use crate::ui::button::{button, icon_button};
 use crate::ui::icon::{Icon, sized_icon};
+use crate::ui::rule::vertical_rule;
 use crate::ui::toast::Tone;
 use crate::ui::tooltip::{Side, tooltip};
 use crate::ui::{CAPTION, LABEL};
@@ -124,14 +125,7 @@ pub(crate) fn device_strip(
         )
         .child(div().flex_grow())
         .children(controls)
-        .child(
-            div()
-                .flex_none()
-                .w(px(1.0))
-                .h(px(16.0))
-                .mx(px(6.0))
-                .bg(paint(t.border)),
-        )
+        .child(vertical_rule(t).h(px(16.0)).mx(px(6.0)))
         .child(capture)
 }
 

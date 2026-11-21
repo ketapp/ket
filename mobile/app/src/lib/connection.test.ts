@@ -19,6 +19,7 @@ jest.mock('@ket/remote', () => ({
   ReadyPullRequestSchema: 'readyPullRequest',
   ReopenPullRequestSchema: 'reopenPullRequest',
   PinWorktreeSchema: 'pinWorktree',
+  RenameWorktreeSchema: 'renameWorktree',
   DeleteWorktreeSchema: 'deleteWorktree',
   UpdatePullRequestSchema: 'updatePullRequest',
   GetChangesSchema: 'getChanges',
@@ -58,8 +59,15 @@ type Internals = {
   closed: boolean;
   backoff: number;
   wake: (() => void) | null;
+  heard: number;
+  redialing: boolean;
+  foreground: (next: string) => void;
   notify: () => void;
   settleStarting: () => void;
+  // What `state` is made from, set directly to stage a moment.
+  snapshot: unknown;
+  status: string;
+  host: object;
 };
 
 const reply = (payload: { case: string; value?: unknown }): Envelope =>
@@ -98,11 +106,13 @@ beforeEach(() => {
     listeners: new Set(),
     changed: new Set(),
     leases: new Map(),
+    settledQuestions: new Set(),
     closed: false,
     backoff: 8000,
     wake: null,
     watched: new Set(),
     backgroundedAt: null,
+    heard: 0,
     redialing: false,
     appState: { remove: () => {} },
     snapshot: null,
@@ -120,28 +130,28 @@ afterEach(() => {
 describe('HostConnection requests', () => {
   test('binds a task after its starting row is gone and keeps the original terminal', async () => {
     await conn.startWork('project', 'fix it', 'codex');
-    conn.snapshot = { projects: [{ id: 'project', worktrees: [{ id: 'new', branch: 'fix-it-k3f9', terminals: [] }] }] } as never;
+    inside.snapshot = { projects: [{ id: 'project', worktrees: [{ id: 'new', branch: 'fix-it-k3f9', terminals: [] }] }] } as never;
     inside.settleStarting();
-    expect(conn.starting).toEqual([]);
-    expect(conn.asked[0].terminal).toBeUndefined();
-    conn.snapshot = { projects: [{ id: 'project', worktrees: [{ id: 'new', branch: 'fix-it-k3f9', terminals: [{ id: 4n, agent: 'codex' }] }] }] } as never;
+    expect(conn.state.starting).toEqual([]);
+    expect(conn.state.asked[0].terminal).toBeUndefined();
+    inside.snapshot = { projects: [{ id: 'project', worktrees: [{ id: 'new', branch: 'fix-it-k3f9', terminals: [{ id: 4n, agent: 'codex' }] }] }] } as never;
     inside.settleStarting();
-    expect(conn.asked[0].terminal).toBe(4n);
-    const opened = conn.asked[0].openedAt;
-    conn.snapshot = { projects: [{ id: 'project', worktrees: [{ id: 'new', branch: 'fix-it-k3f9', terminals: [{ id: 5n, agent: 'codex' }] }] }] } as never;
+    expect(conn.state.asked[0].terminal).toBe(4n);
+    const opened = conn.state.asked[0].openedAt;
+    inside.snapshot = { projects: [{ id: 'project', worktrees: [{ id: 'new', branch: 'fix-it-k3f9', terminals: [{ id: 5n, agent: 'codex' }] }] }] } as never;
     inside.settleStarting();
-    expect(conn.asked[0]).toMatchObject({ terminal: 4n, openedAt: opened });
+    expect(conn.state.asked[0]).toMatchObject({ terminal: 4n, openedAt: opened });
   });
   test('adds and removes a hand-entered address without changing the pairing URL', async () => {
-    Object.assign(conn.host, { relay: 'ws://mac.local:7979', addresses: ['ws://mac.local:7979'] });
+    Object.assign(inside.host, { relay: 'ws://mac.local:7979', addresses: ['ws://mac.local:7979'] });
     await expect(conn.addAddress('https://bad.example')).rejects.toThrow('ws:// or wss://');
     await conn.addAddress('wss://vpn.example');
-    expect(conn.host).toMatchObject({
+    expect(conn.state.host).toMatchObject({
       relay: 'ws://mac.local:7979',
       manualAddresses: ['wss://vpn.example'],
     });
     await conn.removeAddress('wss://vpn.example');
-    expect(conn.host.manualAddresses).toEqual([]);
+    expect(conn.state.host.manualAddresses).toEqual([]);
   });
 
   test('subscribes and unsubscribes', async () => {
@@ -195,16 +205,16 @@ describe('HostConnection requests', () => {
     });
     // The desktop took it: a row stands in for the work until it arrives,
     // and the request is kept for the chat that follows it.
-    expect(conn.starting).toEqual([
+    expect(conn.state.starting).toEqual([
       { project: 'project', prompt: 'fix it', agent: 'codex', at: expect.any(Number), before: [] },
     ]);
-    expect(conn.asked).toEqual(conn.starting);
+    expect(conn.state.asked).toEqual(conn.state.starting);
     nextReply = reply({ case: 'error', value: { code: 0, message: 'ket is closed' } });
     await expect(conn.startWork('project', 'fix it')).resolves.toBe('ket is closed');
-    expect(conn.starting).toHaveLength(1);
+    expect(conn.state.starting).toHaveLength(1);
     // Given up on once it has taken too long to arrive.
     jest.advanceTimersByTime(120_100);
-    expect(conn.starting).toEqual([]);
+    expect(conn.state.starting).toEqual([]);
     await expect(conn.merge('tree')).resolves.toBe('ket is closed');
     await expect(conn.fixChecks('tree')).resolves.toEqual({ why: 'ket is closed' });
     expect(sent.at(-1)?.payload).toEqual({ case: 'fixChecks', value: { worktreeId: 'tree' } });
@@ -234,6 +244,12 @@ describe('HostConnection requests', () => {
     nextReply = reply({ case: 'error', value: { code: 0, message: "the repository's own checkout can't be pinned" } });
     await expect(conn.pinWorktree('primary-p', true)).resolves.toBe("the repository's own checkout can't be pinned");
 
+    nextReply = reply({ case: 'ack', value: {} });
+    await expect(conn.renameWorktree('tree', 'Checkout flow')).resolves.toBeNull();
+    expect(sent.at(-1)?.payload).toEqual({ case: 'renameWorktree', value: { worktreeId: 'tree', name: 'Checkout flow' } });
+    nextReply = reply({ case: 'error', value: { code: 0, message: "the repository's own checkout can't be renamed" } });
+    await expect(conn.renameWorktree('primary-p', 'Main')).resolves.toBe("the repository's own checkout can't be renamed");
+
     nextReply = reply({ case: 'error', value: { code: 8, message: 'it has uncommitted changes' } });
     await expect(conn.deleteWorktree('tree', false)).resolves.toEqual({ why: 'it has uncommitted changes', losesWork: true });
     nextReply = reply({ case: 'error', value: { code: 3, message: 'open ket on your Mac' } });
@@ -249,7 +265,7 @@ describe('HostConnection requests', () => {
   test('sends explicit start choices and opens fresh sessions', async () => {
     await expect(conn.startWork('project', 'fix it', 'codex', { base: 'release', model: 'gpt-6.1-sol', effort: 'high' })).resolves.toBeNull();
     // Kept with the request, for asking again.
-    expect(conn.asked.at(-1)?.choices).toEqual({ base: 'release', model: 'gpt-6.1-sol', effort: 'high' });
+    expect(conn.state.asked.at(-1)?.choices).toEqual({ base: 'release', model: 'gpt-6.1-sol', effort: 'high' });
     expect(sent[0].payload).toEqual({ case: 'startWork', value: {
       projectId: 'project', prompt: 'fix it', agent: 'codex', base: 'release', model: 'gpt-6.1-sol', effort: 'high',
     } });
@@ -372,7 +388,7 @@ describe('HostConnection requests', () => {
 
     const wake = jest.fn();
     inside.wake = wake;
-    conn.status = 'offline';
+    inside.status = 'offline';
     conn.retry();
     expect(remote.close).toHaveBeenCalled();
     expect(wake).toHaveBeenCalled();
@@ -380,5 +396,72 @@ describe('HostConnection requests', () => {
 
     conn.close();
     expect(inside.closed).toBe(true);
+  });
+});
+
+describe('HostConnection coming back from the background', () => {
+  /** The app put away for `ms`, then brought back. */
+  const away = (ms: number) => {
+    inside.foreground('background');
+    jest.advanceTimersByTime(ms);
+    inside.foreground('active');
+  };
+
+  test('keeps a session that answers, and dials nothing', async () => {
+    away(60_000);
+    expect(sent.map((message) => message.payload.case)).toEqual(['getSnippets']);
+    await jest.advanceTimersByTimeAsync(5_000);
+    expect(remote.close).not.toHaveBeenCalled();
+    expect(inside.redialing).toBe(false);
+  });
+
+  test('drops a session that says nothing, and dials again at once', async () => {
+    remote.send.mockImplementation((message: Envelope) => {
+      sent.push(message);
+    });
+    away(60_000);
+    await jest.advanceTimersByTimeAsync(1_499);
+    expect(remote.close).not.toHaveBeenCalled();
+    await jest.advanceTimersByTimeAsync(1);
+    expect(remote.close).toHaveBeenCalledTimes(1);
+    expect(inside.redialing).toBe(true);
+    expect(inside.backoff).toBe(0);
+  });
+
+  test('takes anything from the desktop as a session that works', async () => {
+    remote.send.mockImplementation((message: Envelope) => {
+      sent.push(message);
+    });
+    away(60_000);
+    // A snapshot or a terminal's output, ahead of the answer: the session
+    // loop counts every frame it reads.
+    inside.heard += 1;
+    await jest.advanceTimersByTimeAsync(5_000);
+    expect(remote.close).not.toHaveBeenCalled();
+  });
+
+  test('drops a session whose socket has already failed', async () => {
+    remote.send.mockImplementation(() => {
+      throw new Error('the relay connection closed');
+    });
+    away(60_000);
+    await jest.advanceTimersByTimeAsync(0);
+    expect(remote.close).toHaveBeenCalledTimes(1);
+    expect(inside.redialing).toBe(true);
+  });
+
+  test('a moment away asks nothing', async () => {
+    away(2_000);
+    await jest.advanceTimersByTimeAsync(5_000);
+    expect(sent).toEqual([]);
+    expect(remote.close).not.toHaveBeenCalled();
+  });
+
+  test('a session still being dialled is dialled again, unasked', () => {
+    inside.status = 'connecting';
+    away(60_000);
+    expect(sent).toEqual([]);
+    expect(remote.close).toHaveBeenCalledTimes(1);
+    expect(inside.redialing).toBe(true);
   });
 });

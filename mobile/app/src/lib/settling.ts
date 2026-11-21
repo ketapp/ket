@@ -9,31 +9,32 @@
 // before it is believed. After that, empty is empty.
 
 import { everyWorktree } from './activity';
-import type { HostConnection } from './connection';
+import type { ConnectionState } from './connection';
 
 /** How long after the desktop is first reached, or restarts, an empty list
  * still reads as filling. */
 export const SETTLE_MS = 3_000;
 
-type Settling = Pick<HostConnection, 'status' | 'snapshot' | 'starting'> &
-  Partial<Pick<HostConnection, 'freshSince' | 'snapshotAt'>>;
+type Settling = Pick<ConnectionState, 'status' | 'snapshot' | 'starting'> &
+  Partial<Pick<ConnectionState, 'freshSince' | 'snapshotAt'>>;
 
-/** Whether `conn`'s worktree list is still filling at `now`. Never while it
- * is not connected: the screen shows the reaching instead. */
-export function settling(conn: Settling, now: number): boolean {
-  if (conn.status !== 'connected') return false;
-  if (conn.snapshot === null) return true;
-  const fresh = conn.freshSince ?? null;
+/** Whether the desktop's worktree list, as `hostState` has it, is still
+ * filling at `now`. Never while it is not connected: the screen shows the
+ * reaching instead. */
+export function settling(hostState: Settling, now: number): boolean {
+  if (hostState.status !== 'connected') return false;
+  if (hostState.snapshot === null) return true;
+  const fresh = hostState.freshSince ?? null;
   if (fresh === null) return false;
   // The list is from before the desktop restarted; its own is on the way.
-  if ((conn.snapshotAt ?? 0) < fresh) return true;
-  const empty = everyWorktree(conn.snapshot).length === 0 && conn.starting.length === 0;
+  if ((hostState.snapshotAt ?? 0) < fresh) return true;
+  const empty = everyWorktree(hostState.snapshot).length === 0 && hostState.starting.length === 0;
   return empty && now - fresh < SETTLE_MS;
 }
 
 /** When an empty list stops reading as filling, for a screen to look again
  * then; `null` when no wait is running. */
-export function settlesAt(conn: Settling): number | null {
-  const fresh = conn.freshSince ?? null;
+export function settlesAt(hostState: Settling): number | null {
+  const fresh = hostState.freshSince ?? null;
   return fresh === null ? null : fresh + SETTLE_MS;
 }

@@ -30,7 +30,9 @@ mod browser_agent;
 
 /// How long a new agent is given to start before its prompt is typed. Its
 /// input is read from the terminal once its interface is up; typed sooner,
-/// the prompt lands in the shell it is starting from.
+/// the prompt lands in the shell it is starting from. Claude's is typed as
+/// soon as its input box is drawn, this at the most; Codex's waits for its
+/// composer however long that takes.
 pub(crate) const AGENT_START: Duration = Duration::from_secs(4);
 
 /// How long a new worktree's tabs are given to open their terminals before
@@ -225,6 +227,9 @@ impl Shell {
         let prompt = work.prompt.clone();
         let base = work.base.clone();
         let picked = work.economy;
+        // Where the dialog's starting row reads the progress from, when it
+        // put one up — see `crate::starting`.
+        let step = self.start_step(&work.project, &work.branch);
         let created = cx.background_executor().spawn(async move {
             let workspace = Workspace::open()?;
             let local = asked
@@ -247,12 +252,19 @@ impl Shell {
             let level_id = picked
                 .or(chosen.map(|(level, _)| level))
                 .map(|level| ket_core::worktree::token_reduction(level).id.clone());
-            let (created, _) = workspace.create_worktree_prepared_with_economy(
+            let (created, _) = workspace.create_worktree_reporting(
                 &project,
                 &branch,
                 base.as_deref(),
                 asked.as_deref(),
                 level_id.as_deref(),
+                &mut |at| {
+                    if let Some(step) = &step {
+                        *step
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(at);
+                    }
+                },
             )?;
             Ok::<_, ket_core::KetError>((created, chosen))
         });
@@ -274,15 +286,11 @@ impl Shell {
                     if let WorkOrigin::Backlog { note } = &work.origin {
                         shell.backlog_started(&work.project, note, &created, cx);
                     }
+                    shell.start_made(&work.project, &work.branch, created.id.clone());
                     if matches!(work.origin, WorkOrigin::Phone | WorkOrigin::Dialog)
                         && (agent.is_some() || work.model.is_some() || work.effort.is_some())
                     {
-                        // As the landing does: without it the sidebar shows
-                        // the new worktree with no size until the next sweep.
-                        // Reloaded first, since measuring looks the worktree
-                        // up among the rows and it is not among them yet.
-                        shell.reload(cx);
-                        shell.remeasure_worktree(created.id.clone(), cx);
+                        let id = created.id.clone();
                         shell.open_phone_session(
                             created.id,
                             agent,
@@ -292,6 +300,13 @@ impl Shell {
                             false,
                             cx,
                         );
+                        // As the landing does: without it the sidebar shows
+                        // the new worktree with no size until the next sweep.
+                        // After the session, whose reload put the worktree
+                        // among the rows measuring looks it up in — one
+                        // reload, not two, each a `git worktree list` per
+                        // project on the window's thread.
+                        shell.remeasure_worktree(id, cx);
                     } else {
                         shell.land_work(created.id, agent, work.prompt, work.attachments, cx);
                     }
@@ -307,11 +322,18 @@ impl Shell {
                         format!("Couldn't start the ket command's work in {name}: {error}"),
                         cx,
                     ),
-                    WorkOrigin::QuickPrompt | WorkOrigin::Dialog => shell.toast(
-                        Tone::Error,
-                        format!("Couldn't start a worktree in {name}: {error}"),
-                        cx,
-                    ),
+                    WorkOrigin::QuickPrompt | WorkOrigin::Dialog => {
+                        // The dialog's starting row stays, reading "failed":
+                        // a click on it brings the dialog back as it was.
+                        if matches!(work.origin, WorkOrigin::Dialog) {
+                            shell.start_failed(&work.project, &work.branch, error.to_string());
+                        }
+                        shell.toast(
+                            Tone::Error,
+                            format!("Couldn't start a worktree in {name}: {error}"),
+                            cx,
+                        );
+                    }
                     WorkOrigin::Backlog { .. } => shell.backlog_start_failed(error.to_string(), cx),
                 },
             });
@@ -335,12 +357,13 @@ impl Shell {
         self.reload(cx);
         let Some(selection) = self.position_of(&id) else {
             self.toast(Tone::Error, "The phone's worktree is no longer here", cx);
+            self.start_done(&id);
             return;
         };
         self.suppress_auto_session = true;
         self.select(selection, cx);
         self.suppress_auto_session = false;
-        let pane = self.spaces.entry(id).or_default().focused;
+        let pane = self.spaces.entry(id.clone()).or_default().focused;
         let before = self.next_terminal;
         if shell {
             self.open_terminal_tab_in(pane, cx);
@@ -349,9 +372,12 @@ impl Shell {
         }
         if self.next_terminal == before {
             self.toast(Tone::Error, "Could not open the phone's session", cx);
+            self.start_done(&id);
             return;
         }
-        if !shell && !prompt.is_empty() {
+        if shell || prompt.is_empty() {
+            self.start_done(&id);
+        } else {
             let terminal = crate::terminal::TerminalId(before);
             cx.spawn(async move |shell: WeakEntity<Shell>, cx| {
                 // The tab's terminal opens in the background, and a prompt
@@ -368,10 +394,14 @@ impl Shell {
                     cx.background_executor().timer(LANDING_POLL).await;
                     waited += LANDING_POLL;
                 }
-                if !wait_for_agent_input(&shell, terminal, cx).await {
-                    return;
-                }
-                let _ = shell.update(cx, |shell, cx| shell.submit_or_queue(terminal, &prompt, cx));
+                let ready = wait_for_agent_input(&shell, terminal, &prompt, cx).await;
+                let _ = shell.update(cx, |shell, cx| {
+                    if ready {
+                        shell.submit_startup_prompt(terminal, &prompt, cx);
+                    }
+                    shell.start_done(&id);
+                    cx.notify();
+                });
             })
             .detach();
         }
@@ -446,6 +476,7 @@ impl Shell {
             };
             let Some(terminal) = terminal else {
                 let _ = shell.update(cx, |shell, cx| {
+                    shell.start_done(&id);
                     shell.toast(
                         Tone::Error,
                         "The new worktree has no agent to give the prompt to",
@@ -454,7 +485,8 @@ impl Shell {
                 });
                 return;
             };
-            if !wait_for_agent_input(&shell, terminal, cx).await {
+            if !wait_for_agent_input(&shell, terminal, &prompt, cx).await {
+                let _ = shell.update(cx, |shell, _| shell.start_done(&id));
                 return;
             }
             let (before, left) = shell
@@ -467,7 +499,8 @@ impl Shell {
             wait_for_images(&shell, terminal, before + attached, cx).await;
             let prompt = with_files(prompt, &left);
             let _ = shell.update(cx, |shell, cx| {
-                shell.submit_or_queue(terminal, &prompt, cx);
+                shell.submit_startup_prompt(terminal, &prompt, cx);
+                shell.start_done(&id);
                 cx.notify();
             });
         })
@@ -517,29 +550,35 @@ impl Shell {
 async fn wait_for_agent_input(
     shell: &WeakEntity<Shell>,
     terminal: crate::terminal::TerminalId,
+    prompt: &str,
     cx: &mut gpui::AsyncApp,
 ) -> bool {
-    let codex = shell
+    let harness = shell
         .update(cx, |shell, _| {
             shell.terminals.get(&terminal).map(|handle| {
-                handle.agent.as_deref().is_some_and(|name| {
-                    ket_core::agents::harness(name).eq_ignore_ascii_case("codex")
+                handle.agent.as_deref().map_or(String::new(), |name| {
+                    ket_core::agents::harness(name).to_ascii_lowercase()
                 })
             })
         })
         .ok()
         .flatten();
-    let Some(codex) = codex else {
+    let Some(harness) = harness else {
         let _ = shell.update(cx, |shell, cx| {
-            shell.toast(
+            shell.toast_detail(
                 Tone::Error,
                 "Could not open the terminal. Your prompt has not been sent.",
+                prompt.to_owned(),
                 cx,
             );
         });
         return false;
     };
-    if !codex {
+    if harness == "claude" {
+        wait_for_claude_input(shell, terminal, cx).await;
+        return true;
+    }
+    if harness != "codex" {
         cx.background_executor().timer(AGENT_START).await;
         return true;
     }
@@ -549,41 +588,85 @@ async fn wait_for_agent_input(
             .update(cx, |shell, _| {
                 shell.terminals.get(&terminal).and_then(|handle| {
                     (!handle.term.is_closed()).then(|| {
-                        handle
-                            .term
-                            .with_term(|term| ket_core::screen::codex_prompt_ready(term))
+                        handle.term.with_term(|term| {
+                            let rows = ket_core::screen::bottom_rows(term, usize::MAX);
+                            (
+                                ket_core::screen::codex_prompt_ready(term),
+                                ket_core::screen::codex_startup_question(&rows).is_some(),
+                            )
+                        })
                     })
                 })
             })
             .ok()
             .flatten();
         match ready {
-            Some(true) => return true,
+            Some((true, _)) => return true,
             None => {
                 let _ = shell.update(cx, |shell, cx| {
-                    shell.toast(
+                    shell.toast_detail(
                         Tone::Error,
                         "Codex closed before receiving your prompt. Check its terminal.",
+                        prompt.to_owned(),
                         cx,
                     );
                 });
                 return false;
             }
-            Some(false) if waited < CODEX_START_WAIT => {
+            Some((false, trust)) if trust || waited < CODEX_START_WAIT => {
+                // Folder access and hook review wait for the person's
+                // answer, from the phone or here, however long that takes.
+                // Give startup its full allowance afterwards.
+                if trust {
+                    waited = Duration::ZERO;
+                }
                 cx.background_executor().timer(LANDING_POLL).await;
                 waited += LANDING_POLL;
             }
-            Some(false) => {
+            Some((false, _)) => {
                 let _ = shell.update(cx, |shell, cx| {
-                    shell.toast(
+                    shell.toast_detail(
                         Tone::Error,
                         "Codex hasn't opened its input. Your prompt has not been sent; check its terminal.",
+                        prompt.to_owned(),
                         cx,
                     );
                 });
                 return false;
             }
         }
+    }
+}
+
+/// Waits for Claude's input box: seen on two looks in a row, so a box drawn
+/// mid-start has settled, or [`AGENT_START`] at the most — the whole wait
+/// every start used to take. A box never seen, the folder-trust screen
+/// still up or a closed terminal, leaves the prompt to go at the cap, as
+/// before.
+async fn wait_for_claude_input(
+    shell: &WeakEntity<Shell>,
+    terminal: crate::terminal::TerminalId,
+    cx: &mut gpui::AsyncApp,
+) {
+    let mut waited = Duration::ZERO;
+    let mut seen = false;
+    while waited < AGENT_START {
+        let ready = shell
+            .update(cx, |shell, _| {
+                shell.terminals.get(&terminal).is_some_and(|handle| {
+                    !handle.term.is_closed()
+                        && handle
+                            .term
+                            .with_term(|term| ket_core::screen::claude_prompt_ready(term))
+                })
+            })
+            .unwrap_or(false);
+        if ready && seen {
+            return;
+        }
+        seen = ready;
+        cx.background_executor().timer(LANDING_POLL).await;
+        waited += LANDING_POLL;
     }
 }
 

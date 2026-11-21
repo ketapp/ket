@@ -14,7 +14,7 @@ use ket_core::id::WorktreeId;
 use crate::Shell;
 use crate::paint::paint;
 use crate::ui::banner::banner;
-use crate::ui::button::{Variant, button, icon_button};
+use crate::ui::button::{Variant, button};
 use crate::ui::chip::caption;
 use crate::ui::dialog::{card, centered, footer, header};
 use crate::ui::field;
@@ -299,16 +299,6 @@ impl Shell {
         let refusal = confirm.refusal.clone();
         let allowed = methods.allowed();
 
-        let close = icon_button("close-merge-pull-request", Icon::Close)
-            .bare()
-            .render(t)
-            .on_click(cx.listener(|this, _, _, cx| {
-                if this.pull_request_action.is_some() {
-                    return;
-                }
-                this.confirm_merge_pull_request = None;
-                cx.notify();
-            }));
         let cancel = button("cancel-merge-pull-request", "Cancel")
             .variant(Variant::Ghost)
             .enabled(!pending)
@@ -373,7 +363,18 @@ impl Shell {
             centered(
                 card("merge-pull-request", WIDTH, t)
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .child(header("Merge pull request", t).child(close))
+                    .child(
+                        header("close-merge-pull-request", "Merge pull request")
+                            .busy(pending)
+                            .on_close(cx.listener(|this, _, _, cx| {
+                                if this.pull_request_action.is_some() {
+                                    return;
+                                }
+                                this.confirm_merge_pull_request = None;
+                                cx.notify();
+                            }))
+                            .render(t),
+                    )
                     .child(
                         caption(
                             format!(

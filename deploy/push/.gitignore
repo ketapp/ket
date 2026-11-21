@@ -1,0 +1,5 @@
+# Wrangler's local state and secrets for `wrangler dev`.
+.wrangler/
+.dev.vars*
+# An APNs key dropped here to run `wrangler secret put` must never be committed.
+*.p8

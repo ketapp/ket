@@ -1067,18 +1067,6 @@ impl Shell {
                 }
                 cx.notify();
             }));
-        let close = icon_button("backlog-sheet-close", Icon::Close)
-            .bare()
-            .small()
-            .render(t)
-            .on_click(cx.listener(|this, _, _, cx| {
-                if let Some(dialog) = this.backlog.as_mut()
-                    && !dialog.starting
-                {
-                    dialog.sheet = None;
-                }
-                cx.notify();
-            }));
 
         let title = if count == 1 {
             "Start 1 worktree".to_owned()
@@ -1087,7 +1075,17 @@ impl Shell {
         };
         let sheet = card("backlog-sheet", SHEET_W, t)
             .max_w(gpui::relative(0.9))
-            .child(header(title, t).child(close))
+            .child(
+                header("backlog-sheet-close", title)
+                    .busy(starting)
+                    .on_close(cx.listener(|this, _, _, cx| {
+                        if let Some(dialog) = this.backlog.as_mut() {
+                            dialog.sheet = None;
+                        }
+                        cx.notify();
+                    }))
+                    .render(t),
+            )
             .child(
                 div()
                     .id("backlog-sheet-notes")

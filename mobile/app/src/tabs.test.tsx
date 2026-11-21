@@ -38,14 +38,29 @@ test('returning through the floating tabs keeps Worktrees mounted and its view i
     _layout: () => <Stack screenOptions={{ headerShown: false, animation: 'none' }} />,
     '(tabs)/_layout': TabLayout,
     '(tabs)/index': Worktrees,
-    '(tabs)/usage': () => <TabBar active="usage" needs={0} />,
+    usage: () => <TabBar active="usage" needs={0} />,
     '(tabs)/needs': () => <TabBar active="needs" needs={0} />,
     '(tabs)/settings': () => <TabBar active="settings" needs={0} />,
     detail: () => <Text>Worktree detail</Text>,
   }, { initialUrl: '/' });
 
   await fireEvent.press(view.getByLabelText('Project'));
-  for (const [label, path] of [['Usage', '/usage'], ['Needs you', '/needs'], ['Settings', '/settings']]) {
+  await fireEvent.press(view.getByLabelText('Usage'));
+  expect(view.getPathname()).toBe('/usage');
+  expect(testRouter.canGoBack()).toBe(true);
+  await fireEvent.press(view.getByLabelText('Worktrees'));
+  expect(view.getPathname()).toBe('/');
+  expect(view.getByText('Folded')).toBeTruthy();
+  expect(mounted).toHaveBeenCalledTimes(1);
+  expect(unmounted).not.toHaveBeenCalled();
+
+  await fireEvent.press(view.getByLabelText('Usage'));
+  await testRouter.back('/');
+  expect(view.getByText('Folded')).toBeTruthy();
+  expect(mounted).toHaveBeenCalledTimes(1);
+  expect(unmounted).not.toHaveBeenCalled();
+
+  for (const [label, path] of [['Needs you', '/needs'], ['Settings', '/settings']]) {
     await fireEvent.press(view.getByLabelText(label));
     expect(view.getPathname()).toBe(path);
     expect(testRouter.canGoBack()).toBe(false);

@@ -37,8 +37,14 @@ use super::wire::DeviceRole;
 use crate::Result;
 use crate::activity::Tracker;
 
+mod backlog;
+mod conversation;
 mod keys;
+mod notices;
 mod places;
+mod pulls;
+mod push;
+pub(in crate::host) mod pushes;
 mod relay;
 mod requests;
 mod session;
@@ -46,6 +52,7 @@ mod snapshot;
 #[cfg(test)]
 mod tests;
 mod typing;
+mod work;
 
 use places::{BacklogCounts, FigureMap, Places};
 use relay::{LinkStatus, Target, link_forever};
@@ -312,6 +319,42 @@ pub(super) fn tailnet_ip() -> Option<std::net::Ipv4Addr> {
     }
 }
 
+/// How long the Mac goes untouched before whoever was at it counts as gone,
+/// and phones are told what they missed. Long enough to read an answer
+/// without touching anything.
+const AWAY_AFTER: Duration = Duration::from_secs(2 * 60);
+
+/// How often a notice held for someone at the Mac is looked at again.
+const HOLD_RECHECK: Duration = Duration::from_secs(15);
+
+/// Whether someone is using this Mac: a key or the pointer within
+/// [`AWAY_AFTER`]. `false` where that can't be told, so notices go as they
+/// would.
+fn at_the_mac() -> bool {
+    idle_for().is_some_and(|idle| idle < AWAY_AFTER)
+}
+
+/// How long since the Mac last had a key pressed or the pointer moved: the
+/// HID system's own count, which `ioreg` reads without any permission.
+fn idle_for() -> Option<Duration> {
+    #[cfg(target_os = "macos")]
+    {
+        let out = std::process::Command::new("/usr/sbin/ioreg")
+            .args(["-c", "IOHIDSystem", "-r", "-d", "1", "-k", "HIDIdleTime"])
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()
+            .filter(|out| out.status.success())?;
+        let text = String::from_utf8_lossy(&out.stdout);
+        // `"HIDIdleTime" = 35788871083`, in nanoseconds.
+        let line = text.lines().find(|line| line.contains("\"HIDIdleTime\""))?;
+        let nanos: u64 = line.rsplit('=').next()?.trim().parse().ok()?;
+        Some(Duration::from_nanos(nanos))
+    }
+    #[cfg(not(target_os = "macos"))]
+    None
+}
+
 /// The name a phone on the same network reaches this Mac by: its Bonjour
 /// name, which survives a new network or DHCP lease; else its address on
 /// the network; else the loopback name, which reaches nothing but says so.
@@ -383,6 +426,14 @@ pub(super) struct Phones {
     hosted: Mutex<Option<Hosted>>,
     /// What phones have asked to be typed, waiting its turn in each terminal.
     typing: Typing,
+    /// Where each phone asked to be sent notifications while it isn't
+    /// connected, by device key — see [`pushes`].
+    pushes: Mutex<pushes::Pushes>,
+    /// Push as the config has it, refreshed when the config changes.
+    push_settings: Mutex<push::Settings>,
+    /// What the snapshots have said, for telling what's news to a phone
+    /// that isn't connected — see [`notices`].
+    notices: Mutex<notices::Notices>,
 }
 
 /// A phone waiting for a person to approve its pairing.
@@ -413,21 +464,60 @@ pub struct DeviceInfo {
     /// Its stored authority. `None` for a device paired before roles
     /// existed, which is given full access when it next connects.
     pub role: Option<DeviceRole>,
+    /// Whether it has asked for notifications while it isn't connected.
+    pub push: bool,
 }
 
 impl Phones {
     /// Sends every connected phone a new snapshot, if anything in it changed
-    /// since the last one.
-    fn tick(&self, host: &Host) {
-        let feeds: Vec<mpsc::Sender<Event>> = lock(&self.live)
-            .values()
-            .flatten()
-            .map(|(_, feed)| feed.clone())
-            .collect();
+    /// since the last one, and every registered phone that isn't connected
+    /// what's news in it — see [`notices`]. With neither, builds nothing.
+    fn tick(self: &Arc<Self>, host: &Host) {
+        let (feeds, connected): (Vec<mpsc::Sender<Event>>, Vec<Vec<u8>>) = {
+            let live = lock(&self.live);
+            (
+                live.values()
+                    .flatten()
+                    .map(|(_, feed)| feed.clone())
+                    .collect(),
+                live.iter()
+                    .filter(|(_, sessions)| !sessions.is_empty())
+                    .map(|(device, _)| device.clone())
+                    .collect(),
+            )
+        };
+        let settings = lock(&self.push_settings).clone();
+        // Watched while any phone is registered, connected or not, so a
+        // phone that drops off later is told only what is news by then.
+        let pushing = settings.enabled && !lock(&self.pushes).is_empty();
+        if !pushing {
+            lock(&self.notices).reset();
+        }
+        if feeds.is_empty() && !pushing {
+            return;
+        }
+        // A connected phone's snapshot serves the notices too; without one,
+        // the notices' own, which reads no git figures or session files.
+        let snapshot = if feeds.is_empty() {
+            snapshot::notice_snapshot(host, self)
+        } else {
+            snapshot(host, self)
+        };
+        if pushing {
+            let due =
+                lock(&self.notices).look(&snapshot, Instant::now(), settings.after, &connected);
+            // Someone using the Mac sees it there, in the sidebar: the phone
+            // is told only once they've stepped away, and only what's still
+            // so by then.
+            if !due.is_empty() && at_the_mac() {
+                lock(&self.notices).hold(due, Instant::now() + HOLD_RECHECK);
+            } else if !due.is_empty() {
+                self.push(&due, &settings);
+            }
+        }
         if feeds.is_empty() {
             return;
         }
-        let snapshot = snapshot(host, self);
         let encoded = snapshot.encode_to_vec();
         {
             let mut last = lock(&self.last_snapshot);
@@ -554,6 +644,7 @@ impl Phones {
         // let in take them in.
         let identity = lock(&self.identity);
         let roles = lock(&self.roles);
+        let pushes = lock(&self.pushes);
         let live = lock(&self.live);
         identity
             .grants()
@@ -564,6 +655,7 @@ impl Phones {
                 paired_at: grant.paired_at,
                 connected: live.get(&grant.device).is_some_and(|s| !s.is_empty()),
                 role: roles.get(&grant.device).copied(),
+                push: pushes.contains_key(&grant.device),
             })
             .collect()
     }
@@ -610,6 +702,7 @@ impl Phones {
                 return Ok(false);
             }
             lock(&self.roles).remove(&device);
+            lock(&self.pushes).remove(&device);
             for (_, feed) in lock(&self.live).remove(&device).unwrap_or_default() {
                 let _ = feed.send(Event::Closed);
             }
@@ -617,8 +710,153 @@ impl Phones {
         };
         super::identity::save_with_roles(&identity, &lock(&self.roles))?;
         drop(identity);
+        if let Err(error) = pushes::save(&lock(&self.pushes)) {
+            // The grant is gone, so a registration left on disk is never
+            // loaded again: `pushes::load` keeps only granted devices.
+            tracing::warn!(%error, "a revoked phone's push registration stayed on disk");
+        }
         tracing::info!("revoked a phone");
         Ok(true)
+    }
+
+    /// Keeps `registration` as where `device` is sent notifications, or
+    /// forgets the one it had when `None`, and writes the change.
+    pub(super) fn set_push(
+        &self,
+        device: &[u8],
+        registration: Option<pushes::Registration>,
+    ) -> Result<()> {
+        // Under the identity, the order `revoke` takes them in: a session
+        // still draining frames after its phone was revoked must not put
+        // back the registration `revoke` just dropped.
+        let identity = lock(&self.identity);
+        if registration.is_some() && !identity.grants().iter().any(|grant| grant.device == device) {
+            return Ok(());
+        }
+        let mut pushes = lock(&self.pushes);
+        let changed = match registration {
+            Some(registration) => {
+                pushes.insert(device.to_vec(), registration.clone()) != Some(registration)
+            }
+            None => pushes.remove(device).is_some(),
+        };
+        if changed {
+            pushes::save(&pushes)?;
+        }
+        Ok(())
+    }
+
+    /// Takes up push as `config` has it now.
+    pub(super) fn set_push_config(&self, config: &crate::config::PhonesConfig) {
+        *lock(&self.push_settings) = push::Settings::from_config(config);
+    }
+
+    /// Sends `id`'s phone a test notification now, connected or not, and
+    /// says whether Apple took it: `Err` says why not, in words for the
+    /// person who asked. Blocks on the network, so never from the tick.
+    pub(super) fn test_push(&self, id: &str) -> std::result::Result<(), String> {
+        let not_paired = || "That device isn't paired with this Mac.".to_owned();
+        let device = B64.decode(id.trim()).map_err(|_| not_paired())?;
+        let settings = lock(&self.push_settings).clone();
+        if !settings.enabled {
+            return Err(
+                "Push is off in ket's config: see push and push_url under [phones].".to_owned(),
+            );
+        }
+        let host = lock(&self.identity).id;
+        let Some(registration) = lock(&self.pushes).get(&device).cloned() else {
+            return Err(
+                "This device hasn't turned on notifications. Turn them on in ket's \
+                 Settings › Notifications on the phone, then connect it to this Mac once."
+                    .to_owned(),
+            );
+        };
+        let delivery = push::prepare_test(&host, &device, &registration)?;
+        let answer = push::post(&settings.url, &delivery);
+        if answer.outcome() == push::Outcome::Dead {
+            self.forget_token(&device, &delivery.token);
+        }
+        match answer.trouble(&settings.url) {
+            None => {
+                tracing::info!("push: a test notification was sent");
+                Ok(())
+            }
+            Some(why) => {
+                tracing::info!(%why, "push: a test notification wasn't sent");
+                Err(why)
+            }
+        }
+    }
+
+    /// Seals each of `notices` for every registered phone that asked for its
+    /// kind and isn't connected — a connected one shows its own — and posts
+    /// them on a thread of their own, so the tick never waits on the network.
+    fn push(self: &Arc<Self>, notices: &[notices::Notice], settings: &push::Settings) {
+        let host = lock(&self.identity).id;
+        // Copied out before `live` is taken: `devices` takes the two the
+        // other way round.
+        let registered: Vec<(Vec<u8>, pushes::Registration)> = lock(&self.pushes)
+            .iter()
+            .map(|(device, registration)| (device.clone(), registration.clone()))
+            .collect();
+        let away: Vec<(Vec<u8>, pushes::Registration)> = {
+            let live = lock(&self.live);
+            registered
+                .into_iter()
+                .filter(|(device, _)| live.get(device).is_none_or(Vec::is_empty))
+                .collect()
+        };
+        let mut deliveries = Vec::new();
+        for notice in notices {
+            for (device, registration) in &away {
+                if !registration.wants(notice.kind) || notice.heard.contains(device) {
+                    continue;
+                }
+                match push::prepare(&host, notice, device, registration) {
+                    Ok(delivery) => deliveries.push(delivery),
+                    Err(error) => tracing::warn!(%error, "push: a notice wasn't sealed"),
+                }
+            }
+        }
+        if deliveries.is_empty() {
+            return;
+        }
+        let (phones, url) = (Arc::clone(self), settings.url.clone());
+        let spawned = std::thread::Builder::new()
+            .name("ket-host-push".into())
+            .spawn(move || {
+                for delivery in deliveries {
+                    match push::deliver(&url, &delivery) {
+                        push::Outcome::Sent => tracing::debug!("push: sent"),
+                        push::Outcome::Dead => {
+                            phones.forget_token(&delivery.device, &delivery.token)
+                        }
+                        push::Outcome::Dropped => {}
+                    }
+                }
+            });
+        if let Err(error) = spawned {
+            tracing::warn!(%error, "push: no thread to send on");
+        }
+    }
+
+    /// Forgets `device`'s registration once Apple has retired `token` — not
+    /// a newer one the phone has registered since.
+    fn forget_token(&self, device: &[u8], token: &[u8]) {
+        let mut pushes = lock(&self.pushes);
+        if pushes
+            .get(device)
+            .is_none_or(|registration| registration.token != token)
+        {
+            return;
+        }
+        pushes.remove(device);
+        tracing::info!(
+            "push: a phone's token was retired, so it gets no more until it registers again"
+        );
+        if let Err(error) = pushes::save(&pushes) {
+            tracing::warn!(%error, "push: the retired token stayed on disk");
+        }
     }
 }
 
@@ -638,6 +876,17 @@ pub(super) fn start(host: Arc<Host>, relay: Relay) -> Result<Arc<Phones>> {
         }
         Relay::External(_) => None,
     };
+    let granted: Vec<Vec<u8>> = identity
+        .grants()
+        .iter()
+        .map(|grant| grant.device.clone())
+        .collect();
+    // A push.json that can't be read costs notifications, not phones.
+    let pushes = pushes::load(&granted).unwrap_or_else(|error| {
+        tracing::warn!(%error, "phones: push registrations unreadable, starting without them");
+        pushes::Pushes::new()
+    });
+    let config = crate::config::Config::load().unwrap_or_default();
     let claim = matches!(relay, Relay::Local { .. }).then(ket_remote::secret);
     let (stop, mut stopping) = tokio::sync::watch::channel(false);
     let phones = Arc::new(Phones {
@@ -652,9 +901,7 @@ pub(super) fn start(host: Arc<Host>, relay: Relay) -> Result<Arc<Phones>> {
         live: Mutex::new(HashMap::new()),
         // The agents a window's tracker knows, so a terminal's foreground
         // can name one here too — see the snapshot's foreground reading.
-        activity: Mutex::new(Tracker::new(crate::agents::known_agent_names(
-            &crate::config::Config::load().unwrap_or_default(),
-        ))),
+        activity: Mutex::new(Tracker::new(crate::agents::known_agent_names(&config))),
         places: Mutex::new(None),
         figures: Mutex::new(None),
         backlogs: Mutex::new(None),
@@ -664,6 +911,9 @@ pub(super) fn start(host: Arc<Host>, relay: Relay) -> Result<Arc<Phones>> {
         next_approval: AtomicU64::new(1),
         hosted: Mutex::new(None),
         typing: Typing::default(),
+        pushes: Mutex::new(pushes),
+        push_settings: Mutex::new(push::Settings::from_config(&config.phones)),
+        notices: Mutex::new(notices::Notices::default()),
     });
     let own = Target {
         url: phones.relay.dial(),

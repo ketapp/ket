@@ -1,5 +1,3 @@
-'use no memo'; // Reads a live HostConnection — see lib/hosts.ts.
-
 // A terminal showing Claude Code's agent view: the background sessions it
 // holds, each opening as a chat of its own. Agent view's sessions run under
 // Claude's own daemon and report nothing to the terminal, so the terminal's
@@ -12,7 +10,9 @@ import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { everyWorktree } from '../lib/activity';
-import { useHost } from '../lib/hosts';
+import type { HostConnection } from '../lib/connection';
+import { useHost, useHostState } from '../lib/hosts';
+import { reasonOf } from '../lib/text';
 import { font, size, t } from '../lib/theme';
 import { ChevronDown, Send, TerminalWindow } from './icons';
 import { KeyboardLift } from './KeyboardLift';
@@ -29,20 +29,6 @@ export function terminalAt(
     if (terminal) return { closed: terminal.closed, agentView: terminal.closed ? undefined : terminal.agentView };
   }
   return undefined;
-}
-
-/** A background session's state, as a row and a chat's bar show it. */
-export function backgroundState(state: BackgroundSession_State | undefined): { word: string; color: string } | undefined {
-  switch (state) {
-    case BackgroundSession_State.NEEDS_YOU:
-      return { word: 'waiting', color: t.attention };
-    case BackgroundSession_State.WORKING:
-      return { word: 'running', color: t.running };
-    case BackgroundSession_State.DONE:
-      return { word: 'done', color: t.dim };
-    default:
-      return undefined;
-  }
 }
 
 /** How long ago `at` was, in a few characters — and, for a screen reader,
@@ -63,6 +49,27 @@ const GROUPS: { state: BackgroundSession_State; title: string; color: string }[]
 
 /** How many finished sessions show before the rest fold away. */
 const DONE_SHOWN = 4;
+
+/** When a session last did anything; a desktop before 1.25 says only when
+ * it began. Out here, as is `startTask`, because the React Compiler skips a
+ * component with a BigInt literal or a try/finally in it. */
+function lastActive(session: BackgroundSession): bigint {
+  return session.activeAtMs > 0n ? session.activeAtMs : session.startedAtMs;
+}
+
+/** Types `text` into agent view's box on the Mac, a new session, holding the
+ * terminal only while it does. Why it didn't start, or '' once it has. */
+async function startTask(conn: HostConnection, terminalId: bigint, text: string): Promise<string> {
+  try {
+    if (!(await conn.takeControl(terminalId))) return 'Another device is typing in this terminal.';
+    if (await conn.openAgentSession(terminalId, '', text)) return '';
+    return 'Your desktop took control back.';
+  } catch (e) {
+    return `Not started: ${reasonOf(e)}`;
+  } finally {
+    conn.releaseControl(terminalId);
+  }
+}
 
 /** A session's name as a title: agent view names them in lower case. */
 function titled(name: string): string {
@@ -95,6 +102,7 @@ export function AgentViewList({
   left: boolean;
 }) {
   const conn = useHost(hostId);
+  const hostState = useHostState(conn);
   const insets = useSafeAreaInsets();
   // Read on a timer, not each render: the ages only need the minute.
   const [now, setNow] = useState(() => Date.now());
@@ -107,36 +115,25 @@ export function AgentViewList({
   const [starting, setStarting] = useState(false);
   const [note, setNote] = useState('');
   const terminalId = BigInt(terminal);
-  const located = everyWorktree(conn?.snapshot ?? null).find(({ worktree }) =>
+  const located = everyWorktree(hostState?.snapshot ?? null).find(({ worktree }) =>
     worktree.terminals.some((x) => x.id === terminalId),
   );
   const place = located ? `${located.project.name || 'Elsewhere'} · ${located.worktree.name}` : 'Claude';
-  const canStart = conn !== null && conn.hostMinor >= 25;
+  const canStart = hostState !== null && hostState.hostMinor >= 25;
 
   const open = (session: BackgroundSession) =>
     router.push(`/agent-session/${hostId}/${terminal}/${encodeURIComponent(session.session)}`);
-  // When it last did anything; a desktop before 1.25 says only when it began.
-  const when = (session: BackgroundSession) =>
-    ago(session.activeAtMs > 0n ? session.activeAtMs : session.startedAtMs, now);
+  const when = (session: BackgroundSession) => ago(lastActive(session), now);
 
   const start = async () => {
     const text = task.trim();
     if (!conn || !text || starting) return;
     setStarting(true);
     setNote('');
-    try {
-      if (!(await conn.takeControl(terminalId))) {
-        setNote('Another device is typing in this terminal.');
-        return;
-      }
-      if (await conn.openAgentSession(terminalId, '', text)) setTask('');
-      else setNote('Your desktop took control back.');
-    } catch (e) {
-      setNote(`Not started: ${e instanceof Error ? e.message : String(e)}`);
-    } finally {
-      conn.releaseControl(terminalId);
-      setStarting(false);
-    }
+    const why = await startTask(conn, terminalId, text);
+    if (why) setNote(why);
+    else setTask('');
+    setStarting(false);
   };
 
   const groups = GROUPS.map((group) => ({
@@ -204,6 +201,7 @@ export function AgentViewList({
                     title={titled(session.name)}
                     detail={done ? undefined : session.doing || undefined}
                     detailColor={group.color}
+                    markdown
                     meta={
                       <View accessible accessibilityLabel={`last active ${when(session)} ago`}>
                         <Prose color={t.faint} style={styles.when}>

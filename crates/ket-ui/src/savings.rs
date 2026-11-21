@@ -41,7 +41,7 @@ use ket_core::usage::WorktreeSavings;
 use crate::fonts::Prose;
 use crate::paint::{alpha, paint};
 use crate::ui::button::button;
-use crate::ui::chip::{badge, caption, tag, token_reduction_ring};
+use crate::ui::chip::{caption, image_badge, tag, token_reduction_ring};
 use crate::ui::icon::{Icon, WELL_GLYPH, icon_well, sized_icon};
 use crate::ui::popup::{self, Placement};
 use crate::ui::{CAPTION, LABEL, RADIUS_LG, RADIUS_MD};
@@ -192,6 +192,8 @@ struct ProjectSavings {
     color: Color,
     /// What its sidebar badge says, so the two are recognisably one project.
     mark: SharedString,
+    /// The picture its sidebar badge wears, for the same reason.
+    image: Option<std::sync::Arc<std::path::Path>>,
     worktrees: Vec<WorktreeLine>,
     /// Its worktrees' figures, summed.
     total: WorktreeSavings,
@@ -596,6 +598,7 @@ impl Shell {
                 name: project.name.clone(),
                 color: project.color,
                 mark,
+                image: project.image.clone(),
                 worktrees,
                 total,
             });
@@ -1080,7 +1083,12 @@ impl Shell {
             .pb(px(6.0))
             .children(savings.projects.iter().flat_map(|project| {
                 let heading = line(
-                    Some(lead(badge(project.color, project.mark.clone(), t))),
+                    Some(lead(image_badge(
+                        project.image.clone(),
+                        project.color,
+                        project.mark.clone(),
+                        t,
+                    ))),
                     div()
                         .prose()
                         .min_w_0()

@@ -14,7 +14,7 @@
 //! the system's certificates.
 
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -36,13 +36,6 @@ const ROUTE: &str = "/v1/feedback";
 
 /// The longest message the service accepts, in characters.
 pub const MAX_MESSAGE: usize = 10_000;
-
-/// Where curl puts the response body, which nothing reads: the status is
-/// the answer.
-#[cfg(windows)]
-const NULL_DEVICE: &str = "NUL";
-#[cfg(not(windows))]
-const NULL_DEVICE: &str = "/dev/null";
 
 /// How long a send may take before it is given up on.
 const TIMEOUT: Duration = Duration::from_secs(20);
@@ -242,64 +235,22 @@ fn refusal(status: u16) -> Option<&'static str> {
     }
 }
 
-/// The config curl reads on stdin to POST `body` to `url`.
-///
-/// curl's config format: quoted values, with `\` and `"` escaped, so
-/// nothing in a message can end a line early.
+/// The config curl reads on stdin to POST `body` to `url` — see
+/// [`crate::curl::request_config`].
+#[cfg(test)]
 fn request_config(url: &str, body: &str) -> String {
-    let quote = |value: &str| value.replace('\\', "\\\\").replace('"', "\\\"");
-    format!(
-        "url = \"{}\"\nrequest = \"POST\"\nheader = \"Content-Type: application/json\"\n\
-         data-binary = \"{}\"\noutput = \"{NULL_DEVICE}\"\n",
-        quote(url),
-        quote(body),
-    )
+    crate::curl::request_config(url, body)
 }
 
 /// POSTs `body` as JSON to `url`; the HTTP status back.
 fn post(url: &str, body: &str) -> Result<u16> {
-    let config_text = request_config(url, body);
-
-    let mut child = Command::new("curl")
-        .arg("--silent")
-        .arg("--show-error")
-        .arg("--max-time")
-        .arg(format!("{:.1}", TIMEOUT.as_secs_f32()))
-        .arg("--write-out")
-        .arg("%{http_code}")
-        .arg("--config")
-        .arg("-")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| KetError::Config(format!("could not run curl: {e}")))?;
-    {
-        use std::io::Write;
-        let mut stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| KetError::Config("curl took no stdin".to_owned()))?;
-        stdin
-            .write_all(config_text.as_bytes())
-            .map_err(|e| KetError::Config(format!("could not configure curl: {e}")))?;
-    }
-    let output = child
-        .wait_with_output()
-        .map_err(|e| KetError::Config(format!("curl did not finish: {e}")))?;
-    if !output.status.success() {
-        tracing::info!(
-            "feedback: not sent: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-        return Err(KetError::Conflict(
-            "The report could not be sent — check your connection.".to_owned(),
-        ));
-    }
-    String::from_utf8_lossy(&output.stdout)
-        .trim()
-        .parse()
-        .map_err(|_| KetError::Config("curl reported no status".to_owned()))
+    crate::curl::post_json(url, body, TIMEOUT).map_err(|error| match error {
+        crate::curl::PostError::Curl(why) => KetError::Config(why),
+        crate::curl::PostError::Network(why) => {
+            tracing::info!("feedback: not sent: {why}");
+            KetError::Conflict("The report could not be sent — check your connection.".to_owned())
+        }
+    })
 }
 
 #[cfg(test)]

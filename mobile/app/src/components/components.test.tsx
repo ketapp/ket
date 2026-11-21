@@ -1,6 +1,7 @@
 import { describe, expect, jest, test } from '@jest/globals';
-import { fireEvent, render, waitFor } from '@testing-library/react-native';
+import { act, fireEvent, render, waitFor } from '@testing-library/react-native';
 import { ScrollView, StyleSheet, Text, View } from 'react-native';
+import { getAnimatedStyle } from 'react-native-reanimated';
 import type { Risk } from '@ket/remote';
 import { CommandMenu } from './Commands';
 import { PlusButton, SendButton } from './Composer';
@@ -14,6 +15,7 @@ import {
   Banner,
   Bar,
   Button,
+  Caption,
   Card,
   Dot,
   Figure,
@@ -33,18 +35,23 @@ import {
   Value,
 } from './ui';
 
-const mockRouter = { canGoBack: jest.fn(() => true), back: jest.fn(), replace: jest.fn(), canDismiss: jest.fn(() => false), dismissAll: jest.fn() };
+const mockRouter = { canGoBack: jest.fn(() => true), back: jest.fn(), push: jest.fn(), replace: jest.fn(), canDismiss: jest.fn(() => false), dismissAll: jest.fn() };
 
 jest.mock('expo-router', () => ({
   router: {
     canGoBack: () => mockRouter.canGoBack(),
     back: () => mockRouter.back(),
+    push: (path: string) => mockRouter.push(path),
     replace: (path: string) => mockRouter.replace(path),
     canDismiss: () => mockRouter.canDismiss(),
     dismissAll: () => mockRouter.dismissAll(),
   },
 }));
 jest.mock('react-native-safe-area-context', () => ({ useSafeAreaInsets: () => ({ top: 12, bottom: 24 }) }));
+
+// TypeScript resolves reanimated's web build, where this is a no-op; jest runs
+// the native one, which reads the style a component's animation has reached.
+const animatedStyle = getAnimatedStyle as unknown as (component: { props: object }) => { opacity?: unknown };
 
 describe('project badge', () => {
   // The desktop sends a project's icon from 1.27: a glyph it names is drawn,
@@ -78,9 +85,11 @@ describe('project badge', () => {
     // cannot draw would be dropped silently, so each kind is checked here.
     const kinds = new Set(['path', 'circle', 'ellipse', 'rect', 'line', 'polyline', 'polygon']);
     expect(Object.keys(GLYPHS).length).toBe(47);
-    for (const [name, parts] of Object.entries(GLYPHS)) {
-      expect(parts.length).toBeGreaterThan(0);
-      for (const part of parts) expect(kinds.has(part.kind) ? name : `${name}: ${part.kind}`).toBe(name);
+    for (const [name, glyph] of Object.entries(GLYPHS)) {
+      // Each carries the grid it was drawn on: they are not all one size.
+      expect(/^0 0 \d+ \d+$/.test(glyph.viewBox) ? name : `${name}: ${glyph.viewBox}`).toBe(name);
+      expect(glyph.parts.length).toBeGreaterThan(0);
+      for (const part of glyph.parts) expect(kinds.has(part.kind) ? name : `${name}: ${part.kind}`).toBe(name);
     }
   });
 });
@@ -136,6 +145,20 @@ describe('shared UI controls', () => {
     await view.unmount();
   });
 
+  test('draws a status caption without the markdown marks', async () => {
+    const view = await render(
+      <View>
+        <Caption text="Editing `src/main.rs` now" />
+        <Row title="idle" detail="*Searching* files" markdown />
+      </View>,
+    );
+    expect(view.getByText('Editing src/main.rs now')).toBeTruthy();
+    expect(view.queryByText(/`src\/main.rs`/)).toBeNull();
+    expect(view.getByText('Searching files')).toBeTruthy();
+    expect(view.queryByText('*Searching*')).toBeNull();
+    await view.unmount();
+  });
+
   test('handles navigation, segments, button kinds, and tabs', async () => {
     const change = jest.fn();
     const press = jest.fn();
@@ -165,9 +188,16 @@ describe('shared UI controls', () => {
     await fireEvent.press(getByText('primary'));
     expect(press).toHaveBeenCalled();
     expect(getByLabelText('Needs you, 3')).toBeTruthy();
+    await fireEvent.press(getByLabelText('Usage'));
+    expect(mockRouter.push).toHaveBeenCalledWith('/usage');
     await fireEvent.press(getByLabelText('Worktrees'));
     expect(mockRouter.replace).toHaveBeenCalledWith('/');
     await view.unmount();
+
+    const usage = await render(<TabBar active="usage" needs={0} />);
+    await fireEvent.press(usage.getByLabelText('Worktrees'));
+    expect(mockRouter.back).toHaveBeenCalled();
+    await usage.unmount();
   });
 
   test('a tab strip scrolls to the chosen tab, fades where there is more, and names a state', async () => {
@@ -308,6 +338,27 @@ describe('small components', () => {
     // Gone once its close has played.
     await waitFor(() => expect(view.queryByText('Photos')).toBeNull());
     await view.unmount();
+  });
+
+  test('a menu in place grows in once its card is laid out, not on the frame it goes in', async () => {
+    jest.useFakeTimers();
+    try {
+      const photos = [{ items: [{ key: 'photos', label: 'Photos', onPress: jest.fn() }] }];
+      const view = await render(<FloatMenu inline={{ left: 0 }} open onClose={jest.fn()} label="Attach" sections={photos} />);
+      const card = view.getByLabelText('Attach');
+      await act(async () => {
+        await jest.advanceTimersByTimeAsync(600);
+      });
+      expect(animatedStyle(card).opacity).toBe(0);
+      await fireEvent(card, 'layout', { nativeEvent: { layout: { x: 0, y: 0, width: 280, height: 60 } } });
+      await act(async () => {
+        await jest.advanceTimersByTimeAsync(600);
+      });
+      expect(animatedStyle(card).opacity).toBe(1);
+      await view.unmount();
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   test('selects slash commands', async () => {

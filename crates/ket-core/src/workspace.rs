@@ -19,6 +19,7 @@ use crate::hook::{HookPoint, HookRunner};
 use crate::id::{ProjectId, SessionId, WorktreeId};
 use crate::journal::Journal;
 use crate::project::{Project, ProjectSettings};
+use crate::project_image;
 use crate::provision::{self, ProvisionReport};
 use crate::status::{self, WorktreeStatus};
 use crate::store::{MAX_LAYOUT_BYTES, ProjectState, Store};
@@ -26,7 +27,23 @@ use crate::worktree::{self, DiscoveredWorktree, Worktree};
 use crate::worktree_trash;
 use crate::{KetError, Result, paths};
 
-fn clean_worktree_name(name: &str) -> Option<String> {
+/// The part of making a worktree that [`Workspace::create_worktree_reporting`]
+/// has begun.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CreateStep {
+    /// Fetching the remote, so the branch is cut from the base everyone sees.
+    Fetching {
+        /// Which remote.
+        remote: String,
+    },
+    /// Cutting the branch and checking it out.
+    CheckingOut,
+}
+
+/// The name a worktree is given for `name` as typed: trimmed, at most 120
+/// characters, and none at all when that leaves nothing — the row then shows
+/// its branch.
+pub fn clean_worktree_name(name: &str) -> Option<String> {
     let name: String = name.trim().chars().take(120).collect();
     (!name.is_empty()).then_some(name)
 }
@@ -214,6 +231,10 @@ pub struct Workspace {
     /// deleted from — see [`Workspace::remove_browser_profiles`]. Empty but
     /// for [`Workspace::open`], so a test touches none of the owner's.
     chromium_roots: Vec<PathBuf>,
+    /// Where projects' badge images are copied to — see
+    /// [`crate::project_image`]. Beside the store's file, so a workspace
+    /// pointed at a sandbox keeps its images there too.
+    project_images: PathBuf,
     /// Sessions this process is driving.
     ///
     /// In memory rather than in the store, and deliberately so: a permission
@@ -259,6 +280,7 @@ impl Workspace {
             hooks: HookRunner::real(),
             gh_program: None,
             chromium_roots: paths::chromium_roots().map(Vec::from).unwrap_or_default(),
+            project_images: paths::project_images_dir()?,
             live: std::sync::Mutex::new(std::collections::HashMap::new()),
         })
     }
@@ -292,7 +314,11 @@ impl Workspace {
         config: Config,
         hooks: HookRunner,
     ) -> Self {
+        // `paths::project_images_dir` is the same place for the default
+        // store, whose file is `state.json` in the data directory.
+        let project_images = store.path().with_file_name("project-images");
         Self {
+            project_images,
             store,
             bus: Arc::new(EventBus::default()),
             worktrees_root: worktrees_root.into(),
@@ -454,6 +480,9 @@ impl Workspace {
         for worktree in &dropped {
             crate::network::store::remove_worktree(worktree.as_str());
         }
+        // And its badge image, which went with its settings: a project added
+        // again starts without one.
+        project_image::prune_in(&self.project_images, &id, None);
         self.bus.publish(Event::ProjectRemoved { project_id: id });
         Ok(())
     }
@@ -519,6 +548,14 @@ impl Workspace {
     /// Validated and normalised before anything is written, so the store never
     /// holds a colour that will not parse or an icon over the limit — every
     /// reader would otherwise have to defend against both.
+    ///
+    /// [`ProjectSettings::image`] is written like any other field, so a
+    /// caller that read the settings and changed something else carries the
+    /// picture through untouched. A *new* name must be one
+    /// [`Workspace::import_project_image`] has put in place for this project,
+    /// or the write is refused. Once written, every copy the project has but
+    /// the one named is deleted: the picture replaced, all of them when it is
+    /// cleared, and any a Save that failed after importing left behind.
     pub fn set_project_settings(&self, id: &ProjectId, settings: ProjectSettings) -> Result<()> {
         let settings = settings.normalised();
         settings.validate()?;
@@ -527,6 +564,21 @@ impl Workspace {
         self.store.update(|state| {
             if !state.projects.iter().any(|p| p.id == id) {
                 return Err(KetError::UnknownProject(id.to_string()));
+            }
+            // An unchanged name is carried through even if its file has gone,
+            // so pinning a project whose copy was deleted by hand still works.
+            let before = state
+                .project_settings
+                .get(&id)
+                .and_then(|kept| kept.image.as_deref());
+            if let Some(image) = settings.image.as_deref()
+                && before != Some(image)
+                && !project_image::path_in(&self.project_images, &id, image)
+                    .is_some_and(|path| path.is_file())
+            {
+                return Err(KetError::Config(format!(
+                    "no image {image:?} has been imported for project {id}"
+                )));
             }
             if settings == ProjectSettings::default() {
                 // Defaults are represented by absence, so a project put back
@@ -537,10 +589,50 @@ impl Workspace {
             }
             Ok(())
         })?;
+        project_image::prune_in(&self.project_images, &id, settings.image.as_deref());
 
         self.bus
             .publish(Event::ProjectSettingsChanged { project_id: id });
         Ok(())
+    }
+
+    /// Copies the file at `source` in as a badge image for a project, and
+    /// returns the name to put in [`ProjectSettings::image`].
+    ///
+    /// The first of two steps, so a dialog can hold "this file" as a draft
+    /// and act on it at Save: import, then write the settings with the name
+    /// this returns. Importing alone changes nothing anyone sees, and a copy
+    /// no settings come to name is deleted by the next
+    /// [`Workspace::set_project_settings`] for the project.
+    ///
+    /// Refused — with the file's name and the reason, in words — when it is
+    /// missing, a folder, empty, larger than
+    /// [`project_image::MAX_IMAGE_BYTES`], or not one of
+    /// [`project_image::ImageFormat::ALL`] by its contents. See
+    /// [`project_image::check`] to ask that before Save. The project must be
+    /// known.
+    pub fn import_project_image(&self, id: &ProjectId, source: &Path) -> Result<String> {
+        if !self.store.load()?.projects.iter().any(|p| &p.id == id) {
+            return Err(KetError::UnknownProject(id.to_string()));
+        }
+        project_image::import_in(&self.project_images, id, source)
+    }
+
+    /// Where the badge image `settings` names is kept for project `id`, or
+    /// `None` when it has none.
+    ///
+    /// No I/O — a join of the data directory, the id and the name — so it
+    /// is cheap enough for every frame. A different picture always has a
+    /// different path, so an image cache keyed by path never shows the old
+    /// one. The file can still be missing (deleted by hand); the badge should
+    /// draw its icon or letter when the image fails to load.
+    pub fn project_image_path(
+        &self,
+        id: &ProjectId,
+        settings: &ProjectSettings,
+    ) -> Option<PathBuf> {
+        let image = settings.image.as_deref()?;
+        project_image::path_in(&self.project_images, id, image)
     }
 
     /// Changes the branch new worktrees are based on.
@@ -765,6 +857,28 @@ impl Workspace {
         agent: Option<&str>,
         economy_level_id: Option<&str>,
     ) -> Result<(Worktree, PreparedBase)> {
+        self.create_worktree_reporting(
+            project_id,
+            branch,
+            base,
+            agent,
+            economy_level_id,
+            &mut |_| {},
+        )
+    }
+
+    /// [`Workspace::create_worktree_prepared_with_economy`], telling `step`
+    /// each part of the work as it begins, for a window that shows the
+    /// worktree before it exists.
+    pub fn create_worktree_reporting(
+        &self,
+        project_id: &ProjectId,
+        branch: &str,
+        base: Option<&str>,
+        agent: Option<&str>,
+        economy_level_id: Option<&str>,
+        step: &mut dyn FnMut(CreateStep),
+    ) -> Result<(Worktree, PreparedBase)> {
         if branch.trim().is_empty() {
             return Err(KetError::Conflict("branch name is empty".to_owned()));
         }
@@ -816,6 +930,9 @@ impl Workspace {
         // clone's copy was last left. `base` itself is recorded as asked —
         // `main`, not `refs/remotes/origin/main` — because merges land on the
         // local branch and divergence is measured against it.
+        if let Some(remote) = git.base_remote() {
+            step(CreateStep::Fetching { remote });
+        }
         let prepared = git.prepare_base(&base);
         if let Some(notice) = prepared.notice() {
             // Debug, not info: the callers that have somewhere a person will
@@ -831,6 +948,7 @@ impl Workspace {
         // re-resolving them later buys nothing and can only fail.
         let base_commit = git.rev_parse(&prepared.rev).ok();
 
+        step(CreateStep::CheckingOut);
         git.worktree_add(&path, branch, &prepared.rev)?;
         if !matches!(prepared.fetch, Fetch::NoRemote) {
             git.ensure_push_auto_setup_remote();

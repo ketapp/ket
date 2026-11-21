@@ -1,5 +1,3 @@
-'use no memo'; // Reads a live HostConnection — see lib/hosts.ts.
-
 // One file's changes in a worktree, as a merge would bring them: the lines
 // added and removed, each numbered, wrapped to the phone's width rather than
 // scrolled sideways.
@@ -21,7 +19,7 @@ import { MicButton } from '../../../components/Mic';
 import { Bar, Button, Card, Prose, Screen } from '../../../components/ui';
 import { everyWorktree } from '../../../lib/activity';
 import { useDictation } from '../../../lib/dictation';
-import { useHost } from '../../../lib/hosts';
+import { useHost, useHostState } from '../../../lib/hosts';
 import {
   type Anchor,
   type ReviewComment,
@@ -63,6 +61,7 @@ export default function DiffScreen() {
   const { host: hostId, worktree: raw, path } = useLocalSearchParams<{ host: string; worktree: string; path: string }>();
   const id = decodeURIComponent(raw);
   const conn = useHost(hostId);
+  const hostState = useHostState(conn);
   const insets = useSafeAreaInsets();
   const keyboardUp = useKeyboardState((state) => state.isVisible);
   const [lines, setLines] = useState<Line[] | null>(null);
@@ -103,7 +102,7 @@ export default function DiffScreen() {
   }, [conn, id, path]);
 
   // A desktop from before 1.14 cannot be sent a review.
-  const canReview = conn !== null && conn.hostMinor >= 14;
+  const canReview = hostState !== null && hostState.hostMinor >= 14;
   const editing = composing?.editing ?? null;
 
   // Each comment on this file under the line it ends on, while the diff
@@ -204,7 +203,7 @@ export default function DiffScreen() {
   const name = path?.split('/').pop() ?? 'Diff';
   const folder = path?.includes('/') ? path.slice(0, path.lastIndexOf('/')) : undefined;
   const local = /^(opencode:ollama\/|ollama:)/i.test(
-    everyWorktree(conn?.snapshot ?? null).find((l) => l.worktree.id === id)?.worktree.agent ?? '',
+    everyWorktree(hostState?.snapshot ?? null).find((l) => l.worktree.id === id)?.worktree.agent ?? '',
   );
 
   // At the foot, while there is something to do there: the composer, what

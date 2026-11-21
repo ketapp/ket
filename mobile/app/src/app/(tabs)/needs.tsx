@@ -1,5 +1,3 @@
-'use no memo'; // Reads a live HostConnection — see lib/hosts.ts.
-
 // Needs you: every worktree, on every paired desktop, whose agent is waiting
 // on a person — and, under them, the ones that failed. The one list worth
 // opening the app for. Each prompt waiting is a card of its own, answered
@@ -16,18 +14,18 @@ import { RiskBadge } from '../../components/Risk';
 import { Button, Card, Dot, Heading, MARK_GAP, MARK_SLOT, Prose, Row, Screen, TAB_BAR_ROOM, TabBar } from '../../components/ui';
 import { type Located, agentOf, colorOf, detail, detailColor, everyWorktree, promptKind, stateOf } from '../../lib/activity';
 import type { HostConnection, PromptAnswer } from '../../lib/connection';
-import { useHosts } from '../../lib/hosts';
+import { useHostState, usePairedHosts } from '../../lib/hosts';
 import { confirmIdentity } from '../../lib/lock';
 import { agentLabel, font, sessionColor, size, t } from '../../lib/theme';
 
 export default function Needs() {
-  const conns = useHosts() ?? [];
-  const many = conns.length > 1;
+  const hosts = usePairedHosts() ?? [];
+  const many = hosts.length > 1;
   const of = (activity: Activity) =>
-    conns.flatMap((conn) =>
-      everyWorktree(conn.snapshot)
+    hosts.flatMap(({ conn, hostState }) =>
+      everyWorktree(hostState.snapshot)
         .filter(({ worktree }) => worktree.activity === activity)
-        .map((located) => ({ conn, ...located })),
+        .map((located) => ({ conn, hostState, ...located })),
     );
   const waiting = of(Activity.BLOCKED);
   const failed = of(Activity.FAILED);
@@ -65,7 +63,7 @@ export default function Needs() {
           ) : null}
           {prompts.map(({ conn, project, worktree, question, at }) => (
             <Waiting
-              key={`${conn.host.id}/${worktree.id}/${question?.id.toString() ?? at}`}
+              key={`${conn.id}/${worktree.id}/${question?.id.toString() ?? at}`}
               conn={conn}
               many={many}
               project={project}
@@ -78,16 +76,17 @@ export default function Needs() {
               <Heading color={t.failed} count={failed.length}>
                 Failed
               </Heading>
-              {failed.map(({ conn, project, worktree }) => (
+              {failed.map(({ conn, hostState, project, worktree }) => (
                 <Row
-                  key={`${conn.host.id}/${worktree.id}`}
-                  mark={agentOf(worktree) ? <AgentMark agent={agentOf(worktree)} size={16} session={colorOf(worktree)} /> : null}
+                  key={`${conn.id}/${worktree.id}`}
+                  mark={agentOf(worktree) ? <AgentMark agent={agentOf(worktree)} size={16} session={colorOf(worktree)} well /> : null}
                   title={worktree.name}
                   titleColor={sessionColor(colorOf(worktree))?.label}
-                  detail={[many ? conn.host.name : null, project.name, detail(worktree)].filter(Boolean).join(' · ')}
+                  detail={[many ? hostState.host.name : null, project.name, detail(worktree)].filter(Boolean).join(' · ')}
                   detailColor={detailColor(worktree.activity)}
+                  markdown
                   state={stateOf(worktree.activity)}
-                  onPress={() => router.push(`/worktree/${conn.host.id}/${encodeURIComponent(worktree.id)}`)}
+                  onPress={() => router.navigate(`/worktree/${conn.id}/${encodeURIComponent(worktree.id)}`)}
                 />
               ))}
             </Card>
@@ -115,12 +114,13 @@ function Waiting({
   const [picked, setPicked] = useState<number>();
   const [approved, setApproved] = useState(false);
   const [why, setWhy] = useState('');
-  const host = conn.host.id;
+  const hostState = useHostState(conn);
+  const host = conn.id;
   const agent = agentOf(worktree);
   const terminal = question?.terminalId ? question.terminalId.toString() : '';
   const openChat = () =>
-    router.push(terminal ? `/session/${host}/${terminal}` : `/worktree/${host}/${encodeURIComponent(worktree.id)}`);
-  const openTerminal = () => router.push(`/terminal/${host}/${terminal}`);
+    router.navigate(terminal ? `/session/${host}/${terminal}` : `/worktree/${host}/${encodeURIComponent(worktree.id)}`);
+  const openTerminal = () => router.navigate(`/terminal/${host}/${terminal}`);
   const failed = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
   const answer = async (choice: Answer_Choice) => {
@@ -284,13 +284,13 @@ function Waiting({
         accessibilityLabel={`${worktree.name}, open the chat`}
         style={({ pressed }) => [styles.head, pressed && { backgroundColor: t.selection }]}
       >
-        <View style={styles.mark}>{agent ? <AgentMark agent={agent} size={16} session={colorOf(worktree)} /> : null}</View>
+        <View style={styles.mark}>{agent ? <AgentMark agent={agent} size={16} session={colorOf(worktree)} well /> : null}</View>
         <View style={styles.headText}>
           <Text style={[styles.name, { color: sessionColor(colorOf(worktree))?.label ?? t.text }]} numberOfLines={1}>
             {worktree.name}
           </Text>
           <Text style={styles.detail} numberOfLines={1}>
-            {[many ? conn.host.name : null, project.name, agent ? agentLabel(agent) : null].filter(Boolean).join(' · ')}
+            {[many ? hostState.host.name : null, project.name, agent ? agentLabel(agent) : null].filter(Boolean).join(' · ')}
           </Text>
         </View>
         <Chevron size={14} color={t.faint} weight={2} />

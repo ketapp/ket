@@ -30,7 +30,7 @@ import {
 import { Session } from './session.ts';
 
 export const MAJOR = 1;
-export const MINOR = 31;
+export const MINOR = 35;
 
 const MAGIC = new TextEncoder().encode('KET1');
 const MODE_PAIR = 1;
@@ -53,8 +53,9 @@ const HEAD_START_MS = 1_000;
 const MAX_QUEUED_FRAMES = 4096;
 const MAX_QUEUED_BYTES = 32 * 1024 * 1024;
 
-/** One phone-to-host connection through the relay, as whole frames. */
-class Link {
+/** One phone-to-host connection through the relay, as whole frames.
+ * Exported for its tests; the package's index leaves it out. */
+export class Link {
   private readonly socket: WebSocket;
   private connection = 0n;
   private readonly queue: Uint8Array[] = [];
@@ -208,8 +209,11 @@ class Link {
     });
   }
 
+  /** Ends the link from this side, now: a reader waiting is told at once,
+   * rather than when the socket gets round to closing — late, or never for
+   * one that died while the app was suspended. */
   close(): void {
-    this.socket.close();
+    this.fail(new Error('the phone closed the connection'));
   }
 }
 

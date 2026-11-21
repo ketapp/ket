@@ -219,7 +219,7 @@ fn save_in_with_roles(dir: &Path, host: &ket_remote::Host, roles: &Roles) -> Res
 
 /// Writes a file owner-only from the moment it exists, then renames it into
 /// place, so there is never a readable copy and never a half-written one.
-fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
+pub(in crate::host) fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     let tmp = path.with_extension("tmp");
     let _ = std::fs::remove_file(&tmp);
     let mut file = std::fs::OpenOptions::new()

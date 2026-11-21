@@ -56,6 +56,21 @@ describe('Wipe', () => {
     expect(view.queryByText('b')).toBeNull();
   });
 
+  test('takes up a change that comes as the new words wipe in', async () => {
+    const view = await render(line('a'));
+    await view.rerender(line('b'));
+    // Past the erase: `b` is drawn and the cover is going back.
+    await act(async () => {
+      await jest.advanceTimersByTimeAsync(300);
+    });
+    expect(view.getByText('b')).toBeTruthy();
+    await view.rerender(line('c'));
+    await settle();
+    await settle();
+    expect(view.getByText('c')).toBeTruthy();
+    expect(view.queryByText('b')).toBeNull();
+  });
+
   test('under Reduce Motion the new words are simply there', async () => {
     mockStill = true;
     const view = await render(line('Thinking'));

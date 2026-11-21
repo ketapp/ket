@@ -23,6 +23,7 @@ use crate::ui::chip::kbd;
 use crate::ui::dialog::{card, centered, header};
 use crate::ui::icon::{Icon, sized_icon};
 use crate::ui::menu::{MenuEntry, MenuItem, MenuKey, OpenMenu, dropdown};
+use crate::ui::rule::vertical_rule;
 use crate::ui::select::select;
 use crate::ui::textarea::textarea;
 use crate::ui::toast::Tone;
@@ -1039,19 +1040,6 @@ impl Shell {
             Side::Top,
         );
 
-        let close = tip(
-            "quick-close",
-            icon_button("quick-close", Icon::Close)
-                .bare()
-                .small()
-                .render(t)
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.close_quick_prompt();
-                    cx.notify();
-                })),
-            "Close (esc)",
-            Side::Bottom,
-        );
         let send = button("quick-send", "Send")
             .primary()
             .small()
@@ -1062,7 +1050,7 @@ impl Shell {
                 this.send_quick_prompt(cx);
                 cx.notify();
             }));
-        let divider = || div().flex_none().w(px(1.0)).h(px(16.0)).bg(paint(t.border));
+        let divider = || vertical_rule(t).h(px(16.0));
         let word = |text: &'static str| {
             div()
                 .flex_none()
@@ -1153,14 +1141,18 @@ impl Shell {
                     .track_focus(&dialog.focus)
                     .child(
                         header(
+                            "quick-close",
                             if dialog.attachments.is_empty() {
                                 "Quick prompt"
                             } else {
                                 "Screenshot to agent"
                             },
-                            t,
                         )
-                        .child(close),
+                        .on_close(cx.listener(|this, _, _, cx| {
+                            this.close_quick_prompt();
+                            cx.notify();
+                        }))
+                        .render(t),
                     )
                     .child(
                         div()

@@ -101,8 +101,9 @@ const CLOSE_MS = 140;
 /** How long after opening a row that mounts still comes in. */
 const FRESH_MS = 400;
 
-/** Whether the menu has just opened, for its rows to come in after it. */
-const Opened = createContext(false);
+/** Whether the menu has just opened, for its rows to come in after it, and
+ * whether its card has been placed, for them to start. */
+const Opened = createContext({ fresh: false, ready: true });
 
 /** The card every menu is: it grows from the corner on the side of what
  * opened it — `from` says which — and shrinks away when it closes. `ready`
@@ -152,7 +153,7 @@ export function MenuCard({
     return { opacity: strength.get(), transform: [{ translateY: away * (1 - r) }, { scale: 0.7 + 0.3 * r }] };
   });
   return (
-    <Opened.Provider value={fresh}>
+    <Opened.Provider value={{ fresh, ready }}>
       <Animated.View
         accessibilityRole="menu"
         accessibilityLabel={label}
@@ -170,16 +171,29 @@ export function MenuCard({
  * before it when the menu has just opened; a row that comes later — the /
  * menu narrowing as you type — is simply there. */
 function Stagger({ index, children }: { index: number; children: ReactNode }) {
-  const fresh = useContext(Opened);
+  const { fresh, ready } = useContext(Opened);
   const up = useSharedValue(fresh ? 0 : 1);
+  // Only on the way in, and not before the card it comes up in has been
+  // placed — see MenuCard's `ready`. Run again as `fresh` settles or the row
+  // moves, it aims a row already up at where it is.
   useEffect(() => {
-    if (!fresh) return;
+    if (!fresh || !ready) return;
     up.set(withDelay(index * 40, withTiming(1, timing(300, OVER))));
-    // Only on the way in: `fresh` is settled on mount.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [fresh, ready, index, up]);
   const coming = useAnimatedStyle(() => ({ opacity: up.get(), transform: [{ translateY: 14 * (1 - up.get()) }] }));
   return <Animated.View style={coming}>{children}</Animated.View>;
+}
+
+/** Where each section's rows start, counted down the whole menu: the order
+ * they come up in. Worked out here rather than counted while drawing, which
+ * the React Compiler can't follow. */
+function firstRows(sections: MenuSection[]): number[] {
+  let row = 0;
+  return sections.map((section) => {
+    const first = row;
+    row += section.items.length;
+    return first;
+  });
 }
 
 /** A menu's sections and rows, scrolling past `maxHeight`. `onChoose` is
@@ -193,7 +207,7 @@ export function MenuList({
   onChoose: (item: MenuItem) => void;
   maxHeight?: number;
 }) {
-  let row = 0;
+  const first = firstRows(sections);
   const body = sections.map((section, at) => (
     <View key={section.title ?? at}>
       {at > 0 ? <View style={styles.rule} /> : null}
@@ -204,8 +218,8 @@ export function MenuList({
           <Text style={[styles.words, styles.message]}>{section.message.text}</Text>
         </View>
       ) : null}
-      {section.items.map((item) => (
-        <Stagger key={item.key} index={row++}>
+      {section.items.map((item, i) => (
+        <Stagger key={item.key} index={first[at] + i}>
           <Pressable
             accessibilityRole="menuitem"
             accessibilityState={item.selected ? { selected: true } : undefined}
@@ -279,6 +293,11 @@ function InPlace({ open, onClose, sections, label, hang }: Props & { hang: ViewS
   // Kept in the tree while its close plays, and out of it after, so nothing
   // under a closed menu loses a tap to it.
   const [shown, setShown] = useState(open);
+  // Whether the card has been laid out since it went into the tree. Its
+  // opening waits for that, as a menu over the screen's does: started on
+  // the frame the card went in, the growing in sometimes never reached the
+  // screen, and the menu was open — + turned to × — with nothing drawn.
+  const [placed, setPlaced] = useState(false);
   const [was, setWas] = useState(open);
   if (open !== was) {
     setWas(open);
@@ -286,7 +305,10 @@ function InPlace({ open, onClose, sections, label, hang }: Props & { hang: ViewS
   }
   useEffect(() => {
     if (open) return;
-    const timer = setTimeout(() => setShown(false), CLOSE_MS);
+    const timer = setTimeout(() => {
+      setShown(false);
+      setPlaced(false);
+    }, CLOSE_MS);
     return () => clearTimeout(timer);
   }, [open]);
   if (!shown) return null;
@@ -306,7 +328,14 @@ function InPlace({ open, onClose, sections, label, hang }: Props & { hang: ViewS
           style={[styles.catcher, { top: -window.height, bottom: -window.height, left: -window.width, right: -window.width }]}
         />
       ) : null}
-      <MenuCard open={open} from="below" label={label} style={[styles.inline, hang]}>
+      <MenuCard
+        open={open}
+        from="below"
+        ready={placed}
+        label={label}
+        style={[styles.inline, hang]}
+        onLayout={() => setPlaced(true)}
+      >
         <MenuList sections={sections} onChoose={choose} maxHeight={INLINE_HEIGHT} />
       </MenuCard>
     </>

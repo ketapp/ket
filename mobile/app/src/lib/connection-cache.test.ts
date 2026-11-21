@@ -7,14 +7,18 @@ import type { SavedHost } from './store';
 // connection dials with, not what happens after.
 const mockResume = jest.fn((_host: { relay: string }, _keys: unknown, _options: unknown) => new Promise(() => {}));
 
-// Only `resume` is called here; the protocol's schemas and enums the module
-// names stand in as empty objects.
+// Only `resume` is called here, and `validRelayUrl` as the connection's
+// state names the address it shows; the protocol's schemas and enums the
+// module names stand in as empty objects.
 jest.mock(
   '@ket/remote',
   () =>
     new Proxy(
-      { resume: (host: { relay: string }, keys: unknown, options: unknown) => mockResume(host, keys, options) },
-      { get: (target, name) => (name in target ? target[name as 'resume'] : {}) },
+      {
+        resume: (host: { relay: string }, keys: unknown, options: unknown) => mockResume(host, keys, options),
+        validRelayUrl: (url: string) => /^wss?:\/\//.test(url),
+      },
+      { get: (target, name) => (name in target ? target[name as keyof typeof target] : {}) },
     ),
 );
 jest.mock('./store', () => ({
@@ -32,7 +36,7 @@ describe('connection', () => {
   test('a desktop keeps one connection, whatever record it is asked with', () => {
     const first = connection(saved('ws://old.local:7979'));
     expect(connection(saved('ws://new.local:7979'))).toBe(first);
-    expect(first.host.relay).toBe('ws://old.local:7979');
+    expect(first.state.host.relay).toBe('ws://old.local:7979');
   });
 
   test('after it is dropped, the next connection dials the new pairing', async () => {

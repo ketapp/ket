@@ -47,6 +47,11 @@ const PROJECTS: { name: number; rows: { title: DimensionValue; detail: Dimension
   },
 ];
 
+/** Where each project's lines start in the pulse, its own and then its
+ * rows'. Worked out here rather than counted while drawing, which the React
+ * Compiler can't follow. */
+const FIRST_LINE = PROJECTS.map((_, p) => PROJECTS.slice(0, p).reduce((lines, q) => lines + 1 + q.rows.length, 0));
+
 export function ListSkeleton() {
   const still = useReducedMotion();
   const clock = useSharedValue(0);
@@ -57,17 +62,16 @@ export function ListSkeleton() {
     return () => cancelAnimation(clock);
   }, [still, clock]);
 
-  let line = 0;
   return (
     <View accessible accessibilityRole="progressbar" accessibilityLabel="Loading worktrees" style={styles.list}>
       {PROJECTS.map((project, p) => (
         <View key={p}>
-          <Pulse clock={clock} still={still} index={line++} style={styles.project}>
+          <Pulse clock={clock} still={still} index={FIRST_LINE[p]} style={styles.project}>
             <View style={styles.badge} />
             <View style={[styles.bar, styles.name, { width: project.name }]} />
           </Pulse>
           {project.rows.map((row, r) => (
-            <Pulse key={r} clock={clock} still={still} index={line++} style={styles.row}>
+            <Pulse key={r} clock={clock} still={still} index={FIRST_LINE[p] + 1 + r} style={styles.row}>
               <View style={styles.mark}>
                 <View style={styles.dot} />
               </View>

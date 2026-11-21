@@ -42,6 +42,50 @@ fn known_any(_: &str) -> bool {
 // ---- basic report handling ---------------------------------------------------
 
 #[test]
+fn recency_tracks_turn_milestones_while_tool_reports_still_refresh_liveness() {
+    let mut store = StatusStore::new(1);
+    for (event, at_ms, recency) in [
+        (HookEvent::UserPrompt, 100, 100),
+        (HookEvent::PreTool, 200, 100),
+        (HookEvent::PostTool, 300, 100),
+        (HookEvent::PermissionRequest, 400, 400),
+        (HookEvent::Notification, 450, 400),
+        (HookEvent::PostTool, 500, 400),
+        (HookEvent::Stop, 600, 600),
+        (HookEvent::Idle, 650, 600),
+        (HookEvent::UserPrompt, 700, 700),
+        (HookEvent::Interrupt, 800, 800),
+    ] {
+        assert!(store.report(&report(event, "p1", "w1", "s1", at_ms), known_any));
+        let pane = store.get("p1").unwrap();
+        assert_eq!(pane.recency_at_ms, recency, "{event:?}");
+        assert_eq!(pane.heard_at_ms(), at_ms, "{event:?}");
+    }
+}
+
+#[test]
+fn subagent_tools_leave_recency_steady_but_a_request_for_input_updates_it() {
+    let mut store = StatusStore::new(1);
+    store.report(
+        &report(HookEvent::UserPrompt, "p1", "w1", "s1", 100),
+        known_any,
+    );
+    for (event, at_ms, recency) in [
+        (HookEvent::PreTool, 200, 100),
+        (HookEvent::PostTool, 300, 100),
+        (HookEvent::PermissionRequest, 400, 400),
+        (HookEvent::Notification, 450, 400),
+        (HookEvent::PostTool, 500, 400),
+        (HookEvent::SubagentStop, 600, 400),
+    ] {
+        let mut child = report(event, "p1", "w1", "s1", at_ms);
+        child.subagent = Some("child".into());
+        store.report(&child, known_any);
+        assert_eq!(store.get("p1").unwrap().recency_at_ms, recency, "{event:?}");
+    }
+}
+
+#[test]
 fn a_report_with_no_worktree_is_dropped() {
     let mut store = StatusStore::new(1);
     let mut r = report(HookEvent::UserPrompt, "p1", "w1", "", 100);
@@ -178,16 +222,19 @@ fn a_dialog_after_a_codex_turn_ends_waits_until_it_goes() {
 
     assert!(store.screen_dialog("p1", Some(plan_dialog()), 2));
     let pane = store.get("p1").unwrap();
+    assert_eq!(pane.recency_at_ms, 2);
     assert_eq!(pane.state, AgentState::AwaitingPermission);
     let question = pane.question.as_ref().expect("the dialog");
     assert_eq!(question.tool, ket_core::screen::DIALOG_TOOL);
     assert_ne!(question.id, 0);
     // Read again on the next tick: nothing new.
     assert!(!store.screen_dialog("p1", Some(plan_dialog()), 3));
+    assert_eq!(store.get("p1").unwrap().recency_at_ms, 2);
 
     // Dismissed at the desk: idle again, asking nothing.
     assert!(store.screen_dialog("p1", None, 4));
     let pane = store.get("p1").unwrap();
+    assert_eq!(pane.recency_at_ms, 2);
     assert_eq!(pane.state, AgentState::Idle);
     assert!(pane.question.is_none());
 
@@ -921,11 +968,13 @@ fn a_snapshot_from_a_new_epoch_always_supersedes() {
         epoch: 1,
         revision: 100,
         panes: Vec::new(),
+        marked: Vec::new(),
     };
     let newer_epoch = AgentStatusSnapshot {
         epoch: 2,
         revision: 0,
         panes: Vec::new(),
+        marked: Vec::new(),
     };
     assert!(newer_epoch.supersedes(Some(&older)));
 }
@@ -936,21 +985,25 @@ fn within_an_epoch_only_a_later_revision_supersedes() {
         epoch: 1,
         revision: 5,
         panes: Vec::new(),
+        marked: Vec::new(),
     };
     let later = AgentStatusSnapshot {
         epoch: 1,
         revision: 6,
         panes: Vec::new(),
+        marked: Vec::new(),
     };
     let same = AgentStatusSnapshot {
         epoch: 1,
         revision: 5,
         panes: Vec::new(),
+        marked: Vec::new(),
     };
     let earlier = AgentStatusSnapshot {
         epoch: 1,
         revision: 4,
         panes: Vec::new(),
+        marked: Vec::new(),
     };
 
     assert!(later.supersedes(Some(&base)));
@@ -964,6 +1017,38 @@ fn any_snapshot_supersedes_nothing_held_yet() {
         epoch: 1,
         revision: 0,
         panes: Vec::new(),
+        marked: Vec::new(),
     };
     assert!(snapshot.supersedes(None));
+}
+
+#[test]
+fn a_worktree_marked_unread_stays_so_until_the_mark_comes_off() {
+    let mut store = StatusStore::new(1);
+    store.report(&report(HookEvent::Stop, "p1", "w1", "s1", 100), known_any);
+    assert!(store.seen("p1"));
+
+    assert!(store.mark_unread("w1", true));
+    assert!(store.marked("w1"));
+    assert!(
+        !store.mark_unread("w1", true),
+        "marking it twice changes nothing"
+    );
+    assert!(!store.marked("w2"));
+    assert_eq!(store.snapshot().marked, vec!["w1".to_owned()]);
+
+    // Its panes' own answers are left alone, either way.
+    assert!(!store.get("p1").unwrap().unread);
+    store.report(&report(HookEvent::Stop, "p1", "w1", "s1", 200), known_any);
+    assert!(store.mark_unread("w1", false));
+    assert!(store.get("p1").unwrap().unread);
+    assert!(store.snapshot().marked.is_empty());
+}
+
+#[test]
+fn marking_a_worktree_is_a_new_revision() {
+    let mut store = StatusStore::new(1);
+    let before = store.snapshot();
+    store.mark_unread("w1", true);
+    assert!(store.snapshot().supersedes(Some(&before)));
 }

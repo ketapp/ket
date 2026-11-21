@@ -138,6 +138,22 @@ pub struct ProjectSettings {
     /// taxonomy; an `IconKind` enum here would be exactly the UI knowledge core
     /// is meant to keep out. Bounded by [`MAX_ICON_BYTES`].
     pub icon: Option<String>,
+    /// A picture — a favicon, a logo — drawn on the badge in place of
+    /// [`Self::icon`], as the name of ket's copy of it. `None` is no picture.
+    ///
+    /// The name, not a path: the copy lives in ket's data directory (see
+    /// [`crate::project_image`]), where
+    /// [`crate::workspace::Workspace::project_image_path`] finds it. A name
+    /// is only ever one that [`crate::workspace::Workspace::import_project_image`]
+    /// returned, and is set to one by writing the settings with it; `None`
+    /// clears the picture and deletes the copy. `icon` and `color` are left as
+    /// they are either way — the colour is still used elsewhere, and the icon
+    /// is what shows again once the picture is cleared.
+    ///
+    /// Left out of the file until one is set, so a project without one is
+    /// written exactly as it was before there were pictures.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
     /// Hide worktrees git knows about that ket did not create.
     ///
     /// **On by default.** It was off, on the reasoning that a project where
@@ -220,6 +236,7 @@ impl Default for ProjectSettings {
             display_name: None,
             color: None,
             icon: None,
+            image: None,
             hide_discovered_worktrees: true,
             build_dirs: None,
             agents: BTreeMap::new(),
@@ -251,6 +268,16 @@ impl ProjectSettings {
             )));
         }
 
+        // A path here would be a way to point the badge — and the deletes
+        // that follow a change — anywhere on disk.
+        if let Some(image) = &self.image
+            && !crate::project_image::is_plain_name(image)
+        {
+            return Err(KetError::Config(format!(
+                "project image {image:?} is not the name of a copy ket made"
+            )));
+        }
+
         Ok(())
     }
 
@@ -264,6 +291,7 @@ impl ProjectSettings {
         self.display_name = blank_to_none(self.display_name);
         self.color = blank_to_none(self.color).map(|c| c.to_ascii_lowercase());
         self.icon = blank_to_none(self.icon);
+        self.image = blank_to_none(self.image);
         // A blank command is no override: it would type nothing at the
         // prompt, which is a pane that sits there looking broken.
         self.agents = std::mem::take(&mut self.agents)

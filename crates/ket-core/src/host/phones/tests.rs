@@ -125,6 +125,9 @@ fn rig() -> Rig {
         next_approval: AtomicU64::new(1),
         hosted: Mutex::new(None),
         typing: Typing::default(),
+        pushes: Mutex::new(HashMap::new()),
+        push_settings: Mutex::new(push::Settings::from_config(&Default::default())),
+        notices: Mutex::new(notices::Notices::default()),
     });
     let own = Target {
         url: relay.clone(),
@@ -815,15 +818,210 @@ fn a_phones_cold_session_figures_follow_the_desktops_threshold_and_opt_out() {
     );
 
     let mut config = crate::config::Config::default();
-    config.agent.cold_resume_min_tokens = Some(300_001);
+    config.agent.cold_resume_min_dollars = Some(7);
     config.save().unwrap();
     assert!(read().is_none());
-    config.agent.cold_resume_min_tokens = Some(300_000);
+    config.agent.cold_resume_min_dollars = Some(6);
     config.save().unwrap();
     assert_eq!(read(), Some(cold));
     config.agent.cold_resume = Some(false);
     config.save().unwrap();
     assert!(read().is_none());
+    terminal.kill();
+}
+
+#[test]
+fn a_confirmed_fresh_session_shows_an_empty_chat_until_its_transcript_exists() {
+    if rerun_sandboxed("a_confirmed_fresh_session_shows_an_empty_chat_until_its_transcript_exists")
+    {
+        return;
+    }
+    let rig = rig();
+    let (id, terminal, mut report) = cold_tab(&rig);
+    let directory =
+        std::path::PathBuf::from(std::env::var_os("HOME").unwrap()).join(".claude/projects/test");
+    std::fs::write(
+        directory.join("cold-session.jsonl"),
+        serde_json::json!({
+            "type": "user",
+            "message": { "role": "user", "content": "The old conversation" }
+        })
+        .to_string()
+            + "\n",
+    )
+    .unwrap();
+    let (mut phone, _) = paired(&rig, &Keypair::generate().unwrap());
+    let mut read = |request_id, after| {
+        let reply = ask(
+            &mut phone,
+            request_id,
+            Payload::GetConversation(proto::GetConversation {
+                terminal_id: id,
+                after,
+                session: String::new(),
+            }),
+        );
+        let Some(Payload::Conversation(conversation)) = reply.payload else {
+            panic!("expected a conversation");
+        };
+        conversation
+    };
+    let old = read(1, 0);
+    assert!(old.supported);
+    assert_eq!(old.session, "cold-session");
+    assert_eq!(old.turns[0].text, "The old conversation");
+
+    report.event = crate::agent_hooks::HookEvent::SessionStart;
+    report.fresh_session = true;
+    report.session = Some("fresh-session".to_owned());
+    report.at_ms += 1;
+    assert!(rig.host.report_for_tests(&report));
+    // A missing transcript alone still preserves the conversation, as for
+    // side threads. A confirmed Start fresh explicitly replaces it.
+    assert_eq!(read(2, 0).session, "cold-session");
+    super::conversation::remember_fresh_conversation(&rig.host, id, "cold-session");
+    for request_id in [3, 4] {
+        let fresh = read(request_id, old.next);
+        assert!(fresh.supported);
+        assert!(fresh.fresh);
+        assert_eq!(fresh.session, "fresh-session");
+        assert_eq!(fresh.next, 0);
+        assert!(fresh.turns.is_empty());
+        assert!(fresh.queued.is_empty());
+    }
+    std::fs::write(
+        directory.join("fresh-session.jsonl"),
+        serde_json::json!({
+            "type": "user",
+            "message": { "role": "user", "content": "The first fresh message" }
+        })
+        .to_string()
+            + "\n",
+    )
+    .unwrap();
+    let fresh = read(5, 0);
+    assert!(fresh.supported);
+    assert_eq!(fresh.session, "fresh-session");
+    assert_eq!(fresh.turns.len(), 1);
+    assert_eq!(fresh.turns[0].text, "The first fresh message");
+    terminal.kill();
+}
+
+#[test]
+fn attaching_after_start_fresh_reads_the_background_session() {
+    if rerun_sandboxed("attaching_after_start_fresh_reads_the_background_session") {
+        return;
+    }
+    let rig = rig();
+    let (id, terminal, mut report) = cold_tab(&rig);
+    let directory =
+        std::path::PathBuf::from(std::env::var_os("HOME").unwrap()).join(".claude/projects/test");
+    for (session, text) in [
+        ("cold-session", "Old chat"),
+        ("background-session", "Background chat"),
+    ] {
+        std::fs::write(
+            directory.join(format!("{session}.jsonl")),
+            serde_json::json!({"type": "user", "message": {"role": "user", "content": text}})
+                .to_string()
+                + "\n",
+        )
+        .unwrap();
+    }
+    let (mut phone, _) = paired(&rig, &Keypair::generate().unwrap());
+    // Use cached agent listings and a terminal screen, so this exercises
+    // attachment discovery without starting Claude or reading real state.
+    let cwd = directory.join("checkout");
+    crate::agent_view::cache_sessions_for_tests(
+        &cwd,
+        [
+            ("cold-session", "Cold"),
+            ("background-session", "Background"),
+        ]
+        .into_iter()
+        .map(|(session, name)| crate::agent_view::BackgroundSession {
+            session: session.to_owned(),
+            name: name.to_owned(),
+            state: crate::agent_view::SessionState::Done,
+            started_at_ms: 0,
+            active_at_ms: 0,
+            doing: String::new(),
+            handle: session.to_owned(),
+            live: true,
+            config_dir: None,
+        })
+        .collect(),
+    );
+    *lock(&rig.phones.places) = Some((
+        Instant::now(),
+        Arc::new(Places {
+            projects: Vec::new(),
+            worktrees: vec![super::places::Place {
+                id: "cold-wt".to_owned(),
+                project: "test".to_owned(),
+                name: "test".to_owned(),
+                branch: "test".to_owned(),
+                path: cwd,
+                base: None,
+                pinned: false,
+            }],
+        }),
+    ));
+    let show_attachment = |name: &str| {
+        terminal.with_term(|term| {
+            let screen = format!(
+                "\x1b[2J\x1b[H{} {name} {}\r\n",
+                "─".repeat(12),
+                "─".repeat(12)
+            );
+            let mut parser: alacritty_terminal::vte::ansi::Processor =
+                alacritty_terminal::vte::ansi::Processor::new();
+            parser.advance(term, screen.as_bytes());
+        })
+    };
+    let mut read = |request_id| {
+        let reply = ask(
+            &mut phone,
+            request_id,
+            Payload::GetConversation(proto::GetConversation {
+                terminal_id: id,
+                after: 0,
+                session: String::new(),
+            }),
+        );
+        let Some(Payload::Conversation(conversation)) = reply.payload else {
+            panic!("expected a conversation");
+        };
+        conversation
+    };
+    assert_eq!(read(1).session, "cold-session");
+    report.event = crate::agent_hooks::HookEvent::SessionStart;
+    report.fresh_session = true;
+    report.session = Some("fresh-session".to_owned());
+    report.at_ms += 1;
+    assert!(rig.host.report_for_tests(&report));
+    super::conversation::remember_fresh_conversation(&rig.host, id, "cold-session");
+
+    // The old name can linger on screen while /clear finishes drawing.
+    show_attachment("Cold");
+    let cleared = read(2);
+    assert!(cleared.supported);
+    assert_eq!(cleared.session, "fresh-session");
+    assert!(cleared.turns.is_empty());
+
+    // Attaching elsewhere leaves the tab's own fresh session untyped.
+    show_attachment("Background");
+    for request_id in [3, 4] {
+        let attached = read(request_id);
+        assert!(attached.supported);
+        assert_eq!(attached.session, "background-session");
+        assert_eq!(attached.turns[0].text, "Background chat");
+    }
+    // Explicitly resuming the old session is still allowed.
+    report.session = Some("cold-session".to_owned());
+    report.at_ms += 1;
+    assert!(rig.host.report_for_tests(&report));
+    assert_eq!(read(5).turns[0].text, "Old chat");
     terminal.kill();
 }
 
@@ -2328,6 +2526,107 @@ fn a_phone_pins_a_worktree_but_never_the_repositorys_own_checkout() {
 }
 
 #[test]
+fn a_phone_renames_a_worktree_but_never_the_repositorys_own_checkout() {
+    if rerun_sandboxed("a_phone_renames_a_worktree_but_never_the_repositorys_own_checkout") {
+        return;
+    }
+    let (project, worktree, _) = place();
+    let rig = rig();
+    let mut window = rig.host.window_for_tests();
+    window.set_read_timeout(Some(WAIT)).expect("a read timeout");
+    let (mut session, _) = paired(&rig, &Keypair::generate().unwrap());
+    let rename = |worktree: &str, name: &str| {
+        Payload::RenameWorktree(proto::RenameWorktree {
+            worktree_id: worktree.to_owned(),
+            name: name.to_owned(),
+        })
+    };
+    let named = || {
+        crate::store::Store::open_default()
+            .and_then(|store| store.load())
+            .unwrap()
+            .worktrees
+            .iter()
+            .find(|w| w.id.to_string() == worktree)
+            .expect("the worktree")
+            .name
+            .clone()
+    };
+
+    assert_eq!(
+        error_code(&change(&mut session, 1, rename("nowhere", "Elsewhere"))),
+        Some(proto::ErrorCode::NotFound)
+    );
+    assert!(
+        message(&change(
+            &mut session,
+            2,
+            rename(&format!("primary-{project}"), "Main")
+        ))
+        .contains("can't be renamed")
+    );
+
+    // Named in the store as the desktop's dialog names it, trimmed, and
+    // every window told to read its sidebar again.
+    assert!(is_ack(&change(
+        &mut session,
+        3,
+        rename(&worktree, "  Checkout flow ")
+    )));
+    assert_eq!(named().as_deref(), Some("Checkout flow"));
+    assert!(
+        told(&mut window, |reply| matches!(
+            reply,
+            crate::host::wire::Reply::WorktreesChanged
+        )
+        .then_some(()))
+        .is_some(),
+        "the window was not told"
+    );
+    // An empty name goes back to the branch's.
+    assert!(is_ack(&change(&mut session, 4, rename(&worktree, ""))));
+    assert_eq!(named(), None);
+}
+
+#[test]
+fn a_phone_marks_a_worktree_unread_and_takes_the_mark_off() {
+    if rerun_sandboxed("a_phone_marks_a_worktree_unread_and_takes_the_mark_off") {
+        return;
+    }
+    let (_, worktree, _) = place();
+    let rig = rig();
+    let (mut session, _) = paired(&rig, &Keypair::generate().unwrap());
+    let mark = |unread: bool| {
+        Payload::MarkUnread(proto::MarkUnread {
+            worktree_id: worktree.clone(),
+            unread,
+        })
+    };
+    assert!(!shown(&rig, &worktree).unread);
+
+    // Never one the desktop doesn't have: each mark is kept, and sent to
+    // every window.
+    let nowhere = Payload::MarkUnread(proto::MarkUnread {
+        worktree_id: "nowhere".to_owned(),
+        unread: true,
+    });
+    assert_eq!(
+        error_code(&change(&mut session, 3, nowhere)),
+        Some(proto::ErrorCode::NotFound)
+    );
+    assert!(rig.host.agent_status().marked.is_empty());
+
+    // Marked for every window and phone: the host's own store holds it.
+    assert!(is_ack(&change(&mut session, 1, mark(true))));
+    assert!(shown(&rig, &worktree).unread);
+    assert_eq!(rig.host.agent_status().marked, vec![worktree.clone()]);
+
+    assert!(is_ack(&change(&mut session, 2, mark(false))));
+    assert!(!shown(&rig, &worktree).unread);
+    assert!(rig.host.agent_status().marked.is_empty());
+}
+
+#[test]
 fn deleting_a_worktree_is_checked_then_handed_to_a_window_which_may_refuse() {
     if rerun_sandboxed("deleting_a_worktree_is_checked_then_handed_to_a_window_which_may_refuse") {
         return;
@@ -2598,4 +2897,65 @@ fn a_relay_elsewhere_that_cannot_be_reached_says_why() {
     // Asked again for the same relay, nothing restarts.
     rig.phones.set_hosted(&rig.host, Some(gone));
     assert!(rig.phones.hosted_relay().unwrap().error.is_some());
+}
+
+#[test]
+fn a_model_switch_waits_only_for_a_turn_the_tab_shows() {
+    if rerun_sandboxed("a_model_switch_waits_only_for_a_turn_the_tab_shows") {
+        return;
+    }
+    use crate::agent_hooks::HookEvent;
+    let rig = rig();
+    let spec = TerminalSpec {
+        command: "/bin/cat".into(),
+        args: Vec::new(),
+        cwd: std::env::temp_dir(),
+        env: Default::default(),
+        env_remove: Vec::new(),
+        size: TerminalSize::new(80, 24),
+        key: None,
+        adopt: false,
+        adopt_only: false,
+    };
+    let id = rig.host.file_keyed_for_tests(
+        LocalTerminal::open(&spec).unwrap(),
+        Some("chat-wt|claude|1".to_owned()),
+    );
+    let terminal = rig.host.find(id).unwrap();
+    let (mut session, _) = paired(&rig, &Keypair::generate().unwrap());
+    let lease = Payload::Lease(proto::Lease {
+        terminal_id: id,
+        action: proto::lease::Action::Acquire as i32,
+    });
+    assert!(is_ack(&ask(&mut session, 1, lease)));
+    let switch = || {
+        Payload::SetModel(proto::SetModel {
+            terminal_id: id,
+            model: "sonnet".to_owned(),
+            effort: String::new(),
+        })
+    };
+    let said = |event: HookEvent, at_ms: u64| {
+        let mut report = asked_long_ago("chat-wt|claude|1", "chat-wt");
+        report.event = event;
+        report.question = None;
+        report.tool_name = None;
+        report.at_ms = at_ms;
+        assert!(rig.host.report_for_tests(&report));
+    };
+
+    // A session nobody has given a turn yet sits at its prompt: the tab
+    // reads it as ready, so the switch goes ahead.
+    said(
+        HookEvent::SessionStart,
+        crate::now_ms() - crate::activity::STARTING_READY_MS - 1_000,
+    );
+    let reply = ask(&mut session, 2, switch());
+    assert!(!message(&reply).contains("is busy"), "{reply:?}");
+
+    // Mid-turn it waits.
+    said(HookEvent::UserPrompt, crate::now_ms());
+    let reply = ask(&mut session, 3, switch());
+    assert!(message(&reply).contains("is busy"), "{reply:?}");
+    terminal.kill();
 }

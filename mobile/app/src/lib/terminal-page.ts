@@ -1,7 +1,6 @@
 // The page a host terminal is drawn in: xterm.js, and a `window.ket` the app
 // calls to feed it. What is typed goes back through
-// `window.ReactNativeWebView.postMessage`, which the WebView provides on a
-// phone and `TerminalView.web` provides in a browser.
+// `window.ReactNativeWebView.postMessage`, which the native WebView provides.
 
 import { t } from './theme';
 import { XTERM_CSS, XTERM_JS, XTERM_WEBGL_JS } from './xterm-assets';

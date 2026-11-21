@@ -166,6 +166,13 @@ lettre = { version = "0.11.23", default-features = false, features = [
 base64 = "0.22"
 # Pairing secrets and ids: the operating system's randomness, nothing seeded.
 getrandom = "0.3"
+# Seals each push notification to the phone's push key (RFC 9180). 0.13, on
+# the chacha20poly1305 0.10 / hkdf 0.12 / sha2 0.10 the tree already has,
+# where 0.14 and later would bring a second copy of each. Only X25519 and
+# ChaCha20-Poly1305: no P-256.
+hpke = { version = "0.13.0", default-features = false, features = ["alloc", "x25519"] }
+# The randomness hpke takes, from the operating system through getrandom.
+rand_core = { version = "0.9", features = ["os_rng"] }
 # The pairing screen's QR code, in ket.app. Pure Rust, MIT OR Apache-2.0, and
 # with default features off it depends on nothing: the defaults are PNG, SVG
 # and PIC renderers, and the shell draws the modules itself with gpui.

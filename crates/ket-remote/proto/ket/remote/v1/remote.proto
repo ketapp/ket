@@ -107,6 +107,21 @@
 // 1.30 adds whether a terminal's agent is compacting its conversation
 // (`TerminalSummary.compacting`).
 
+// 1.31 adds the colour a terminal's session was given with Claude's `/color`
+// (`TerminalSummary.color`, `WorktreeSummary.agent_color`).
+
+// 1.32 adds a terminal whose agent has answered and nobody has looked since
+// (`TerminalSummary.unread`), and MarkSeen, which a phone sends as it shows
+// the terminal's chat, answered with Ack.
+
+// 1.33 adds RenameWorktree, the worktree menu's Rename.
+
+// 1.34 adds RegisterPush and UnregisterPush, where the host sends a phone
+// a notification while it is not connected and for what, and `Device.push`.
+
+// 1.35 adds MarkUnread, the worktree menu's Mark as Unread, and
+// `WorktreeSummary.unread`, set while a worktree is marked.
+
 syntax = "proto3";
 
 package ket.remote.v1;
@@ -232,6 +247,16 @@ message Envelope {
     // Since 1.28.
     StartFresh start_fresh = 129;
     FreshStarted fresh_started = 130;
+
+    // Since 1.32.
+    MarkSeen mark_seen = 131;
+    // Since 1.33.
+    RenameWorktree rename_worktree = 132;
+    // Since 1.34.
+    RegisterPush register_push = 133;
+    UnregisterPush unregister_push = 134;
+    // Since 1.35.
+    MarkUnread mark_unread = 135;
   }
 }
 
@@ -459,6 +484,12 @@ message WorktreeSummary {
   // Since 1.31. The `/color` of the session `agent_state` is read from, by
   // name as TerminalSummary.color has it: what the worktree's row wears.
   string agent_color = 19;
+  // Since 1.35. Marked unread from a worktree menu, on the desktop or a
+  // phone, until someone next comes to it: on the desktop by going to it, on
+  // a phone by opening one of its terminals, which sends MarkUnread to take
+  // the mark off. Not set by an agent's answer, which is
+  // `TerminalSummary.unread`.
+  bool unread = 20;
 }
 
 // Since 1.11. A pull request open from a worktree's branch.
@@ -685,6 +716,70 @@ message TerminalSummary {
   // `/color`, by Claude's name for it — red, blue, green, yellow, purple,
   // orange, pink or cyan — and empty for none, or an agent without it.
   string color = 13;
+  // Since 1.32. Set once the terminal's agent has finished a turn, until
+  // someone looks at it: on the desktop by showing its tab, on a phone with
+  // MarkSeen. A prompt sent to it leaves it set.
+  bool unread = 14;
+}
+
+// Since 1.32. The phone is showing the terminal's conversation: what its
+// agent last said is read, on the desktop and on every phone. Needs no
+// lease, and no more than a viewer's role.
+message MarkSeen {
+  uint64 terminal_id = 1;
+}
+
+// Since 1.35. Marks a worktree unread, as the worktree menu's Mark as Unread
+// does, or with `unread` false takes the mark off — what a phone sends as it
+// comes to one of the worktree's terminals. Its terminals' own unread is left
+// alone either way. Needs no lease, and no more than a viewer's role.
+// Answered with Ack.
+message MarkUnread {
+  string worktree_id = 1;
+  bool unread = 2;
+}
+
+// Since 1.34. Where the host sends this phone a notification while it is
+// not connected, and for what. The host encrypts each one to `push_key`
+// and hands it to ket's push service, which forwards it to Apple; neither
+// sees what it says. Sent again whenever the token, the key or the kinds
+// change, and the newest replaces the last. Only ever about the phone
+// sending it. Needs no lease and no more than a viewer's role. Answered
+// with Ack.
+message RegisterPush {
+  // The phone's APNs device token, as Apple gave it.
+  bytes token = 1;
+  PushEnvironment environment = 2;
+  // An X25519 public key made only for push, not the phone's Noise key, so
+  // what decrypts a notification can decrypt nothing else. Each one is
+  // sealed to it with HPKE (RFC 9180) in base mode: DHKEM(X25519,
+  // HKDF-SHA256), HKDF-SHA256 and ChaCha20-Poly1305.
+  bytes push_key = 3;
+  // What to send. None sends nothing, as UnregisterPush does.
+  repeated PushKind kinds = 4;
+}
+
+// Since 1.34. Stops notifications to this phone. Answered with Ack.
+message UnregisterPush {}
+
+// Which of Apple's push services a token belongs to: a development build's
+// tokens work only with the sandbox.
+enum PushEnvironment {
+  PUSH_ENVIRONMENT_UNSPECIFIED = 0;
+  PUSH_ENVIRONMENT_SANDBOX = 1;
+  PUSH_ENVIRONMENT_PRODUCTION = 2;
+}
+
+// What a phone asks to be told about, as its Settings › Notifications
+// lists them.
+enum PushKind {
+  PUSH_KIND_UNSPECIFIED = 0;
+  // An agent stopped on a permission prompt, a question or a plan.
+  PUSH_KIND_WAITING = 1;
+  // An agent finished its task, or failed.
+  PUSH_KIND_FINISHED = 2;
+  // A check on a worktree's pull request failed.
+  PUSH_KIND_CHECKS = 3;
 }
 
 // Since 1.28. A session whose prompt cache has gone cold: its next prompt
@@ -1411,6 +1506,16 @@ message PinWorktree {
   bool pinned = 2;
 }
 
+// Since 1.33. Rename a worktree, as the desktop's worktree menu does: the
+// name ket shows for it, not its branch or its folder. Trimmed and cut to
+// 120 characters; an empty name goes back to the branch's. Not a
+// repository's own checkout. Needs no ket window. A mutation; answered with
+// Ack, or an Error saying why not.
+message RenameWorktree {
+  string worktree_id = 1;
+  string name = 2;
+}
+
 // Since 1.20. Delete a worktree — its checkout and its branch — as the
 // desktop's worktree menu does once its dialog is confirmed. Not a
 // repository's own checkout. A branch with commits its base does not have
@@ -1464,6 +1569,9 @@ message Device {
   bool this_device = 4;
   // Whether it is connected now.
   bool connected = 5;
+  // Since 1.34. Whether it has asked for notifications while it is not
+  // connected — see RegisterPush.
+  bool push = 6;
 }
 
 // Stops the host accepting a phone, and ends its session if it has one. A

@@ -67,6 +67,33 @@ pub(crate) fn root_view(
     Some(view.retain())
 }
 
+/// Gives gpui's view the keyboard back when nothing on screen has it.
+///
+/// AppKit makes the window itself first responder when the view that had
+/// the keyboard leaves it — a Chromium page closing or swapping its view —
+/// and leaves a hidden view first responder. Either way every key went
+/// nowhere, with the system beep, until ket restarted: a click never makes
+/// gpui's view first responder again, because it does not accept that from
+/// AppKit.
+#[cfg(target_os = "macos")]
+pub(crate) fn reclaim_keyboard(window: &gpui::Window) {
+    use objc2_app_kit::NSView;
+
+    let Some(view) = root_view(window) else {
+        return;
+    };
+    let Some(native) = view.window() else {
+        return;
+    };
+    let lost = native
+        .firstResponder()
+        .and_then(|responder| responder.downcast::<NSView>().ok())
+        .is_none_or(|responder| responder.isHiddenOrHasHiddenAncestor());
+    if lost {
+        native.makeFirstResponder(Some(&view));
+    }
+}
+
 /// Starts a window drag from the element under the pointer.
 ///
 /// Safe to call from any mouse-down handler: without a current event, or off

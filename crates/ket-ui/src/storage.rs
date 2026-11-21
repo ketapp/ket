@@ -59,10 +59,17 @@ impl Shell {
         Some(
             crate::ui::dialog::centered(
                 crate::ui::dialog::card("project-storage", px(460.0), t)
-                    .child(crate::ui::dialog::header(
-                        format!("{} Storage", project.name),
-                        t,
-                    ))
+                    .child(
+                        crate::ui::dialog::header(
+                            "close-project-storage",
+                            format!("{} Storage", project.name),
+                        )
+                        .on_close(cx.listener(|this, _, _, cx| {
+                            this.storage_dialog = None;
+                            cx.notify();
+                        }))
+                        .render(t),
+                    )
                     .child(content)
                     .child(close),
             )

@@ -1,5 +1,3 @@
-'use no memo'; // Reads a live HostConnection — see lib/hosts.ts.
-
 // What the home screen shows in place of its worktrees while the phone is
 // reaching for its desktop: the ping, and what is happening. Once it has
 // tried for a while without an answer, the ping stops and the screen names
@@ -10,13 +8,15 @@ import { router } from 'expo-router';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 import type { HostConnection } from '../lib/connection';
+import { useHostState } from '../lib/hosts';
 import { font, size, t } from '../lib/theme';
 import { hostOf, STUCK_MS, useWaited } from './ConnectionHelp';
 import { Ping } from './Ping';
 import { Button } from './ui';
 
 export function Connecting({ conn }: { conn: HostConnection }) {
-  const waited = useWaited(conn);
+  const hostState = useHostState(conn);
+  const waited = useWaited(hostState);
   const stuck = waited >= STUCK_MS;
 
   if (!stuck) {
@@ -25,19 +25,19 @@ export function Connecting({ conn }: { conn: HostConnection }) {
         <Ping stuck={false} />
         <View style={styles.words}>
           <Text style={styles.title}>Connecting to your Mac</Text>
-          <Text style={styles.meta}>{conn.addressForDisplay() ? `through ${hostOf(conn.addressForDisplay()!)}` : 'trying saved addresses'}</Text>
+          <Text style={styles.meta}>{hostState.displayAddress ? `through ${hostOf(hostState.displayAddress!)}` : 'trying saved addresses'}</Text>
         </View>
       </View>
     );
   }
 
-  const address = conn.addressForDisplay();
+  const address = hostState.displayAddress;
   return (
     <View style={styles.stuck} accessibilityLiveRegion="polite">
       <Ping stuck />
       <View style={styles.words}>
-        <Text style={styles.title}>{`Can’t reach ${conn.host.name}`}</Text>
-        <Text style={styles.meta}>attempt {Math.max(conn.attempts, 1)}</Text>
+        <Text style={styles.title}>{`Can’t reach ${hostState.host.name}`}</Text>
+        <Text style={styles.meta}>attempt {Math.max(hostState.attempts, 1)}</Text>
         <Text style={styles.sentence}>
           Phone and Mac on the same Wi‑Fi or Tailscale, ket running on the Mac, and the Mac awake with its lid open.
         </Text>
@@ -50,7 +50,7 @@ export function Connecting({ conn }: { conn: HostConnection }) {
           accessibilityRole="button"
           accessibilityLabel="Change the saved address"
           hitSlop={8}
-          onPress={() => router.push(`/devices/${conn.host.id}`)}
+          onPress={() => router.push(`/devices/${conn.id}`)}
         >
           <Text style={styles.change}>Change</Text>
         </Pressable>

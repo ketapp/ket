@@ -1,25 +1,26 @@
-// Screens' view of the paired desktops: each one's live connection, redrawn
-// whenever any of them changes.
+// Screens' view of the paired desktops: each one's connection, for what it
+// does, and its state, for what it is now (see `ConnectionState` in
+// lib/connection.ts).
 //
-// A connection is one long-lived object whose fields change in place, so a
-// screen that reads it opts out of the React Compiler with 'use no memo': the
-// compiler caches what it derives from an unchanged reference, and the
-// redraw these hooks ask for then drew the old status — Worktrees sat at
-// "Connecting…" while Settings, drawn later, said connected.
+// A connection is one long-lived object that changes in place, so a screen
+// never reads it while it draws: it draws from `useHostState`, a new state
+// object whenever anything in it changes, which React and the React
+// Compiler can tell from the last. The connection itself is for asking the
+// desktop.
 
 import { useFocusEffect } from 'expo-router';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 'react';
 
 import { type AddressKind, WAY_PHRASE, addressKind, wayOf } from './address-kind';
-import { connection, type HostConnection } from './connection';
+import { type ConnectionState, connection, type HostConnection, liveConnection } from './connection';
 import { getHost, listHosts } from './store';
 import { adoptPalette } from './theme';
 
-/** Every paired desktop, connected; `null` until the list has been read.
- * Read again each time the screen is focused, and when `refresh` changes. */
+/** Every paired desktop's connection; `null` until the list has been read.
+ * Read again each time the screen is focused, and when `refresh` changes.
+ * Their states are `useHostStates`'. */
 export function useHosts(refresh?: string): HostConnection[] | null {
   const [conns, setConns] = useState<HostConnection[] | null>(null);
-  const [, redraw] = useState(0);
 
   const read = useCallback(() => {
     void listHosts().then((hosts) => setConns(hosts.map((host) => connection(host))));
@@ -29,50 +30,97 @@ export function useHosts(refresh?: string): HostConnection[] | null {
     if (refresh !== undefined) read();
   }, [refresh, read]);
 
-  useEffect(() => {
-    const offs = (conns ?? []).map((c) => c.onChange(() => redraw((n) => n + 1)));
-    return () => offs.forEach((off) => off());
-  }, [conns]);
-
   return conns;
 }
 
-/** One paired desktop, connected; `null` until it has been found. */
+/** One paired desktop's connection; `null` until it has been found. A desktop
+ * the app is already connected to — any screen opened from Worktrees — is
+ * there on the first draw; only one not met yet waits for the Keychain. Its
+ * state is `useHostState`'s. */
 export function useHost(id: string): HostConnection | null {
-  const [conn, setConn] = useState<HostConnection | null>(null);
-  const [, redraw] = useState(0);
+  const held = liveConnection(id);
+  // One not met yet, once the Keychain has given it back.
+  const [found, setFound] = useState<HostConnection | null>(null);
 
   useEffect(() => {
-    let off = () => {};
+    // Only when none was held as this drew: one that went live since is the
+    // connection `connection(host)` hands back.
+    if (held) return;
     let live = true;
     void getHost(id).then((host) => {
-      if (!host || !live) return;
-      const c = connection(host);
-      setConn(c);
-      off = c.onChange(() => redraw((n) => n + 1));
+      if (host && live) setFound(connection(host));
     });
     return () => {
       live = false;
-      off();
     };
-  }, [id]);
+  }, [id, held]);
 
-  return conn;
+  return held ?? (found?.id === id ? found : null);
+}
+
+/** What `conn` is now, drawn again whenever it changes; `null` without a
+ * connection. */
+export function useHostState(conn: HostConnection): ConnectionState;
+export function useHostState(conn: HostConnection | null): ConnectionState | null;
+export function useHostState(conn: HostConnection | null): ConnectionState | null {
+  const subscribe = useCallback((changed: () => void) => (conn ? conn.onChange(changed) : () => {}), [conn]);
+  return useSyncExternalStore(subscribe, () => conn?.state ?? null);
+}
+
+/** The states `useHostStates` last handed out, by the list of connections they
+ * are of: the same array until one of them changes. */
+const statesOf = new WeakMap<readonly HostConnection[], readonly ConnectionState[]>();
+
+/** What each of `conns` is now, in their order, drawn again whenever any of
+ * them changes; `null` without the list. */
+export function useHostStates(conns: readonly HostConnection[] | null): readonly ConnectionState[] | null {
+  const subscribe = useCallback(
+    (changed: () => void) => {
+      const offs = (conns ?? []).map((c) => c.onChange(changed));
+      return () => offs.forEach((off) => off());
+    },
+    [conns],
+  );
+  const read = () => {
+    if (!conns) return null;
+    const now = conns.map((c) => c.state);
+    const was = statesOf.get(conns);
+    if (was && was.length === now.length && was.every((state, at) => state === now[at])) return was;
+    statesOf.set(conns, now);
+    return now;
+  };
+  return useSyncExternalStore(subscribe, read);
+}
+
+/** A paired desktop as a screen listing them all has it: its connection, for
+ * asking it, and its state, for drawing it. */
+export type PairedHost = { readonly conn: HostConnection; readonly hostState: ConnectionState };
+
+/** Every paired desktop with its state, in the order they were paired; `null`
+ * until the list has been read. A new list whenever any of them changes. See
+ * `useHosts` for `refresh`. */
+export function usePairedHosts(refresh?: string): readonly PairedHost[] | null {
+  const conns = useHosts(refresh);
+  const hostStates = useHostStates(conns);
+  return useMemo(
+    () => (conns && hostStates ? conns.map((conn, at) => ({ conn, hostState: hostStates[at] })) : null),
+    [conns, hostStates],
+  );
 }
 
 /** What a connection's state reads as under a desktop's name: once it is
  * up, how — on the local network, over Tailscale, through a relay — in
  * words, and as the kind of address the Secure pill draws a mark for. */
-export function statusLine(conn: HostConnection | null): { text: string; connected: boolean; kind?: AddressKind } {
-  switch (conn?.status) {
+export function statusLine(live: ConnectionState | null): { text: string; connected: boolean; kind?: AddressKind } {
+  switch (live?.status) {
     case 'connected': {
-      const address = conn.activeAddress;
+      const address = live.activeAddress;
       if (!address) return { text: 'Connected', connected: true };
-      const way = wayOf(address, conn.host.manualAddresses?.includes(address));
+      const way = wayOf(address, live.host.manualAddresses?.includes(address));
       return { text: WAY_PHRASE[way], connected: true, kind: addressKind(address) };
     }
     case 'offline':
-      return { text: conn.error ? `Offline · ${conn.error}` : 'Offline · retrying', connected: false };
+      return { text: live.error ? `Offline · ${live.error}` : 'Offline · retrying', connected: false };
     default:
       return { text: 'Connecting…', connected: false };
   }
@@ -91,7 +139,7 @@ export function useDesktopPalette(): void {
     let ids = '';
     let offs: (() => void)[] = [];
     const follow = (conns: HostConnection[]) => {
-      const palette = conns.map((c) => c.snapshot?.palette).find((p) => p !== undefined);
+      const palette = conns.map((c) => c.state.snapshot?.palette).find((p) => p !== undefined);
       if (palette) adoptPalette(palette);
     };
     const look = () => {

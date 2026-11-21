@@ -289,6 +289,8 @@ pub(crate) enum Icon {
     Command,
     /// A device's screen, taken as a picture.
     Camera,
+    /// A picture: an image file, or the one a project's badge wears.
+    Image,
     /// A device's on-screen keyboard.
     Keyboard,
     /// A device's lock.
@@ -442,6 +444,7 @@ impl Icon {
             Icon::MergeInto => "icons/merge-into.svg",
             Icon::Command => "icons/command.svg",
             Icon::Camera => "icons/camera.svg",
+            Icon::Image => "icons/image.svg",
             Icon::Keyboard => "icons/keyboard.svg",
             Icon::Lock => "icons/lock.svg",
             Icon::ArrowLeft => "icons/arrow-left.svg",
@@ -503,7 +506,7 @@ pub(crate) fn sized_icon(which: Icon, size: Pixels, colour: Rgba) -> Svg {
 pub(crate) struct Assets;
 
 /// The bytes for every path [`Icon::asset`] can return.
-const FILES: [(&str, &[u8]); 118] = [
+const FILES: [(&str, &[u8]); 119] = [
     (
         "icons/chevron-down.svg",
         include_bytes!("../../assets/icons/chevron-down.svg"),
@@ -853,6 +856,10 @@ const FILES: [(&str, &[u8]); 118] = [
         include_bytes!("../../assets/icons/camera.svg"),
     ),
     (
+        "icons/image.svg",
+        include_bytes!("../../assets/icons/image.svg"),
+    ),
+    (
         "icons/keyboard.svg",
         include_bytes!("../../assets/icons/keyboard.svg"),
     ),
@@ -1131,6 +1138,7 @@ mod tests {
             Icon::MergeInto,
             Icon::Command,
             Icon::Camera,
+            Icon::Image,
             Icon::Keyboard,
             Icon::Lock,
             Icon::ArrowLeft,

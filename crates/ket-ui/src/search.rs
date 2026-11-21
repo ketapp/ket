@@ -213,7 +213,7 @@ fn tab_mark(kind: &TabKind) -> Icon {
     match kind {
         TabKind::Editor(_) => Icon::Pencil,
         TabKind::Audio(_) => Icon::Layers,
-        TabKind::Image(_) => Icon::Camera,
+        TabKind::Image(_) => Icon::Image,
         TabKind::Terminal(_) => Icon::Terminal,
         TabKind::Browser(_) => crate::browser::browser_tab_mark().0,
         #[cfg(target_os = "macos")]
@@ -1003,10 +1003,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn an_image_tab_is_marked_with_a_camera() {
+    fn an_image_tab_is_marked_with_a_picture() {
         assert_eq!(
             tab_mark(&TabKind::Image("/repo/shot.png".into())),
-            Icon::Camera
+            Icon::Image
         );
         assert_eq!(
             tab_mark(&TabKind::Editor("/repo/main.rs".into())),

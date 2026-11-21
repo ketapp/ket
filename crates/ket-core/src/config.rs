@@ -238,6 +238,36 @@ impl Default for PermissionConfig {
 }
 
 impl PermissionConfig {
+    /// Permission defaults for an interactive agent launched in a terminal.
+    ///
+    /// Codex reads these on both fresh launches and resumes. Explicit CLI
+    /// flags in a configured launch still win over these config defaults.
+    /// Custom per-tool policies cannot be represented by a terminal preset,
+    /// and agents without a mapping keep their own permission configuration.
+    pub fn terminal_args(&self, agent: &str) -> Vec<String> {
+        use crate::agents::PermissionPreset;
+
+        if crate::agents::harness(agent) != "codex" {
+            return Vec::new();
+        }
+        let settings: &[&str] = match self.preset() {
+            PermissionPreset::Yolo => &[
+                "approval_policy=\"never\"",
+                "sandbox_mode=\"danger-full-access\"",
+            ],
+            PermissionPreset::Manual => &[
+                "approval_policy=\"on-request\"",
+                "sandbox_mode=\"workspace-write\"",
+                "approvals_reviewer=\"user\"",
+            ],
+            PermissionPreset::Custom => return Vec::new(),
+        };
+        settings
+            .iter()
+            .flat_map(|setting| ["-c".to_owned(), (*setting).to_owned()])
+            .collect()
+    }
+
     /// The named posture this policy currently matches, if any.
     ///
     /// Reported rather than stored. Storing a preset alongside the policy would
@@ -368,15 +398,25 @@ pub struct AgentConfig {
     #[serde(default)]
     pub cold_resume: Option<bool>,
     /// The fewest tokens a cold session must have to re-cache before opening
-    /// it asks. Unset means [`DEFAULT_COLD_RESUME_MIN_TOKENS`].
+    /// it asks, for a session on a model ket has no price for. Unset means
+    /// [`DEFAULT_COLD_RESUME_MIN_TOKENS`].
     #[serde(default)]
     pub cold_resume_min_tokens: Option<u64>,
+    /// The least re-caching a cold session must cost, in whole dollars at
+    /// list price, before opening it asks. Unset means
+    /// [`DEFAULT_COLD_RESUME_MIN_DOLLARS`].
+    #[serde(default)]
+    pub cold_resume_min_dollars: Option<u32>,
 }
 
 /// Below this, picking a cold session up again is cheap enough not to ask
 /// about: 100,000 tokens is about $2 to re-cache on Fable at the one-hour
 /// rate, and a few cents on Haiku.
 pub const DEFAULT_COLD_RESUME_MIN_TOKENS: u64 = 100_000;
+
+/// Below this many dollars, picking a cold session up again is cheap enough
+/// not to ask about.
+pub const DEFAULT_COLD_RESUME_MIN_DOLLARS: u32 = 2;
 
 impl AgentConfig {
     /// Whether opening a cold session asks first — see
@@ -389,6 +429,21 @@ impl AgentConfig {
     pub fn cold_resume_min_tokens(&self) -> u64 {
         self.cold_resume_min_tokens
             .unwrap_or(DEFAULT_COLD_RESUME_MIN_TOKENS)
+    }
+
+    /// See [`AgentConfig::cold_resume_min_dollars`].
+    pub fn cold_resume_min_dollars(&self) -> u32 {
+        self.cold_resume_min_dollars
+            .unwrap_or(DEFAULT_COLD_RESUME_MIN_DOLLARS)
+    }
+
+    /// The two thresholds a cold session is weighed against — see
+    /// [`crate::cold::Cold::worth_asking`].
+    pub fn cold_resume_floor(&self) -> crate::cold::Floor {
+        crate::cold::Floor {
+            micros: i64::from(self.cold_resume_min_dollars()) * 1_000_000,
+            tokens: self.cold_resume_min_tokens(),
+        }
     }
 }
 
@@ -1135,6 +1190,39 @@ pub struct PhonesConfig {
     /// reach it. Empty, the default, links to none.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub relay: String,
+    /// Notifications to paired phones that aren't connected: an agent
+    /// waiting on you, a task finished or failed, checks failed, each as the
+    /// phone's own Settings › Notifications asks. Encrypted to the phone on
+    /// this Mac and sent through [`Self::push_url`].
+    #[serde(skip_serializing_if = "is_true")]
+    pub push: bool,
+    /// Where they are sent: ket's push service, [`PUSH_SERVICE`], or one of
+    /// your own run from `deploy/push`.
+    #[serde(skip_serializing_if = "is_push_service")]
+    pub push_url: String,
+    /// How long something waits before it is sent, in seconds, so one dealt
+    /// with at the Mac doesn't buzz the phone as well.
+    #[serde(skip_serializing_if = "is_push_after_default")]
+    pub push_after_seconds: u64,
+}
+
+/// ket's push service, `deploy/push` (#55): it forwards a notification this
+/// Mac has already encrypted to the phone, so it can't read one.
+pub const PUSH_SERVICE: &str = "https://push.ketapp.dev";
+
+/// [`PhonesConfig::push_after_seconds`] unless the config says otherwise.
+const PUSH_AFTER_SECONDS: u64 = 20;
+
+fn is_true(value: &bool) -> bool {
+    *value
+}
+
+fn is_push_service(url: &str) -> bool {
+    url == PUSH_SERVICE
+}
+
+fn is_push_after_default(seconds: &u64) -> bool {
+    *seconds == PUSH_AFTER_SECONDS
 }
 
 /// The relay ket runs, for devices away from their Mac's networks (#142).
@@ -1165,6 +1253,9 @@ impl Default for PhonesConfig {
             enabled: false,
             port: DEFAULT_PHONES_PORT,
             relay: String::new(),
+            push: true,
+            push_url: PUSH_SERVICE.to_owned(),
+            push_after_seconds: PUSH_AFTER_SECONDS,
         }
     }
 }

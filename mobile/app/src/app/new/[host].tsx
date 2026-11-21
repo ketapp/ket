@@ -1,5 +1,3 @@
-'use no memo'; // Reads a live HostConnection — see lib/hosts.ts.
-
 // New work from the phone, as a sheet over Worktrees: pick a project and an
 // agent from two dropdowns, say what to do, and ket on the desktop makes a
 // worktree for it and starts the agent on it — the project's own, or one
@@ -22,7 +20,7 @@ import { AgentMark, Check, ChevronDown } from '../../components/icons';
 import { SHEET_HEAD, SHEET_INSET, SheetPanel, type SheetMeasure } from '../../components/Sheet';
 import { Badge, Button, Prose } from '../../components/ui';
 import { projectColor } from '../../lib/activity';
-import { useHost } from '../../lib/hosts';
+import { useHost, useHostState } from '../../lib/hosts';
 import { showBeside, useSplit } from '../../lib/layout';
 import { getLastWork, saveLastWork } from '../../lib/store';
 import { agentLabel, font, size, t } from '../../lib/theme';
@@ -45,13 +43,14 @@ export default function NewTask() {
     project: initialProject,
   } = useLocalSearchParams<{ host: string; worktree?: string; project?: string }>();
   const conn = useHost(hostId);
+  const hostState = useHostState(conn);
   const insets = useSafeAreaInsets();
   const split = useSplit();
   // Projects the desktop lists, without "Elsewhere" — the terminals it could
   // not place, which are no project to start work in.
-  const projects = (conn?.snapshot?.projects ?? []).filter((project) => project.id !== '');
+  const projects = (hostState?.snapshot?.projects ?? []).filter((project) => project.id !== '');
   // The agents the desktop can start; none from a desktop too old to say.
-  const agents = conn?.snapshot?.agents ?? [];
+  const agents = hostState?.snapshot?.agents ?? [];
   const [picked, setPicked] = useState<string | null>(initialProject ? decodeURIComponent(initialProject) : null);
   // Empty for the project's own agent.
   const [wanted, setWanted] = useState('');
@@ -85,7 +84,7 @@ export default function NewTask() {
   const project = projects.find((p) => p.id === picked) ?? projects.find((p) => p.worktrees.some((w) => w.id === target)) ?? projects[0];
   const projectId = project?.id;
   useEffect(() => {
-    if (!conn || !projectId || conn.hostMinor < 15) return;
+    if (!conn || !projectId || conn.state.hostMinor < 15) return;
     let active = true;
     void conn.startOptions(projectId).then((next) => {
       if (active) setOptions(next);
@@ -97,13 +96,13 @@ export default function NewTask() {
 
   const agent = agents.includes(wanted) ? wanted : '';
   const choosesAgent = agents.length > 1;
-  const advanced = (conn?.hostMinor ?? 0) >= 15;
+  const advanced = (hostState?.hostMinor ?? 0) >= 15;
   const existing = advanced ? project?.worktrees.find((w) => w.id === target) : undefined;
   const currentOptions = options?.projectId === projectId ? options : null;
   const agentOptions = currentOptions?.agents.find((item) => item.agent === agent);
   const selectedBase = currentOptions?.localBranches.includes(base) ? base : currentOptions?.defaultBase ?? '';
   // A desktop from before 1.7 can't take new work.
-  const tooOld = conn !== null && conn.status === 'connected' && conn.hostMinor < 7;
+  const tooOld = hostState !== null && hostState.status === 'connected' && hostState.hostMinor < 7;
 
   // Down and out first, then off the stack — or, for work just asked for,
   // on to the chat that stands in for it while the desktop makes its
@@ -164,7 +163,7 @@ export default function NewTask() {
     void saveLastWork(hostId, { project: project.id, agent });
     // New work: the connection holds a row for it from the moment the
     // desktop takes it, and that row's chat is where it goes next.
-    const asked = existing ? undefined : conn.starting.at(-1);
+    const asked = existing ? undefined : conn.state.starting.at(-1);
     close(asked ? `/starting/${hostId}/${asked.at}` : undefined);
   };
 
@@ -207,7 +206,7 @@ export default function NewTask() {
     open === 'project'
       ? [
           {
-            title: `Projects on ${conn?.host.name ?? 'this desktop'}`,
+            title: `Projects on ${hostState?.host.name ?? 'this desktop'}`,
             items: projects.map((p) => ({
               ...choice(p.id, p.id === project?.id, p.name, <Badge name={p.name} color={projectColor(p)} icon={p.icon} size={20} />),
               onPress: () => pickProject(p.id),
@@ -304,7 +303,7 @@ export default function NewTask() {
       onClose={() => close()}
       onGone={gone}
       title="New task"
-      detail={conn?.host.name}
+      detail={hostState?.host.name}
       onMeasure={setMeasure}
       overlay={
         open && place && measure ? (
@@ -394,7 +393,7 @@ export default function NewTask() {
       ) : null}
       {tooOld ? (
         <Prose style={styles.note} color={t.failed}>
-          ket on {conn?.host.name ?? 'your Mac'} is older than this app. Update it — rebuild ket and start a new host —
+          ket on {hostState?.host.name ?? 'your Mac'} is older than this app. Update it — rebuild ket and start a new host —
           to start work from here.
         </Prose>
       ) : null}

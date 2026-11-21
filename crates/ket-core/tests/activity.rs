@@ -712,6 +712,74 @@ fn signal_falls_back_to_inferred_when_no_pane_has_reported() {
 // ---- Tracker::report (the agent-self-report path) ---------------------------
 
 #[test]
+fn recency_uses_the_latest_update_across_sources_and_panes() {
+    let mut tracker = Tracker::default();
+    let wt = worktree("w1");
+    assert_eq!(tracker.last_updated_ms(&wt), None);
+
+    tracker.record(&wt, Some(discovered("claude", "s1", None, 100)));
+    assert_eq!(tracker.last_updated_ms(&wt), Some(100));
+
+    let mut driven = session(&wt, SessionStatus::Live(AgentState::Idle), 150);
+    driven.heartbeat_ms = 200;
+    tracker.sync_sessions([driven]);
+    assert_eq!(tracker.last_updated_ms(&wt), Some(150));
+
+    tracker.report(
+        &hook_report(HookEvent::UserPrompt, "p1", "w1", 300),
+        known_any,
+    );
+    tracker.report(
+        &hook_report(HookEvent::UserPrompt, "p2", "w1", 250),
+        known_any,
+    );
+    tracker.report(
+        &hook_report(HookEvent::UserPrompt, "p3", "w2", 400),
+        known_any,
+    );
+    assert_eq!(tracker.last_updated_ms(&wt), Some(300));
+
+    // Expiring a report's status does not discard its recency.
+    assert!(tracker.pane("p1", 300 + REPORT_LINGERS_MS).is_none());
+    assert_eq!(tracker.last_updated_ms(&wt), Some(300));
+    tracker.record(&wt, Some(discovered("claude", "s1", None, 500)));
+    // Transcript writes during a tracked turn do not change the order.
+    assert_eq!(tracker.last_updated_ms(&wt), Some(300));
+    tracker.clear_pane("p1");
+    tracker.clear_pane("p2");
+    tracker.sync_sessions([]);
+    assert_eq!(tracker.last_updated_ms(&wt), Some(500));
+}
+
+#[test]
+fn tool_and_transcript_updates_do_not_override_turn_recency_locally_or_on_the_host() {
+    let mut tracker = Tracker::default();
+    let wt = worktree("w1");
+    tracker.report(
+        &hook_report(HookEvent::UserPrompt, "p1", "w1", 100),
+        known_any,
+    );
+    tracker.report(&hook_report(HookEvent::PreTool, "p1", "w1", 200), known_any);
+    tracker.record(&wt, Some(discovered("claude", "s1", None, 300)));
+    assert_eq!(tracker.last_updated_ms(&wt), Some(100));
+
+    tracker.report(&hook_report(HookEvent::Stop, "p1", "w1", 400), known_any);
+    assert_eq!(tracker.last_updated_ms(&wt), Some(400));
+
+    let snapshot = ket_core::agent_status::AgentStatusSnapshot {
+        epoch: 1,
+        revision: 1,
+        panes: vec![tracker.pane_status("p1").unwrap().clone()],
+        marked: Vec::new(),
+    };
+    let json = serde_json::to_string(&snapshot).unwrap();
+    let mut replica = Tracker::default();
+    replica.accept_snapshot(serde_json::from_str(&json).unwrap());
+    replica.record(&wt, Some(discovered("claude", "s1", None, 500)));
+    assert_eq!(replica.last_updated_ms(&wt), Some(400));
+}
+
+#[test]
 fn a_reported_pane_beats_a_driven_session() {
     let mut tracker = Tracker::new(["claude".to_owned()]);
     let wt = worktree("w1");
@@ -1002,4 +1070,35 @@ fn a_row_wears_the_session_of_the_pane_it_reports() {
 
     // Another worktree's tabs are not this row's.
     assert_eq!(tracker.leading_session(&worktree("w2"), 5), None);
+}
+
+#[test]
+fn a_worktree_marked_unread_at_the_host_or_here_reads_unread() {
+    let wt = worktree("w1");
+    let mut tracker = Tracker::default();
+    assert!(!tracker.unread(&wt));
+
+    tracker.accept_snapshot(ket_core::agent_status::AgentStatusSnapshot {
+        epoch: 1,
+        revision: 1,
+        panes: Vec::new(),
+        marked: vec!["w1".to_owned()],
+    });
+    assert!(tracker.marked(&wt));
+    assert!(tracker.unread(&wt));
+    assert!(!tracker.unread(&worktree("w2")));
+
+    let mut here = Tracker::default();
+    assert!(here.mark_unread(&wt, true));
+    assert!(here.unread(&wt));
+    assert!(here.mark_unread(&wt, false));
+    assert!(!here.unread(&wt));
+}
+
+#[test]
+fn a_snapshot_from_a_host_without_marks_has_none() {
+    // A host from before marks sends no `marked` at all.
+    let snapshot: ket_core::agent_status::AgentStatusSnapshot =
+        serde_json::from_str(r#"{"epoch":1,"revision":1,"panes":[]}"#).unwrap();
+    assert!(snapshot.marked.is_empty());
 }

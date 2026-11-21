@@ -49,27 +49,6 @@ pub fn relay_url() -> Option<String> {
     std::env::var(RELAY_ENV).ok().filter(|url| !url.is_empty())
 }
 
-/// The environment variable naming where the phone app is served as a web
-/// page (`http://<this Mac>:8081` from its dev server). Set, the pairing QR
-/// code opens that page from a phone's Camera app with the code filled in;
-/// unset, the QR code is the bare `ket://pair/…` code, which only the native
-/// app can open.
-pub const PHONE_WEB_ENV: &str = "KET_PHONE_WEB_URL";
-
-/// What the pairing QR code should say for `code`: a link to the phone's web
-/// app that pairs with it, when [`PHONE_WEB_ENV`] names one, else the code.
-pub fn pairing_link(code: &str) -> String {
-    match std::env::var(PHONE_WEB_ENV) {
-        Ok(web) if !web.is_empty() => {
-            // Only `:` and `/` in a code are not plain URL characters; the
-            // rest is base64url.
-            let escaped = code.replace(':', "%3A").replace('/', "%2F");
-            format!("{}/pair?code={escaped}", web.trim_end_matches('/'))
-        }
-        _ => code.to_owned(),
-    }
-}
-
 /// A code an already-paired device scans to learn every address this Mac
 /// can be reached at, without pairing again:
 /// `ket://reach?host=<id>&at=<address>%20<address>` — the local network,
@@ -329,6 +308,7 @@ pub fn devices() -> Result<Vec<DeviceEntry>> {
                     paired_at: grant.paired_at,
                     connected: false,
                     role: roles.get(&grant.device).copied(),
+                    push: phones::pushes::registered(&grant.device),
                 })
                 .collect()
         })
@@ -500,6 +480,30 @@ pub fn revoke(id: &str) -> Result<bool> {
         identity::save(&host)?;
     }
     Ok(found)
+}
+
+/// How long [`test_push`] waits: the push service's two tries, and then some.
+const TEST_PUSH_WAIT: Duration = Duration::from_secs(30);
+
+/// Pushes the phone `id` a test notification now, connected or not. `Ok`
+/// once Apple has taken it; otherwise why not, in words for the person who
+/// asked.
+pub fn test_push(id: &str) -> Result<()> {
+    let Some((stream, _, _)) = client::peek()? else {
+        return Err(KetError::Conflict("ket's host isn't running".to_owned()));
+    };
+    let request = wire::Request::TestPush { id: id.to_owned() };
+    let answer = client::ask_within(stream, &request, TEST_PUSH_WAIT, |reply| match reply {
+        wire::Reply::PushTested { error } => Some(error),
+        _ => None,
+    })?;
+    match answer {
+        Some(None) => Ok(()),
+        Some(Some(why)) => Err(KetError::Conflict(why)),
+        None => Err(KetError::Conflict(
+            "ket's host didn't answer. If ket was just updated, restart its host.".to_owned(),
+        )),
+    }
 }
 
 /// What a running host says about itself.
@@ -968,6 +972,30 @@ pub fn interrupt(pane: &str, cancel: bool) -> bool {
         conn.request(&wire::Request::Interrupt {
             pane: pane.to_owned(),
             cancel,
+        })
+        .is_ok()
+    })
+}
+
+/// Tells the host one of its terminals is in front of a person in this
+/// window, so what its agent last said is read everywhere. Returns whether a
+/// host was connected to hear it.
+pub fn seen(pane: &str) -> bool {
+    client::current().is_some_and(|conn| {
+        conn.request(&wire::Request::Seen {
+            pane: pane.to_owned(),
+        })
+        .is_ok()
+    })
+}
+
+/// Marks a worktree unread at the host, for every window and phone, or
+/// takes the mark off. Returns whether a host was connected to hear it.
+pub fn mark_unread(worktree: &str, unread: bool) -> bool {
+    client::current().is_some_and(|conn| {
+        conn.request(&wire::Request::MarkUnread {
+            worktree: worktree.to_owned(),
+            unread,
         })
         .is_ok()
     })

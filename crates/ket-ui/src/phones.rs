@@ -111,6 +111,8 @@ pub(crate) struct PhonesPane {
     confirming: Option<String>,
     /// The phone being revoked now.
     revoking: Option<String>,
+    /// The phone being sent a test notification now.
+    testing: Option<String>,
     /// Whether a fetch is on its way, so the ticker does not stack another.
     fetching: bool,
     /// Whether the switch has been thrown and the host has not answered yet.
@@ -191,7 +193,7 @@ fn fetch(want_code: bool) -> Snapshot {
                 expires_at: host::pairing_expires_at(&code).unwrap_or(0),
                 // Encoded here too: it runs Reed-Solomon and scores eight
                 // masks, which is no work for the window's thread either.
-                modules: QrModules::encode(&host::pairing_link(&code)),
+                modules: QrModules::encode(&code),
                 code,
             })
             .map_err(|why| why.to_string())
@@ -534,6 +536,52 @@ impl Shell {
                     }
                     Err(why) => shell.toast_detail(Tone::Error, "Could not revoke", why, cx),
                 }
+                shell.refresh_phones(false, cx);
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Pushes a phone a test notification the whole way a real one goes —
+    /// sealed here, through the push service and Apple, opened by the
+    /// phone's extension — and says in a toast what came of it.
+    fn test_push_phone(&mut self, id: String, cx: &mut Context<Self>) {
+        let Some(pane) = self.phones_pane() else {
+            return;
+        };
+        if pane.testing.is_some() {
+            return;
+        }
+        let name = pane
+            .devices
+            .iter()
+            .find(|device| device.id == id)
+            .map_or_else(|| "Device".to_owned(), phone_name);
+        pane.testing = Some(id.clone());
+
+        let work = cx
+            .background_executor()
+            .spawn(async move { host::test_push(&id).map_err(|why| why.to_string()) });
+        cx.spawn(async move |shell: WeakEntity<Shell>, cx| {
+            let outcome = work.await;
+            let _ = shell.update(cx, |shell, cx| {
+                if let Some(pane) = shell.phones_pane() {
+                    pane.testing = None;
+                }
+                match outcome {
+                    Ok(()) => shell.toast_detail(
+                        Tone::Success,
+                        "Test notification sent",
+                        format!("{name} should show it now, as a banner unless ket is open on it."),
+                        cx,
+                    ),
+                    Err(why) => {
+                        shell.toast_detail(Tone::Error, "Test notification not sent", why, cx)
+                    }
+                }
+                // A token Apple retired is forgotten, and the row says so.
                 shell.refresh_phones(false, cx);
                 cx.notify();
             });
@@ -1379,7 +1427,8 @@ impl Shell {
     }
 
     /// One paired device: what it is, when it paired, whether it is
-    /// connected, and Revoke — which asks once before it does anything.
+    /// connected, Send test for one that asked for notifications, and
+    /// Revoke — which asks once before it does anything.
     fn device_row(
         &self,
         pane: &PhonesPane,
@@ -1390,6 +1439,7 @@ impl Shell {
         let id = device.id.clone();
         let revoking = pane.revoking.as_deref() == Some(id.as_str());
         let confirming = pane.confirming.as_deref() == Some(id.as_str());
+        let testing = pane.testing.as_deref() == Some(id.as_str());
         let kind = device_kind(device);
 
         // Just paired and not in yet: the phone is dialling back in, which
@@ -1452,10 +1502,27 @@ impl Shell {
                 .into_any_element()
         };
 
-        let detail = match kind {
+        // Only for a phone that asked for notifications, and not while the
+        // row is busy revoking it.
+        let test = (device.push && !confirming && !revoking).then(|| {
+            let test_id = id.clone();
+            button(key("phones-test-push", &id), "Send test")
+                .ghost()
+                .loading_if(testing, "Sending…")
+                .render(t)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.test_push_phone(test_id.clone(), cx);
+                }))
+        });
+
+        let mut detail = match kind {
             Some((_, kind)) => format!("{kind} · {}", paired_ago(device.paired_at).to_lowercase()),
             None => paired_ago(device.paired_at),
         };
+        // It has asked to be told things while it isn't connected.
+        if device.push {
+            detail.push_str(" · notifications on");
+        }
 
         sized_row(key("phones-device", &id), false, px(40.0), t)
             .cursor_default()
@@ -1472,6 +1539,7 @@ impl Shell {
             .child(caption(detail, t).truncate().min_w_0())
             .child(div().flex_1())
             .child(state)
+            .children(test)
             .child(actions)
             .into_any_element()
     }

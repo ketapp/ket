@@ -1,4 +1,4 @@
-//! A Claude session's `/color` on its sidebar row and its tab: its mark on a
+//! A Claude session's `/color` on its worktree's sidebar row: its mark on a
 //! tile of the colour, and the name beside it in the colour — see
 //! `ket_core::agent_color`, which reads it from the session's transcript.
 //!
@@ -7,23 +7,16 @@
 
 use std::collections::HashMap;
 
-use gpui::{AsyncApp, Context, Div, Pixels, WeakEntity, div, prelude::*, px};
+use gpui::{AnyElement, AsyncApp, Context, Div, Pixels, WeakEntity, div, prelude::*, px};
+use ket_core::activity::Activity;
 use ket_core::agent_color::SessionColor;
+use ket_core::id::WorktreeId;
 use ket_core::theme::{Color, Theme, contrast_ratio};
 
 use crate::Shell;
 use crate::paint::paint;
+use crate::ui::agent::{MARK, provider};
 use crate::ui::icon::{Icon, sized_icon};
-
-/// The tile on a sidebar row: a step smaller than the project badge heading
-/// the column it stands in, so the two don't read as the same thing.
-pub(crate) const ROW_TILE: Pixels = px(18.0);
-
-/// The tile on a tab, inside the tab mark's own square.
-const TAB_TILE: Pixels = px(16.0);
-
-/// The mark on a tab's tile.
-const TAB_MARK: Pixels = px(12.0);
 
 /// The sessions' colours, as last read.
 #[derive(Default)]
@@ -34,20 +27,15 @@ pub(crate) struct SessionColors {
 }
 
 impl Shell {
-    /// Reads the `/color` of every session this window has a tab for, off its
-    /// thread, and redraws when one changed.
+    /// Reads the `/color` of every session a row may be drawn for, off the
+    /// window's thread, and redraws when one changed: the host's panes', not
+    /// only those of tabs this window has opened, since a worktree's tabs
+    /// wait to be put back until it is first shown.
     pub(crate) fn refresh_session_colors(&mut self, cx: &mut Context<Self>) {
         if self.session_colors.reading {
             return;
         }
-        let sessions: Vec<(String, String)> = self
-            .terminal_keys
-            .values()
-            .filter_map(|key| {
-                let status = self.activity.pane_status(key)?;
-                Some((status.agent.clone(), status.session.clone()?))
-            })
-            .collect();
+        let sessions = self.activity.known_sessions();
         if sessions.is_empty() && self.session_colors.by_session.is_empty() {
             return;
         }
@@ -81,10 +69,40 @@ impl Shell {
         self.session_colors.by_session.get(session).copied()
     }
 
-    /// The colour of the session running in the tab with `key`.
-    pub(crate) fn pane_color(&self, key: &str) -> Option<SessionColor> {
-        let session = self.activity.pane_status(key)?.session.as_deref()?;
-        self.session_color(session)
+    /// The colour a row for `worktree`, doing `activity`, wears while its
+    /// mark is an agent's. The session it speaks for first; then its newest
+    /// on disk, for a row whose tabs this window has not put back yet; then
+    /// any of its panes running that agent, latest heard first, since a
+    /// `/color` fires no hook and the pane given it is often one whose
+    /// report has lapsed. Every list of worktrees asks this: grouped, sorted
+    /// by status, the folded rail's.
+    pub(crate) fn row_color(
+        &self,
+        worktree: &WorktreeId,
+        activity: &Activity,
+        now_ms: u64,
+    ) -> Option<SessionColor> {
+        let agent = activity.agent()?;
+        let reported = self
+            .activity
+            .leading_session(worktree, now_ms)
+            .map(|(_, session)| session);
+        let recorded = match activity {
+            Activity::Recorded { session, .. } => Some(session.as_str()),
+            _ => None,
+        };
+        let harness = ket_core::agents::harness(agent);
+        reported
+            .into_iter()
+            .chain(recorded)
+            .chain(
+                self.activity
+                    .pane_sessions(worktree)
+                    .into_iter()
+                    .filter(|(pane_agent, _)| ket_core::agents::harness(pane_agent) == harness)
+                    .map(|(_, session)| session),
+            )
+            .find_map(|session| self.session_color(session))
     }
 }
 
@@ -102,16 +120,15 @@ pub(crate) fn label(color: SessionColor, t: &Theme) -> Color {
         .unwrap_or(t.text.primary)
 }
 
-/// `which` on a `side` tile of the session's colour, in whichever of the
+/// The tile a coloured session's mark stands on: square, and a step smaller
+/// than the project badge heading the column, so the two don't read as the
+/// same thing.
+const ROW_TILE: Pixels = px(18.0);
+
+/// `which` on a square tile of the session's colour, in whichever of the
 /// card and the text stands off the tile more — the rule a project badge's
-/// letter follows.
-pub(crate) fn tiled(
-    which: Icon,
-    mark: Pixels,
-    side: Pixels,
-    color: SessionColor,
-    t: &Theme,
-) -> Div {
+/// letter follows. One size wherever a worktree is listed.
+fn tiled(which: Icon, color: SessionColor, t: &Theme) -> Div {
     let fill = fill(color);
     let ink = if contrast_ratio(t.surface, fill) >= contrast_ratio(t.text.primary, fill) {
         t.surface
@@ -123,21 +140,29 @@ pub(crate) fn tiled(
         .flex_none()
         .items_center()
         .justify_center()
-        .size(side)
+        .size(ROW_TILE)
         .rounded(crate::ui::RADIUS_SM)
         .bg(paint(fill))
-        .child(sized_icon(which, mark, paint(ink)))
+        .child(sized_icon(which, MARK, paint(ink)))
 }
 
-/// A tab's mark on its tile, in the tab mark's own square, faded with the
-/// rest of an inactive tab's mark.
-pub(crate) fn tab_mark(which: Icon, color: SessionColor, dim: bool, t: &Theme) -> Div {
-    div()
-        .flex()
-        .flex_none()
-        .items_center()
-        .justify_center()
-        .size(crate::ui::filetype::SIZE)
-        .when(dim, |el| el.opacity(crate::ui::filetype::DIMMED))
-        .child(tiled(which, TAB_MARK, TAB_TILE, color, t))
+/// A worktree row's mark: its agent's on a tile of the session's colour,
+/// else the state light every row has.
+pub(crate) fn row_mark(
+    activity: &Activity,
+    color: Option<SessionColor>,
+    dirty: bool,
+    missing: bool,
+    t: &Theme,
+) -> AnyElement {
+    match (color, activity) {
+        (
+            Some(color),
+            Activity::Session { agent, .. }
+            | Activity::Observed { agent, .. }
+            | Activity::Recorded { agent, .. }
+            | Activity::Ended { agent, .. },
+        ) => tiled(provider(agent, t).0, color, t).into_any_element(),
+        _ => crate::tree::row_mark(activity, dirty, missing, t),
+    }
 }

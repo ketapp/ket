@@ -18,6 +18,8 @@ import {
   detailColor,
   everyWorktree,
   filterOf,
+  isUnread,
+  passes,
   programBusy,
   projectColor,
   railColor,
@@ -33,7 +35,7 @@ jest.mock('@ket/remote', () => ({
 const terminal = (agent: string, closed = false): TerminalSummary =>
   ({ agent, closed }) as TerminalSummary;
 
-type WorktreeFields = Partial<Pick<WorktreeSummary, 'id' | 'agentState' | 'terminals' | 'agent' | 'asleep' | 'agentColor'>>;
+type WorktreeFields = Partial<Pick<WorktreeSummary, 'id' | 'agentState' | 'terminals' | 'agent' | 'asleep' | 'agentColor' | 'unread'>>;
 
 const worktree = (activity: Activity, fields: WorktreeFields = {}): WorktreeSummary =>
   ({ activity, agentState: '', agent: '', agentColor: '', terminals: [], asleep: [], ...fields }) as WorktreeSummary;
@@ -160,6 +162,17 @@ describe('snapshot helpers', () => {
     expect(named('', '⠹ make')).toBe('⠹ make');
     expect(named('', '~/dev/ket')).toBe('~/dev/ket');
     expect(named('', '')).toBe('Terminal');
+  });
+});
+
+describe('unread', () => {
+  const answered = { ...terminal('claude'), unread: true } as TerminalSummary;
+  test('a worktree is unread while an agent has answered or it is marked', () => {
+    expect(isUnread(worktree(Activity.QUIET, { terminals: [terminal('claude')] }))).toBe(false);
+    expect(isUnread(worktree(Activity.QUIET, { terminals: [answered] }))).toBe(true);
+    // Marked from its menu (1.35), with no answer and no terminal at all.
+    expect(isUnread(worktree(Activity.QUIET, { unread: true }))).toBe(true);
+    expect(passes(worktree(Activity.QUIET, { unread: true }), 'unread')).toBe(true);
   });
 });
 

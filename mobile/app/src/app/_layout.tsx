@@ -6,11 +6,11 @@ import { DarkTheme, DefaultTheme, Stack, type Theme, ThemeProvider, usePathname 
 import * as SplashScreen from 'expo-splash-screen';
 import { StatusBar } from 'expo-status-bar';
 import * as SystemUI from 'expo-system-ui';
-import { useEffect } from 'react';
 import { View } from 'react-native';
 import { KeyboardProvider } from 'react-native-keyboard-controller';
 
 import { LockGate } from '../components/Lock';
+import { Splash } from '../components/Splash';
 import { WorktreeList } from '../components/WorktreeList';
 import { useDesktopPalette, useHosts } from '../lib/hosts';
 import { SIDEBAR_WIDTH, SplitContext, useWide } from '../lib/layout';
@@ -27,6 +27,9 @@ installErrorCapture();
 export { ErrorScreen as ErrorBoundary } from '../components/ErrorScreen';
 
 SplashScreen.preventAutoHideAsync();
+// The native splash goes at once, with no fade of its own: components/Splash
+// has drawn the same frame over the app by then, and plays from it.
+SplashScreen.setOptions({ duration: 0, fade: false });
 startLock();
 startNotices();
 
@@ -63,9 +66,8 @@ export default function Layout() {
   const path = usePathname();
   const paired = (useHosts(path)?.length ?? 0) > 0;
   const split = useWide() && paired;
-  useEffect(() => {
-    if (loaded) void SplashScreen.hideAsync();
-  }, [loaded]);
+  // Until the fonts are in, the native splash stays up; components/Splash
+  // takes over from it.
   if (!loaded) return null;
   // Behind the lock screen, the app is out of a screen reader's reach too.
   const hidden = !lock.ready || lock.locked || lock.confirming !== null;
@@ -78,6 +80,9 @@ export default function Layout() {
     <KeyboardProvider>
       <ThemeProvider value={navigation}>
       <StatusBar style={light ? 'dark' : 'light'} />
+      {/* The launch splash plays over all of it, and holds until the lock
+          knows whether to show. */}
+      <Splash ready={lock.ready}>
       <SplitContext.Provider value={split}>
       <View
         style={{ flex: 1, flexDirection: 'row', backgroundColor: t.backdrop }}
@@ -92,6 +97,9 @@ export default function Layout() {
       <View style={{ flex: 1 }}>
       <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: t.backdrop } }}>
         <Stack.Screen name="(tabs)" options={{ animation: 'none' }} />
+        {/* Over Worktrees, so a back gesture returns to the list. No slide:
+            it opens from the bar, and the bar's other tabs swap in place. */}
+        <Stack.Screen name="usage" options={{ animation: 'none' }} />
         <Stack.Screen name="pin" options={{ presentation: 'modal' }} />
         {/* A sheet over Worktrees, which stays drawn behind it. It animates
             itself in and out — see new/[host].tsx. */}
@@ -99,11 +107,16 @@ export default function Layout() {
           name="new/[host]"
           options={{ presentation: 'transparentModal', animation: 'none', contentStyle: { backgroundColor: 'transparent' } }}
         />
+        <Stack.Screen
+          name="rename/[host]/[worktree]"
+          options={{ presentation: 'transparentModal', animation: 'none', contentStyle: { backgroundColor: 'transparent' } }}
+        />
       </Stack>
       </View>
       </View>
       </SplitContext.Provider>
       <LockGate />
+      </Splash>
       </ThemeProvider>
     </KeyboardProvider>
   );

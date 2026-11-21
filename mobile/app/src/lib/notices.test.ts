@@ -27,6 +27,8 @@ jest.mock('expo-notifications', () => ({
   setNotificationHandler: jest.fn(),
   setNotificationChannelAsync: jest.fn(async () => null),
   addNotificationResponseReceivedListener: (open: (response: object) => void) => mockListen(open),
+  addPushTokenListener: jest.fn(() => ({ remove: () => {} })),
+  getPresentedNotificationsAsync: jest.fn(async () => []),
   useLastNotificationResponse: () => mockResponse,
 }));
 jest.mock('expo-router', () => ({ router: { push: (path: string) => mockPush(path) } }));

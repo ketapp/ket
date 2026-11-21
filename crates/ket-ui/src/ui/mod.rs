@@ -34,6 +34,8 @@ pub(crate) mod popup;
 pub(crate) mod progress;
 pub(crate) mod qr;
 pub(crate) mod row;
+pub(crate) mod rule;
+pub(crate) mod section;
 pub(crate) mod select;
 pub(crate) mod textarea;
 pub(crate) mod toast;

@@ -7,10 +7,13 @@
 //! puts them inside, which is why the scrim was drawn twice.
 
 use gpui::{
-    AnyElement, Div, ElementId, FontWeight, Pixels, SharedString, Stateful, div, prelude::*, px,
+    AnyElement, App, ClickEvent, Div, ElementId, FontWeight, Pixels, SharedString, Stateful,
+    Window, div, prelude::*, px,
 };
 use ket_core::theme::Theme;
 
+use super::button::icon_button;
+use super::icon::Icon;
 use super::{CARD_PAD, RADIUS_LG, TITLE};
 use crate::fonts::Prose;
 use crate::paint::paint;
@@ -51,34 +54,117 @@ pub(crate) fn card(id: impl Into<ElementId>, width: Pixels, t: &Theme) -> Statef
         .shadow_lg()
 }
 
-/// A dialog's title row. Append the close button to it.
-pub(crate) fn header(title: impl Into<SharedString>, t: &Theme) -> Div {
-    header_with(title, div(), t)
+/// The ✕ that closes a dialog, at the far end of its title row. Attach what
+/// closing does to what comes back — the same as Cancel, and as Escape.
+///
+/// [`header`] draws it. A dialog whose heading is its own — a badge and a
+/// count beside the name — sets this at that heading's end, so every dialog
+/// is closed by the same mark in the same place.
+pub(crate) fn close(id: impl Into<ElementId>, t: &Theme) -> Stateful<Div> {
+    close_mark(id, true, t)
 }
 
-/// [`header`] with something set straight after the title rather than out at
-/// the far end — the project a worktree is being created in, so the title
-/// reads as one sentence. It takes the title's size and weight.
-pub(crate) fn header_with(
-    title: impl Into<SharedString>,
-    after: impl IntoElement,
-    t: &Theme,
-) -> Div {
+/// The ✕ itself, faded when it cannot be pressed.
+fn close_mark(id: impl Into<ElementId>, enabled: bool, t: &Theme) -> Stateful<Div> {
+    icon_button(id, Icon::Close)
+        .circle()
+        .enabled(enabled)
+        .render(t)
+}
+
+/// A dialog's title, in the title's size and weight, with nothing else in
+/// its row. For a pane that wears a dialog's look but cannot be closed — a
+/// simulator's message about what it needs — where [`header`] would offer a
+/// ✕ that has nowhere to go.
+pub(crate) fn title(text: impl Into<SharedString>, t: &Theme) -> Div {
     div()
         .flex()
         .items_center()
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(8.0))
-                .text_size(TITLE)
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(paint(t.text.primary))
-                .child(title.into())
-                .child(after),
-        )
-        .child(div().flex_grow())
+        .gap(px(8.0))
+        .text_size(TITLE)
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(paint(t.text.primary))
+        .child(text.into())
+}
+
+/// What a dialog's ✕ does.
+type OnClose = Box<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
+
+/// A dialog's title row: its title, and at the far end the [`close`] ✕.
+///
+/// Every dialog has one, so a dialog is never closed only from its footer
+/// or by a key the person has to know. Build it with [`header`].
+pub(crate) struct Header {
+    id: ElementId,
+    title: SharedString,
+    after: Option<AnyElement>,
+    aside: Option<AnyElement>,
+    on_close: Option<OnClose>,
+    busy: bool,
+}
+
+/// A dialog's title row, `title` at its start and the ✕ at its end. `id`
+/// names the ✕. Say what closing does with [`Header::on_close`].
+pub(crate) fn header(id: impl Into<ElementId>, title: impl Into<SharedString>) -> Header {
+    Header {
+        id: id.into(),
+        title: title.into(),
+        after: None,
+        aside: None,
+        on_close: None,
+        busy: false,
+    }
+}
+
+impl Header {
+    /// Something set straight after the title rather than out at the far
+    /// end — the project a worktree is being created in, so the title reads
+    /// as one sentence. It takes the title's size and weight.
+    pub(crate) fn after(mut self, after: impl IntoElement) -> Self {
+        self.after = Some(after.into_any_element());
+        self
+    }
+
+    /// Something at the far end, just before the ✕: what the dialog is
+    /// about, when the title alone does not say — a project's folder.
+    pub(crate) fn aside(mut self, aside: impl IntoElement) -> Self {
+        self.aside = Some(aside.into_any_element());
+        self
+    }
+
+    /// What the ✕ does: whatever Cancel does.
+    pub(crate) fn on_close(
+        mut self,
+        close: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_close = Some(Box::new(close));
+        self
+    }
+
+    /// Held still while the dialog is doing something it cannot leave half
+    /// done — a merge, a push. The ✕ is drawn faded and does nothing, as the
+    /// footer's buttons are.
+    pub(crate) fn busy(mut self, busy: bool) -> Self {
+        self.busy = busy;
+        self
+    }
+
+    /// Builds the row.
+    pub(crate) fn render(self, t: &Theme) -> Div {
+        let enabled = !self.busy && self.on_close.is_some();
+        let mut close = close_mark(self.id, enabled, t);
+        if let (true, Some(on_close)) = (enabled, self.on_close) {
+            close = close.on_click(move |event, window, cx| on_close(event, window, cx));
+        }
+        div()
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .child(title(self.title, t).min_w_0().children(self.after))
+            .child(div().flex_grow())
+            .children(self.aside)
+            .child(close)
+    }
 }
 
 /// The row a dialog's buttons sit in: trailing-aligned, with the cancel first

@@ -7,17 +7,23 @@ const mockPush = jest.fn();
 jest.mock('expo-router', () => ({ router: { push: (path: string) => mockPush(path) } }));
 jest.mock('react-native-safe-area-context', () => ({ useSafeAreaInsets: () => ({ top: 0, bottom: 0 }) }));
 
-const connection = (fields: Partial<HostConnection> = {}) =>
+const connection = (fields: Record<string, unknown> = {}) =>
   ({
     status: 'connecting',
     downSince: 0,
     attempts: 2,
     error: null,
     host: { name: 'Studio Mac', relay: 'ws://studio.local:7979' },
-    addressForDisplay: () => 'ws://studio.local:7979',
+    displayAddress: 'ws://studio.local:7979',
     retry: jest.fn(),
+    // A fake connection is its own state, unchanging: what the banner draws from.
+    id: 'host',
+    onChange: () => () => {},
+    get state() {
+      return this;
+    },
     ...fields,
-  }) as HostConnection;
+  }) as unknown as HostConnection;
 
 describe('ConnectionHelp', () => {
   beforeEach(() => {
@@ -73,7 +79,7 @@ describe('ConnectionHelp', () => {
 
   test('falls back to an invalid relay address', async () => {
     const view = await render(
-      <ConnectionHelp conn={connection({ host: { id: 'mac', name: 'Mac', relay: 'not a url', hostPublic: '', pairedAt: 0 }, addressForDisplay: () => 'not a url' })} />,
+      <ConnectionHelp conn={connection({ host: { id: 'mac', name: 'Mac', relay: 'not a url', hostPublic: '', pairedAt: 0 }, displayAddress: 'not a url' })} />,
     );
     const { getByText } = view;
     expect(getByText('not a url')).toBeTruthy();

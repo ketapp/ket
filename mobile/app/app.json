@@ -6,13 +6,18 @@
     "orientation": "default",
     "icon": "./assets/images/icon.png",
     "scheme": "ket",
+    "platforms": ["ios", "android"],
     "userInterfaceStyle": "dark",
     "backgroundColor": "#0d0c0b",
     "ios": {
-      "icon": "./assets/expo.icon",
+      "icon": "./assets/ket.icon",
       "supportsTablet": true,
       "bundleIdentifier": "dev.ketapp.ket",
       "buildNumber": "1",
+      "deploymentTarget": "17.0",
+      "entitlements": {
+        "keychain-access-groups": ["$(AppIdentifierPrefix)dev.ketapp.ket"]
+      },
       "config": {
         "usesNonExemptEncryption": true
       },
@@ -29,7 +34,6 @@
       "adaptiveIcon": {
         "backgroundColor": "#0d0c0b",
         "foregroundImage": "./assets/images/android-icon-foreground.png",
-        "backgroundImage": "./assets/images/android-icon-background.png",
         "monochromeImage": "./assets/images/android-icon-monochrome.png"
       },
       "predictiveBackGestureEnabled": false,
@@ -44,18 +48,20 @@
     },
     "plugins": [
       "expo-router",
+      "@bacons/apple-targets",
       [
         "expo-splash-screen",
         {
           "backgroundColor": "#0d0c0b",
           "image": "./assets/images/splash-icon.png",
-          "imageWidth": 76
+          "imageWidth": 64
         }
       ],
       "expo-secure-store",
       [
         "expo-notifications",
         {
+          "icon": "./assets/images/notification-icon.png",
           "color": "#7ee08a"
         }
       ],

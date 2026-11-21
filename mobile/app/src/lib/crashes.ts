@@ -34,7 +34,6 @@ const KEEP = 5;
 /** A stack cut to this many characters: the top of it is what says where. */
 const STACK = 4000;
 const NAME = 'error-reports.json';
-const WEB_KEY = 'ket.errorReports';
 
 function file(): File {
   return new File(Paths.document, NAME);
@@ -44,7 +43,8 @@ function file(): File {
  * cannot be read. */
 export function readReports(): ErrorReport[] {
   try {
-    const text = Platform.OS === 'web' ? (globalThis.localStorage?.getItem(WEB_KEY) ?? '') : file().exists ? file().textSync() : '';
+    const target = file();
+    const text = target.exists ? target.textSync() : '';
     const parsed: unknown = text ? JSON.parse(text) : [];
     return Array.isArray(parsed) ? (parsed as ErrorReport[]) : [];
   } catch {
@@ -54,10 +54,6 @@ export function readReports(): ErrorReport[] {
 
 function writeReports(reports: ErrorReport[]): void {
   const text = JSON.stringify(reports);
-  if (Platform.OS === 'web') {
-    globalThis.localStorage?.setItem(WEB_KEY, text);
-    return;
-  }
   const target = file();
   if (!target.exists) target.create();
   target.writeSync(text);
@@ -86,8 +82,8 @@ export function recordError(error: unknown, how: { fatal: boolean; where: ErrorR
 /** Removes every kept report. */
 export function clearReports(): void {
   try {
-    if (Platform.OS === 'web') globalThis.localStorage?.removeItem(WEB_KEY);
-    else if (file().exists) file().delete();
+    const target = file();
+    if (target.exists) target.delete();
   } catch {
     // A file that cannot be deleted leaves the reports listed, which is honest.
   }

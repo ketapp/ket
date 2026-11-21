@@ -59,6 +59,13 @@ const host = (fields: object = {}) =>
     devices: jest.fn(async () => []),
     revoke: jest.fn(async () => {}),
     diff: jest.fn(async () => ({ text: '', error: '', truncated: false })),
+    // A fake connection is its own state, unchanging: what the screens draw from.
+    id: 'host',
+    displayAddress: 'ws://studio',
+    onChange: () => () => {},
+    get state() {
+      return this;
+    },
     ...fields,
   }) as unknown as HostConnection;
 
@@ -219,6 +226,9 @@ describe('Pair', () => {
     await fireEvent.press(view.getByText('Pair with a pasted code'));
     expect(mockPair).not.toHaveBeenCalled();
     await fireEvent.changeText(view.getByPlaceholderText('ket://pair/…'), 'https://ket.test/pair?code=ket%3A%2F%2Fpair%2Fabc');
+    await fireEvent.press(view.getByText('Pair with a pasted code'));
+    expect(mockPair).not.toHaveBeenCalled();
+    await fireEvent.changeText(view.getByPlaceholderText('ket://pair/…'), 'ket://pair/abc');
     await fireEvent.press(view.getByText('Pair with a pasted code'));
     await waitFor(() => expect(view.getByText('expired code')).toBeTruthy());
     await view.unmount();

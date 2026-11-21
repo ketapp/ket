@@ -8,14 +8,18 @@
 
 use std::path::PathBuf;
 
-use gpui::{AnyElement, Context, KeyDownEvent, MouseButton, WeakEntity, div, prelude::*, px};
+use gpui::{
+    AnyElement, App, Context, KeyDownEvent, MouseButton, Pixels, WeakEntity, Window, div,
+    prelude::*, px,
+};
 use ket_core::github::{self, Checkout};
 
+use super::form::line;
 use crate::Shell;
 use crate::paint::paint;
 use crate::ui::banner::banner;
 use crate::ui::chip::{caption, tag};
-use crate::ui::icon::Icon;
+use crate::ui::icon::{Icon, sized_icon};
 use crate::ui::menu::{MenuEntry, MenuItem, MenuKey, OpenMenu, dropdown};
 use crate::ui::select::select;
 use crate::ui::toast::Tone;
@@ -58,33 +62,64 @@ impl Shell {
         .detach();
     }
 
-    /// The GitHub line under the sync switch: the account picker and where
-    /// issues go, or what it takes to get there. `None` for a project being
-    /// added, which picks its account once it has settings.
-    pub(super) fn github_line(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// Where the project's issues go, under the account's label: the
+    /// repository the picked account sees, a check that is still out, or
+    /// that there is none — whose reason is [`Shell::github_refusal`].
+    /// `None` until GitHub is connected, or for a project being added.
+    pub(super) fn github_status(&self) -> Option<AnyElement> {
         let dialog = self.settings.as_ref()?;
+        if !self.github.connected() {
+            return None;
+        }
         let t = &self.theme;
+        Some(match &dialog.github_repo {
+            None => caption("Checking the repository\u{2026}", t).into_any_element(),
+            Some(Ok(repo)) => line()
+                .flex_wrap()
+                .child(sized_icon(Icon::Check, px(12.0), paint(t.status.running)))
+                .child(caption("Issues go to", t))
+                .child(caption(repo.clone(), t).font_family(self.font_family.clone()))
+                .into_any_element(),
+            Some(Err(_)) => line()
+                .child(sized_icon(
+                    Tone::Warning.icon(),
+                    px(12.0),
+                    Tone::Warning.colour(t),
+                ))
+                .child(caption("No repository for issues", t))
+                .into_any_element(),
+        })
+    }
+
+    /// The account dropdown, or with no account signed in the way to sign
+    /// one in. `None` for a project being added. Size it at the call site.
+    pub(super) fn github_control(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        self.settings.as_ref()?;
         if !self.github.connected() {
             return Some(self.github_setup("project-github", cx));
         }
-        // A refusal in a banner rather than a red caption: it is the one
-        // thing here to act on, and a sentence long.
-        let repo = match &dialog.github_repo {
-            None => caption("Checking the repository\u{2026}", t).into_any_element(),
-            Some(Ok(repo)) => caption(format!("Issues go to {repo}"), t).into_any_element(),
-            Some(Err(why)) => {
-                banner("project-github-repo", Tone::Warning, why.clone(), t).into_any_element()
-            }
+        Some(self.form_github_account(cx))
+    }
+
+    /// Why the picked account has nowhere to send issues, as GitHub put it.
+    /// A banner rather than a red caption: it is the one thing here to act
+    /// on, and a sentence long.
+    pub(super) fn github_refusal(&self) -> Option<AnyElement> {
+        let dialog = self.settings.as_ref()?;
+        if !self.github.connected() {
+            return None;
+        }
+        let Some(Err(why)) = &dialog.github_repo else {
+            return None;
         };
         Some(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(6.0))
-                .min_w_0()
-                .child(self.form_github_account(cx))
-                .child(repo)
-                .into_any_element(),
+            banner(
+                "project-github-repo",
+                Tone::Warning,
+                why.clone(),
+                &self.theme,
+            )
+            .into_any_element(),
         )
     }
 
@@ -129,8 +164,8 @@ impl Shell {
             .cursor_pointer()
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    this.toggle_form_github_menu();
+                cx.listener(|this, _, window, cx| {
+                    this.toggle_form_github_menu(window, cx);
                     cx.stop_propagation();
                     cx.notify();
                 }),
@@ -139,7 +174,7 @@ impl Shell {
     }
 
     /// Opens or closes the account dropdown.
-    fn toggle_form_github_menu(&mut self) {
+    fn toggle_form_github_menu(&mut self, window: &mut Window, cx: &App) {
         let logins: Vec<String> = self
             .github
             .pickable()
@@ -154,9 +189,10 @@ impl Shell {
             return;
         }
         form.agent_menu = None;
-        form.palette_open = false;
+        form.close_panel(window, cx);
         let picked = form.github_account.clone().flatten();
-        form.github_menu = Some(account_menu(&logins, active, picked.as_deref()));
+        let width = form.menu_width();
+        form.github_menu = Some(account_menu(&logins, active, picked.as_deref(), width));
         form.github_logins = logins;
     }
 
@@ -208,6 +244,7 @@ fn account_menu(
     logins: &[String],
     active: Option<String>,
     picked: Option<&str>,
+    width: Pixels,
 ) -> OpenMenu<usize> {
     let current = picked
         .and_then(|login| logins.iter().position(|known| known == login))
@@ -229,12 +266,7 @@ fn account_menu(
             row + 1,
         ));
     }
-    OpenMenu::new(
-        "project-github-account".into(),
-        None,
-        super::form::control_width(),
-        entries,
-    )
-    .selected(current)
-    .offset(px(0.0), px(6.0))
+    OpenMenu::new("project-github-account".into(), None, width, entries)
+        .selected(current)
+        .offset(px(0.0), px(6.0))
 }

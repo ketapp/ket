@@ -400,6 +400,7 @@ impl Host {
                 .then(|| config.hosted_relay())
                 .flatten();
             phones.set_hosted(self, hosted);
+            phones.set_push_config(&config);
         }
         Ok(slot.is_some())
     }
@@ -652,6 +653,25 @@ impl Host {
         }
     }
 
+    /// The terminal the host calls `id` is in front of someone on a phone:
+    /// what its agent last said is read.
+    pub(super) fn seen_terminal(&self, id: u64) {
+        let Some(key) = lock(&self.terminals).get(&id).and_then(|e| e.key.clone()) else {
+            return;
+        };
+        if lock(&self.status).seen(&key) {
+            self.broadcast_status();
+        }
+    }
+
+    /// Marks `worktree` unread for every window and phone, or takes the mark
+    /// off — see [`crate::agent_status::StatusStore::mark_unread`].
+    pub(super) fn mark_unread(&self, worktree: &str, unread: bool) {
+        if lock(&self.status).mark_unread(worktree, unread) {
+            self.broadcast_status();
+        }
+    }
+
     /// Answers the permission prompt terminal `id` is showing — only if it
     /// is still prompt `question`, and nobody has typed into the terminal at
     /// the desktop since it was reported — by pressing the keys `keys_for`
@@ -764,11 +784,17 @@ impl Host {
             }
             let rows = entry
                 .terminal
-                .with_term(|term| crate::screen::bottom_rows(term, crate::screen::DIALOG_ROWS));
+                .with_term(|term| crate::screen::bottom_rows(term, usize::MAX));
             // The same dialog, option for option: a number means nothing
             // against a list that has changed since the phone saw it.
             let dialog = match crate::screen::codex_dialog(&rows) {
-                Some(dialog) if dialog.title == *title && dialog.options == *options => dialog,
+                Some(dialog)
+                    if dialog.title == *title
+                        && dialog.options == *options
+                        && current.subject.as_deref() == Some(dialog.question.as_str()) =>
+                {
+                    dialog
+                }
                 _ => return Err(AnswerRefused::Changed),
             };
             entry
@@ -816,43 +842,59 @@ impl Host {
             })
     }
 
-    /// Reads the screen of every Codex pane waiting on a prompt or idle for
-    /// a dialog drawn over it, and puts what it finds on the pane's status —
-    /// see [`crate::screen`]. Returns whether any status changed.
+    /// Reads Codex panes waiting on a prompt, idle, or not yet heard from
+    /// for dialogs, including folder access and hook review before the
+    /// first session hook.
+    /// Returns whether any status changed.
     ///
     /// Codex only, and never at work: the status is scanned once, and no
-    /// terminal is touched unless one of its panes is a Codex pane on a
-    /// prompt or idle — where "Implement this plan?" goes up after a plan's
-    /// turn has ended. A read is [`crate::screen::DIALOG_ROWS`] rows under
-    /// the parser's lock, which is held for the length of a row copy.
+    /// terminal is touched unless its key names Codex and its status allows
+    /// it. Read the visible screen under the parser's lock: startup dialogs
+    /// can sit above empty rows rather than at the foot of the screen.
     fn read_codex_dialogs(&self) -> bool {
-        let waiting: Vec<String> = lock(&self.status)
-            .entries()
-            .filter(|pane| {
-                matches!(
-                    pane.state,
-                    crate::event::AgentState::AwaitingPermission | crate::event::AgentState::Idle
-                ) && crate::agents::harness(&pane.agent).eq_ignore_ascii_case("codex")
-            })
-            .map(|pane| pane.pane.clone())
-            .collect();
-        if waiting.is_empty() {
-            return false;
-        }
+        let status = lock(&self.status).snapshot();
         let screens: Vec<(String, Arc<LocalTerminal>)> = lock(&self.terminals)
             .values()
             .filter_map(|entry| {
-                let key = entry.key.as_ref().filter(|key| waiting.contains(key))?;
+                let key = entry.key.as_ref()?;
+                let pane = status.panes.iter().find(|pane| pane.pane == *key);
+                let agent =
+                    pane.map_or_else(|| key.split('|').nth(1), |pane| Some(pane.agent.as_str()))?;
+                if !crate::agents::harness(agent).eq_ignore_ascii_case("codex")
+                    || entry.terminal.is_closed()
+                    || pane.is_some_and(|pane| {
+                        !matches!(
+                            pane.state,
+                            crate::event::AgentState::AwaitingPermission
+                                | crate::event::AgentState::Idle
+                        )
+                    })
+                {
+                    return None;
+                }
                 Some((key.clone(), entry.terminal.clone()))
             })
             .collect();
         let now = crate::now_ms();
         let mut changed = false;
         for (key, terminal) in screens {
-            let rows = terminal
-                .with_term(|term| crate::screen::bottom_rows(term, crate::screen::DIALOG_ROWS));
+            let rows = terminal.with_term(|term| crate::screen::bottom_rows(term, usize::MAX));
             let dialog = crate::screen::codex_dialog(&rows);
-            changed |= lock(&self.status).screen_dialog(&key, dialog, now);
+            let mut status = lock(&self.status);
+            if status.get(&key).is_none() {
+                // Asked at startup, before any hook can report a session.
+                if let Some(dialog) = dialog.filter(|dialog| {
+                    dialog.title == "Folder access" || dialog.title == crate::screen::HOOK_REVIEW
+                }) {
+                    let mut parts = key.split('|');
+                    if let (Some(worktree), Some(agent)) = (parts.next(), parts.next()) {
+                        changed |= status.startup_dialog(&key, worktree, agent, dialog, now);
+                    }
+                }
+            } else {
+                changed |= status.screen_dialog(&key, dialog, now);
+                changed |= status.codex_subagent_screen(&key, &rows, now);
+            }
         }
         changed
     }
@@ -2439,6 +2481,16 @@ fn handle(host: &Arc<Host>, conn: u64, out: &Arc<Out>, request: Request) -> bool
             }
             true
         }
+        Request::Seen { pane } => {
+            if lock(&host.status).seen(&pane) {
+                host.broadcast_status();
+            }
+            true
+        }
+        Request::MarkUnread { worktree, unread } => {
+            host.mark_unread(&worktree, unread);
+            true
+        }
         Request::Detach { id } => {
             if let Some(entry) = lock(&host.terminals).get(&id) {
                 for watcher in entry.watchers.iter().filter(|w| w.conn == conn) {
@@ -2472,6 +2524,7 @@ fn handle(host: &Arc<Host>, conn: u64, out: &Arc<Out>, request: Request) -> bool
                         paired_at: d.paired_at,
                         connected: d.connected,
                         role: d.role,
+                        push: d.push,
                     })
                     .collect()
             });
@@ -2516,6 +2569,15 @@ fn handle(host: &Arc<Host>, conn: u64, out: &Arc<Out>, request: Request) -> bool
                 },
             };
             out.reply(&reply);
+            true
+        }
+        Request::TestPush { id } => {
+            // On this connection's own thread: the post can take seconds.
+            let error = match host.phones() {
+                Some(phones) => phones.test_push(&id).err(),
+                None => Some("Devices are off on this Mac.".into()),
+            };
+            out.reply(&Reply::PushTested { error });
             true
         }
         Request::Phones { enabled } => {
@@ -3655,7 +3717,12 @@ mod tests {
             &["-c", "printf '%s\\n' \"$1\"; exec cat", "sh", &foot],
         ))
         .expect("a terminal");
-        let last = shows.lines().last().unwrap_or_default().trim().to_owned();
+        let last = shows
+            .lines()
+            .rfind(|line| !line.trim().is_empty())
+            .unwrap_or_default()
+            .trim()
+            .to_owned();
         let id = host.file_keyed_for_tests(terminal, Some(key.to_owned()));
         let terminal = host.find(id).expect("filed");
         assert!(
@@ -3692,6 +3759,127 @@ mod tests {
             .find(|p| p.pane == key)
             .and_then(|p| p.question)
             .map(|q| q.id)
+    }
+
+    #[test]
+    fn codex_folder_access_is_answerable_before_any_session_hook() {
+        let host = Host::for_tests();
+        let key = "wt|codex|1";
+        let (id, terminal) = codex_pane(
+            &host,
+            key,
+            "Folder access\n/tmp/new-worktree\n\n\
+             Trust this folder? Your trust decision will be saved.\n\n\
+             › 1. Trust and continue\n\
+             \x20 2. Back to Agent Command Center\n\n\
+             enter continue · esc back\n\n\n\n\n",
+        );
+        assert!(lock(&host.status).get(key).is_none());
+        assert!(host.read_codex_dialogs());
+        let pane = lock(&host.status).get(key).unwrap().clone();
+        assert_eq!(pane.worktree, "wt");
+        assert_eq!(pane.agent, "codex");
+        assert!(pane.session.is_none());
+        assert_eq!(pane.state, crate::event::AgentState::AwaitingPermission);
+        let question = pane.question.expect("folder access on the phone");
+        assert!(
+            question
+                .subject
+                .as_deref()
+                .unwrap()
+                .contains("/tmp/new-worktree")
+        );
+        assert!(!host.read_codex_dialogs(), "the same question stays stable");
+        // The same choices for a different folder must not grant trust.
+        let mut stale = terminal
+            .with_term(|term| {
+                crate::screen::codex_dialog(&crate::screen::bottom_rows(term, usize::MAX))
+            })
+            .unwrap();
+        stale.question = stale
+            .question
+            .replace("/tmp/new-worktree", "/tmp/other-folder");
+        assert!(lock(&host.status).screen_dialog(key, Some(stale), crate::now_ms()));
+        let stale_id = question_id(&host, key).unwrap();
+        assert_eq!(
+            host.respond_prompt(id, stale_id, |_| Some(agent_hooks::Decision::Pick(0))),
+            Err(AnswerRefused::Changed)
+        );
+        assert!(host.read_codex_dialogs());
+        let question = lock(&host.status)
+            .get(key)
+            .unwrap()
+            .question
+            .clone()
+            .unwrap();
+        assert_eq!(
+            host.respond_prompt(id, question.id, |_| Some(agent_hooks::Decision::Pick(0))),
+            Ok(())
+        );
+        assert_eq!(
+            host.respond_prompt(id, question.id, |_| Some(agent_hooks::Decision::Pick(0))),
+            Err(AnswerRefused::Answered)
+        );
+        assert!(wait_until(Duration::from_secs(5), || terminal
+            .with_term(|term| crate::screen::bottom_rows(term, 24))
+            .iter()
+            .any(|row| row == "1")));
+
+        // The first real hook takes over the pane created for folder trust,
+        // even before the terminal has redrawn the old question away.
+        let mut started = codex_report(key, agent_hooks::HookEvent::SessionStart, None);
+        started.session = Some("new-session".to_owned());
+        assert!(lock(&host.status).report(&started, |_| true));
+        let pane = lock(&host.status).get(key).unwrap().clone();
+        assert!(pane.question.is_none());
+        assert_eq!(pane.state, crate::event::AgentState::Starting);
+        assert_eq!(pane.session.as_deref(), Some("new-session"));
+        assert!(!host.read_codex_dialogs());
+        assert_eq!(
+            host.respond_prompt(id, question.id, |_| Some(agent_hooks::Decision::Pick(0))),
+            Err(AnswerRefused::Answered)
+        );
+        terminal.clear();
+        terminal.kill();
+    }
+
+    #[test]
+    fn codex_hook_review_is_answerable_before_any_session_hook() {
+        let host = Host::for_tests();
+        let key = "wt|codex|1";
+        let (id, terminal) = codex_pane(
+            &host,
+            key,
+            "Hooks need review\n\
+             1 hook is new or changed.\n\
+             Hooks can run outside the sandbox after you trust them.\n\n\
+             › 1. Review hooks\n\
+             \x20 2. Trust all and continue\n\
+             \x20 3. Continue without trusting (hooks won't run)\n\n\
+             enter confirm · esc skip\n\n\n\n",
+        );
+        assert!(lock(&host.status).get(key).is_none());
+        assert!(host.read_codex_dialogs());
+        let pane = lock(&host.status).get(key).unwrap().clone();
+        assert_eq!(pane.state, crate::event::AgentState::AwaitingPermission);
+        let question = pane.question.expect("hook review on the phone");
+        assert_eq!(
+            question.subject.as_deref(),
+            Some(
+                "1 hook is new or changed.\nHooks can run outside the sandbox after you trust them."
+            )
+        );
+        // Trust all: Codex's own 2, then Enter. Its Review hooks is not offered.
+        assert_eq!(
+            host.respond_prompt(id, question.id, |_| Some(agent_hooks::Decision::Pick(0))),
+            Ok(())
+        );
+        assert!(wait_until(Duration::from_secs(5), || terminal
+            .with_term(|term| crate::screen::bottom_rows(term, 24))
+            .iter()
+            .any(|row| row == "2")));
+        terminal.clear();
+        terminal.kill();
     }
 
     #[test]

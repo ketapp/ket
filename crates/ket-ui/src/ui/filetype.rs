@@ -17,7 +17,7 @@ use gpui::{Div, Pixels, Rgba, SharedString, div, prelude::*, px, rgb};
 use ket_core::theme::Theme;
 
 /// The well a mark sits in.
-pub(crate) const SIZE: Pixels = px(18.0);
+const SIZE: Pixels = px(18.0);
 
 /// Its corner.
 const RADIUS: Pixels = super::RADIUS_SM;
@@ -40,7 +40,7 @@ const GROUND: f32 = 0.08;
 const EDGE: f32 = 0.45;
 
 /// An inactive tab's mark, so the active tab's is the one that carries colour.
-pub(crate) const DIMMED: f32 = 0.55;
+const DIMMED: f32 = 0.55;
 
 /// The extensions worth colouring, and what they are drawn as.
 ///

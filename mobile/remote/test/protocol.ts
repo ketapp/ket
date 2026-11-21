@@ -9,11 +9,11 @@
 //   node test/protocol.ts
 
 import { readFileSync } from 'node:fs';
-import { DialError, firstOpen } from '../src/client.ts';
+import { DialError, Link, firstOpen } from '../src/client.ts';
 
 import { Initiator, type Keypair, type Transport, generateKeypair, keypairFrom } from '../src/noise.ts';
 import { OFFER_PREFIX, parseOffer, toBase64Url, validRelayUrl } from '../src/offer.ts';
-import { HEADER, KIND_CONTROL, KIND_DATA, MAX_FRAME, decodeFrame, encodeFrame } from '../src/relay.ts';
+import { CONTROL_CONNECTED, HEADER, KIND_CONTROL, KIND_DATA, MAX_FRAME, decodeFrame, encodeFrame } from '../src/relay.ts';
 import { MAX_MESSAGE, Session } from '../src/session.ts';
 
 interface Vector {
@@ -409,6 +409,74 @@ check('address validation rejects a non-WebSocket URL', !validRelayUrl('https://
     20,
   );
   check('a silent home address holds the rest back only for its head start', hung.address === 'ws://100.101.102.103');
+}
+
+// A link the phone closes tells its reader at once, without waiting for the
+// socket to say it has closed: one that died while the app was suspended
+// never does, and the session waited on it before dialling again.
+{
+  const arrayBuffer = (bytes: Uint8Array): ArrayBuffer => Uint8Array.from(bytes).buffer;
+  class Quiet {
+    static readonly CONNECTING = 0;
+    static readonly OPEN = 1;
+    static readonly CLOSING = 2;
+    static readonly CLOSED = 3;
+    static last: Quiet | null = null;
+    readyState = Quiet.CONNECTING;
+    binaryType = '';
+    closes = 0;
+    onopen: (() => void) | null = null;
+    onmessage: ((event: { data: ArrayBuffer }) => void) | null = null;
+    onerror: (() => void) | null = null;
+    onclose: (() => void) | null = null;
+    constructor() {
+      Quiet.last = this;
+      queueMicrotask(() => {
+        this.readyState = Quiet.OPEN;
+        this.onopen?.();
+      });
+    }
+    /** The relay's side: the connect frame is answered as connected. */
+    send(data: Uint8Array) {
+      if (decodeFrame(data).kind !== KIND_CONTROL) return;
+      const connected = encodeFrame({ kind: KIND_CONTROL, connection: 7n, body: Uint8Array.of(CONTROL_CONNECTED) });
+      queueMicrotask(() => this.onmessage?.({ data: arrayBuffer(connected) }));
+    }
+    /** Asked to close, and never saying it has. */
+    close() {
+      this.closes += 1;
+      this.readyState = Quiet.CLOSING;
+    }
+  }
+  const real = globalThis.WebSocket;
+  globalThis.WebSocket = Quiet as unknown as typeof WebSocket;
+  try {
+    const link = await Link.open('ws://quiet', new Uint8Array(16));
+    const reading = link.recv().then(
+      () => 'a frame',
+      (error: Error) => error.message,
+    );
+    link.close();
+    const said = await Promise.race([reading, new Promise<string>((resolve) => setTimeout(() => resolve('still waiting'), 50))]);
+    check('a link the phone closes tells its reader at once', said === 'the phone closed the connection', said);
+    check('a link the phone closes closes its socket', Quiet.last?.closes === 1);
+    let refused = false;
+    try {
+      link.send(Uint8Array.of(1));
+    } catch {
+      refused = true;
+    }
+    check('a closed link sends nothing', refused);
+    const late = encodeFrame({ kind: KIND_DATA, connection: 7n, body: Uint8Array.of(9) });
+    Quiet.last?.onmessage?.({ data: arrayBuffer(late) });
+    const after = await link.recv().then(
+      () => 'a frame',
+      (error: Error) => error.message,
+    );
+    check('a frame after the close is dropped', after === 'the phone closed the connection', after);
+  } finally {
+    globalThis.WebSocket = real;
+  }
 }
 
 console.log(`${passed} passed, ${failures} failed`);

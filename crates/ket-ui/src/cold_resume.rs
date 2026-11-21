@@ -148,7 +148,7 @@ impl Shell {
             }
             let last = last_call(&lookup)?;
             let cold = last.cold(ket_core::now_ms())?;
-            cold.worth_asking(config.agent.cold_resume_min_tokens())
+            cold.worth_asking(config.agent.cold_resume_floor())
                 .then_some((last.at_ms, cold))
         });
         cx.spawn(async move |this: WeakEntity<Shell>, cx: &mut AsyncApp| {
@@ -453,6 +453,12 @@ impl Shell {
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(paint(t.text.primary))
                     .child("This session went cold"),
+            )
+            // Closing changes nothing, as Escape does: the session continues.
+            .child(div().flex_grow())
+            .child(
+                crate::ui::dialog::close("cold-resume-close", t)
+                    .on_click(cx.listener(|this, _, _, cx| this.cold_resume_continue(cx))),
             );
         Some(
             centered(

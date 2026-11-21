@@ -13,13 +13,18 @@
 //! "Implement this plan?", so the pane reads idle while it waits on a
 //! person. That is read here the same way, and the pane waits on it.
 //!
-//! Read only for a Codex pane waiting on a prompt or idle, on the host's
-//! one-second tick, [`DIALOG_ROWS`] rows under the parser's lock: nothing
-//! for any other agent, and nothing for a Codex pane at work.
+//! Read for Codex panes waiting on a prompt, idle, or still starting, on
+//! the host's one-second tick. Folder access is asked before any hook can
+//! report a session and can sit above empty rows, so the visible screen is
+//! read under the parser's lock. Nothing is read for a Codex pane at work.
 //!
 //! Grok's own permission menu is read here too, but only when a phone
 //! answers it: its rows change with the prompt, so the number to press is
 //! found by label at that moment — see [`grok_permission_menu`].
+//!
+//! OpenCode's `/clear` and `/new` leave the TUI on its home screen without
+//! creating a session, so the pane still names the conversation that just
+//! left. [`opencode_home`] is how the phone tells, and starts the chat over.
 
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line};
@@ -36,6 +41,10 @@ const FOOTER_ROWS: usize = 3;
 /// The tool name a screen-read dialog is reported under, in place of the
 /// tool whose prompt it covers. Not a tool: a phone treats it as a question.
 pub const DIALOG_TOOL: &str = "Dialog";
+
+/// The heading of Codex's startup question about hooks — see
+/// [`codex_hook_review`].
+pub const HOOK_REVIEW: &str = "Hooks need review";
 
 /// A dialog read off the screen.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,18 +64,144 @@ pub struct Dialog {
 impl Dialog {
     /// The keys that pick option `at`, counted from zero.
     pub fn keys(&self, at: usize) -> Vec<u8> {
-        let mut keys = (at + 1).to_string().into_bytes();
-        if self.enter {
+        // Hook review's own first option opens a panel only the terminal
+        // can work, and is left out: what is offered starts at Codex's 2.
+        let first = if self.title == HOOK_REVIEW { 2 } else { 1 };
+        let mut keys = (at + first).to_string().into_bytes();
+        // Trusting requires Enter after its number, but the other choice
+        // leaves immediately. An Enter after that would land in what comes
+        // next: the Agent Command Center, or the composer.
+        let leaves = at == 1 && (self.title == "Folder access" || self.title == HOOK_REVIEW);
+        if self.enter && !leaves {
             keys.push(b'\r');
         }
         keys
     }
 }
 
-/// Whichever Codex dialog is up at the foot of the screen, if any — see
-/// [`codex_rate_limit`] and [`codex_plan_implementation`].
+/// Whichever Codex dialog is on the visible screen, if any — see
+/// [`codex_folder_access`], [`codex_hook_review`], [`codex_rate_limit`] and
+/// [`codex_plan_implementation`].
 pub fn codex_dialog(rows: &[String]) -> Option<Dialog> {
-    codex_rate_limit(rows).or_else(|| codex_plan_implementation(rows))
+    let footer = &rows[rows.len().saturating_sub(DIALOG_ROWS)..];
+    codex_startup_question(rows)
+        .or_else(|| codex_rate_limit(footer))
+        .or_else(|| codex_plan_implementation(footer))
+}
+
+/// Codex's startup folder-access question. Unlike its in-session pickers,
+/// this is drawn at the top of the screen with empty rows below it, so
+/// callers must supply the whole visible screen. Keep the folder paths and
+/// explanation in the question: the person must see what they are trusting.
+pub fn codex_folder_access(rows: &[String]) -> Option<Dialog> {
+    let at = rows.iter().rposition(|row| row.trim() == "Folder access")?;
+    let end = rows.iter().rposition(|row| !row.trim().is_empty())?;
+    let footer = rows[end].trim().to_lowercase();
+    if !footer.contains("enter") || !footer.contains("continue") || !footer.contains("esc") {
+        return None;
+    }
+    let choices = rows.get(at + 1..end)?;
+    let first = choices
+        .iter()
+        .position(|row| numbered_option(row).is_some())?;
+    let options: Vec<String> = choices[first..]
+        .iter()
+        .filter_map(|row| numbered_option(row))
+        .collect();
+    if options.len() != 2 || options[0] != "Trust and continue" {
+        return None;
+    }
+    Some(Dialog {
+        title: "Folder access".to_owned(),
+        question: choices[..first].join("\n").trim().to_owned(),
+        options,
+        enter: true,
+    })
+}
+
+/// Whichever of Codex's startup questions is up — [`codex_folder_access`]
+/// or [`codex_hook_review`] — over the whole visible screen. Either holds a
+/// first prompt back until somebody answers it, and drops a paste made
+/// meanwhile.
+pub fn codex_startup_question(rows: &[String]) -> Option<Dialog> {
+    codex_folder_access(rows).or_else(|| codex_hook_review(rows))
+}
+
+/// Codex's startup question when a hook is new or changed since it was
+/// last trusted, as Codex CLI 0.170 draws it:
+///
+/// ```text
+/// Hooks need review
+/// 1 hook is new or changed.
+/// Hooks can run outside the sandbox after you trust them.
+///
+/// › 1. Review hooks
+///   2. Trust all and continue
+///   3. Continue without trusting (hooks won't run)
+///
+/// enter confirm · esc skip
+/// ```
+///
+/// Drawn like folder access, at the top over empty rows and before the
+/// composer, so callers must supply the whole visible screen, and a task's
+/// prompt cannot go in until it is answered. "Review hooks" opens Codex's
+/// own hook panel, which only the terminal can work, so the dialog offers
+/// the other two (see [`Dialog::keys`]). The question is Codex's own words:
+/// the screen does not say which hooks, and nothing outside Codex can tell
+/// which of them it has trusted.
+pub fn codex_hook_review(rows: &[String]) -> Option<Dialog> {
+    let at = rows.iter().rposition(|row| row.trim() == HOOK_REVIEW)?;
+    let end = rows.iter().rposition(|row| !row.trim().is_empty())?;
+    let footer = rows[end].trim().to_lowercase();
+    if !footer.contains("enter") || !footer.contains("esc") {
+        return None;
+    }
+    let body = rows.get(at + 1..end)?;
+    let first = body.iter().position(|row| numbered_option(row).is_some())?;
+    let options: Vec<String> = body[first..]
+        .iter()
+        .filter_map(|row| numbered_option(row))
+        .collect();
+    if options.len() != 3 || options[0] != "Review hooks" || !options[1].starts_with("Trust all") {
+        return None;
+    }
+    let question: Vec<&str> = body[..first]
+        .iter()
+        .map(|row| row.trim())
+        .filter(|row| !row.is_empty())
+        .collect();
+    Some(Dialog {
+        title: HOOK_REVIEW.to_owned(),
+        question: question.join("\n"),
+        options: options[1..].to_vec(),
+        enter: true,
+    })
+}
+
+/// The session id a phone is given while OpenCode is on its home screen.
+/// Distinct from OpenCode's own `ses_…` ids, so the chat starts over.
+pub const OPENCODE_HOME: &str = "home";
+
+/// Whether OpenCode's home screen is drawn — `/clear` and `/new` land here
+/// without creating a session.
+///
+/// The TUI draws the OPENCODE wordmark in block characters, or a smaller
+/// mark when the terminal is narrow. A session view never uses those rows.
+/// Shorter than 12 rows, the mark is omitted and this cannot tell.
+pub fn opencode_home(rows: &[String]) -> bool {
+    rows.iter().any(|row| {
+        // Full and medium wordmark: two `█▀▀█` side by side, or the `█^^^`
+        // row. The small mark is `█_^█`, or `█▀▀█` over `█__█` when narrow.
+        row.contains("\u{2588}\u{2580}\u{2580}\u{2588} \u{2588}\u{2580}\u{2580}\u{2588}")
+            || row.contains("\u{2588}^^^")
+            || row.contains("\u{2588}_^\u{2588}")
+    }) || {
+        let mark = rows
+            .iter()
+            .any(|row| row.contains("\u{2588}\u{2580}\u{2580}\u{2588}"));
+        let body = rows.iter().any(|row| row.contains("\u{2588}__\u{2588}"));
+        mark && body
+    }
 }
 
 /// The bottom `n` rows of the screen as text, each trimmed on the right.
@@ -111,11 +246,116 @@ pub fn codex_prompt_ready<T>(term: &Term<T>) -> bool {
         return false;
     }
     let rows = bottom_rows(term, usize::MAX);
+    // A selected menu option uses the same › as the composer. During a
+    // redraw, its cursor and a footer from the preceding screen can still
+    // be visible. Sending Enter there accepts the option (not the task).
+    if numbered_option(&rows[row]).is_some() {
+        return false;
+    }
+    // The footer's hints are separated by `·`: Codex 0.170 leads with
+    // `← for agents` after a startup question, ahead of `? for shortcuts`,
+    // and can draw a warning at the far end of the same row.
     rows.iter().skip(row + 1).any(|line| {
-        let line = line.trim();
-        line.starts_with("? for shortcuts") || line.contains("context left")
+        line.split('\u{b7}')
+            .any(|hint| hint.trim().starts_with("? for shortcuts"))
+            || line.contains("context left")
     })
 }
+
+/// Whether Claude Code has drawn its input box, so a first prompt typed now
+/// reaches it rather than the shell it starts from: a `❯` row just under
+/// the second-last of the full-width rules it draws over and under the box,
+/// with paste on. A selected menu option — the folder-trust screen's
+/// `❯ 1. Yes, proceed` — is not the box, and a shell's `❯` prompt has no
+/// rules round it.
+pub fn claude_prompt_ready<T>(term: &Term<T>) -> bool {
+    use alacritty_terminal::term::TermMode;
+
+    if !term.mode().contains(TermMode::BRACKETED_PASTE) {
+        return false;
+    }
+    let rows = bottom_rows(term, usize::MAX);
+    let rules: Vec<usize> = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| crate::agent_view::is_rule(row))
+        .map(|(at, _)| at)
+        .collect();
+    let [.., above, below] = rules.as_slice() else {
+        return false;
+    };
+    if below - above < 2 {
+        return false;
+    }
+    let first = &rows[above + 1];
+    first.trim_start().starts_with('\u{276f}') && numbered_option(first).is_none()
+}
+
+/// Whether Enter can submit `prompt`, just pasted into Codex: a live
+/// composer row at or above the cursor that holds the start of it, or the
+/// `[Pasted Content …]` chip Codex draws for a long paste. The footer is not looked at: with a draft in the box Codex
+/// (0.170) draws its model and folder there, not `? for shortcuts`.
+pub fn codex_draft_ready<T>(term: &Term<T>, prompt: &str) -> bool {
+    use alacritty_terminal::term::TermMode;
+    if !term
+        .mode()
+        .contains(TermMode::BRACKETED_PASTE | TermMode::SHOW_CURSOR)
+    {
+        return false;
+    }
+    let rows = bottom_rows(term, usize::MAX);
+    let cursor = term.grid().cursor.point;
+    let Ok(row) = usize::try_from(cursor.line.0) else {
+        return false;
+    };
+    if row >= rows.len() {
+        return false;
+    }
+    // The nearest `›` at or above the cursor: a menu's selected option,
+    // when one has come up, and that never starts with the prompt. On the
+    // cursor's own row only what is before the cursor counts: what follows
+    // it is the empty box's placeholder.
+    let Some(draft) = rows[..=row]
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(at, line)| {
+            let line: String = match at == row {
+                true => line.chars().take(cursor.column.0).collect(),
+                false => line.clone(),
+            };
+            line.trim_start().strip_prefix('›').map(str::to_owned)
+        })
+    else {
+        return false;
+    };
+    // The start of its first line: later lines sit on rows of their own.
+    let start: String = prompt
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or_default()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(DRAFT_START)
+        .collect();
+    let draft = draft.split_whitespace().collect::<Vec<_>>().join(" ");
+    // Images attached ahead of the prompt stand before it as chips.
+    let mut draft = draft.as_str();
+    while let Some((_, rest)) = draft
+        .strip_prefix("[Image #")
+        .and_then(|chip| chip.split_once(']'))
+    {
+        draft = rest.trim_start();
+    }
+    !start.is_empty() && (draft.starts_with(&start) || draft.starts_with("[Pasted Content"))
+}
+
+/// How much of a prompt's start has to be seen in Codex's composer: short
+/// enough to sit on the first row of a narrow pane, long enough not to be
+/// the placeholder.
+const DRAFT_START: usize = 12;
 
 /// Codex's notice that a usage limit is near, as Codex CLI 0.156 draws it:
 ///
@@ -314,6 +554,17 @@ mod tests {
         assert!(check(
             &ready.replace("? for shortcuts", "100% context left")
         ));
+        // As Codex 0.170 draws it once its hook review is answered.
+        assert!(check(&ready.replace(
+            "? for shortcuts",
+            "  \u{2190} for agents \u{b7} ? for shortcuts"
+        )));
+        // With a warning at the row's far end, as Codex 0.170 drew it once
+        // its hook review was answered without trusting.
+        assert!(check(&ready.replace(
+            "? for shortcuts",
+            "  \u{2190} for agents \u{b7} ? for shortcuts     \u{26a0} 1 warning \u{b7} f2 to view"
+        )));
         assert!(!check("shell prompt › "));
         assert!(!check(&ready.replace(
             "? for shortcuts",
@@ -322,10 +573,200 @@ mod tests {
         assert!(!check(&format!("{ready}\x1b[?25l")));
         assert!(!check(&format!("{ready}\x1b[?2004l")));
         assert!(!check(&format!("{ready}Already typing")));
+        // Startup pickers can leave the old footer visible while drawing.
+        // Their selected › is a choice, never an empty composer, including
+        // when a different update choice is selected.
+        for option in [
+            "1. Update now (runs `npm install -g @openai/codex`)",
+            "2. Skip",
+            "3. Skip until next version",
+            "1. Trust and continue",
+            "2. Back to Agent Command Center",
+        ] {
+            assert!(!check(&format!(
+                "{ready}\x1b[18;1HUpdate available\x1b[22;1H\x1b[2K› {option}\x1b[22;3H"
+            )));
+        }
+    }
+
+    #[test]
+    fn an_update_picker_between_paste_and_enter_refuses_submission() {
+        use alacritty_terminal::event::VoidListener;
+        use alacritty_terminal::vte::ansi::Processor;
+        let mut term = Term::new(
+            Default::default(),
+            &crate::terminal::TerminalSize::new(80, 24),
+            VoidListener,
+        );
+        let mut parser: Processor = Processor::new();
+        parser.advance(&mut term, "\x1b[?2004h\x1b[?25h\x1b[22;1H› Explain this codebase\x1b[24;1H? for shortcuts\x1b[22;3H".as_bytes());
+        assert!(codex_prompt_ready(&term));
+        // The placeholder is not the draft, even for a task that reads as it.
+        assert!(!codex_draft_ready(&term, "Build the app"));
+        assert!(!codex_draft_ready(&term, "Explain this codebase"));
+        // With a draft in the box Codex 0.170 draws its model and folder in
+        // the footer, and wraps a long prompt under the composer's row.
+        parser.advance(
+            &mut term,
+            "\x1b[22;1H\x1b[2K› Build the app and then\x1b[23;1H\x1b[2K  run it\x1b[24;1H\x1b[2K  GPT-6.2-Sol medium · ~/project\x1b[23;9H"
+                .as_bytes(),
+        );
+        assert!(codex_draft_ready(&term, "Build the app  and then run it"));
+        assert!(codex_draft_ready(
+            &term,
+            "\nBuild the app\n1. and then run it"
+        ));
+        assert!(!codex_draft_ready(&term, "Something else entirely"));
+        parser.advance(
+            &mut term,
+            "\x1b[23;1H\x1b[2K\x1b[22;1H\x1b[2K› 1. Update now".as_bytes(),
+        );
+        assert!(!codex_prompt_ready(&term));
+        assert!(!codex_draft_ready(&term, "Build the app and then run it"));
+        // A task worded as the selected option is still not in the box.
+        assert!(!codex_draft_ready(&term, "Update now"));
+        parser.advance(&mut term, b"\x1b[2J\x1b[HUpdating and restarting");
+        assert!(!codex_draft_ready(&term, "Build the app"));
     }
 
     fn rows(text: &str) -> Vec<String> {
         text.lines().map(|row| row.trim_end().to_owned()).collect()
+    }
+
+    const FOLDER_ACCESS: &str = "\
+Folder access
+/tmp/worktrees/new-task
+
+Note: You're in a subdirectory of a Git
+project. Trusting will apply to the
+repository root:
+/tmp/project
+
+Trust this folder? Codex can read, edit,
+and run files here. Your trust decision
+will be saved.
+
+› 1. Trust and continue
+  2. Back to Agent Command Center
+
+enter continue · esc back
+
+
+
+";
+
+    #[test]
+    fn folder_access_above_empty_rows_keeps_both_paths_and_the_trust_explanation() {
+        let dialog = codex_dialog(&rows(FOLDER_ACCESS)).expect("folder access");
+        assert_eq!(dialog.title, "Folder access");
+        assert!(dialog.question.contains("/tmp/worktrees/new-task"));
+        assert!(dialog.question.contains("repository root:\n/tmp/project"));
+        assert!(
+            dialog
+                .question
+                .contains("Your trust decision\nwill be saved.")
+        );
+        assert_eq!(
+            dialog.options,
+            ["Trust and continue", "Back to Agent Command Center"]
+        );
+        assert_eq!(dialog.keys(0), b"1\r");
+        assert_eq!(dialog.keys(1), b"2");
+        // A direct CLI launch offers Quit rather than returning to the
+        // Agent Command Center; it is the same folder trust question.
+        let quit = FOLDER_ACCESS
+            .replace("Back to Agent Command Center", "Quit")
+            .replace("esc back", "esc quit");
+        assert!(codex_dialog(&rows(&quit)).is_some());
+    }
+
+    /// As Codex CLI 0.170 drew it under a real pty, a new hook in the
+    /// project's `.codex/hooks.json`.
+    const HOOK_REVIEW_SCREEN: &str = "
+  Hooks need review
+  1 hook is new or changed.
+  Hooks can run outside the sandbox after you trust them.
+
+
+› 1. Review hooks
+  2. Trust all and continue
+  3. Continue without trusting (hooks won't run)
+
+  enter confirm · esc skip
+
+
+
+
+";
+
+    #[test]
+    fn hook_review_offers_trust_or_skip_but_not_codex_own_panel() {
+        let dialog = codex_dialog(&rows(HOOK_REVIEW_SCREEN)).expect("hook review");
+        assert_eq!(dialog.title, HOOK_REVIEW);
+        assert_eq!(
+            dialog.question,
+            "1 hook is new or changed.\nHooks can run outside the sandbox after you trust them."
+        );
+        assert_eq!(
+            dialog.options,
+            [
+                "Trust all and continue",
+                "Continue without trusting (hooks won't run)"
+            ]
+        );
+        // Codex's 2 moves the mark until Enter takes it; its 3 leaves at
+        // once, and an Enter after it would land in the composer.
+        assert_eq!(dialog.keys(0), b"2\r");
+        assert_eq!(dialog.keys(1), b"3");
+    }
+
+    #[test]
+    fn hook_review_is_only_the_live_question_with_its_own_choices() {
+        // Answered, the composer's footer is the last row: not the question.
+        let gone = format!("{HOOK_REVIEW_SCREEN}\n› Ask Codex to do anything\n\n  ? for shortcuts");
+        assert!(codex_hook_review(&rows(&gone)).is_none());
+        // Codex's hook panel, opened from Review hooks, is a different screen.
+        let panel = "Hooks\nLifecycle hooks from config and enabled plugins.\n\n\
+                     ⚠ 1 hook needs review before it can run.\n\n\
+                     › PreToolUse 1/2 !\n\nt trust all · enter review · esc close";
+        assert!(codex_hook_review(&rows(panel)).is_none());
+        // Other choices than Codex's are not this question.
+        let other = HOOK_REVIEW_SCREEN.replace("Review hooks", "Something else");
+        assert!(codex_hook_review(&rows(&other)).is_none());
+    }
+
+    #[test]
+    fn folder_access_requires_its_choices_and_live_footer() {
+        let screen = rows(FOLDER_ACCESS);
+        assert!(
+            codex_dialog(&rows(
+                &FOLDER_ACCESS.replace("enter continue · esc back", "")
+            ))
+            .is_none()
+        );
+        assert!(
+            codex_dialog(&rows(
+                &FOLDER_ACCESS.replace("Trust and continue", "Update now")
+            ))
+            .is_none()
+        );
+        let mut answered = screen;
+        answered.extend(["› Explain this codebase", "? for shortcuts"].map(str::to_owned));
+        assert!(codex_dialog(&answered).is_none());
+    }
+
+    #[test]
+    fn old_dialog_titles_above_the_footer_do_not_cover_a_live_question_form() {
+        for title in ["Implement this plan?", "Approaching rate limits"] {
+            let mut screen = vec![title.to_owned()];
+            screen.extend(vec![String::new(); DIALOG_ROWS]);
+            screen.extend(rows(
+                "Question 1/1 (1 unanswered)\nWhich crate?\n\n\
+                 › 1. ket-core\n\x20 2. ket-ui\n\n\
+                 tab to add notes | enter to submit answer | esc to interrupt",
+            ));
+            assert_eq!(codex_dialog(&screen), None);
+        }
     }
 
     /// Codex CLI 0.164's plan question, at the foot of an 80-column screen.
@@ -423,5 +864,24 @@ mod tests {
             2
         ));
         assert!(!codex_user_input_from_start(&rows("› "), 1));
+    }
+
+    #[test]
+    fn opencodes_home_wordmark_is_home() {
+        let full = rows(
+            "\
+                   █▀▀█ █▀▀█ █▀▀█ █▀▀▄  █▀▀▀ █▀▀█ █▀▀█ █▀▀█
+                   █__█ █__█ █^^^ █__█  █___ █__█ █__█ █^^^
+                   ▀▀▀▀ █▀▀▀ ▀▀▀▀ ▀~~▀  ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀
+
+Ask anything, / for commands, @ for context",
+        );
+        assert!(opencode_home(&full));
+        assert!(opencode_home(&rows("█_^█")));
+        assert!(opencode_home(&rows("█▀▀█\n█__█")));
+        assert!(!opencode_home(&rows(
+            "Ask anything, / for commands, @ for context\n\n› hello"
+        )));
+        assert!(!opencode_home(&rows("")));
     }
 }

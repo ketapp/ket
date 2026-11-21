@@ -1,5 +1,3 @@
-'use no memo'; // Reads a live HostConnection — see lib/hosts.ts.
-
 // One worktree: its tabs, what it has changed since its base, and how to
 // land it — merged from here, or pushed and opened as a pull request —
 // docked at the foot. The tabs come first, as the desktop's tab strip has
@@ -29,7 +27,7 @@ import { Alert, Linking, Pressable, ScrollView, StyleSheet, Text, View, type Vie
 import { ConnectionHelp } from '../../../components/ConnectionHelp';
 import { FloatMenu, type MenuSection, type Place, placeOf } from '../../../components/FloatMenu';
 import { RiskBadge } from '../../../components/Risk';
-import { worktreeMenu } from '../../../components/WorktreeList';
+import { worktreeMenu } from '../../../components/WorktreeMenu';
 import {
   AgentMark,
   CheckCircle,
@@ -46,6 +44,7 @@ import {
   Banner,
   Bar,
   Button,
+  Caption,
   Card,
   Heading,
   IconButton,
@@ -67,19 +66,25 @@ import {
   stateOf,
   terminalName,
 } from '../../../lib/activity';
+import { useReadOnArrival } from '../../../lib/arrival';
 import { checkWord, checksInOrder, prLine } from '../../../lib/checks';
 import type { HostConnection } from '../../../lib/connection';
-import { useHost } from '../../../lib/hosts';
+import { useHost, useHostState } from '../../../lib/hosts';
 import { confirmIdentity } from '../../../lib/lock';
 import { askMerge, prActions } from '../../../lib/pr-actions';
 import { commentsSaid, review, sendReview, useReview } from '../../../lib/review';
-import { agentLabel, font, sessionColor, size, t } from '../../../lib/theme';
+import { agentLabel, font, size, t } from '../../../lib/theme';
 import { useNow } from '../../../lib/usage';
+
+/** What the desktop sends for a time it doesn't have. Out here because the
+ * React Compiler skips a component with a BigInt literal in it. */
+const NEVER = 0n;
 
 export default function Worktree() {
   const { host: hostId, worktree: raw } = useLocalSearchParams<{ host: string; worktree: string }>();
   const id = decodeURIComponent(raw);
   const conn = useHost(hostId);
+  const hostState = useHostState(conn);
   // The permission just answered, by its id: its buttons go on the tap and
   // stay gone until the desktop's next snapshot takes the question away.
   // Back only if the desktop would not take the answer, with its reason.
@@ -90,7 +95,9 @@ export default function Worktree() {
   // The bar's menu, hung under its button while it is open.
   const [menu, setMenu] = useState<Place | null>(null);
   const more = useRef<ViewInstance>(null);
-  const found = everyWorktree(conn?.snapshot ?? null).find((l) => l.worktree.id === id);
+  const found = everyWorktree(hostState?.snapshot ?? null).find((l) => l.worktree.id === id);
+  // Marked unread from its menu: read as its screen is come to (1.35).
+  useReadOnArrival(conn, found?.worktree);
 
   // What a merge would bring, asked for again whenever the figures move —
   // while this screen is the one showing. A terminal opened from here sits
@@ -126,9 +133,9 @@ export default function Worktree() {
   if (!found) {
     return (
       <Screen>
-        <Bar back title={conn?.host.name ?? ''} />
+        <Bar back title={hostState?.host.name ?? ''} />
         <View style={styles.page}>
-          {conn?.snapshot ? (
+          {hostState?.snapshot ? (
             <Card style={styles.pad}>
               <Prose>This worktree is no longer running anything on the desktop.</Prose>
             </Card>
@@ -141,7 +148,7 @@ export default function Worktree() {
   }
 
   const { project, worktree } = found;
-  const open = (terminal: bigint) => router.push(`/terminal/${hostId}/${terminal.toString()}`);
+  const open = (terminal: bigint) => router.navigate(`/terminal/${hostId}/${terminal.toString()}`);
   // Wakes an asleep tab on the desktop and opens its chat once its terminal
   // is there. The desktop says why when it won't.
   const wake = async (key: string) => {
@@ -260,7 +267,7 @@ export default function Worktree() {
     // Pushed for review instead: the other way out, as the desktop's merge
     // dialog offers it. Not before 1.16, which opens them, and not for a
     // branch already open as one and closed: the menu offers reopening.
-    const opens = conn !== null && conn.hostMinor >= 16 && !pr;
+    const opens = hostState !== null && hostState.hostMinor >= 16 && !pr;
     if (opens) inFoot.push('open-pr');
     foot = (
       <View style={styles.foot}>
@@ -287,13 +294,13 @@ export default function Worktree() {
   // The bar's menu: what holding its row on Worktrees offers, less what the
   // foot already has. Its tabs and a new one are in their card.
   const sections: MenuSection[] = [];
-  if (conn) {
+  if (conn && hostState) {
     // Deleted from here: this screen has nothing left to show, so it goes
     // back at once; a refusal is said in its alert wherever that lands.
     const going = (_id: string, away: boolean) => {
       if (away && router.canGoBack()) router.back();
     };
-    for (const section of worktreeMenu(conn, worktree, (href) => router.push(href), going)) {
+    for (const section of worktreeMenu(conn, hostState, worktree, (href) => router.push(href), going)) {
       const items = section.items.filter((item) => !inFoot.includes(item.key));
       if (items.length > 0) sections.push({ ...section, items });
     }
@@ -326,7 +333,7 @@ export default function Worktree() {
         {blocked || failed ? (
           <Banner tone={blocked ? t.attention : t.failed}>
             <View style={styles.askHead}>
-              {worktree.agent ? <AgentMark agent={worktree.agent} size={16} session={worktree.agentColor || undefined} /> : null}
+              {worktree.agent ? <AgentMark agent={worktree.agent} size={16} session={worktree.agentColor || undefined} well /> : null}
               <Text style={styles.askTitle}>
                 {question ? asking(agentName, question.tool) : blocked ? `${agentName} is waiting on you` : `${agentName} failed`}
               </Text>
@@ -341,7 +348,7 @@ export default function Worktree() {
               </View>
             ) : !question && worktree.agentState ? (
               <View style={styles.well}>
-                <Text style={styles.wellText}>{detail(worktree)}</Text>
+                <Caption text={detail(worktree)} color={t.text} style={styles.wellText} numberOfLines={12} />
               </View>
             ) : null}
             {refusal ? <Prose color={t.failed}>{refusal}</Prose> : null}
@@ -384,7 +391,7 @@ export default function Worktree() {
 
         {pr ? <PullRequest pr={pr} said={actions.said} /> : null}
 
-        {conn && conn.hostMinor >= 14 ? <Review conn={conn} hostId={hostId} worktreeId={id} /> : null}
+        {conn && hostState && hostState.hostMinor >= 14 ? <Review conn={conn} hostId={hostId} worktreeId={id} /> : null}
 
         <Card style={styles.list}>
           <Heading count={changes ? files.length : undefined}>
@@ -462,11 +469,12 @@ function Tabs({
   onWake: (key: string) => void;
 }) {
   const now = useNow();
-  const hostId = conn.host.id;
+  const hostState = useHostState(conn);
+  const hostId = conn.id;
   const live = worktree.terminals.filter((x) => !x.closed);
-  const knows = conn.hostMinor >= 29;
-  const canWake = conn.hostMinor >= 23;
-  const adds = conn.hostMinor >= 15;
+  const knows = hostState.hostMinor >= 29;
+  const canWake = hostState.hostMinor >= 23;
+  const adds = hostState.hostMinor >= 15;
   const count = live.length + worktree.asleep.length;
   if (count === 0 && !adds) return null;
 
@@ -482,17 +490,16 @@ function Tabs({
           return (
             <Row
               key={terminal.id.toString()}
-              mark={<AgentMark agent={agent} size={16} session={terminal.color} />}
+              mark={<AgentMark agent={agent} size={16} />}
               title={terminalName(terminal)}
-              titleColor={sessionColor(terminal.color)?.label}
               detail={knows && !state ? `${agentLabel(agent)} · ready` : agentLabel(agent)}
               state={state}
               chevron
-              onPress={() => router.push(`/session/${hostId}/${terminal.id.toString()}`)}
+              onPress={() => router.navigate(`/session/${hostId}/${terminal.id.toString()}`)}
             />
           );
         }
-        const since = terminal.runningSinceMs > 0n ? ` for ${runningFor(terminal.runningSinceMs, now)}` : '';
+        const since = terminal.runningSinceMs > NEVER ? ` for ${runningFor(terminal.runningSinceMs, now)}` : '';
         return (
           <Row
             key={terminal.id.toString()}
@@ -501,7 +508,7 @@ function Tabs({
             detail={terminal.running ? `Terminal · running${since}` : 'Terminal'}
             state={state}
             chevron
-            onPress={() => router.push(`/terminal/${hostId}/${terminal.id.toString()}`)}
+            onPress={() => router.navigate(`/terminal/${hostId}/${terminal.id.toString()}`)}
           />
         );
       })}
@@ -514,7 +521,7 @@ function Tabs({
           detail={
             waking === tab.key
               ? 'Waking on your Mac…'
-              : tab.sinceMs > 0n
+              : tab.sinceMs > NEVER
                 ? `Asleep since ${new Date(Number(tab.sinceMs)).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })} · ${Math.round(Number(tab.freedBytes) / 1_048_576)} MB freed`
                 : 'Stopped with ket’s host · tap to start it again'
           }
@@ -554,7 +561,8 @@ function runningFor(since: bigint, now: number): string {
 function usePullRequest(pr: PullRequestSummary | undefined, conn: HostConnection | null, worktreeId: string, terminal: bigint | null) {
   const [busy, setBusy] = useState<string | null>(null);
   const [said, setSaid] = useState<{ text: string; failed: boolean } | null>(null);
-  const can = pr && conn ? prActions(pr, conn.hostMinor) : { fix: false, address: false, merge: false, update: false, ready: false, reopen: false };
+  const hostState = useHostState(conn);
+  const can = pr && hostState ? prActions(pr, hostState.hostMinor) : { fix: false, address: false, merge: false, update: false, ready: false, reopen: false };
 
   // Handed to the agent: off to its conversation to watch it work, or word
   // of where the handing stands when there is none to open.
@@ -571,16 +579,16 @@ function usePullRequest(pr: PullRequestSummary | undefined, conn: HostConnection
     const what = kind === 'checks' ? 'failed checks' : 'review comments';
     if (handed.starting) {
       setSaid({
-        text: `ket on ${conn.host.name || 'your Mac'} is still starting the agent. It gets the ${what} once it's up.`,
+        text: `ket on ${conn.state.host.name || 'your Mac'} is still starting the agent. It gets the ${what} once it's up.`,
         failed: false,
       });
       return;
     }
     if (terminal !== null) {
-      router.push(`/session/${conn.host.id}/${terminal.toString()}`);
+      router.push(`/session/${conn.id}/${terminal.toString()}`);
       return;
     }
-    setSaid({ text: `The agent on ${conn.host.name || 'your Mac'} has the ${what}.`, failed: false });
+    setSaid({ text: `The agent on ${conn.state.host.name || 'your Mac'} has the ${what}.`, failed: false });
   };
 
   const act = async (label: string, run: () => Promise<string | null>) => {

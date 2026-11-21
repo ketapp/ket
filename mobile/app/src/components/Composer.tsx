@@ -181,6 +181,13 @@ export function PlusButton({ open, onPress }: { open: boolean; onPress: () => vo
   );
 }
 
+/** Under the composer with the keyboard down: the home indicator's inset,
+ * less what it leaves clear anyway. The terminal's composer stands on the
+ * same line as the chat's. */
+export const composerRest = (bottomInset: number) => Math.max(bottomInset - 18, COMPOSER_GAP);
+/** Between the composer and the keyboard, while it is up. */
+export const COMPOSER_GAP = 6;
+
 /** Where the + menu hangs, in place over the composer: off the + button,
  * up to 296 wide. */
 export const plusMenu: ViewStyle = { left: 0, right: 0, maxWidth: 296 };

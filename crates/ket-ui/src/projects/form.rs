@@ -3,96 +3,51 @@
 //! Adding a project and changing one ask the same questions — what it is
 //! called, how its badge looks, which branch new worktrees start from, which
 //! agent runs and with what command — so [`ProjectForm`] holds those drafts
-//! once and draws them as parts each dialog places: the card, the identity
-//! line and the labelled rows under it. What differs — the folder line, the
-//! project's path, Remove — stays in [`super::add`] and [`super::settings`].
+//! once and draws them as parts both dialogs place in the same two columns
+//! (see [`super::settings`]): the badge's icon and colour in
+//! [`super::badge`], the agent and its command in [`super::agent`], the
+//! GitHub account in [`super::github`]. What differs — the folder line, the
+//! project's path, the backlog — stays in [`super::add`] and
+//! [`super::settings`].
 //!
 //! The form holds *drafts* while they are being typed and hands them to core
 //! in one write, so a colour that will not parse or a base that is not a
 //! branch comes back as an error line rather than as half-applied settings.
 
+use std::path::Path;
+use std::sync::Arc;
+
 use gpui::{
-    AnyElement, App, Context, Div, Entity, KeyDownEvent, MouseButton, Pixels, Rgba, SharedString,
-    Stateful, Window, div, prelude::*, px,
+    App, Context, Div, Entity, KeyDownEvent, MouseButton, Pixels, SharedString, Stateful, Window,
+    div, prelude::*, px,
 };
 use ket_core::config::AgentLaunch;
 use ket_core::id::ProjectId;
 use ket_core::project::ProjectSettings;
-use ket_core::theme::{Color, Theme};
+use ket_core::theme::Color;
 use ket_core::workspace::Workspace;
 
+use super::agent::agent_drafts;
+use super::badge::matching_glyphs;
+use super::settings::{CONTROL_W, Tip};
 use super::{PROJECT_COLORS, default_color};
 use crate::Shell;
-use crate::fonts::Prose;
 use crate::input::{Style, TextInput, is_text, text_field};
-use crate::paint::{alpha, paint};
-use crate::ui::agent::{agent_label, mark, provider};
-use crate::ui::button::icon_button;
-use crate::ui::chip::{Motion, badge, caption, status_dot, swatch, tag};
 use crate::ui::dialog::card;
-use crate::ui::field::{error as field_error, label};
 use crate::ui::glyph::{self, Glyph};
-use crate::ui::group::{button_group, segment};
 use crate::ui::icon::Icon;
-use crate::ui::menu::{MenuEntry, MenuItem, MenuKey, OpenMenu, dropdown};
-use crate::ui::popup::{Placement, anchored};
-use crate::ui::select::select;
-use crate::ui::toggle::checkbox;
-use crate::ui::{CARD_PAD, FIELD_H};
-
-/// Both dialogs' width.
-pub(super) const CARD_WIDTH: Pixels = px(560.0);
-
-/// The width of the label column beside each control.
-const LABEL_WIDTH: Pixels = px(96.0);
-
-/// The gap between the label column and its control.
-const LABEL_GAP: Pixels = px(12.0);
-
-/// How wide a control in the label column's rows is: the card's inside, less
-/// the labels. The agent menu opens at this width, so it lines up with the
-/// trigger it hangs from.
-pub(super) fn control_width() -> Pixels {
-    CARD_WIDTH - CARD_PAD * 2.0 - LABEL_WIDTH - LABEL_GAP
-}
-
-/// The badge button beside the name: the badge, then the select's chevron.
-const BADGE_TRIGGER_W: Pixels = px(74.0);
-
-/// How wide the badge popover is: two rows of nine swatches and the gaps
-/// between them, inside the popover's padding and border.
-const PALETTE_WIDTH: Pixels = px(310.0);
-
-/// The popover's padding.
-const PALETTE_PAD: Pixels = px(12.0);
-
-/// The gap between swatches.
-const SWATCH_GAP: Pixels = px(8.0);
-
-/// The hex field's width: `#rrggbb` in the mono, and the field's padding.
-const HEX_W: Pixels = px(96.0);
-
-/// Glyphs to a row in the badge popover: eight cells and their gaps fill the
-/// width two rows of nine swatches set.
-const GLYPHS_PER_ROW: usize = 8;
-
-/// A glyph cell's side.
-const GLYPH_CELL: Pixels = px(30.0);
-
-/// The glyph in a cell: the chrome's icon size, so the grid reads as icons.
-const GLYPH_ICON: Pixels = px(16.0);
-
-/// The gap between glyph cells.
-const GLYPH_GAP: Pixels = px(6.0);
+use crate::ui::menu::OpenMenu;
 
 /// Which text field in a project form has the keyboard.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Field {
     /// The display name.
     Name,
-    /// The icon, in the badge popover.
+    /// The icon as typed, in the icon panel.
     Icon,
-    /// The badge colour as `#rrggbb`, in the badge popover.
+    /// What the icon panel's glyphs are filtered by.
+    IconFilter,
+    /// The badge colour as `#rrggbb`.
     Hex,
     /// The default base branch.
     Base,
@@ -124,6 +79,22 @@ pub(super) struct Seed<'a> {
     pub(super) github_account: Option<Option<String>>,
 }
 
+/// The badge picture a project form holds until it is confirmed.
+///
+/// A file picked is only a path until Save, which is when core copies it in
+/// ([`Workspace::import_project_image`]): Cancel leaves nothing behind, and a
+/// file refused is refused at the pick, by [`ket_core::project_image::check`],
+/// so it never becomes the draft at all.
+#[derive(Clone)]
+pub(super) enum ImageDraft {
+    /// Whatever the project has now, if anything.
+    Keep,
+    /// A file picked and checked, not copied in yet.
+    Picked(Arc<Path>),
+    /// Taken off: the badge goes back to its icon.
+    Cleared,
+}
+
 /// Drafts of every field a project dialog edits, until it is confirmed.
 pub(crate) struct ProjectForm {
     /// The directory's name: what the project is called with no display name,
@@ -138,7 +109,10 @@ pub(crate) struct ProjectForm {
     /// Draft icon as typed, stored verbatim by core. Empty means none — or
     /// the glyph, when one is picked.
     pub(super) icon: Entity<TextInput>,
-    /// Draft glyph, picked from the popover's grid ([`crate::ui::glyph`]).
+    /// What the icon panel's glyphs are narrowed to, by name. Emptied each
+    /// time the panel opens: it is a way to find a glyph, not a draft.
+    pub(super) icon_filter: Entity<TextInput>,
+    /// Draft glyph, picked from the icon panel's grid ([`crate::ui::glyph`]).
     ///
     /// Beside the typed icon rather than written into it: the field would
     /// otherwise show `glyph:leaf`, which is the store's spelling, not
@@ -151,7 +125,13 @@ pub(crate) struct ProjectForm {
     /// The field rather than a separate `Option<String>`: a swatch writes its
     /// hex here, so there is one draft and the field always shows it.
     pub(super) hex: Entity<TextInput>,
-    /// Whether the badge popover — icon and colour — is open.
+    /// Draft badge picture. A new project's starts as [`ImageDraft::Keep`],
+    /// which for it is none.
+    pub(super) image: ImageDraft,
+    /// Where the picture the project has is kept, for drawing
+    /// [`ImageDraft::Keep`]. `None` with no picture, or none on disk.
+    pub(super) kept_image: Option<Arc<Path>>,
+    /// Whether the icon panel is open.
     pub(super) palette_open: bool,
     /// Draft default base branch.
     pub(super) base: Entity<TextInput>,
@@ -191,10 +171,13 @@ pub(crate) struct ProjectForm {
     pub(super) github_logins: Vec<String>,
     /// Why the last confirm was refused, if it was.
     pub(super) error: Option<SharedString>,
+    /// The ⓘ, or the image's remove button, under the pointer: whose
+    /// tooltip is up.
+    pub(super) tip: Option<Tip>,
 }
 
 impl ProjectForm {
-    /// A form holding `seed`, with the popover open when `focus` is in it.
+    /// A form holding `seed`, with the icon panel open when `focus` is in it.
     pub(super) fn new(workspace: &Workspace, seed: Seed<'_>, focus: Field, cx: &mut App) -> Self {
         let (agents, configured, commands) = agent_drafts(workspace, seed.settings, cx);
         let local_agents =
@@ -229,9 +212,12 @@ impl ProjectForm {
                 if glyph.is_some() { "" } else { stored_icon },
                 cx,
             ),
+            icon_filter: TextInput::new("Filter icons", cx),
             glyph,
             hex: TextInput::with_text(PROJECT_COLORS[0].1, &hex, cx),
-            palette_open: focus == Field::Icon || focus == Field::Hex,
+            image: ImageDraft::Keep,
+            kept_image: None,
+            palette_open: in_panel(focus),
             base: TextInput::with_text("main", seed.base, cx),
             agent: seed.agent,
             agent_menu: None,
@@ -247,6 +233,7 @@ impl ProjectForm {
             github_menu: None,
             github_logins: Vec::new(),
             error: None,
+            tip: None,
         }
     }
 
@@ -265,6 +252,7 @@ impl ProjectForm {
         match field {
             Field::Name => self.name.clone(),
             Field::Icon => self.icon.clone(),
+            Field::IconFilter => self.icon_filter.clone(),
             Field::Hex => self.hex.clone(),
             Field::Base => self.base.clone(),
             Field::Command(row) => self.commands[row].clone(),
@@ -273,17 +261,86 @@ impl ProjectForm {
 
     /// Every field the form has, shown or not.
     fn inputs(&self) -> Vec<Entity<TextInput>> {
-        [&self.name, &self.icon, &self.hex, &self.base]
+        [
+            &self.name,
+            &self.icon,
+            &self.icon_filter,
+            &self.hex,
+            &self.base,
+        ]
+        .into_iter()
+        .chain(&self.commands)
+        .cloned()
+        .collect()
+    }
+
+    /// `field` when it is on show, else the field that stands in for it: the
+    /// command on show for any agent's command, and the name for anything
+    /// else that is not drawn. The keyboard is never handed to a field the
+    /// dialog does not show.
+    pub(super) fn visible(&self, field: Field) -> Field {
+        match field {
+            Field::Command(_) => self.command_row().map_or(Field::Name, Field::Command),
+            other if self.order().contains(&other) => other,
+            _ => Field::Name,
+        }
+    }
+
+    /// The fields that go when the icon panel closes.
+    fn panel_inputs(&self) -> [&Entity<TextInput>; 2] {
+        [&self.icon_filter, &self.icon]
+    }
+
+    /// Opens the icon panel, and closes either menu: one of them open at a
+    /// time. The icon panel opens with its filter
+    /// empty and holding the keyboard, so typing narrows the glyphs at once.
+    pub(super) fn open_panel(&mut self, cx: &mut App) {
+        self.palette_open = true;
+        self.agent_menu = None;
+        self.github_menu = None;
+        self.icon_filter.update(cx, |input, _| {
+            input.clear();
+            input.request_focus();
+        });
+    }
+
+    /// Closes the icon panel, if it is open.
+    pub(super) fn close_panel(&mut self, window: &mut Window, cx: &App) {
+        if !self.palette_open {
+            return;
+        }
+        self.palette_open = false;
+        // Keys typed next must not go to a field that is no longer drawn. A
+        // press on another field has already taken the keyboard by now.
+        let hidden = self
+            .panel_inputs()
             .into_iter()
-            .chain(&self.commands)
-            .cloned()
-            .collect()
+            .any(|input| input.read(cx).is_focused(window));
+        if hidden {
+            window.focus(self.name.read(cx).focus_handle());
+        }
+    }
+
+    /// Takes a glyph from the grid, `None` being the letters cell. Picking
+    /// one empties the typed icon, which would otherwise outrank it. The icon
+    /// panel is a dropdown, so it closes on the pick.
+    pub(super) fn pick_glyph(&mut self, glyph: Option<Glyph>, window: &mut Window, cx: &mut App) {
+        self.glyph = glyph;
+        self.icon.update(cx, |input, _| input.set_text(""));
+        self.error = None;
+        self.close_panel(window, cx);
+    }
+
+    /// How wide the agent and account menus open: as wide as the trigger
+    /// they hang from.
+    pub(super) fn menu_width(&self) -> Pixels {
+        CONTROL_W
     }
 
     /// The row in `agents` whose command is on show: the chosen agent's, or
     /// the first configured one's when the project takes the default — which
     /// is the agent "default" launches (see `Workspace::create_worktree`).
-    fn command_row(&self) -> Option<usize> {
+    pub(super) fn command_row(&self) -> Option<usize> {
         match &self.agent {
             Some(name) => self.agents.iter().position(|agent| agent == name),
             None => (!self.agents.is_empty()).then_some(0),
@@ -293,13 +350,23 @@ impl ProjectForm {
     /// The badge colour the draft holds: the swatch or hex in the field, or
     /// the neutral default when it is empty. `None` when what is typed is not
     /// a colour yet, which the field shows as a refusal.
-    fn colour(&self, cx: &App) -> Option<Color> {
+    pub(super) fn colour(&self, cx: &App) -> Option<Color> {
         let text = self.hex.read(cx).text();
         let text = text.trim();
         if text.is_empty() {
             return Some(default_color());
         }
         Color::from_hex(text).ok()
+    }
+
+    /// The picture the badge wears as drafted: the one picked, else the one
+    /// the project has, unless it was taken off.
+    pub(super) fn image_shown(&self) -> Option<Arc<Path>> {
+        match &self.image {
+            ImageDraft::Keep => self.kept_image.clone(),
+            ImageDraft::Picked(path) => Some(path.clone()),
+            ImageDraft::Cleared => None,
+        }
     }
 
     /// The icon as core will store it: what is typed, else the glyph's
@@ -312,13 +379,14 @@ impl ProjectForm {
         self.glyph.map(Glyph::stored).unwrap_or_default()
     }
 
-    /// The text field rows Tab walks, in order. The popover's two only while
-    /// it is open, and only the command that is on show.
+    /// The text fields Tab walks, in reading order: the icon panel's only
+    /// while it is open, and only the command that is on show.
     fn order(&self) -> Vec<Field> {
         let mut order = vec![Field::Name];
         if self.palette_open {
-            order.extend([Field::Icon, Field::Hex]);
+            order.extend([Field::IconFilter, Field::Icon]);
         }
+        order.push(Field::Hex);
         order.push(Field::Base);
         order.extend(self.command_row().map(Field::Command));
         order
@@ -335,13 +403,14 @@ impl ProjectForm {
     /// The drafts as core takes them.
     ///
     /// A colour that does not parse is refused here rather than by core so
-    /// the reason can name the field: core's message is about a config value,
-    /// and this is a box in a popover that may not even be open — so the
-    /// popover is opened to show it.
-    pub(super) fn drafts(&mut self, cx: &App) -> Option<Drafts> {
+    /// the reason can name the field: core's message is about a config value.
+    /// The box is on show, unless the icon panel is hanging over it: the
+    /// panel goes, and the box takes the keyboard.
+    pub(super) fn drafts(&mut self, cx: &mut App) -> Option<Drafts> {
         let Some(colour) = self.colour(cx) else {
             let typed = self.hex.read(cx).text();
-            self.palette_open = true;
+            self.palette_open = false;
+            self.hex.update(cx, |input, _| input.request_focus());
             self.error = Some(format!("{} is not a colour — use #rrggbb", typed.trim()).into());
             return None;
         };
@@ -349,6 +418,7 @@ impl ProjectForm {
             display_name: self.name.read(cx).text(),
             color: (colour != default_color()).then(|| colour.to_hex()),
             icon: self.icon_draft(cx),
+            image: self.image.clone(),
             hide_discovered: self.hide_discovered,
             trust_automation: self.trust_automation,
             github_issues: self.github_issues,
@@ -373,6 +443,7 @@ pub(super) struct Drafts {
     display_name: String,
     color: Option<String>,
     icon: String,
+    image: ImageDraft,
     hide_discovered: bool,
     trust_automation: bool,
     /// `None` when the form did not ask, which keeps what is stored.
@@ -390,7 +461,9 @@ impl Drafts {
     ///
     /// Presentation is written first because it can only fail on the store
     /// itself; the base and agent are checked against the repository and the
-    /// config, and a refusal there comes back as the error.
+    /// config, and a refusal there comes back as the error. A picture picked
+    /// is copied in before any of it, so a file that has gone since it was
+    /// picked is refused with nothing written.
     pub(super) fn write(self, workspace: &Workspace, id: &ProjectId) -> ket_core::Result<()> {
         // Carried through rather than rebuilt. The form does not edit
         // `build_dirs` — it is set in the config file — and a save that
@@ -398,6 +471,11 @@ impl Drafts {
         // renamed the project.
         let existing = workspace.project_settings(id).unwrap_or_default();
         let build_dirs = existing.build_dirs;
+        let image = match self.image {
+            ImageDraft::Keep => existing.image,
+            ImageDraft::Picked(path) => Some(workspace.import_project_image(id, &path)?),
+            ImageDraft::Cleared => None,
+        };
 
         // An override for an agent the config no longer lists is kept, not
         // dropped: it has no row here to be cleared from, and the agent coming
@@ -436,6 +514,7 @@ impl Drafts {
             github_account: self.github_account.unwrap_or(existing.github_account),
             pinned: existing.pinned,
             hidden: existing.hidden,
+            image,
         };
         workspace.set_project_settings(id, settings)?;
         workspace.set_default_base(id, &self.base)?;
@@ -444,61 +523,10 @@ impl Drafts {
     }
 }
 
-/// The form's agent rows for a project with `settings`: each configured
-/// agent's name, its command line in Settings, and a field holding the
-/// project's own command for it.
-fn agent_drafts(
-    workspace: &Workspace,
-    settings: &ProjectSettings,
-    cx: &mut App,
-) -> (Vec<String>, Vec<SharedString>, Vec<Entity<TextInput>>) {
-    let config = workspace.config();
-    let agents = config
-        .agents
-        .iter()
-        .map(|agent| agent.name.clone())
-        .collect();
-    let configured: Vec<SharedString> = config
-        .agents
-        .iter()
-        .map(|agent| agent.launch_line(&[]).into())
-        .collect();
-    // The configured line is the placeholder, so an empty field reads as what
-    // the project will run rather than as a blank.
-    let commands = config
-        .agents
-        .iter()
-        .zip(&configured)
-        .map(|(agent, line)| {
-            let own = settings
-                .agents
-                .get(&agent.name)
-                .map(|launch| ket_core::shell::line(&launch.command, &launch.args))
-                .unwrap_or_default();
-            TextInput::with_text(line.clone(), &own, cx)
-        })
-        .collect();
-    (agents, configured, commands)
-}
-
-/// A label beside its control, centred on a field's height whatever the
-/// control is, so a checkbox row and a field row line up the same.
-fn labelled(caption: &'static str, control: impl IntoElement, t: &Theme) -> AnyElement {
-    div()
-        .flex()
-        .items_start()
-        .gap(LABEL_GAP)
-        .child(
-            div()
-                .w(LABEL_WIDTH)
-                .h(FIELD_H)
-                .flex_none()
-                .flex()
-                .items_center()
-                .child(label(caption, t).mb(px(0.0))),
-        )
-        .child(control)
-        .into_any_element()
+/// Whether `field` is drawn in the icon panel, so a form asked to open
+/// there opens it.
+fn in_panel(field: Field) -> bool {
+    matches!(field, Field::Icon | Field::IconFilter)
 }
 
 /// What a key meant to a project form, past what the form did with it.
@@ -582,7 +610,7 @@ impl Shell {
             return FormKey::Handled;
         };
         match event.keystroke.key.as_str() {
-            // The popover first, then the dialog: Escape backs out one layer
+            // The icon panel first, then the dialog: Escape backs out one layer
             // at a time.
             "escape" if form.palette_open => {
                 form.palette_open = false;
@@ -590,13 +618,35 @@ impl Shell {
                 FormKey::Handled
             }
             "escape" => FormKey::Close,
-            "enter" => FormKey::Submit,
+            // In the icon panel's filter with something typed, Return takes
+            // the first glyph left, as a menu's filter takes its first row.
+            // Anywhere else, and with nothing to take, it is the dialog's.
+            "enter" => {
+                let filtering = form.palette_open && form.icon_filter.read(cx).is_focused(window);
+                let query = form.icon_filter.read(cx).text();
+                let first = filtering
+                    .then(|| query.trim())
+                    .filter(|query| !query.is_empty())
+                    .and_then(|query| matching_glyphs(query).next());
+                match first {
+                    Some(glyph) => {
+                        form.pick_glyph(Some(glyph), window, cx);
+                        FormKey::Handled
+                    }
+                    None => FormKey::Submit,
+                }
+            }
             "tab" => {
                 // Tab from nowhere lands on the first field.
                 let next = match form.focused(window, cx) {
                     Some((field, _)) => form.step(field, event.keystroke.modifiers.shift),
                     None => Field::Name,
                 };
+                // The icon panel hangs over the colour, hex field and all, so
+                // Tab leaving it puts it away rather than typing under it.
+                if !in_panel(next) {
+                    form.palette_open = false;
+                }
                 // Tabbing into a field selects it, so the next keystroke
                 // replaces the value rather than extending it. That is what
                 // every other text field does.
@@ -613,99 +663,45 @@ impl Shell {
         }
     }
 
-    // ---- the agent menu -------------------------------------------------------
-
-    /// Opens or closes the form's agent dropdown.
-    fn toggle_form_agent_menu(&mut self, cx: &App) {
-        let Some(form) = self.project_form_mut() else {
-            return;
-        };
-        if form.agent_menu.take().is_some() {
-            return;
-        }
-        form.palette_open = false;
-        form.github_menu = None;
-
-        let Some(form) = self.project_form() else {
-            return;
-        };
-        let menu = agent_menu(form, &self.theme, cx);
-        if let Some(form) = self.project_form_mut() {
-            form.agent_menu = Some(menu);
-        }
-    }
-
-    /// Takes a pick from the agent dropdown: row 0 is the default.
-    fn pick_form_agent(&mut self, row: usize) {
-        if let Some(form) = self.project_form_mut() {
-            form.agent = row.checked_sub(1).and_then(|row| {
-                form.agents
-                    .iter()
-                    .chain(&form.local_agents)
-                    .nth(row)
-                    .cloned()
-            });
-            form.agent_menu = None;
-            form.error = None;
-        }
-    }
-
-    /// Lets the agent dropdown take keys before the form interprets them.
-    fn form_agent_menu_key(&mut self, event: &KeyDownEvent) -> bool {
-        let Some(menu) = self
-            .project_form_mut()
-            .and_then(|form| form.agent_menu.as_mut())
-        else {
-            return false;
-        };
-
-        match menu.key(event) {
-            MenuKey::Ignored => false,
-            MenuKey::Consumed => true,
-            MenuKey::Close => {
-                if let Some(form) = self.project_form_mut() {
-                    form.agent_menu = None;
-                }
-                true
-            }
-            MenuKey::Run(row) => {
-                self.pick_form_agent(row);
-                true
-            }
-        }
-    }
-
     // ---- views ----------------------------------------------------------------
 
-    /// The dialog card a project form sits in.
+    /// The dialog card a project form sits in, `width` wide.
     ///
-    /// A press anywhere in it but the badge popover and its trigger puts the
-    /// popover away.
-    pub(super) fn form_card(&self, id: &'static str, cx: &mut Context<Self>) -> Stateful<Div> {
-        card(id, CARD_WIDTH, &self.theme).on_mouse_down(
+    /// A press anywhere in it but an open panel and its trigger puts the
+    /// panel away — see [`Shell::put_form_panels_away`].
+    pub(super) fn form_card(
+        &self,
+        id: &'static str,
+        width: Pixels,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        card(id, width, &self.theme).on_mouse_down(
             MouseButton::Left,
             cx.listener(|this, _, window, cx| {
-                if let Some(form) = this.project_form_mut()
-                    && form.palette_open
-                {
-                    form.palette_open = false;
-                    // Keys typed next must not go to a field that is no longer
-                    // drawn. A press on another field has already taken the
-                    // keyboard by now.
-                    let hidden = [&form.icon, &form.hex]
-                        .into_iter()
-                        .any(|input| input.read(cx).is_focused(window));
-                    if hidden {
-                        window.focus(form.name.read(cx).focus_handle());
-                    }
+                if this.put_form_panels_away(window, cx) {
                     cx.notify();
                 }
             }),
         )
     }
 
+    /// Puts away what the open form has open, for a press that landed outside
+    /// it. Returns whether anything closed.
+    ///
+    /// That is the icon panel and both menus.
+    pub(super) fn put_form_panels_away(&mut self, window: &mut Window, cx: &App) -> bool {
+        let Some(form) = self.project_form_mut() else {
+            return false;
+        };
+        let open = form.palette_open;
+        form.close_panel(window, cx);
+        let agent = form.agent_menu.take().is_some();
+        let account = form.github_menu.take().is_some();
+        open || agent || account
+    }
+
     /// One of the form's text fields. A press on it selects what is in it.
-    fn form_field(
+    pub(super) fn form_field(
         &self,
         form: &ProjectForm,
         which: Field,
@@ -721,6 +717,7 @@ impl Shell {
         let id = match which {
             Field::Name => "field-name".into(),
             Field::Icon => "field-icon".into(),
+            Field::IconFilter => "field-icon-filter".into(),
             Field::Hex => "field-hex".into(),
             Field::Base => "field-base".into(),
             Field::Command(row) => gpui::ElementId::from(("field-command", row)),
@@ -734,616 +731,22 @@ impl Shell {
             },
         ))
     }
-
-    /// What the project looks like, on one line: its badge, which opens the
-    /// icon and colour, beside its name.
-    pub(super) fn form_identity(
-        &self,
-        form: &ProjectForm,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let t = &self.theme;
-        let colour = form.colour(cx);
-        let shown = colour.unwrap_or_else(default_color);
-        let initial = badge_initial(form, cx);
-
-        let trigger = select("project-badge", "")
-            .leading(badge(shown, initial.clone(), t))
-            .open(form.palette_open)
-            .render(t)
-            .w(BADGE_TRIGGER_W)
-            .flex_none()
-            .on_click(cx.listener(|this, _, window, cx| {
-                if let Some(form) = this.project_form_mut() {
-                    form.palette_open = !form.palette_open;
-                    form.agent_menu = None;
-                    form.github_menu = None;
-                    let hidden = !form.palette_open
-                        && [&form.icon, &form.hex]
-                            .into_iter()
-                            .any(|input| input.read(cx).is_focused(window));
-                    if hidden {
-                        window.focus(form.name.read(cx).focus_handle());
-                    }
-                }
-                cx.notify();
-            }));
-        let palette = form
-            .palette_open
-            .then(|| self.form_palette(form, colour, shown, initial, window, cx));
-        let badge = anchored(
-            "project-badge-popover",
-            trigger.into_any_element(),
-            palette,
-            Placement::BelowStart,
-            PALETTE_WIDTH,
-            window,
-            t,
-        );
-        let name = self
-            .form_field(form, Field::Name, false, None, window, cx)
-            .flex_1();
-
-        div()
-            .flex()
-            .items_center()
-            .gap(px(8.0))
-            .child(badge)
-            .child(name)
-            .into_any_element()
-    }
-
-    /// The badge popover: the icon, the swatches, and the colour as a name
-    /// and a hex.
-    fn form_palette(
-        &self,
-        form: &ProjectForm,
-        colour: Option<Color>,
-        shown: Color,
-        initial: SharedString,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let t = &self.theme;
-        let icon_field = self.form_field(form, Field::Icon, false, None, window, cx);
-        let glyphs = self.glyph_grid(form, cx);
-        let hex_field = self
-            .form_field(form, Field::Hex, colour.is_none(), None, window, cx)
-            .w(HEX_W)
-            .flex_none()
-            .font_family(self.font_family.clone());
-        let named = match colour {
-            Some(colour) => PROJECT_COLORS
-                .iter()
-                .find(|(_, hex)| Color::from_hex(hex).ok() == Some(colour))
-                .map_or("Custom", |(name, _)| *name),
-            None => "Not a colour",
-        };
-        let swatches = PROJECT_COLORS.chunks(9).enumerate().map(|(line, chunk)| {
-            div()
-                .flex()
-                .gap(SWATCH_GAP)
-                .children(chunk.iter().enumerate().map(|(at, (_, hex))| {
-                    let index = line * 9 + at;
-                    let each = Color::from_hex(hex).unwrap_or_else(|_| default_color());
-                    swatch(("swatch", index), each, colour == Some(each), t).on_click(cx.listener(
-                        move |this, _, _, cx| {
-                            if let Some(form) = this.project_form_mut() {
-                                // The default is the field's placeholder, so
-                                // choosing it empties the field.
-                                let text = if index == 0 { "" } else { *hex };
-                                form.hex.update(cx, |input, _| input.set_text(text));
-                                form.error = None;
-                            }
-                            cx.notify();
-                        },
-                    ))
-                }))
-        });
-
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(12.0))
-            .p(PALETTE_PAD)
-            .prose()
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .child(label("Icon", t))
-                    .child(glyphs)
-                    .child(div().pt(px(10.0)).child(icon_field)),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .child(label("Colour", t))
-                    .child(div().flex().flex_col().gap(SWATCH_GAP).children(swatches)),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .child(badge(shown, initial, t))
-                    .child(caption(named, t).flex_1().text_color(paint(t.text.primary)))
-                    .child(hex_field),
-            )
-            .into_any_element()
-    }
-
-    /// The popover's glyphs: letters first — the name's initial, or whatever
-    /// is typed below — then every glyph, the chosen one held down. Text
-    /// typed in the icon field outranks the glyphs, so while there is some,
-    /// the letters cell is the one held.
-    fn glyph_grid(&self, form: &ProjectForm, cx: &mut Context<Self>) -> Div {
-        let t = &self.theme;
-        let typed = !form.icon.read(cx).text().trim().is_empty();
-        let choices = std::iter::once((Icon::TextCursor, None))
-            .chain(glyph::every().map(|glyph| (Icon::Glyph(glyph), Some(glyph))));
-        let cells = choices.enumerate().map(|(at, (which, glyph))| {
-            let chosen = if typed {
-                glyph.is_none()
-            } else {
-                form.glyph == glyph
-            };
-            icon_button(("glyph-cell", at), which)
-                .bare()
-                .sized(GLYPH_CELL, GLYPH_ICON)
-                .pressed(chosen)
-                .render(t)
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    if let Some(form) = this.project_form_mut() {
-                        form.glyph = glyph;
-                        form.icon.update(cx, |input, _| input.set_text(""));
-                        form.error = None;
-                    }
-                    cx.notify();
-                }))
-                .into_any_element()
-        });
-        let mut rows = Vec::new();
-        let mut row = Vec::new();
-        for cell in cells {
-            row.push(cell);
-            if row.len() == GLYPHS_PER_ROW {
-                rows.push(
-                    div()
-                        .flex()
-                        .gap(GLYPH_GAP)
-                        .children(std::mem::take(&mut row)),
-                );
-            }
-        }
-        if !row.is_empty() {
-            rows.push(div().flex().gap(GLYPH_GAP).children(row));
-        }
-        div().flex().flex_col().gap(GLYPH_GAP).children(rows)
-    }
-
-    /// The labelled rows under the identity line — base, agent, the agent's
-    /// command, the two switches — and the refusal, if the last confirm was
-    /// refused.
-    pub(super) fn form_rows(
-        &self,
-        form: &ProjectForm,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Vec<AnyElement> {
-        let t = &self.theme;
-        let base = self
-            .form_field(form, Field::Base, false, Some(Icon::GitBranch), window, cx)
-            .flex_1()
-            .font_family(self.font_family.clone());
-
-        let mut rows = vec![
-            labelled("Base branch", base, t),
-            labelled("Agent", self.form_agent(form, cx), t),
-        ];
-        rows.extend(
-            self.form_command(form, window, cx)
-                .map(|command| labelled("Command", command, t)),
-        );
-        rows.push(labelled(
-            "Worktrees",
-            div()
-                .h(FIELD_H)
-                .flex()
-                .items_center()
-                .child(self.form_hide_discovered(form, cx)),
-            t,
-        ));
-        rows.push(labelled("Automation", self.form_trust(form, cx), t));
-        rows.extend(
-            form.backlog_in_repo
-                .map(|in_repo| labelled("Backlog", self.form_backlog(in_repo, cx), t)),
-        );
-        rows.extend(
-            form.github_issues
-                .map(|on| labelled("GitHub", self.form_github(on, cx), t)),
-        );
-        rows.extend(
-            form.error
-                .clone()
-                .map(|why| field_error(why, t).into_any_element()),
-        );
-        rows
-    }
-
-    /// The agent dropdown. A dropdown rather than a button per agent so the
-    /// list can grow.
-    fn form_agent(&self, form: &ProjectForm, cx: &mut Context<Self>) -> AnyElement {
-        let t = &self.theme;
-        let shown = form.agent.as_deref().or_else(|| {
-            form.command_row()
-                .and_then(|row| form.agents.get(row))
-                .map(String::as_str)
-        });
-        let mut trigger = select(
-            "project-agent",
-            shown.map_or_else(|| "No agents configured".to_owned(), agent_label),
-        )
-        .leading(mark(shown.unwrap_or(""), t))
-        .open(form.agent_menu.is_some());
-        if form.agent.is_none() {
-            trigger = trigger.trailing(tag("Settings default", t));
-        }
-        let panel = form.agent_menu.as_ref().map(|menu| {
-            menu.view(
-                t,
-                cx,
-                |shell, row, cx| {
-                    shell.pick_form_agent(*row);
-                    cx.notify();
-                },
-                |shell, cx| {
-                    if let Some(form) = shell.project_form_mut() {
-                        form.agent_menu = None;
-                    }
-                    cx.notify();
-                },
-            )
-        });
-        dropdown("project-agent-select", trigger.render(t), panel)
-            .flex_1()
-            .cursor_pointer()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    this.toggle_form_agent_menu(cx);
-                    cx.stop_propagation();
-                    cx.notify();
-                }),
-            )
-            .into_any_element()
-    }
-
-    /// The chosen agent's command, what it replaces, and any other agent this
-    /// project already runs differently — those have no field on show, and a
-    /// command nobody can see is a session on the wrong account.
-    ///
-    /// Only the chosen agent's command is on show: the command is a fact about
-    /// that agent, and a field per configured agent grows the dialog with
-    /// every one added. `None` when no agent is configured.
-    fn form_command(
-        &self,
-        form: &ProjectForm,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        let t = &self.theme;
-        let mono = self.font_family.clone();
-        let tint = crate::agent_override::hue(t);
-        let row = form.command_row()?;
-        let input = &form.commands[row];
-        let set = !input.read(cx).text().trim().is_empty();
-        let typing = input.read(cx).is_focused(window);
-
-        let end: AnyElement = if set {
-            icon_button("project-command-reset", Icon::RotateCcw)
-                .bare()
-                .dense()
-                .render(t)
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    if let Some(form) = this.project_form() {
-                        form.commands[row].update(cx, |input, _| input.clear());
-                    }
-                    cx.stop_propagation();
-                    cx.notify();
-                }))
-                .into_any_element()
-        } else {
-            tag("from Settings", t).into_any_element()
-        };
-        // A command in force wears the override's tint until the field is
-        // being typed in — see `crate::agent_override`.
-        let field = self
-            .form_field(form, Field::Command(row), false, None, window, cx)
-            .flex_1()
-            .font_family(mono.clone())
-            .when(set && !typing, |el| el.border_color(alpha(tint, 0.6)))
-            .child(end);
-
-        let agent = agent_label(&form.agents[row]);
-        let project = match form.dir_name.as_ref() {
-            "" => "this project",
-            name => name,
-        };
-        let note = if set {
-            line()
-                .flex_wrap()
-                .child(status_dot(tint, Motion::Still, px(6.0)))
-                .child(caption("Replaces", t))
-                .child(
-                    caption(form.configured[row].clone(), t)
-                        .font_family(mono.clone())
-                        .line_through(),
-                )
-                .child(caption(
-                    format!("for every {agent} session in {project}"),
-                    t,
-                ))
-        } else {
-            line().child(caption(
-                "Blank runs the one in Settings. Type a command to change it here.",
-                t,
-            ))
-        };
-        let others = form
-            .agents
-            .iter()
-            .zip(&form.commands)
-            .enumerate()
-            .filter(|(other, _)| *other != row)
-            .filter_map(|(_, (name, input))| {
-                let text = input.read(cx).text();
-                let word = text.split_whitespace().next()?.to_owned();
-                Some(
-                    line()
-                        .child(mark(name, t))
-                        .child(caption(format!("{} runs", agent_label(name)), t))
-                        .child(caption(word, t).font_family(mono.clone()).text_color(tint))
-                        .child(caption("here too", t)),
-                )
-            });
-
-        Some(
-            div()
-                .flex()
-                .flex_col()
-                .flex_1()
-                .min_w_0()
-                .gap(px(7.0))
-                .child(div().flex().child(field))
-                .child(note)
-                .children(others)
-                .into_any_element(),
-        )
-    }
-
-    /// The discovered-worktrees switch.
-    fn form_hide_discovered(&self, form: &ProjectForm, cx: &mut Context<Self>) -> AnyElement {
-        checkbox(
-            "hide-discovered",
-            form.hide_discovered,
-            "Hide worktrees ket did not create",
-            &self.theme,
-        )
-        .on_click(cx.listener(|this, _, _, cx| {
-            if let Some(form) = this.project_form_mut() {
-                form.hide_discovered = !form.hide_discovered;
-            }
-            cx.notify();
-        }))
-        .into_any_element()
-    }
-
-    /// Where the backlog is kept: privately, or in the repository for
-    /// everyone who has it — and what that means, under the choice.
-    fn form_backlog(&self, in_repo: bool, cx: &mut Context<Self>) -> AnyElement {
-        let t = &self.theme;
-        let choice = button_group("project-backlog")
-            .small()
-            .child(
-                segment("project-backlog-private", "Private")
-                    .leading(Icon::Lock, paint(t.text.dim))
-                    .selected(!in_repo)
-                    .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
-                        if let Some(form) = this.project_form_mut() {
-                            form.backlog_in_repo = Some(false);
-                        }
-                        cx.notify();
-                    })),
-            )
-            .child(
-                segment("project-backlog-repo", "In the repository")
-                    .leading(Icon::BookMarked, paint(t.status.running))
-                    .selected(in_repo)
-                    .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
-                        if let Some(form) = this.project_form_mut() {
-                            form.backlog_in_repo = Some(true);
-                        }
-                        cx.notify();
-                    })),
-            )
-            .render(t);
-        let note = if in_repo {
-            "Notes and their files live in .ket/backlog/, one file per note. Commit \
-             them, and everyone with the repository shares one backlog."
-        } else {
-            "Notes stay on this Mac, in ket's own data."
-        };
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(6.0))
-            .flex_1()
-            .min_h(FIELD_H)
-            .justify_center()
-            .child(div().flex().child(choice))
-            .child(caption(note, t))
-            .into_any_element()
-    }
-
-    /// The switch that keeps the backlog in step with GitHub issues, and
-    /// what that means, under it.
-    fn form_github(&self, on: bool, cx: &mut Context<Self>) -> AnyElement {
-        let t = &self.theme;
-        let switch = checkbox(
-            "project-github-issues",
-            on,
-            "Sync the backlog with GitHub issues",
-            t,
-        )
-        .on_click(cx.listener(|this, _, _, cx| {
-            if let Some(form) = this.project_form_mut() {
-                form.github_issues = form.github_issues.map(|on| !on);
-            }
-            cx.notify();
-        }));
-        let note = if on {
-            "Open issues arrive as notes, and a note is done when its issue closes. \
-             Done or deleted here closes the issue."
-        } else {
-            "Notes can still be made into issues one at a time, from a note's menu."
-        };
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(6.0))
-            .flex_1()
-            // Without this the column is as wide as its longest line wants
-            // to be, and a repository error from GitHub is a long line: the
-            // column, its dropdown and the error all ran past the dialog's
-            // edge. Bounded, the error wraps and the dropdown fills the
-            // column.
-            .min_w_0()
-            .min_h(FIELD_H)
-            .justify_center()
-            .child(div().flex().child(switch))
-            .child(caption(note, t))
-            .children(self.github_line(cx))
-            .into_any_element()
-    }
-
-    /// The switch for the repository's own automation.
-    fn form_trust(&self, form: &ProjectForm, cx: &mut Context<Self>) -> AnyElement {
-        checkbox(
-            "trust-automation",
-            form.trust_automation,
-            "Run hooks and post-command from .ket.toml",
-            &self.theme,
-        )
-        .on_click(cx.listener(|this, _, _, cx| {
-            if let Some(form) = this.project_form_mut() {
-                form.trust_automation = !form.trust_automation;
-            }
-            cx.notify();
-        }))
-        .into_any_element()
-    }
 }
 
-/// The agent dropdown's rows: "Settings default", then each agent with what
-/// it would launch here — the project's own command in the override's tint,
-/// else the one in Settings. With many agents that is the difference between
-/// picking one, and picking one then checking what it runs.
-fn agent_menu(form: &ProjectForm, t: &Theme, cx: &App) -> OpenMenu<usize> {
-    let tint = crate::agent_override::hue(t);
-    let launches = |row: usize| -> (SharedString, Option<Rgba>) {
-        let own = form.commands[row].read(cx).text();
-        match own.split_whitespace().next() {
-            Some(word) => (word.to_owned().into(), Some(tint)),
-            None => (
-                form.configured[row]
-                    .split_whitespace()
-                    .next()
-                    .unwrap_or_default()
-                    .to_owned()
-                    .into(),
-                None,
-            ),
-        }
-    };
-    let current = form
-        .agent
-        .as_ref()
-        .and_then(|name| {
-            form.agents
-                .iter()
-                .chain(&form.local_agents)
-                .position(|agent| agent == name)
-        })
-        .map_or(0, |row| row + 1);
-    let checked = |item: MenuItem<usize>, row: usize| {
-        MenuEntry::Item(if current == row { item.checked() } else { item })
-    };
-
-    let mut entries = Vec::with_capacity(form.agents.len() + form.local_agents.len() + 3);
-    if let Some(first) = form.agents.first() {
-        let (which, colour) = provider(first, t);
-        let item = MenuItem::new(0, "Settings default")
-            .tinted_icon(which, colour)
-            .detail(agent_label(first), None);
-        entries.push(checked(item, 0));
-        entries.push(MenuEntry::Separator);
-    }
-    for (row, name) in form.agents.iter().enumerate() {
-        let (which, colour) = provider(name, t);
-        let (command, ink) = launches(row);
-        let item = MenuItem::new(row + 1, agent_label(name))
-            .tinted_icon(which, colour)
-            .detail(command, ink);
-        entries.push(checked(item, row + 1));
-    }
-    // Local agents last, set apart: what they run is the model, on this Mac.
-    if !form.local_agents.is_empty() {
-        entries.push(MenuEntry::Separator);
-    }
-    for (offset, name) in form.local_agents.iter().enumerate() {
-        let row = form.agents.len() + offset + 1;
-        let (which, colour) = provider(name, t);
-        let item = MenuItem::new(row, agent_label(name))
-            .tinted_icon(which, colour)
-            .detail("on this Mac", None);
-        entries.push(checked(item, row));
-    }
-    OpenMenu::new(
-        "project-agent".into(),
-        Some("Choose an agent…".into()),
-        control_width(),
-        entries,
-    )
-    .selected(current)
-    .offset(px(0.0), px(6.0))
-}
-
-/// The badge's mark: the typed icon, else the glyph, else the first letter of
-/// the name, else of the folder's name.
-fn badge_initial(form: &ProjectForm, cx: &App) -> SharedString {
-    let icon = form.icon.read(cx).text();
-    if !icon.trim().is_empty() {
-        return icon.trim().to_owned().into();
-    }
-    if let Some(glyph) = form.glyph {
-        return glyph.stored().into();
-    }
-    let name = form.name.read(cx).text();
-    let name = match name.trim() {
-        "" => form.dir_name.as_ref(),
-        typed => typed,
-    };
-    name.chars()
-        .next()
-        .map(|c| c.to_uppercase().to_string())
-        .unwrap_or_default()
-        .into()
-}
-
-/// One line of the notes under the command: captions and marks in a row.
-fn line() -> Div {
+/// One line of notes: captions and marks in a row.
+pub(super) fn line() -> Div {
     div().flex().items_center().gap(px(5.0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_icon_panel_names_the_fields_it_holds() {
+        assert!(!in_panel(Field::Hex));
+        assert!(in_panel(Field::IconFilter));
+        assert!(in_panel(Field::Icon));
+        assert!(!in_panel(Field::Name));
+    }
 }

@@ -19,8 +19,8 @@ use super::{priority_icon, priority_mark, priority_tint};
 use crate::Shell;
 use crate::input::{Style, TextInput, is_text, text_field};
 use crate::paint::{alpha, paint};
-use crate::ui::button::{icon_button, pressable};
-use crate::ui::chip::{badge, caption, key_hint, tinted_tag};
+use crate::ui::button::pressable;
+use crate::ui::chip::{caption, image_badge, key_hint, tinted_tag};
 use crate::ui::dialog::card;
 use crate::ui::icon::{Icon, sized_icon};
 use crate::ui::menu::{MenuEntry, MenuItem, MenuKey, OpenMenu, dropdown};
@@ -464,7 +464,7 @@ impl Shell {
             .map(|c| c.to_uppercase().collect())
             .unwrap_or_default();
         let project = select(PROJECT_PICKER, node.name.clone())
-            .leading(badge(node.color, initial, t))
+            .leading(image_badge(node.image.clone(), node.color, initial, t))
             .inline()
             .open(menu_open(PROJECT_PICKER))
             .render(t);
@@ -473,11 +473,8 @@ impl Shell {
             .inline()
             .open(menu_open(PRIORITY_PICKER))
             .render(t);
-        let close = icon_button("capture-close", Icon::Close)
-            .bare()
-            .small()
-            .render(t)
-            .on_click(cx.listener(|this, _, _, cx| {
+        let close =
+            crate::ui::dialog::close("capture-close", t).on_click(cx.listener(|this, _, _, cx| {
                 this.quick_capture = None;
                 cx.notify();
             }));

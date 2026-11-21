@@ -52,8 +52,8 @@ use crate::input::{TextInput, is_text};
 use crate::paint::{alpha, paint};
 use crate::phone_work::NewWork;
 use crate::ui::banner::banner;
-use crate::ui::button::{icon_button, pressable};
-use crate::ui::chip::{badge, caption, key_hint, signal_tag};
+use crate::ui::button::pressable;
+use crate::ui::chip::{caption, image_badge, key_hint, signal_tag};
 use crate::ui::dialog::{card, centered};
 use crate::ui::icon::{Icon, sized_icon};
 use crate::ui::menu::{MenuEntry, MenuItem, MenuKey, OpenMenu, dropdown};
@@ -216,9 +216,10 @@ enum Pick {
 /// The backlog dialog, while it is open.
 pub(crate) struct BacklogDialog {
     project: ProjectId,
-    /// The project's name and colour, for the header.
+    /// The project's name, colour and badge picture, for the header.
     name: SharedString,
     colour: Color,
+    image: Option<std::sync::Arc<std::path::Path>>,
     /// Whether the project keeps its backlog in its repository.
     in_repo: bool,
     /// Whether the project follows its GitHub issues, so a note done or
@@ -426,13 +427,19 @@ impl Shell {
     pub(crate) fn open_backlog(&mut self, project: &ProjectId, cx: &mut Context<Self>) {
         self.popup = None;
         self.menu = None;
-        let (name, colour) = self
+        let (name, colour, image) = self
             .projects
             .iter()
             .find(|node| &node.id == project)
             .map_or_else(
-                || (SharedString::default(), crate::projects::default_color()),
-                |node| (node.name.clone(), node.color),
+                || {
+                    (
+                        SharedString::default(),
+                        crate::projects::default_color(),
+                        None,
+                    )
+                },
+                |node| (node.name.clone(), node.color, node.image.clone()),
             );
         let (notes, load_error) = match Backlog::load(project) {
             Ok(backlog) => (backlog.notes, None),
@@ -454,6 +461,7 @@ impl Shell {
             project: project.clone(),
             name,
             colour,
+            image,
             in_repo,
             github,
             notes,
@@ -1658,11 +1666,8 @@ impl Shell {
         let dialog = self.backlog.as_ref()?;
         let t = &self.theme;
 
-        let close = icon_button("backlog-close", Icon::Close)
-            .bare()
-            .small()
-            .render(t)
-            .on_click(cx.listener(|this, _, _, cx| {
+        let close =
+            crate::ui::dialog::close("backlog-close", t).on_click(cx.listener(|this, _, _, cx| {
                 this.close_backlog(cx);
                 cx.notify();
             }));
@@ -1685,7 +1690,7 @@ impl Shell {
             .items_center()
             .gap(px(11.0))
             .h(px(34.0))
-            .child(badge(dialog.colour, initial, t))
+            .child(image_badge(dialog.image.clone(), dialog.colour, initial, t))
             .child(
                 div()
                     .text_size(HEADING_TEXT)

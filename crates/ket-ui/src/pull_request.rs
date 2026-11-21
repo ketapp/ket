@@ -25,8 +25,8 @@
 //! again later.
 
 use gpui::{
-    AnyElement, Context, Entity, KeyDownEvent, MouseButton, SharedString, Window, div, prelude::*,
-    px,
+    AnyElement, Context, Entity, KeyDownEvent, MouseButton, SharedString, WeakEntity, Window, div,
+    prelude::*, px,
 };
 use ket_core::backlog::Backlog;
 use ket_core::id::WorktreeId;
@@ -38,7 +38,7 @@ use crate::merge_worktree::LISTED_PATHS;
 use crate::paint::paint;
 use crate::ui::LABEL;
 use crate::ui::banner::banner;
-use crate::ui::button::{Variant, button, icon_button};
+use crate::ui::button::{Variant, button};
 use crate::ui::chip::caption;
 use crate::ui::dialog::{card, centered, footer, header};
 use crate::ui::field;
@@ -80,11 +80,14 @@ pub(crate) struct PullRequestConfirm {
 }
 
 impl Shell {
-    /// Opens the dialog for `target`.
+    /// Opens the dialog for `target`, once its words and facts are read.
     ///
-    /// Everything read here is local: the draft is words and names, and the
-    /// path list is the same in-process `gix` read the merge dialog makes.
-    /// The remote is named, not asked, until the button is pressed.
+    /// Everything read is local: the draft is words and names, and the path
+    /// list is the same in-process `gix` read the merge dialog makes. The
+    /// remote is named, not asked, until the button is pressed. The draft
+    /// still asks git for the base, the remote and the branch, so it's read
+    /// off the window's thread: the menu that asked goes at once, and the
+    /// dialog follows.
     pub(crate) fn request_pull_request(&mut self, target: WorktreeTarget, cx: &mut Context<Self>) {
         // One at a time, for the same reason as a merge: two pushes of one
         // branch at once is two processes writing the same refs.
@@ -108,43 +111,69 @@ impl Shell {
             return;
         }
         let path = node.path.clone();
+        let id = target.id.clone();
 
-        let Ok(workspace) = Workspace::open() else {
-            return;
-        };
-        let project = workspace.worktrees(None).ok().and_then(|worktrees| {
-            worktrees
-                .into_iter()
-                .find(|w| w.id == target.id)
-                .map(|w| w.project_id)
+        let read = cx.background_executor().spawn(async move {
+            let workspace = Workspace::open().map_err(|error| error.to_string())?;
+            let project = workspace.worktrees(None).ok().and_then(|worktrees| {
+                worktrees
+                    .into_iter()
+                    .find(|w| w.id == id)
+                    .map(|w| w.project_id)
+            });
+            // The backlog is where a title worth offering lives. A project
+            // without one, or one that cannot be read, costs only the better
+            // title: the branch is still there to name the pull request.
+            let notes = project
+                .and_then(|project| Backlog::load(&project).ok())
+                .map(|backlog| backlog.notes)
+                .unwrap_or_default();
+            let draft = workspace
+                .pull_request_draft(&id, &notes)
+                .map_err(|error| error.to_string())?;
+            let paths: Vec<String> = ket_core::status::of_worktree(&path, None)
+                .ok()
+                .map(|status| {
+                    crate::tree::distinct_paths(&status)
+                        .take(LISTED_PATHS)
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default();
+            Ok::<_, String>((draft, paths))
         });
-        // The backlog is where a title worth offering lives. A project
-        // without one, or one that cannot be read, costs only the better
-        // title: the branch is still there to name the pull request.
-        let notes = project
-            .and_then(|project| Backlog::load(&project).ok())
-            .map(|backlog| backlog.notes)
-            .unwrap_or_default();
-        let draft = match workspace.pull_request_draft(&target.id, &notes) {
-            Ok(draft) => draft,
-            Err(error) => {
-                self.toast(Tone::Error, error.to_string(), cx);
-                return;
-            }
-        };
+        cx.spawn(async move |shell: WeakEntity<Shell>, cx| {
+            let outcome = read.await;
+            let _ = shell.update(cx, |shell, cx| {
+                match outcome {
+                    // Another dialog opened while this one was read: it
+                    // isn't opened under it, where its keys would still work.
+                    Ok(_) if shell.modal_open() => shell.toast(
+                        Tone::Info,
+                        "Pull request not opened — another dialog is up",
+                        cx,
+                    ),
+                    Ok((draft, paths)) => shell.open_pull_request(target, draft, paths, cx),
+                    Err(why) => shell.toast(Tone::Error, why, cx),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
 
-        let paths = ket_core::status::of_worktree(&path, None)
-            .ok()
-            .map(|status| {
-                status
-                    .files
-                    .iter()
-                    .take(LISTED_PATHS)
-                    .map(|file| SharedString::from(file.path.clone()))
-                    .collect()
-            })
-            .unwrap_or_default();
-
+    /// The dialog, on the draft just read — unless one is already up, or a
+    /// push already running, by the time it arrives.
+    fn open_pull_request(
+        &mut self,
+        target: WorktreeTarget,
+        draft: PullRequestDraft,
+        paths: Vec<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.confirm_pull_request.is_some() || self.opening_pull_request.is_some() {
+            return;
+        }
         // The title is selected whole, as a field opened with a value is:
         // the draft is an offer, and typing replaces it.
         let title = TextInput::with_text("Title", &draft.title, cx);
@@ -156,7 +185,7 @@ impl Shell {
         self.confirm_pull_request = Some(PullRequestConfirm {
             target,
             draft,
-            paths,
+            paths: paths.into_iter().map(SharedString::from).collect(),
             title,
             draft_pr: false,
             body_active: false,
@@ -343,17 +372,6 @@ impl Shell {
             .flatten();
         let t = &self.theme;
 
-        let close = icon_button("close-pull-request", Icon::Close)
-            .bare()
-            .render(t)
-            .on_click(cx.listener(move |this, _, _, cx| {
-                // Held still while it pushes, like everything else here.
-                if pending {
-                    return;
-                }
-                this.close_pull_request();
-                cx.notify();
-            }));
         let cancel = button(
             "cancel-pull-request",
             if finished { "Close" } else { "Cancel" },
@@ -524,14 +542,20 @@ impl Shell {
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .child(
                         header(
+                            "close-pull-request",
                             if finished {
                                 "Pull request open"
                             } else {
                                 "Open a pull request"
                             },
-                            t,
                         )
-                        .child(close),
+                        // Held still while it pushes, like everything else here.
+                        .busy(pending)
+                        .on_close(cx.listener(|this, _, _, cx| {
+                            this.close_pull_request();
+                            cx.notify();
+                        }))
+                        .render(t),
                     )
                     .children(form)
                     .children(receipt)

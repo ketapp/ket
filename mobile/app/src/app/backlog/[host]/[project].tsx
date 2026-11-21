@@ -1,5 +1,3 @@
-'use no memo'; // Reads a live HostConnection — see lib/hosts.ts.
-
 // A project's backlog: notes on work not started yet, kept on the desktop —
 // the desktop's backlog dialog, on the phone. The field at the top writes a
 // new one in a line; a note opens in place to change its words and priority,
@@ -19,8 +17,9 @@ import { FloatMenu, type MenuSection, type Place, placeOf } from '../../../compo
 import { Check, Chevron, ChevronDown, Plus, PriorityMark, Trash } from '../../../components/icons';
 import { Bar, Button, Card, Heading, IconButton, Prose, Screen, Segmented, Tag, field, oneLine } from '../../../components/ui';
 import type { BacklogChange } from '../../../lib/connection';
-import { useHost } from '../../../lib/hosts';
+import { useHost, useHostState } from '../../../lib/hosts';
 import { font, size, t } from '../../../lib/theme';
+import { sentence } from '../../../lib/text';
 
 /** How often the backlog is read again while it is on screen: a note written
  * at the desktop, or one a start has just marked done, shows within this. */
@@ -54,6 +53,12 @@ function priorityOf(note: BacklogNote): BacklogPriority {
   return note.priority === BacklogPriority.UNSPECIFIED ? BacklogPriority.MEDIUM : note.priority;
 }
 
+/** Whether a note is done. Out here because the React Compiler skips a
+ * component with a BigInt literal in it. */
+function isDone(note: BacklogNote): boolean {
+  return note.doneMs !== 0n;
+}
+
 /** `notes` most pressing first, keeping their order within a priority. */
 function byPriority(notes: BacklogNote[]): BacklogNote[] {
   return notes
@@ -66,7 +71,8 @@ export default function BacklogScreen() {
   const { host: hostId, project: raw } = useLocalSearchParams<{ host: string; project: string }>();
   const projectId = decodeURIComponent(raw);
   const conn = useHost(hostId);
-  const project = conn?.snapshot?.projects.find((p) => p.id === projectId);
+  const hostState = useHostState(conn);
+  const project = hostState?.snapshot?.projects.find((p) => p.id === projectId);
   const [backlog, setBacklog] = useState<Backlog | null>(null);
   const [failing, setFailing] = useState('');
   const [capture, setCapture] = useState('');
@@ -83,10 +89,10 @@ export default function BacklogScreen() {
   // The last backlog read, for a timer to look at after the render it was
   // set in has gone.
   const latest = useRef<Backlog | null>(null);
-  const tooOld = conn !== null && conn.status === 'connected' && conn.hostMinor < 9;
+  const tooOld = hostState !== null && hostState.status === 'connected' && hostState.hostMinor < 9;
   // A desktop from before 1.10 keeps no priorities: none are shown or asked.
-  const ranked = conn !== null && conn.hostMinor >= 10;
-  const hostName = conn?.host.name ?? 'your desktop';
+  const ranked = hostState !== null && hostState.hostMinor >= 10;
+  const hostName = hostState?.host.name ?? 'your desktop';
 
   // Only while this screen is the one showing, and only while connected: a
   // read that cannot be answered waits ten seconds to say so.
@@ -95,7 +101,7 @@ export default function BacklogScreen() {
       if (!conn || tooOld) return;
       let stopped = false;
       const read = () => {
-        if (conn.status !== 'connected') return;
+        if (conn.state.status !== 'connected') return;
         void conn
           .backlog(projectId)
           .then((reply) => {
@@ -159,7 +165,7 @@ export default function BacklogScreen() {
     setFailing('');
     setTimeout(() => {
       settle();
-      const still = latest.current?.notes.some((n) => n.id === note.id && n.doneMs === 0n);
+      const still = latest.current?.notes.some((n) => n.id === note.id && !isDone(n));
       if (still) setFailing(`ket on ${hostName} has not started it; its window says why`);
     }, START_WAIT_MS);
   };
@@ -179,8 +185,8 @@ export default function BacklogScreen() {
     ]);
 
   const notes = backlog?.notes ?? [];
-  const waiting = byPriority(notes.filter((note) => note.doneMs === 0n));
-  const done = notes.filter((note) => note.doneMs !== 0n);
+  const waiting = byPriority(notes.filter((note) => !isDone(note)));
+  const done = notes.filter(isDone);
 
   return (
     <Screen>
@@ -324,7 +330,7 @@ export default function BacklogScreen() {
 /** A note, closed: its priority, its title, the first line of what it says,
  * its files, and for a done one where it went. */
 function NoteRow({ note, ranked, onPress }: { note: BacklogNote; ranked: boolean; onPress: () => void }) {
-  const finished = note.doneMs !== 0n;
+  const finished = isDone(note);
   return (
     <Pressable onPress={onPress} style={({ pressed }) => [styles.row, pressed && { backgroundColor: t.selection }]}>
       {ranked ? <PriorityMark priority={priorityOf(note)} faded={finished} /> : null}
@@ -523,12 +529,6 @@ function day(ms: bigint): string {
 
 function reason(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
-}
-
-/** A reason from the desktop as a sentence. */
-function sentence(text: string): string {
-  const s = text.charAt(0).toUpperCase() + text.slice(1);
-  return /[.!?…]$/.test(s) ? s : `${s}.`;
 }
 
 const styles = StyleSheet.create({

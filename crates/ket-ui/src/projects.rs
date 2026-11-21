@@ -15,13 +15,18 @@
 //!
 //! - [`form`] — the drafts both dialogs edit (name, icon, colour, base
 //!   branch, agent and its command, the two switches) and the parts they are
-//!   drawn as.
+//!   drawn as. The badge's parts are in [`badge`], the agent's and its
+//!   command's in [`agent`].
 //! - [`add`] — the folder line over the form; registers nothing until Add.
-//! - [`settings`] — the form under the project's path, with Remove.
+//! - [`settings`] — the form under the project's path. Both dialogs set it
+//!   out in the same two columns: how the project looks, and how it behaves.
+//!   Removing a project is the menu's and the palette's, not the dialog's.
 //!
 //! This file keeps the menu, removal and the landing page.
 
 mod add;
+mod agent;
+mod badge;
 mod form;
 mod github;
 mod settings;
@@ -336,7 +341,12 @@ impl Shell {
         self.change_projects(ids, cx, |settings| settings.hidden = false);
     }
 
-    /// Writes one change to each project's settings, then reloads once.
+    /// Makes one change to each project's settings, and shows it in the
+    /// sidebar in place. Reloading here asked git about every project's
+    /// worktrees, and read each one's status, to flip one switch; the writes
+    /// themselves are a millisecond or two, so they stay on the window's
+    /// thread and land in the order they're made. A write that fails says
+    /// why in a notification; the projects written before it are changed.
     ///
     /// Written straight through rather than via the dialog: these are
     /// one-click picks in a menu, and a pick that opened a dialog to flip a
@@ -349,20 +359,45 @@ impl Shell {
     ) {
         self.project_menu = None;
         self.tucked_menu = None;
+        // Git's other checkouts, shown again, are only found by asking git:
+        // a reload.
+        let mut finding = false;
+        let projects = &mut self.projects;
         let result = Workspace::open().and_then(|workspace| {
             ids.iter().try_for_each(|id| {
                 let mut settings = workspace.project_settings(id)?;
                 change(&mut settings);
-                workspace.set_project_settings(id, settings)
+                workspace.set_project_settings(id, settings.clone())?;
+                let Some(node) = projects.iter_mut().find(|node| &node.id == id) else {
+                    return Ok(());
+                };
+                node.pinned = settings.pinned;
+                node.hidden = settings.hidden;
+                if node.hide_discovered != settings.hide_discovered_worktrees {
+                    node.hide_discovered = settings.hide_discovered_worktrees;
+                    if node.hide_discovered {
+                        node.discovered.clear();
+                    } else {
+                        finding = true;
+                    }
+                }
+                Ok(())
             })
         });
-        if let Err(e) = result {
-            self.note = Some(format!("could not change the project: {e}").into());
+        if let Err(error) = &result {
+            self.toast_detail(Tone::Error, "Project not changed", error.to_string(), cx);
         }
-        // After a failure too: the projects changed before it are changed.
-        self.reload(cx);
+        // A failed write may still have changed the registry — the settings
+        // land before a file written beside them — so the sidebar reads
+        // what's there.
+        if finding || result.is_err() {
+            self.reload(cx);
+        } else {
+            self.resort_projects();
+        }
         // The menu bar's Pin to Top check follows the pick, wherever it was made.
         self.menu_dirty = true;
+        cx.notify();
     }
 
     // ---- removing -------------------------------------------------------------
@@ -679,7 +714,14 @@ impl Shell {
         Some(
             centered(
                 card("confirm-remove", px(440.0), t)
-                    .child(header(format!("Remove {}?", confirm.name), t))
+                    .child(
+                        header("confirm-remove-close", format!("Remove {}?", confirm.name))
+                            .on_close(cx.listener(|this, _, _, cx| {
+                                this.confirm_remove = None;
+                                cx.notify();
+                            }))
+                            .render(t),
+                    )
                     .child(body(explanation, t))
                     .children(
                         confirm

@@ -121,6 +121,8 @@ pub(crate) enum WorktreeAction {
     CopyPath,
     /// Keep it at the top of the list.
     Pin,
+    /// Give its row the unread dot again, until someone next goes to it.
+    MarkUnread,
     /// Suspend its agent without removing it.
     Sleep,
     /// Resume the saved sessions in this worktree's asleep tabs.
@@ -185,7 +187,6 @@ pub(crate) struct WorktreeTarget {
 pub(crate) struct WorktreeRename {
     target: WorktreeTarget,
     input: Entity<TextInput>,
-    error: Option<SharedString>,
 }
 
 /// The "are you sure" step before a worktree is removed.
@@ -244,13 +245,15 @@ const HANDOFF: &str = "A local model has been working on a task in this worktree
 /// worktree ket created, and removing it would take the project with it. It
 /// stays visible so the menu has one shape rather than two.
 ///
-/// `has_agent_tab` and `has_asleep_tab` choose Sleep or Wake. Git operations
+/// `has_agent_tab` and `has_asleep_tab` choose Sleep or Wake, and `unread`
+/// disables Mark as Unread on a row that already has its dot. Git operations
 /// live in the submenu built by [`git_menu`].
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn worktree_menu(
     at: Point<Pixels>,
     primary: bool,
     pinned: bool,
+    unread: bool,
     token_reduction: u8,
     build_bytes: Option<u64>,
     escalate_to: Option<SharedString>,
@@ -333,6 +336,12 @@ pub(crate) fn worktree_menu(
                     MenuItem::new(WorktreeAction::Pin, "Pin").icon(Icon::Pin)
                 };
                 if primary { pin.disabled() } else { pin }
+            }),
+            // The row's own dot, in its colour.
+            MenuEntry::Item({
+                let mark = MenuItem::new(WorktreeAction::MarkUnread, "Mark as Unread")
+                    .tinted_icon(Icon::Dot, paint(t.accent));
+                if unread { mark.disabled() } else { mark }
             }),
             MenuEntry::Item(MenuItem::new(WorktreeAction::CopyPath, "Copy Path").icon(Icon::Copy)),
             MenuEntry::Separator,
@@ -752,6 +761,7 @@ impl Shell {
             at,
             node.primary,
             node.pinned,
+            self.activity.unread(&node.id),
             node.token_reduction,
             build_bytes,
             escalate_to,
@@ -846,6 +856,7 @@ impl Shell {
                 self.escalate_worktree(target, cx);
             }
             WorktreeAction::Pin => self.set_worktree_pinned(&target, !target.pinned, cx),
+            WorktreeAction::MarkUnread => self.mark_worktree_unread(&target.id, cx),
             WorktreeAction::Sleep => self.sleep_worktree(&target.id, cx),
             WorktreeAction::Wake => self.wake_worktree(&target.id, cx),
             WorktreeAction::CopyPath => {
@@ -859,28 +870,64 @@ impl Shell {
         let input = TextInput::with_text("Worktree name", target.label.as_ref(), cx);
         input.update(cx, |input, _| input.request_focus());
         self.watch_field(&input, cx);
-        self.worktree_rename = Some(WorktreeRename {
-            target,
-            input,
-            error: None,
-        });
+        self.worktree_rename = Some(WorktreeRename { target, input });
     }
 
+    /// Closes the dialog, saves the name and shows it on the row — see
+    /// [`Self::save_row`]. Reloading the whole sidebar for one row's name
+    /// held the dialog open while git was asked about every project.
     fn save_worktree_rename(&mut self, cx: &mut Context<Self>) {
-        let Some(rename) = self.worktree_rename.as_ref() else {
+        let Some(rename) = self.worktree_rename.take() else {
             return;
         };
         let id = rename.target.id.clone();
         let name = rename.input.read(cx).text();
-        match Workspace::open().and_then(|workspace| workspace.set_worktree_name(&id, &name)) {
-            Ok(()) => {
-                self.worktree_rename = None;
-                self.reload(cx);
-            }
+        if self.save_row(
+            "Worktree not renamed",
+            |workspace| workspace.set_worktree_name(&id, &name),
+            cx,
+        ) {
+            let shown = ket_core::workspace::clean_worktree_name(&name).map(SharedString::from);
+            self.change_row(&id, |row| row.name = shown);
+            // The Economy summary names its worktrees.
+            self.refresh_savings();
+        }
+        cx.notify();
+    }
+
+    /// Changes the sidebar's row for `id` in place, returning what `change`
+    /// returns: `None` when there is no such row.
+    fn change_row<T>(
+        &mut self,
+        id: &WorktreeId,
+        change: impl FnOnce(&mut crate::tree::WorktreeNode) -> T,
+    ) -> Option<T> {
+        let row = self
+            .projects
+            .iter_mut()
+            .flat_map(|project| project.worktrees.iter_mut())
+            .find(|row| &row.id == id)?;
+        Some(change(row))
+    }
+
+    /// Writes a change to one field of one row to the registry, and says why
+    /// in a notification when it can't be; the caller then shows it on the
+    /// row in place. A full reload asked git about every project's worktrees
+    /// and read each one's status, for one field. The write itself is a
+    /// millisecond or two, so it stays on the window's thread: changes land
+    /// in the order they're made, and nothing is left pending for a reload
+    /// to read past or a quit to lose.
+    fn save_row(
+        &mut self,
+        failed: &'static str,
+        write: impl FnOnce(&Workspace) -> ket_core::Result<()>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        match Workspace::open().and_then(|workspace| write(&workspace)) {
+            Ok(()) => true,
             Err(error) => {
-                if let Some(rename) = self.worktree_rename.as_mut() {
-                    rename.error = Some(error.to_string().into());
-                }
+                self.toast_detail(Tone::Error, failed, error.to_string(), cx);
+                false
             }
         }
     }
@@ -935,7 +982,7 @@ impl Shell {
         let field = text_field(
             &rename.input,
             "worktree-rename-name",
-            rename.error.is_some(),
+            false,
             InputStyle::new(t, self.caret.visible),
             window,
             cx,
@@ -944,15 +991,16 @@ impl Shell {
             centered(
                 card("rename-worktree", px(420.0), t)
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .child(header("Rename worktree", t))
+                    .child(
+                        header("close-worktree-rename", "Rename worktree")
+                            .on_close(cx.listener(|this, _, _, cx| {
+                                this.worktree_rename = None;
+                                cx.notify();
+                            }))
+                            .render(t),
+                    )
                     .child(field)
                     .child(caption(format!("Git branch: {}", rename.target.branch), t))
-                    .children(
-                        rename
-                            .error
-                            .clone()
-                            .map(|error| caption(error, t).text_color(paint(t.status.failed))),
-                    )
                     .child(footer().child(cancel).child(save)),
             )
             .into_any_element(),
@@ -1154,33 +1202,37 @@ impl Shell {
     ///
     /// The primary checkout has no record to carry the flag, so it says so
     /// rather than appearing to succeed.
+    /// Pins or unpins a row: saved, then moved in place — see
+    /// [`Self::save_row`].
     fn set_worktree_pinned(
         &mut self,
         target: &WorktreeTarget,
         pinned: bool,
         cx: &mut Context<Self>,
     ) {
-        let workspace = match Workspace::open() {
-            Ok(workspace) => workspace,
-            Err(e) => {
-                self.note = Some(format!("could not open the workspace: {e}").into());
-                return;
-            }
+        let failed = if pinned {
+            "Worktree not pinned"
+        } else {
+            "Worktree not unpinned"
         };
-
-        if let Err(e) = workspace.set_worktree_pinned(&target.id, pinned) {
-            self.note = Some(
-                format!(
-                    "could not {} {}: {e}",
-                    if pinned { "pin" } else { "unpin" },
-                    target.branch
-                )
-                .into(),
-            );
+        if !self.save_row(
+            failed,
+            |workspace| workspace.set_worktree_pinned(&target.id, pinned),
+            cx,
+        ) {
             return;
         }
-
-        self.reload(cx);
+        self.change_row(&target.id, |row| row.pinned = pinned);
+        let project = self
+            .projects
+            .iter()
+            .find(|project| project.worktrees.iter().any(|row| row.id == target.id))
+            .map(|project| project.id.clone());
+        if let Some(project) = project {
+            self.resort_worktrees(&project);
+        }
+        self.menu_dirty = true;
+        cx.notify();
     }
 
     /// Records a new level for the worktree the picker is about.
@@ -1198,19 +1250,20 @@ impl Shell {
             return;
         };
 
-        let workspace = match Workspace::open() {
-            Ok(workspace) => workspace,
-            Err(e) => {
-                self.note = Some(format!("could not open the workspace: {e}").into());
-                return;
-            }
-        };
-
+        // The row's ring, and the menu's own subtitle next time, read the
+        // row: saved, then changed in place — see `save_row`.
         let level_id = ket_core::worktree::token_reduction(level).id.clone();
-        if let Err(e) = workspace.set_economy_level(&target.id, &level_id) {
-            self.note = Some(format!("could not change economy: {e}").into());
+        if !self.save_row(
+            "Economy not changed",
+            |workspace| workspace.set_economy_level(&target.id, &level_id),
+            cx,
+        ) {
             return;
         }
+        self.change_row(&target.id, |row| row.token_reduction = level);
+        // The Economy summary, and the menu bar's Economy checkmark.
+        self.refresh_savings();
+        self.menu_dirty = true;
 
         self.note = Some(
             format!(
@@ -1220,9 +1273,7 @@ impl Shell {
             )
             .into(),
         );
-        // So the row's ring, and the menu's own subtitle next time, come from
-        // what was just stored rather than from what the sidebar last read.
-        self.reload(cx);
+        cx.notify();
     }
 
     /// Handles a key while the level picker is open.
@@ -1309,8 +1360,9 @@ impl Shell {
     /// `force` discards uncommitted work, and is only ever reached by a reader
     /// who has been shown what would be lost and asked again. Off the
     /// window's thread because a delete walks the checkout and asks git
-    /// twice, which takes seconds on a big tree; the dialog stays up with its
-    /// button busy until the answer comes back.
+    /// twice, which takes seconds on a big tree. The dialog goes as it
+    /// starts, and the row says "deleting" until it's gone; the dialog comes
+    /// back only if git refuses, to ask about what would be lost.
     pub(crate) fn remove_worktree_confirmed(&mut self, force: bool, cx: &mut Context<Self>) {
         let Some(confirm) = self.confirm_remove_worktree.as_mut() else {
             return;
@@ -1319,10 +1371,25 @@ impl Shell {
             return;
         }
         confirm.pending = true;
+        confirm.quiet = true;
         let id = confirm.target.id.clone();
         // Taken now, because the dialog it lives on is closed before the
         // outcome is reported and the toast still has to name what went.
         let branch = confirm.target.branch.clone();
+        // Off it, if it's the one in front: to its project's own checkout,
+        // which leads every project. Nothing in the window can reach it
+        // again until the delete is done or refused — see `select`.
+        if self.selected_id().as_ref() == Some(&id)
+            && let Some(at) = self.position_of(&id)
+        {
+            self.select(
+                crate::tree::Selection {
+                    project: at.project,
+                    worktree: 0,
+                },
+                cx,
+            );
+        }
 
         // The branch goes with the checkout. Leaving it was the safer-looking
         // default and turned out to be the expensive one: the branches piled
@@ -1362,7 +1429,7 @@ impl Shell {
         match outcome {
             Ok(report) => {
                 self.confirm_remove_worktree = None;
-                self.worktree_target = None;
+                self.let_go_of_target(&id);
                 self.forget_deleted_worktree(&id);
                 // A kept branch is said out loud, and in the tone that says
                 // "not all of it". Someone who asked for the branch to go and
@@ -1379,7 +1446,7 @@ impl Shell {
                         self.toast_detail(Tone::Success, "Worktree deleted", branch.clone(), cx)
                     }
                 }
-                self.reload(cx);
+                self.drop_row(&id, cx);
             }
             Err(e) => {
                 // An unforced refusal is a question rather than a result: the
@@ -1394,7 +1461,7 @@ impl Shell {
                 if force {
                     tracing::warn!(%e, branch = %branch, "forced worktree delete failed");
                     self.confirm_remove_worktree = None;
-                    self.worktree_target = None;
+                    self.let_go_of_target(&id);
                     self.toast(Tone::Error, format!("Couldn't delete {branch}"), cx);
                 } else if let Some(confirm) = self.confirm_remove_worktree.as_mut() {
                     confirm.pending = false;
@@ -1404,6 +1471,18 @@ impl Shell {
                     confirm.quiet = false;
                 }
             }
+        }
+    }
+
+    /// Lets go of the worktree the menus are about, if it's `id`: one opened
+    /// on another worktree while this one was deleting is still in use.
+    fn let_go_of_target(&mut self, id: &WorktreeId) {
+        if self
+            .worktree_target
+            .as_ref()
+            .is_some_and(|target| &target.id == id)
+        {
+            self.worktree_target = None;
         }
     }
 
@@ -1512,7 +1591,7 @@ impl Shell {
                     }
                     shell.forget_deleted_worktree(&id);
                     shell.toast_detail(Tone::Info, "Deleted from your phone", branch.clone(), cx);
-                    shell.reload(cx);
+                    shell.drop_row(&id, cx);
                 }
                 cx.notify();
             });
@@ -1648,14 +1727,22 @@ impl Shell {
                     .min_w(REMOVE_WIDTH)
                     .max_w(REMOVE_MAX_WIDTH)
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .child(header(
-                        if pending {
-                            "Deleting worktree"
-                        } else {
-                            "Delete worktree"
-                        },
-                        t,
-                    ))
+                    .child(
+                        header(
+                            "close-remove-worktree",
+                            if pending {
+                                "Deleting worktree"
+                            } else {
+                                "Delete worktree"
+                            },
+                        )
+                        .busy(pending)
+                        .on_close(cx.listener(|this, _, _, cx| {
+                            this.confirm_remove_worktree = None;
+                            cx.notify();
+                        }))
+                        .render(t),
+                    )
                     .child(prune(state, name.into_any_element(), t))
                     .child(under)
                     .child(footer().child(cancel).child(delete)),
@@ -1842,6 +1929,7 @@ mod tests {
             Point::default(),
             primary,
             false,
+            false,
             ket_core::worktree::default_token_reduction(),
             None,
             None,
@@ -1911,9 +1999,32 @@ mod tests {
     }
 
     #[test]
+    fn mark_as_unread_waits_for_a_row_without_its_dot() {
+        let menu = |unread: bool| {
+            worktree_menu(
+                Point::default(),
+                false,
+                false,
+                unread,
+                ket_core::worktree::default_token_reduction(),
+                None,
+                None,
+                false,
+                false,
+                &Theme::dark(),
+            )
+        };
+        assert!(item(&menu(false), "Mark as Unread").enabled);
+        assert!(!item(&menu(true), "Mark as Unread").enabled);
+        // The repository's own checkout has agents too.
+        assert!(item(&default_menu(true), "Mark as Unread").enabled);
+    }
+
+    #[test]
     fn sleep_and_wake_follow_agent_tabs() {
         let menu = worktree_menu(
             Point::default(),
+            false,
             false,
             false,
             ket_core::worktree::default_token_reduction(),
@@ -1931,6 +2042,7 @@ mod tests {
         );
         let menu = worktree_menu(
             Point::default(),
+            false,
             false,
             false,
             ket_core::worktree::default_token_reduction(),

@@ -1240,7 +1240,7 @@ fn problem_view(problem: &Problem, theme: &Theme, cx: &mut Context<Shell>) -> An
                         .flex_col()
                         .flex_none()
                         .gap(px(6.0))
-                        .child(dialog::header(problem.title.clone(), theme))
+                        .child(dialog::title(problem.title.clone(), theme))
                         .child(dialog::body(problem.why.clone(), theme)),
                 )
                 .children(

@@ -1,5 +1,3 @@
-'use no memo'; // Reads a live HostConnection — see lib/hosts.ts.
-
 // What a screen shows when the phone has been trying to reach its desktop
 // for a while: what went wrong, the few things that cause it, and what to do.
 // Before that, a plain "Connecting…" — most connections take a second, and a
@@ -10,9 +8,11 @@ import { type ReactNode, useEffect, useState } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 
 import { reachesAway } from '../lib/address-kind';
-import type { HostConnection } from '../lib/connection';
+import type { ConnectionState, HostConnection } from '../lib/connection';
+import { useHostState } from '../lib/hosts';
 import { font, size, t } from '../lib/theme';
 import { Banner, Button, Prose } from './ui';
+import { sentence } from '../lib/text';
 
 /** How long a connection may try quietly before the phone says more. */
 export const STUCK_MS = 8_000;
@@ -20,50 +20,51 @@ export const STUCK_MS = 8_000;
 /** How long `conn` has been down, in milliseconds — 0 while it is up —
  * redrawn each second while down, so what depends on it appears on time and
  * the wait it reports keeps counting. */
-export function useWaited(conn: HostConnection): number {
+export function useWaited(hostState: ConnectionState): number {
   const [now, setNow] = useState(() => Date.now());
-  const down = conn.status !== 'connected';
+  const down = hostState.status !== 'connected';
   useEffect(() => {
     if (!down) return;
     const timer = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(timer);
   }, [down]);
-  if (!down || conn.downSince === null) return 0;
-  return now - conn.downSince;
+  if (!down || hostState.downSince === null) return 0;
+  return now - hostState.downSince;
 }
 
 /** The things that stop a phone reaching its desktop, most likely first. */
-export function checks(conn: HostConnection): ReactNode[] {
+export function checks(hostState: ConnectionState): ReactNode[] {
   return [
-    reachesAway(conn.host)
+    reachesAway(hostState.host)
       ? 'At home, connect this phone to the same Wi-Fi as the Mac. Away from home, keep Tailscale on, on both.'
-      : `This phone only knows how to reach ${conn.host.name} on its own network. At home, connect to the same Wi-Fi. For away from home, turn on Tailscale on both, then scan Show code under Away from home in the Mac’s Settings › Devices.`,
+      : `This phone only knows how to reach ${hostState.host.name} on its own network. At home, connect to the same Wi-Fi. For away from home, turn on Tailscale on both, then scan Show code under Away from home in the Mac’s Settings › Devices.`,
     'ket is open on the Mac, and Settings › Devices is turned on.',
     'The Mac is awake. A closed lid or sleep drops every phone.',
     <>
-      Check the saved address <Text style={styles.address}>{conn.addressForDisplay() ? hostOf(conn.addressForDisplay()!) : 'in Settings'}</Text>. You can add a new address in Settings › Paired desktops without pairing again.
+      Check the saved address <Text style={styles.address}>{hostState.displayAddress ? hostOf(hostState.displayAddress!) : 'in Settings'}</Text>. You can add a new address in Settings › Paired desktops without pairing again.
     </>,
   ];
 }
 
 export function ConnectionHelp({ conn }: { conn: HostConnection }) {
-  const waited = useWaited(conn);
-  if (conn.status === 'connected') return null;
+  const hostState = useHostState(conn);
+  const waited = useWaited(hostState);
+  if (hostState.status === 'connected') return null;
   if (waited < STUCK_MS) {
-    return <Prose style={styles.quiet}>Connecting to {conn.host.name}…</Prose>;
+    return <Prose style={styles.quiet}>Connecting to {hostState.host.name}…</Prose>;
   }
 
   return (
-    <Banner tone={conn.status === 'offline' ? t.failed : t.attention}>
+    <Banner tone={hostState.status === 'offline' ? t.failed : t.attention}>
       <View style={styles.head}>
-        <Text style={styles.title}>{`Can’t reach ${conn.host.name}`}</Text>
+        <Text style={styles.title}>{`Can’t reach ${hostState.host.name}`}</Text>
         <Text style={styles.meta}>
-          {Math.round(waited / 1000)}s · attempt {Math.max(conn.attempts, 1)}
+          {Math.round(waited / 1000)}s · attempt {Math.max(hostState.attempts, 1)}
         </Text>
       </View>
-      {conn.error ? <Text style={styles.error}>{sentence(conn.error)}</Text> : null}
+      {hostState.error ? <Text style={styles.error}>{sentence(hostState.error)}</Text> : null}
       <View style={styles.checks}>
-        {checks(conn).map((check, index) => (
+        {checks(hostState).map((check, index) => (
           <Check key={index} n={index + 1}>
             {check}
           </Check>
@@ -84,10 +85,6 @@ function Check({ n, children }: { n: number; children: React.ReactNode }) {
       <Text style={styles.checkText}>{children}</Text>
     </View>
   );
-}
-
-export function sentence(text: string): string {
-  return text.charAt(0).toUpperCase() + text.slice(1) + (/[.!?]$/.test(text) ? '' : '.');
 }
 
 export function hostOf(url: string): string {

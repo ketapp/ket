@@ -58,6 +58,7 @@ use crate::paint::{alpha, paint};
 use crate::terminal::TerminalId;
 use crate::ui::icon::{Icon, sized_icon};
 use crate::ui::popup::{self, Placement};
+use crate::ui::rule::vertical_rule;
 
 /// How long a reading is drawn as current.
 ///
@@ -551,7 +552,7 @@ pub(crate) fn usage_card(
                 .child(cost_cell)
                 // The hairline is what makes these two things rather than
                 // four lines.
-                .child(div().flex_none().w(px(1.0)).bg(paint(t.border)))
+                .child(vertical_rule(t))
                 .child(saved_cell)
                 .into_any_element(),
         ];

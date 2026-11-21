@@ -1,8 +1,7 @@
 // The chat's mic: what is said, transcribed as it is spoken and streamed into
 // the draft. iOS gives an app no way to start the keyboard's dictation, so
 // this is a recogniser of the app's own — modules/ket-voice, Apple's Speech
-// framework, on the iPhone wherever it can. The browser build's is
-// voice.web.ts.
+// framework, on the iPhone wherever it can.
 
 import { NativeModule, requireOptionalNativeModule } from 'expo';
 import { Platform } from 'react-native';

@@ -34,7 +34,7 @@ use crate::input::{Style, TextInput, is_text, text_field};
 use crate::paint::{alpha, paint};
 use crate::ui::agent::{agent_label, mark, provider};
 use crate::ui::button::button;
-use crate::ui::chip::{badge, caption, kbd, tag, tinted_tag};
+use crate::ui::chip::{caption, image_badge, kbd, tag, tinted_tag};
 use crate::ui::dialog::{card, centered, header};
 use crate::ui::group::{button_group, segment};
 use crate::ui::icon::{Icon, icon, icon_well, sized_icon};
@@ -457,7 +457,7 @@ pub(crate) struct Preferences {
     /// The General pane's idle sleep interval choices.
     sleep_menu: Option<OpenMenu<u32>>,
     /// The Economy pane's cold-session threshold choices, in tokens.
-    cold_resume_menu: Option<OpenMenu<u64>>,
+    cold_resume_menu: Option<OpenMenu<u32>>,
     /// The Phones pane: the pairing code, the paired phones, and the clock
     /// that keeps both current. Dropped with the view, which stops it.
     pub(crate) phones: crate::phones::PhonesPane,
@@ -1240,16 +1240,16 @@ impl Shell {
             return;
         };
         let open = view.cold_resume_menu.is_some();
-        let current = view.config.agent.cold_resume_min_tokens();
+        let current = view.config.agent.cold_resume_min_dollars();
         self.close_preference_menus();
         if open {
             return;
         }
         let items = COLD_RESUME_CHOICES
             .into_iter()
-            .map(|tokens| {
-                let item = MenuItem::new(tokens, cold_resume_label(tokens));
-                MenuEntry::Item(if tokens == current {
+            .map(|dollars| {
+                let item = MenuItem::new(dollars, cold_resume_label(dollars));
+                MenuEntry::Item(if dollars == current {
                     item.checked()
                 } else {
                     item
@@ -1262,7 +1262,7 @@ impl Shell {
                     .selected(
                         COLD_RESUME_CHOICES
                             .iter()
-                            .position(|tokens| *tokens == current)
+                            .position(|dollars| *dollars == current)
                             .unwrap_or(1),
                     )
                     .offset(px(0.0), px(6.0)),
@@ -2461,14 +2461,6 @@ impl Shell {
             vec![framed(view.section, entries, t)]
         };
 
-        let close = crate::ui::button::icon_button("preferences-close", Icon::Close)
-            .circle()
-            .render(t)
-            .on_click(cx.listener(|this, _, window, cx| {
-                this.close_preferences(window, cx);
-                cx.notify();
-            }));
-
         let filter = text_field(
             &view.search,
             "preferences-filter",
@@ -2612,7 +2604,14 @@ impl Shell {
                     .max_w(relative(MOST_OF_THE_WINDOW))
                     .h(HEIGHT)
                     .max_h(relative(MOST_OF_THE_WINDOW))
-                    .child(header("Settings", t).child(close))
+                    .child(
+                        header("preferences-close", "Settings")
+                            .on_close(cx.listener(|this, _, window, cx| {
+                                this.close_preferences(window, cx);
+                                cx.notify();
+                            }))
+                            .render(t),
+                    )
                     .child(
                         div()
                             .flex()
@@ -2848,7 +2847,7 @@ impl Shell {
         )
     }
 
-    /// Whether opening a cold session asks first, and above how many tokens,
+    /// Whether opening a cold session asks first, and above what price,
     /// as rows of the Economy group — see `ket_core::cold`.
     fn cold_resume_rows(&self, t: &Theme, cx: &mut Context<Self>) -> Vec<gpui::Div> {
         let Some(view) = self.preferences.as_ref() else {
@@ -2856,7 +2855,7 @@ impl Shell {
         };
         let writable = view.writable;
         let asks = view.config.agent.asks_on_cold_resume();
-        let min_tokens = view.config.agent.cold_resume_min_tokens();
+        let min_dollars = view.config.agent.cold_resume_min_dollars();
         let ask = switch("economy-cold-resume", asks, t)
             .when(writable, |el| {
                 el.cursor_pointer()
@@ -2870,11 +2869,11 @@ impl Shell {
             menu.view(
                 t,
                 cx,
-                |this, tokens, cx| {
-                    let tokens = *tokens;
+                |this, dollars, cx| {
+                    let dollars = *dollars;
                     this.close_preference_menus();
                     this.save_setting(|config| {
-                        config.agent.cold_resume_min_tokens = Some(tokens);
+                        config.agent.cold_resume_min_dollars = Some(dollars);
                     });
                     cx.notify();
                 },
@@ -2886,7 +2885,7 @@ impl Shell {
         });
         let threshold = dropdown(
             "preferences-cold-resume-select",
-            crate::ui::select::select("preferences-cold-resume", cold_resume_label(min_tokens))
+            crate::ui::select::select("preferences-cold-resume", cold_resume_label(min_dollars))
                 .open(view.cold_resume_menu.is_some())
                 .render(t)
                 .w(SELECT_WIDTH),
@@ -2913,8 +2912,8 @@ impl Shell {
             ),
             economy_row(
                 (Icon::Gauge, paint(t.text.dim)),
-                economy_title("Only when re-caching is more than", t),
-                "A small session is cheap to pick up again, so it never asks.",
+                economy_title("Only when re-caching costs at least", t),
+                "At API prices. A session cheaper than this to pick up again never asks.",
                 Some(threshold),
                 t,
             ),
@@ -3386,11 +3385,13 @@ impl Shell {
             ),
             Entry::layout(div().h(px(14.0))),
             together(
-                "Agent Permissions Choose whether ket allows tools automatically or asks before they run. Yolo Manual Custom",
+                "Agent Permissions Choose whether ket allows tools automatically or asks before they run. Applies to new and resumed Codex terminals. Yolo Manual Custom",
                 [
                     subsection(
                         "Agent Permissions",
-                        "Choose whether ket allows tools automatically or asks before they run.",
+                        "Choose whether ket allows tools automatically or asks before they run. \
+                         Also applies to new and resumed Codex terminals; running terminals keep \
+                         their current permissions.",
                         t,
                     ),
                     permissions_group.into_any_element(),
@@ -3507,6 +3508,7 @@ impl Shell {
                             Some(ProjectLaunch {
                                 name: project.name.clone(),
                                 color: project.color,
+                                image: project.image.clone(),
                                 mark: project.icon.clone().unwrap_or_else(|| {
                                     project
                                         .name
@@ -4885,6 +4887,8 @@ struct ProjectLaunch {
     name: gpui::SharedString,
     /// Its badge colour.
     color: ket_core::theme::Color,
+    /// Its badge's picture, if it has one.
+    image: Option<std::sync::Arc<std::path::Path>>,
     /// What its badge carries: its icon, else its initial.
     mark: gpui::SharedString,
     /// The whole command line it launches the agent with.
@@ -5101,7 +5105,7 @@ fn agent_card(
                                 .min_w_0()
                                 .text_size(px(11.0))
                                 .child(
-                                    badge(launch.color, launch.mark, t)
+                                    image_badge(launch.image, launch.color, launch.mark, t)
                                         .size(px(14.0))
                                         .text_size(px(8.5)),
                                 )
@@ -5507,12 +5511,12 @@ const ECONOMY_ROW_PAD: gpui::Pixels = px(16.0);
 /// The gap between an Economy row's well and its words.
 const ECONOMY_ROW_GAP: gpui::Pixels = px(14.0);
 
-/// The thresholds a cold session can be asked about above, in tokens.
-const COLD_RESUME_CHOICES: [u64; 4] = [50_000, 100_000, 200_000, 400_000];
+/// The prices a cold session can be asked about from, in dollars.
+const COLD_RESUME_CHOICES: [u32; 6] = [1, 2, 3, 4, 5, 10];
 
-/// A threshold as its menu shows it: "100k tokens".
-fn cold_resume_label(tokens: u64) -> String {
-    format!("{} tokens", ket_core::cold::short_tokens(tokens))
+/// A threshold as its menu shows it: "$2".
+fn cold_resume_label(dollars: u32) -> String {
+    format!("${dollars}")
 }
 
 /// The Jev key field's width, beside its Save button.

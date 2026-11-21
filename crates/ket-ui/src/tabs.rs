@@ -1624,7 +1624,17 @@ impl Shell {
             centered(
                 card("close-session", px(440.0), t)
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .child(header(format!("End {} session?", confirm.agent), t))
+                    .child(
+                        header(
+                            "close-close-session",
+                            format!("End {} session?", confirm.agent),
+                        )
+                        .on_close(cx.listener(|this, _, _, cx| {
+                            this.confirm_close_session = None;
+                            cx.notify();
+                        }))
+                        .render(t),
+                    )
                     .child(body(
                         format!(
                             "Closing this tab ends the {} session running in it. \
@@ -3752,14 +3762,6 @@ impl Shell {
                             _ => false,
                         };
                         let tint = crate::agent_override::hue(t);
-                        // Its session's `/color` — see `crate::session_color`.
-                        let session_color = match &tab.kind {
-                            TabKind::Terminal(terminal) => self
-                                .terminal_keys
-                                .get(terminal)
-                                .and_then(|key| self.pane_color(key)),
-                            _ => None,
-                        };
                         let terminal_light = match signal {
                             Signal::Blocked => paint(t.status.attention),
                             Signal::Failed => paint(t.status.failed),
@@ -3829,26 +3831,16 @@ impl Shell {
                             {
                                 Some(agent) => {
                                     let (which, provider_light) = provider(agent, t);
-                                    // At rest, on its session's tile. At work,
-                                    // in its state's colour like any agent's
-                                    // tab: the mark is the tab's only light.
-                                    match session_color.filter(|_| matches!(signal, Signal::Quiet))
-                                    {
-                                        Some(color) => {
-                                            crate::session_color::tab_mark(which, color, !active, t)
-                                                .into_any_element()
-                                        }
-                                        None => icon_mark(
-                                            which,
-                                            if matches!(signal, Signal::Quiet) {
-                                                provider_light
-                                            } else {
-                                                terminal_light
-                                            },
-                                            !active,
-                                        )
-                                        .into_any_element(),
-                                    }
+                                    icon_mark(
+                                        which,
+                                        if matches!(signal, Signal::Quiet) {
+                                            provider_light
+                                        } else {
+                                            terminal_light
+                                        },
+                                        !active,
+                                    )
+                                    .into_any_element()
                                 }
                                 None if working => icon_mark(Icon::Asterisk, terminal_light, false)
                                     .into_any_element(),
@@ -3905,17 +3897,11 @@ impl Shell {
                             .prose()
                             .text_size(TAB_LABEL)
                             .cursor_pointer()
-                            .text_color(match (session_color, tinted, active) {
-                                (Some(color), _, true) => {
-                                    paint(crate::session_color::label(color, t))
-                                }
-                                (Some(color), _, false) => {
-                                    alpha(paint(crate::session_color::label(color, t)), 0.8)
-                                }
-                                (None, true, true) => tint,
-                                (None, true, false) => alpha(tint, 0.8),
-                                (None, false, true) => paint(t.text.primary),
-                                (None, false, false) => paint(t.text.dim),
+                            .text_color(match (tinted, active) {
+                                (true, true) => tint,
+                                (true, false) => alpha(tint, 0.8),
+                                (false, true) => paint(t.text.primary),
+                                (false, false) => paint(t.text.dim),
                             })
                             .when(active, |el| el.font_weight(FontWeight::MEDIUM))
                             .when(tab.preview, |el| el.italic())
@@ -4126,11 +4112,8 @@ impl Shell {
     /// here too rather than on the pane it was released over — by then the
     /// target is already worked out, and a drop a pixel into a divider would
     /// otherwise belong to no element and read as the drag not having worked.
-    pub(crate) fn pane_layout(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    /// The worktree's panes, or the landing or setup view in their place.
+    pub(crate) fn panes(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         if self.setup_open {
             return self.setup_view(window, cx);
         }

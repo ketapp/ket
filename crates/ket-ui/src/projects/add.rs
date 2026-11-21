@@ -1,6 +1,6 @@
-//! The add-project dialog: a folder line over the project form, so a project
-//! arrives named, coloured and running the right agent rather than being
-//! fixed up after it lands in the sidebar.
+//! The add-project dialog: a folder line over the project settings dialog's
+//! two columns, so a project arrives named, coloured and running the right
+//! agent rather than being fixed up after it lands in the sidebar.
 //!
 //! Nothing is registered until **Add project**. The folder is read when it is
 //! chosen — its name and default branch fill the blanks — and registered only
@@ -12,20 +12,29 @@
 
 use std::path::{Path, PathBuf};
 
-use gpui::{AnyElement, Context, PathPromptOptions, SharedString, Window, div, prelude::*, px};
+use gpui::{
+    AnyElement, Context, MouseButton, PathPromptOptions, SharedString, WeakEntity, Window, div,
+    prelude::*, px,
+};
 use ket_core::git::{self, Git};
 use ket_core::id::ProjectId;
 use ket_core::project::{Project, ProjectSettings};
 use ket_core::workspace::Workspace;
 
 use super::form::{Field, ProjectForm, Seed};
+use super::settings::{Tip, WIDTH};
 use crate::Shell;
 use crate::ui::banner::banner;
 use crate::ui::button::button;
 use crate::ui::dialog::{centered, footer, header};
-use crate::ui::field::field;
+use crate::ui::field::{error as field_error, field};
 use crate::ui::icon::Icon;
+use crate::ui::rule::rule;
 use crate::ui::toast::Tone;
+
+/// How much of the columns shows before a folder is chosen: there, so the
+/// dialog's size and what it will ask are plain, but plainly not ready.
+const WAITING: f32 = 0.4;
 
 /// The add-project dialog.
 pub(crate) struct AddProjectDialog {
@@ -39,6 +48,9 @@ pub(crate) struct AddProjectDialog {
     pub(crate) repair: Option<Repair>,
     /// A repair under way.
     pub(crate) repairing: bool,
+    /// The folder being read, off the window's thread: what it turned out to
+    /// be fills the dialog only if it's still the folder chosen last.
+    pub(crate) reading: Option<PathBuf>,
     /// The fields.
     pub(crate) form: ProjectForm,
 }
@@ -93,6 +105,7 @@ impl Shell {
             chosen: None,
             repair: None,
             repairing: false,
+            reading: None,
             form,
         });
     }
@@ -123,85 +136,106 @@ impl Shell {
         .detach();
     }
 
-    /// Fills the dialog from the repository containing `path`.
+    /// Fills the dialog from the repository containing `path`, once it's
+    /// read: off the window's thread, since finding the repository, its
+    /// default branch and whether it has a commit is several calls to git.
     ///
     /// Read, not registered: the folder's name becomes the name and initial a
     /// blank field falls back to, and its default branch the base. A folder
     /// that is not in a repository, or a project already in the sidebar, is
     /// refused here, where the folder was chosen, rather than on Add.
     fn take_project_folder(&mut self, path: &Path, cx: &mut Context<Self>) {
-        // Not a repository at all: kept, named after the folder, with the
-        // button that makes it one.
-        if git::discover_root(path).is_err() {
-            let Some(dialog) = self.adding_project.as_mut() else {
-                return;
-            };
-            let name = path
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            let form = &mut dialog.form;
-            if form.base.read(cx).text().trim().is_empty() {
-                form.base.update(cx, |input, _| input.set_text("main"));
-            }
-            form.name
-                .update(cx, |input, _| input.set_placeholder(name.clone()));
-            form.dir_name = name.into();
-            form.error = None;
-            dialog.found = None;
-            dialog.chosen = Some(path.to_path_buf());
-            dialog.repair = Some(Repair::Init {
-                path: path.to_path_buf(),
-            });
+        let Some(dialog) = self.adding_project.as_mut() else {
             return;
-        }
-        let found = Project::discover(path);
+        };
+        dialog.reading = Some(path.to_path_buf());
+        // The last folder's repair goes with it: it would act on that folder.
+        dialog.repair = None;
+        let path = path.to_path_buf();
+        let read = cx.background_executor().spawn({
+            let path = path.clone();
+            async move { read_folder(&path) }
+        });
+        cx.spawn(async move |shell: WeakEntity<Shell>, cx| {
+            let read = read.await;
+            let _ = shell.update(cx, |shell, cx| {
+                // Only the folder chosen last, in the dialog it was chosen in.
+                if shell
+                    .adding_project
+                    .as_ref()
+                    .is_some_and(|dialog| dialog.reading.as_ref() == Some(&path))
+                {
+                    shell.fill_project_folder(read, cx);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Fills the dialog from what a chosen folder turned out to be.
+    fn fill_project_folder(&mut self, read: FolderRead, cx: &mut Context<Self>) {
         let known = |id: &ProjectId| self.projects.iter().any(|node| &node.id == id);
-        let refusal = match &found {
-            Ok(project) if known(&project.id) => Some(format!(
+        let refusal = match &read {
+            FolderRead::Repository { project, .. } if known(&project.id) => Some(format!(
                 "{} is already in the sidebar",
                 project.root.display()
             )),
-            Ok(_) => None,
-            Err(e) => Some(e.to_string()),
+            FolderRead::Refused(why) => Some(why.clone()),
+            _ => None,
         };
         let Some(dialog) = self.adding_project.as_mut() else {
             return;
         };
+        dialog.reading = None;
         let form = &mut dialog.form;
         if let Some(why) = refusal {
             form.error = Some(why.into());
             dialog.repair = None;
             return;
         }
-        let Ok(project) = found else {
-            return;
-        };
-
-        // The base follows the folder until someone types one of their own.
-        let base = form.base.read(cx).text();
-        let detected = dialog.found.as_ref().map(|old| old.default_base.as_str());
-        if base.trim().is_empty() || Some(base.trim()) == detected {
-            form.base
-                .update(cx, |input, _| input.set_text(&project.default_base));
+        match read {
+            // Not a repository at all: kept, named after the folder, with the
+            // button that makes it one.
+            FolderRead::NotRepository { path, name } => {
+                if form.base.read(cx).text().trim().is_empty() {
+                    form.base.update(cx, |input, _| input.set_text("main"));
+                }
+                form.name
+                    .update(cx, |input, _| input.set_placeholder(name.clone()));
+                form.dir_name = name.into();
+                form.error = None;
+                dialog.found = None;
+                dialog.chosen = Some(path.clone());
+                dialog.repair = Some(Repair::Init { path });
+            }
+            FolderRead::Repository {
+                project,
+                unborn_branch,
+            } => {
+                // The base follows the folder until someone types one of
+                // their own.
+                let base = form.base.read(cx).text();
+                let detected = dialog.found.as_ref().map(|old| old.default_base.as_str());
+                if base.trim().is_empty() || Some(base.trim()) == detected {
+                    form.base
+                        .update(cx, |input, _| input.set_text(&project.default_base));
+                }
+                form.name
+                    .update(cx, |input, _| input.set_placeholder(project.name.clone()));
+                form.dir_name = project.name.clone().into();
+                form.error = None;
+                // A repository with no commits has a branch in name only:
+                // nothing for a worktree to start from until one is made.
+                dialog.repair = unborn_branch.map(|branch| Repair::FirstCommit {
+                    root: project.root.clone(),
+                    branch,
+                });
+                dialog.chosen = Some(project.root.clone());
+                dialog.found = Some(project);
+            }
+            FolderRead::Refused(_) => {}
         }
-        form.name
-            .update(cx, |input, _| input.set_placeholder(project.name.clone()));
-        form.dir_name = project.name.clone().into();
-        form.error = None;
-        // A repository with no commits has a branch in name only: nothing
-        // for a worktree to start from until one is made.
-        let repo = Git::new(&project.root);
-        dialog.repair = (!repo.has_commits()).then(|| Repair::FirstCommit {
-            root: project.root.clone(),
-            branch: repo
-                .current_branch()
-                .ok()
-                .flatten()
-                .unwrap_or_else(|| project.default_base.clone()),
-        });
-        dialog.chosen = Some(project.root.clone());
-        dialog.found = Some(project);
     }
 
     /// Makes what the chosen folder lacks — see [`Repair`] — off this thread,
@@ -214,7 +248,7 @@ impl Shell {
         let Some(repair) = dialog.repair.clone() else {
             return;
         };
-        if dialog.repairing {
+        if dialog.repairing || dialog.reading.is_some() {
             return;
         }
         let typed = dialog.form.base.read(cx).text();
@@ -343,6 +377,10 @@ impl Shell {
         let Some(dialog) = self.adding_project.as_mut() else {
             return;
         };
+        // A folder still being read isn't the one in `found` yet.
+        if dialog.reading.is_some() {
+            return;
+        }
         let Some(found) = dialog.found.as_ref() else {
             if dialog.repair.is_none() {
                 dialog.form.error = Some("Choose the folder to add first".into());
@@ -545,17 +583,111 @@ impl Shell {
                     })),
             );
 
+        let form = &dialog.form;
+        let folder = self.stacked_item(
+            "Folder",
+            Tip::Folder,
+            form.tip,
+            self.folder_line(dialog, cx),
+            cx,
+        );
+        let root = dialog
+            .found
+            .as_ref()
+            .map(|project| project.root.as_path())
+            .or(dialog.chosen.as_deref());
+        // Everything under the folder starts from what is in it, so until
+        // there is one it is shown, faded, and out of reach.
+        let waiting = root.is_none();
+        let columns = div()
+            .relative()
+            .child(
+                self.form_columns(form, root, window, cx)
+                    .when(waiting, |el| el.opacity(WAITING)),
+            )
+            .when(waiting, |el| {
+                el.child(
+                    div()
+                        .id("add-project-waiting")
+                        .absolute()
+                        .inset_0()
+                        .occlude(),
+                )
+            });
+
         Some(
             centered(
-                self.form_card("add-project", cx)
-                    .child(header("Add project", t))
-                    .child(self.folder_line(dialog, cx))
+                self.form_card("add-project", WIDTH, cx)
+                    .child(
+                        header("add-project-close", "Add project")
+                            .on_close(cx.listener(|this, _, _, cx| {
+                                this.adding_project = None;
+                                cx.notify();
+                            }))
+                            .render(t),
+                    )
+                    .child(folder)
                     .children(self.repair_line(dialog, cx))
-                    .child(self.form_identity(&dialog.form, window, cx))
-                    .children(self.form_rows(&dialog.form, window, cx))
+                    .child(rule(t))
+                    .child(columns)
+                    .children(form.error.clone().map(|why| field_error(why, t)))
                     .child(dialog_footer),
+            )
+            // A press on the scrim, outside the card, is outside every panel
+            // too. The card occludes, so a press on it never lands here.
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    if this.put_form_panels_away(window, cx) {
+                        cx.notify();
+                    }
+                }),
             )
             .into_any_element(),
         )
+    }
+}
+
+/// What a chosen folder turned out to be.
+enum FolderRead {
+    /// Not inside a Git repository: named after the folder.
+    NotRepository { path: PathBuf, name: String },
+    /// A repository, and its branch when it has no commit yet.
+    Repository {
+        project: Project,
+        unborn_branch: Option<String>,
+    },
+    /// Inside a repository that can't be a project, and why.
+    Refused(String),
+}
+
+/// Reads what the folder at `path` is. Several calls to git: run it off the
+/// window's thread.
+fn read_folder(path: &Path) -> FolderRead {
+    if git::discover_root(path).is_err() {
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        return FolderRead::NotRepository {
+            path: path.to_path_buf(),
+            name,
+        };
+    }
+    match Project::discover(path) {
+        Ok(project) => {
+            let repo = Git::new(&project.root);
+            let unborn_branch = (!repo.has_commits()).then(|| {
+                repo.current_branch()
+                    .ok()
+                    .flatten()
+                    .unwrap_or_else(|| project.default_base.clone())
+            });
+            FolderRead::Repository {
+                project,
+                unborn_branch,
+            }
+        }
+        Err(error) => FolderRead::Refused(error.to_string()),
     }
 }

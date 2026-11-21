@@ -33,7 +33,8 @@ const ONE_HOUR_MS: u64 = 60 * 60 * 1000;
 /// The newest request a session made, as its transcript recorded it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LastCall {
-    /// When the response was written, in epoch milliseconds.
+    /// When the response was written, in epoch milliseconds — or the
+    /// compaction after it, when the session was compacted since.
     pub at_ms: u64,
     /// Every token the next request will send before the new prompt: what
     /// this one sent — fresh, written and read — plus what it answered.
@@ -89,10 +90,24 @@ impl LastCall {
     }
 }
 
+/// What a cold session must reach to be asked about: a price, or for a
+/// model ket has no price for, a size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Floor {
+    /// The least it costs to re-cache, in millionths of a dollar.
+    pub micros: i64,
+    /// The fewest tokens to re-cache, when the price is unknown.
+    pub tokens: u64,
+}
+
 impl Cold {
-    /// Whether this is worth asking about: at least `min_tokens` to re-cache.
-    pub fn worth_asking(&self, min_tokens: u64) -> bool {
-        self.tokens >= min_tokens
+    /// Whether this is worth asking about: re-caching costs at least the
+    /// floor's price, or with no price known, is at least its size.
+    pub fn worth_asking(&self, floor: Floor) -> bool {
+        match self.cost_micros {
+            Some(micros) => micros >= floor.micros,
+            None => self.tokens >= floor.tokens,
+        }
     }
 
     /// The figures as one line: "re-caches 312k tokens, about $6.24 at API
@@ -156,8 +171,67 @@ pub fn claude_last_call_cached(path: &Path) -> Option<LastCall> {
 }
 
 /// [`claude_last_call`] over bytes already read.
+///
+/// A compaction after the last response stands in for it. Claude Code
+/// compacts a session left idle shortly before its cache would expire, and
+/// writes no response for that: read without this, the session went cold
+/// minutes later at its size before, when the next prompt sends only the
+/// summary.
 fn last_call_in(bytes: &[u8]) -> Option<LastCall> {
-    bytes.split(|&b| b == b'\n').rev().find_map(call_from_line)
+    let mut compacted = None;
+    for line in bytes.split(|&b| b == b'\n').rev() {
+        if let Some(call) = call_from_line(line) {
+            return Some(match compacted {
+                // The response before it still says the model and the
+                // lifetime the session caches at.
+                Some((at_ms, context_tokens)) => LastCall {
+                    at_ms,
+                    context_tokens,
+                    ..call
+                },
+                None => call,
+            });
+        }
+        if compacted.is_none() {
+            compacted = compaction_from_line(line);
+        }
+    }
+    // Compacted, and the response before it is further back than was read.
+    compacted.map(|(at_ms, context_tokens)| LastCall {
+        at_ms,
+        context_tokens,
+        one_hour: false,
+        model: None,
+    })
+}
+
+/// When a main-thread compaction was written, and the tokens it left the
+/// conversation at — the system prompt and the tools not among them, so a
+/// little under what the next prompt sends. Zero when the record does not
+/// say, which never asks.
+fn compaction_from_line(line: &[u8]) -> Option<(u64, u64)> {
+    if !contains(line, b"\"compact_boundary\"") {
+        return None;
+    }
+    let record: serde_json::Value = serde_json::from_slice(line).ok()?;
+    if record.get("subtype").and_then(|s| s.as_str()) != Some("compact_boundary")
+        || record
+            .get("isSidechain")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+    {
+        return None;
+    }
+    let at_ms = record
+        .get("timestamp")
+        .and_then(|t| t.as_str())
+        .and_then(crate::rate_limits::parse_rfc3339_ms)?;
+    let left = record
+        .get("compactMetadata")
+        .and_then(|m| m.get("postTokens"))
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    Some((at_ms, left))
 }
 
 fn call_from_line(line: &[u8]) -> Option<LastCall> {
@@ -408,8 +482,12 @@ mod tests {
             tokens: 99_999,
             cost_micros: None,
         };
-        assert!(!cold.worth_asking(100_000));
-        assert!(cold.worth_asking(99_999));
+        let floor = |tokens| Floor {
+            micros: 2_000_000,
+            tokens,
+        };
+        assert!(!cold.worth_asking(floor(100_000)));
+        assert!(cold.worth_asking(floor(99_999)));
     }
 
     #[test]

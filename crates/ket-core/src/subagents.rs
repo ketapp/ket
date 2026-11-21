@@ -12,6 +12,7 @@ use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 
 use crate::agent_hooks::{BackgroundTask, HookEvent, HookReport};
+use crate::agent_status::PROMPT_SIBLINGS_MS;
 
 /// Most subagents one pane tracks; past it a row is one nobody reads.
 pub const MAX_SUBAGENTS: usize = 32;
@@ -57,6 +58,10 @@ struct Tracked {
     /// The call a prompt is holding, so an unrelated call finishing does not
     /// read as the prompt being answered.
     blocked_tool: Option<String>,
+    /// When that prompt went up, for telling the model's next call from one
+    /// that ran beside it.
+    #[serde(default)]
+    blocked_at_ms: u64,
     started_at_ms: u64,
     last_at_ms: u64,
     /// Listed by id in a `background_tasks` inventory, which makes a later
@@ -104,8 +109,26 @@ impl Roster {
             HookEvent::PermissionRequest | HookEvent::Notification => {
                 if tracked.state != SubagentState::Blocked || report.tool_use_id.is_some() {
                     tracked.blocked_tool = report.tool_use_id.clone();
+                    tracked.blocked_at_ms = report.at_ms;
                 }
                 tracked.state = SubagentState::Blocked;
+            }
+            // Codex says nothing when a subagent's prompt is declined or its
+            // turn is interrupted under it: no result for the call, no
+            // `Interrupt`, no `SubagentStop`. The row read "waiting" with no
+            // prompt left to answer until the subagent finished. A call it
+            // starts well after the prompt went up is its next one, which it
+            // could only make once the prompt was gone — the lead's own rule,
+            // see [`PROMPT_SIBLINGS_MS`].
+            HookEvent::PreTool
+                if tracked.state == SubagentState::Blocked
+                    && crate::agents::harness(&report.agent).eq_ignore_ascii_case("codex")
+                    && (report.tool_use_id.is_none()
+                        || tracked.blocked_tool != report.tool_use_id)
+                    && report.at_ms.saturating_sub(tracked.blocked_at_ms) >= PROMPT_SIBLINGS_MS =>
+            {
+                tracked.state = SubagentState::Working;
+                tracked.blocked_tool = None;
             }
             // The prompt was answered once the call it held comes back. Any
             // other call finishing says nothing: a subagent's read-only calls
@@ -216,6 +239,7 @@ impl Roster {
             model: None,
             state: SubagentState::Working,
             blocked_tool: None,
+            blocked_at_ms: 0,
             started_at_ms: at_ms,
             last_at_ms: at_ms,
             listed: false,
@@ -405,6 +429,61 @@ mod tests {
         assert_eq!(rows[0].id, "a1a2b3");
         assert_eq!(rows[0].state, SubagentState::Working);
         assert_eq!(rows[0].label, "subagent", "no description or type given");
+    }
+
+    fn codex(event: HookEvent, call: &str, at_ms: u64) -> HookReport {
+        let mut report = report(event, Some(THREAD), at_ms);
+        report.agent = "codex".to_owned();
+        report.tool_use_id = Some(call.to_owned());
+        report
+    }
+
+    const THREAD: &str = "01a1ec67-9420-75a2-9693-e205142c5783";
+
+    #[test]
+    fn a_codex_subagents_next_call_ends_a_prompt_nothing_answered_for() {
+        let mut roster = Roster::default();
+        roster.child(THREAD, &codex(HookEvent::PreTool, "call-1", 1_000));
+        roster.child(
+            THREAD,
+            &codex(HookEvent::PermissionRequest, "call-1", 1_010),
+        );
+        assert!(roster.blocked());
+
+        // Declined: its turn ends without a word, and its lead sends it on.
+        roster.child(THREAD, &codex(HookEvent::PreTool, "call-2", 120_000));
+        assert!(!roster.blocked(), "the next call means the prompt is gone");
+        assert_eq!(rows(&roster)[0].state, SubagentState::Working);
+    }
+
+    #[test]
+    fn a_call_beside_the_prompt_leaves_a_codex_subagent_waiting() {
+        let mut roster = Roster::default();
+        roster.child(
+            THREAD,
+            &codex(HookEvent::PermissionRequest, "call-1", 1_000),
+        );
+
+        roster.child(THREAD, &codex(HookEvent::PreTool, "call-2", 1_400));
+        assert!(roster.blocked(), "dispatched with the one that asked");
+        roster.child(THREAD, &codex(HookEvent::PostTool, "call-2", 9_000));
+        assert!(roster.blocked(), "a call finishing proves nothing");
+    }
+
+    #[test]
+    fn a_later_call_leaves_a_claude_subagent_waiting() {
+        let mut roster = Roster::default();
+        let mut asked = report(HookEvent::PermissionRequest, Some("a1a2b3"), 1_000);
+        asked.tool_use_id = Some("toolu_1".to_owned());
+        roster.child("a1a2b3", &asked);
+
+        let mut next = report(HookEvent::PreTool, Some("a1a2b3"), 60_000);
+        next.tool_use_id = Some("toolu_2".to_owned());
+        roster.child("a1a2b3", &next);
+        assert!(
+            roster.blocked(),
+            "Claude reports the held call's own result"
+        );
     }
 
     #[test]

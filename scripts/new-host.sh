@@ -97,19 +97,8 @@ if ! grep -q '^\[phones\]' "$config"; then
   echo "› turned on Devices in $config"
 fi
 
-# Where the phone app is served, for the pairing QR code: this checkout's
-# Expo dev server, whichever port it got.
-web=""
-expo=$(pgrep -f "$(pwd)/mobile/app/node_modules/.bin/expo start" | head -1 || true)
-if [ -n "$expo" ]; then
-  port=$(lsof -nP -a -p "$expo" -iTCP -sTCP:LISTEN 2>/dev/null | awk 'NR>1 {sub(/.*:/, "", $9); print $9; exit}')
-  ip=$(ipconfig getifaddr en0 2>/dev/null || true)
-  [ -n "$port" ] && [ -n "$ip" ] && web="http://$ip:$port"
-fi
-[ -z "$web" ] && echo "› the phone app's dev server is not running (cd mobile/app && npx expo start)"
-
 echo "› opening ket"
-env -u KET_RELAY_URL ${web:+KET_PHONE_WEB_URL=$web} nohup "$UI" >/dev/null 2>&1 &
+env -u KET_RELAY_URL nohup "$UI" >/dev/null 2>&1 &
 
 for _ in $(seq 1 40); do
   "$KET" host status 2>/dev/null | grep -q '^running' && break

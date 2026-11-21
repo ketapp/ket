@@ -32,7 +32,7 @@
 //! real report replaces outright. See [`StatusStore::escape`].
 
 use std::collections::btree_map::Entry;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -57,7 +57,7 @@ const UNPLACED: &str = "worktree:";
 /// one the model asked for, which it could only do once the prompt was
 /// answered. Generous against the hooks' own run time; a prompt is up for
 /// seconds at the least.
-const PROMPT_SIBLINGS_MS: u64 = 2_000;
+pub(crate) const PROMPT_SIBLINGS_MS: u64 = 2_000;
 
 /// Who decided a turn was cancelled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -122,6 +122,11 @@ pub struct PaneAgentStatus {
     /// When the lead was last heard from. Never refreshed by a snapshot being
     /// passed on — only by the agent.
     pub at_ms: u64,
+    /// The lead's latest turn milestone, for ordering worktrees without
+    /// moving them on every tool call. Updated on a prompt, a turn ending,
+    /// or entering a wait for input. Zero in snapshots from older hosts.
+    #[serde(default)]
+    pub recency_at_ms: u64,
     /// A cancelled turn, while it is held.
     pub cancel: Option<CancelVerdict>,
     /// See [`ToolCall`].
@@ -150,6 +155,15 @@ pub struct PaneAgentStatus {
     /// `PostCompact`.
     #[serde(default)]
     pub compacting: bool,
+    /// Whether the lead has finished a turn nobody has looked at since: set
+    /// when its turn ends, cleared by [`StatusStore::seen`] when a window or
+    /// a phone shows the pane. A prompt sent to it leaves this alone.
+    #[serde(default)]
+    pub unread: bool,
+    /// A Codex subagent's prompt standing as this pane's — see
+    /// [`crate::codex_subagent_prompt`]. The host's own; never sent on.
+    #[serde(skip)]
+    pub(crate) codex_asker: Option<crate::codex_subagent_prompt::Asker>,
     pub(crate) roster: Roster,
 }
 
@@ -168,7 +182,7 @@ pub struct Answered {
 /// A new prompt's id: never `0`, never the same twice in a run, and not the
 /// same run to run — a phone that answers across a host restart must not
 /// match a prompt it never saw.
-fn next_question_id() -> u64 {
+pub(crate) fn next_question_id() -> u64 {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let _ = NEXT.compare_exchange(
@@ -195,6 +209,7 @@ impl PaneAgentStatus {
             note: None,
             mutating_git: false,
             at_ms,
+            recency_at_ms: at_ms,
             cancel: None,
             last_tool: None,
             question: None,
@@ -202,6 +217,8 @@ impl PaneAgentStatus {
             covered: None,
             covered_idle: false,
             compacting: false,
+            unread: false,
+            codex_asker: None,
             roster: Roster::default(),
         }
     }
@@ -268,6 +285,7 @@ impl PaneAgentStatus {
         self.covered_idle = false;
         self.mutating_git = false;
         self.at_ms = at_ms;
+        self.recency_at_ms = self.recency_at_ms.max(at_ms);
         // Whatever it was running belonged to the turn that has just ended,
         // and showing it for the rest of its minimum would undo this.
         self.last_tool = None;
@@ -291,6 +309,10 @@ pub struct AgentStatusSnapshot {
     pub revision: u64,
     /// Every pane the owner knows about.
     pub panes: Vec<PaneAgentStatus>,
+    /// The worktrees marked unread from a worktree menu — see
+    /// [`StatusStore::mark_unread`].
+    #[serde(default)]
+    pub marked: Vec<String>,
 }
 
 impl AgentStatusSnapshot {
@@ -329,6 +351,8 @@ pub struct StatusStore {
     /// The worktree each Codex thread works in, by session, as its own
     /// thread-level events place it — see [`Self::route`].
     threads: HashMap<String, String>,
+    /// See [`Self::mark_unread`].
+    marked: BTreeSet<String>,
 }
 
 impl StatusStore {
@@ -544,7 +568,12 @@ impl StatusStore {
                 entry.cancel = None;
             }
             entry.worktree = worktree;
+            let was_blocked = entry.roster.blocked();
             entry.roster.child(child, report);
+            crate::codex_subagent_prompt::child(entry, child, report);
+            if !was_blocked && entry.roster.blocked() {
+                entry.recency_at_ms = entry.recency_at_ms.max(at_ms);
+            }
             return true;
         }
 
@@ -640,6 +669,10 @@ impl StatusStore {
             if std::mem::take(&mut entry.covered_idle) {
                 entry.state = AgentState::Idle;
             }
+        }
+
+        if crate::codex_subagent_prompt::lead(entry, report) {
+            return true;
         }
 
         // Another call's news while the lead waits on a person. Claude runs
@@ -798,11 +831,72 @@ impl StatusStore {
             entry.covered = None;
             entry.covered_idle = false;
         }
+        if report.event == HookEvent::UserPrompt
+            || (state == AgentState::AwaitingPermission
+                && entry.state != AgentState::AwaitingPermission)
+            || (state == AgentState::Idle && entry.state != AgentState::Idle)
+        {
+            entry.recency_at_ms = entry.recency_at_ms.max(at_ms);
+        }
+        // The turn is over: there is an answer to read.
+        if matches!(report.event, HookEvent::Stop | HookEvent::StopFailure) {
+            entry.unread = true;
+        }
         entry.state = state;
         entry.note.clone_from(&report.note);
         entry.mutating_git = report.mutating_git;
         entry.at_ms = at_ms;
         true
+    }
+
+    /// Marks `worktree` unread, as its row's menu does, or takes the mark
+    /// off as someone comes to it. Its row has a dot while it is marked,
+    /// whatever its panes say; their own answers are left alone either way.
+    /// Returns whether that changed anything.
+    pub fn mark_unread(&mut self, worktree: &str, unread: bool) -> bool {
+        let changed = if unread {
+            self.marked.insert(worktree.to_owned())
+        } else {
+            self.marked.remove(worktree)
+        };
+        self.revision += u64::from(changed);
+        changed
+    }
+
+    /// Whether `worktree` is marked unread — see [`Self::mark_unread`].
+    pub fn marked(&self, worktree: &str) -> bool {
+        self.marked.contains(worktree)
+    }
+
+    /// Someone has `pane` in front of them: what its lead last said is read.
+    /// Returns whether that changed anything.
+    pub fn seen(&mut self, pane: &str) -> bool {
+        let Some(entry) = self.panes.get_mut(pane).filter(|e| e.unread) else {
+            return false;
+        };
+        entry.unread = false;
+        self.revision += 1;
+        true
+    }
+
+    /// A startup dialog shown before the agent has sent its first hook.
+    pub(crate) fn startup_dialog(
+        &mut self,
+        pane: &str,
+        worktree: &str,
+        agent: &str,
+        dialog: crate::screen::Dialog,
+        now_ms: u64,
+    ) -> bool {
+        self.panes.entry(pane.to_owned()).or_insert_with(|| {
+            PaneAgentStatus::new(
+                pane.to_owned(),
+                worktree.to_owned(),
+                agent.to_owned(),
+                now_ms,
+            )
+        });
+        self.screen_dialog(pane, Some(dialog), now_ms)
     }
 
     /// What `pane`'s screen shows drawn over its prompt, or `None` when the
@@ -851,6 +945,7 @@ impl StatusStore {
                     entry.covered = entry.question.take();
                     entry.covered_idle = idle;
                     entry.state = AgentState::AwaitingPermission;
+                    entry.recency_at_ms = entry.recency_at_ms.max(now_ms);
                 }
                 tracing::debug!(pane, agent = %entry.agent, ?prompt, "dialog on screen");
                 entry.question = Some(PermissionQuestion {
@@ -875,6 +970,18 @@ impl StatusStore {
         }
         self.revision += 1;
         true
+    }
+
+    /// What `pane`'s screen shows, for a Codex subagent's prompt — see
+    /// [`crate::codex_subagent_prompt::screen`]. Returns whether anything
+    /// changed.
+    pub fn codex_subagent_screen(&mut self, pane: &str, rows: &[String], now_ms: u64) -> bool {
+        let changed = self
+            .panes
+            .get_mut(pane)
+            .is_some_and(|entry| crate::codex_subagent_prompt::screen(entry, rows, now_ms));
+        self.revision += u64::from(changed);
+        changed
     }
 
     /// A cancel verdict from outside the agent: `Ctrl-C` or a phone.
@@ -957,6 +1064,10 @@ impl StatusStore {
         }) else {
             return false;
         };
+        if crate::codex_subagent_prompt::answered(entry, allowed, now_ms) {
+            self.revision += 1;
+            return true;
+        }
         let Some(asked) = entry.question.take() else {
             return false;
         };
@@ -1011,6 +1122,7 @@ impl StatusStore {
             epoch: self.epoch,
             revision: self.revision,
             panes: self.panes.values().cloned().collect(),
+            marked: self.marked.iter().cloned().collect(),
         }
     }
 }
@@ -1025,7 +1137,7 @@ impl StatusStore {
 /// ended. A pane shows one prompt at a time, so the tool is enough. A
 /// permission keeps its subject: the calls running beside one are often the
 /// same tool.
-fn answers(asked: &PermissionQuestion, call: &PermissionQuestion) -> bool {
+pub(crate) fn answers(asked: &PermissionQuestion, call: &PermissionQuestion) -> bool {
     asked.tool == call.tool
         && (PROMPT_TOOLS.contains(&asked.tool.as_str()) || asked.subject == call.subject)
 }

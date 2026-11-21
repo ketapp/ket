@@ -912,7 +912,12 @@ impl Shell {
         let card = dialog::card(("browser-dialog", id.0), px(420.0), theme)
             .max_w_full()
             .max_h(relative(1.0))
-            .child(dialog::header(title, theme).flex_none())
+            .child(
+                dialog::header(("browser-dialog-close", id.0), title)
+                    .on_close(answer(false))
+                    .render(theme)
+                    .flex_none(),
+            )
             .children(message.map(|message| {
                 div()
                     .id(("browser-dialog-message", id.0))

@@ -1,7 +1,9 @@
-// An agent's words, read as markdown: marked's lexer, the way GitHub reads
-// it — emphasis that nests and wraps code, escapes, tables, task lists,
-// strikethrough, autolinks — turned into the few blocks and runs the chat
-// draws. Nothing here draws; see `Words` in the session screen.
+// An agent's words, read as markdown. The chat uses marked's lexer, the way
+// GitHub reads it — emphasis that nests and wraps code, escapes, tables,
+// task lists, strikethrough, autolinks — turned into the few blocks and
+// runs `Words` draws. A worktree's one-line status is smaller: `caption`
+// walks paired backticks, `**strong**` and `*emphasis*` and leaves unmatched
+// marks in the string, so a report cannot lose text while it is arriving.
 
 import { type Token, type Tokens, lexer } from 'marked';
 
@@ -33,6 +35,103 @@ export type Block =
  * every update, and a long one is worth reading once. */
 const read = new Map<string, Block[]>();
 const KEPT = 300;
+
+/** A one-line status as the phone draws it: paired backticks become code,
+ * `**strong**` and `*emphasis*` take their face, and an unmatched mark is
+ * left alone. Empty `` stays literal, as the Mac sidebar's `detail_text`
+ * does for ticks. */
+export function caption(text: string): Run[] {
+  return codes(text).flatMap((run) => (run.kind === 'text' ? stars(run.text) : [run]));
+}
+
+function codes(text: string): Run[] {
+  const out: Run[] = [];
+  const push = (run: Run) => {
+    const last = out[out.length - 1];
+    if (run.kind === 'text' && last && last.kind === 'text') last.text += run.text;
+    else out.push(run);
+  };
+  let rest = text;
+  while (rest.length > 0) {
+    const open = rest.indexOf('`');
+    if (open < 0) {
+      push({ kind: 'text', text: rest });
+      break;
+    }
+    const after = rest.slice(open + 1);
+    const close = after.indexOf('`');
+    if (close < 0) {
+      push({ kind: 'text', text: rest });
+      break;
+    }
+    const code = after.slice(0, close);
+    if (code === '') {
+      push({ kind: 'text', text: rest.slice(0, open + 2) });
+    } else {
+      if (open > 0) push({ kind: 'text', text: rest.slice(0, open) });
+      push({ kind: 'code', text: code });
+    }
+    rest = after.slice(close + 1);
+  }
+  return out;
+}
+
+function stars(text: string): Run[] {
+  const out: Run[] = [];
+  let i = 0;
+  const push = (piece: string) => {
+    if (!piece) return;
+    const last = out[out.length - 1];
+    if (last && last.kind === 'text') last.text += piece;
+    else out.push({ kind: 'text', text: piece });
+  };
+  while (i < text.length) {
+    if (text.startsWith('**', i)) {
+      const innerStart = i + 2;
+      const close = text.indexOf('**', innerStart);
+      if (close > innerStart) {
+        out.push({ kind: 'strong', runs: stars(text.slice(innerStart, close)) });
+        i = close + 2;
+        continue;
+      }
+    }
+    if (text[i] === '*' && text[i + 1] !== '*') {
+      const innerStart = i + 1;
+      if (innerStart < text.length && !space(text[innerStart])) {
+        const close = starClose(text, innerStart);
+        if (close > innerStart && !space(text[close - 1])) {
+          out.push({ kind: 'em', runs: stars(text.slice(innerStart, close)) });
+          i = close + 1;
+          continue;
+        }
+      }
+    }
+    const next = text.indexOf('*', i);
+    const end = next < 0 ? text.length : next === i ? i + 1 : next;
+    push(text.slice(i, end));
+    i = end;
+  }
+  return out;
+}
+
+function starClose(text: string, from: number): number {
+  let i = from;
+  while (i < text.length) {
+    if (text[i] === '*') {
+      if (text[i + 1] === '*') {
+        i += 2;
+        continue;
+      }
+      return i;
+    }
+    i += 1;
+  }
+  return -1;
+}
+
+function space(ch: string): boolean {
+  return ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r';
+}
 
 /** `text` as the chat draws it. */
 export function markdown(text: string): Block[] {

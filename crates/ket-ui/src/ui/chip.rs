@@ -5,11 +5,13 @@
 //! box. A key hint means one thing wherever it appears, so it looks like one
 //! thing wherever it appears.
 
+use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    AnyElement, Bounds, Div, PathBuilder, Pixels, Rgba, SharedString, Window, canvas, div, point,
-    prelude::*, px,
+    AnyElement, Bounds, Div, PathBuilder, Pixels, Rgba, SharedString, Window, canvas, div, img,
+    point, prelude::*, px,
 };
 use ket_core::theme::{Color, Theme, contrast_ratio};
 
@@ -86,36 +88,85 @@ const BADGE_LETTER: Pixels = px(12.0);
 /// ([`super::glyph`]) is drawn as that picture, in the same ink a letter
 /// would be.
 pub(crate) fn badge(colour: Color, label: impl Into<SharedString>, t: &Theme) -> Div {
-    let on_badge = if contrast_ratio(t.surface, colour) >= contrast_ratio(t.text.primary, colour) {
+    lettered(face(colour, ink_on(colour, t), label.into())).size(BADGE)
+}
+
+/// A [`badge`] wearing a picture — a project's favicon or logo, the file at
+/// `image` — in place of its colour and mark. With no `image` it is the
+/// badge.
+///
+/// The picture fills the tile at the badge's corner, scaled to fit whole, so
+/// a logo that is not square is never cropped. When it cannot be drawn — the
+/// file deleted by hand, bytes that will not decode — the tile is the
+/// coloured badge instead, never an empty square. A size or a letter size the
+/// caller sets on what comes back reaches that stand-in too, as it would on a
+/// [`badge`].
+///
+/// gpui reads the file off the window's thread and keeps it by path, so
+/// asking every frame costs nothing after the first.
+pub(crate) fn image_badge(
+    image: Option<Arc<Path>>,
+    colour: Color,
+    label: impl Into<SharedString>,
+    t: &Theme,
+) -> Div {
+    let Some(image) = image else {
+        return badge(colour, label, t);
+    };
+    let ink = ink_on(colour, t);
+    let label = label.into();
+    lettered(div().flex_none().size(BADGE)).child(
+        img(image)
+            .size_full()
+            .rounded(RADIUS_SM)
+            .with_fallback(move || {
+                face(colour, ink, label.clone())
+                    .size_full()
+                    .into_any_element()
+            }),
+    )
+}
+
+/// The ink a badge's mark takes on `colour`: whichever of the card's ground
+/// and the primary ink stands out from it more.
+fn ink_on(colour: Color, t: &Theme) -> Color {
+    if contrast_ratio(t.surface, colour) >= contrast_ratio(t.text.primary, colour) {
         t.surface
     } else {
         t.text.primary
-    };
-    let label = label.into();
+    }
+}
 
+/// A badge's coloured square and its mark in `ink`, as large as it is made.
+fn face(colour: Color, ink: Color, label: SharedString) -> Div {
     let square = div()
         .flex()
         .flex_none()
         .items_center()
         .justify_center()
-        .size(BADGE)
         .rounded(RADIUS_SM)
         .bg(paint(colour));
     match super::glyph::named(&label) {
         Some(glyph) => square.child(super::icon::sized_icon(
             super::icon::Icon::Glyph(glyph),
             BADGE_GLYPH,
-            paint(on_badge),
+            paint(ink),
         )),
-        // Prose, not the chrome's mono: a capital in a fixed-width face is
-        // drawn narrow to fit its cell, and the badge is no cell.
-        None => square
-            .prose()
-            .text_size(BADGE_LETTER)
-            .font_weight(gpui::FontWeight::BOLD)
-            .text_color(paint(on_badge))
-            .child(label),
+        None => square.text_color(paint(ink)).child(label),
     }
+}
+
+/// A badge letter's type, set on the badge's outside so a caller that draws
+/// one smaller can set its letter smaller with it, and a picture's stand-in
+/// takes it too.
+///
+/// Prose, not the chrome's mono: a capital in a fixed-width face is drawn
+/// narrow to fit its cell, and the badge is no cell.
+fn lettered(badge: Div) -> Div {
+    badge
+        .prose()
+        .text_size(BADGE_LETTER)
+        .font_weight(gpui::FontWeight::BOLD)
 }
 
 /// One beat of a moving dot.

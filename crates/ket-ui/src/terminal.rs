@@ -213,6 +213,32 @@ pub(crate) struct TerminalId(pub(crate) u64);
 /// How long [`Shell::submit_to_terminal`] waits between the paste and Enter.
 const SUBMIT_DELAY: Duration = ket_core::attachments::SUBMIT_DELAY;
 
+/// How long a prompt pasted into Codex is given to show in its box before
+/// Enter is held back.
+const CODEX_DRAFT_WAIT: Duration = Duration::from_secs(3);
+
+/// Looks in a row at an empty Codex composer, once a startup question has
+/// gone, before a prompt it dropped is pasted again: a frame between the
+/// question and the composer is not the composer.
+const STEADY_LOOKS: u32 = 3;
+
+/// What one look at a Codex pane finds while a startup prompt is landing —
+/// see [`Shell::submit_guarded_to_terminal_then`].
+enum Landing {
+    /// The prompt is in the box.
+    Drawn,
+    /// The pane is gone or its program has exited: nothing will go in.
+    Closed,
+    /// A startup question is up: the prompt waits on its answer.
+    Asked,
+    /// The composer is empty again after a question, not yet for long.
+    Empty,
+    /// The prompt has gone in again after a question dropped it.
+    Pasted,
+    /// Nothing yet.
+    Waiting,
+}
+
 /// The closest two repaints of one pane may come while its program is writing
 /// continuously.
 ///
@@ -1645,6 +1671,9 @@ impl Shell {
         let mut extra = resume.map(|(_, args)| args).unwrap_or_default();
         let mut economy_env = std::collections::BTreeMap::new();
         if let Some(agent) = agent.as_ref() {
+            if let Some(settings) = settings {
+                extra.extend(settings.permissions.terminal_args(&agent.name));
+            }
             // The level's own policy sits *under* the reader's config: a pack
             // proposes, a config decides. Every built-in level names nothing at
             // all, so this changes no launch until a pack is in force.
@@ -2477,21 +2506,179 @@ impl Shell {
         cx: &mut Context<Self>,
         done: impl FnOnce(&mut Shell, bool, &mut Context<Shell>) + 'static,
     ) {
+        self.submit_guarded_to_terminal_then(id, text, false, cx, done);
+    }
+
+    /// Delivers a startup prompt only while Codex still shows its composer.
+    pub(crate) fn submit_startup_prompt(
+        &mut self,
+        id: TerminalId,
+        text: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let codex = self
+            .terminals
+            .get(&id)
+            .and_then(|handle| handle.agent.as_deref())
+            .is_some_and(|agent| ket_core::agents::harness(agent).eq_ignore_ascii_case("codex"));
+        if codex {
+            self.submit_guarded_to_terminal_then(id, text, true, cx, |_, _, _| {});
+        } else {
+            self.submit_or_queue(id, text, cx);
+        }
+    }
+
+    fn submit_guarded_to_terminal_then(
+        &mut self,
+        id: TerminalId,
+        text: &str,
+        guard: bool,
+        cx: &mut Context<Self>,
+        done: impl FnOnce(&mut Shell, bool, &mut Context<Shell>) + 'static,
+    ) {
         let Some(handle) = self.terminals.get(&id) else {
             done(self, false, cx);
             return;
         };
-        let bytes = paste_bytes(&handle.term, text);
-        if !self.terminal_input(id, bytes, cx) {
-            done(self, false, cx);
-            return;
+        let codex = guard
+            && handle.agent.as_deref().is_some_and(|agent| {
+                ket_core::agents::harness(agent).eq_ignore_ascii_case("codex")
+            });
+        // A startup question already over the composer — hook review,
+        // folder access — sends the prompt to the wait below rather than
+        // losing it: it goes in once the question has been answered.
+        let mut asked = false;
+        if codex {
+            let (ready, question) = handle.term.with_term(|term| {
+                let rows = ket_core::screen::bottom_rows(term, usize::MAX);
+                (
+                    ket_core::screen::codex_prompt_ready(term),
+                    ket_core::screen::codex_startup_question(&rows).is_some(),
+                )
+            });
+            if !ready && !question {
+                self.toast_detail(
+                    crate::ui::toast::Tone::Error,
+                    "Codex is not ready. Your prompt was not sent.",
+                    text.to_owned(),
+                    cx,
+                );
+                done(self, false, cx);
+                return;
+            }
+            asked = !ready;
+        }
+        if !asked {
+            let bytes = paste_bytes(&handle.term, text);
+            if !self.terminal_input(id, bytes, cx) {
+                done(self, false, cx);
+                return;
+            }
         }
         // Enter as a write of its own, a beat later. Sent in the same write,
         // a TUI still taking the paste in can read the carriage return as one
         // more line of it rather than as the submit.
+        let held_prompt = text.to_owned();
         cx.spawn(async move |this: WeakEntity<Shell>, cx: &mut AsyncApp| {
             cx.background_executor().timer(SUBMIT_DELAY).await;
+            // Codex draws a paste when it gets to it, later than that while
+            // it is still starting: look until the prompt is in its box.
+            //
+            // Starting, Codex can draw an empty composer for a moment and
+            // then ask a startup question over it — hook review, folder
+            // access — which drops a paste made meanwhile. The prompt waits
+            // on the person's answer, however long that takes, and is pasted
+            // again once the empty composer has been back for a few looks.
+            let mut waited = Duration::ZERO;
+            let mut asked = asked;
+            let mut empty_for = 0;
+            let mut closed = false;
+            while codex && waited < CODEX_DRAFT_WAIT {
+                let seen = this.update(cx, |shell, cx| {
+                    // Gone, or exited: a question left on its last screen
+                    // is no longer being asked, and nothing will go in.
+                    let Some(handle) = shell.terminals.get(&id) else {
+                        return Landing::Closed;
+                    };
+                    if handle.term.is_closed() {
+                        return Landing::Closed;
+                    }
+                    let (drawn, question, empty) = handle.term.with_term(|term| {
+                        let rows = ket_core::screen::bottom_rows(term, usize::MAX);
+                        (
+                            ket_core::screen::codex_draft_ready(term, &held_prompt),
+                            ket_core::screen::codex_startup_question(&rows).is_some(),
+                            ket_core::screen::codex_prompt_ready(term),
+                        )
+                    });
+                    if drawn {
+                        return Landing::Drawn;
+                    }
+                    if question {
+                        return Landing::Asked;
+                    }
+                    if !(asked && empty) {
+                        return Landing::Waiting;
+                    }
+                    if empty_for + 1 < STEADY_LOOKS {
+                        return Landing::Empty;
+                    }
+                    let bytes = paste_bytes(&handle.term, &held_prompt);
+                    shell.terminal_input(id, bytes, cx);
+                    Landing::Pasted
+                });
+                match seen.unwrap_or(Landing::Closed) {
+                    Landing::Drawn => break,
+                    Landing::Closed => {
+                        closed = true;
+                        break;
+                    }
+                    Landing::Asked => {
+                        asked = true;
+                        empty_for = 0;
+                        waited = Duration::ZERO;
+                    }
+                    Landing::Empty => empty_for += 1,
+                    Landing::Pasted => {
+                        asked = false;
+                        empty_for = 0;
+                        waited = Duration::ZERO;
+                    }
+                    Landing::Waiting => {
+                        empty_for = 0;
+                        waited += SUBMIT_DELAY;
+                    }
+                }
+                cx.background_executor().timer(SUBMIT_DELAY).await;
+            }
             let _ = this.update(cx, |shell, cx| {
+                if closed {
+                    shell.toast_detail(
+                        crate::ui::toast::Tone::Error,
+                        "Codex closed before receiving your prompt.",
+                        held_prompt,
+                        cx,
+                    );
+                    done(shell, false, cx);
+                    return;
+                }
+                if codex
+                    && !shell.terminals.get(&id).is_some_and(|handle| {
+                        !handle.term.is_closed()
+                            && handle.term.with_term(|term| {
+                                ket_core::screen::codex_draft_ready(term, &held_prompt)
+                            })
+                    })
+                {
+                    shell.toast_detail(
+                        crate::ui::toast::Tone::Error,
+                        "Codex changed screens. Your prompt was not submitted.",
+                        held_prompt,
+                        cx,
+                    );
+                    done(shell, false, cx);
+                    return;
+                }
                 let entered = shell.terminal_input(id, b"\r".to_vec(), cx);
                 done(shell, entered, cx);
             });

@@ -132,7 +132,14 @@ impl Shell {
         Some(
             centered(
                 card("release-dialog", px(460.0), t)
-                    .child(header(title, t))
+                    .child(
+                        header("release-dialog-x", title)
+                            .on_close(cx.listener(|this, _, _, cx| {
+                                this.release_dialog = None;
+                                cx.notify();
+                            }))
+                            .render(t),
+                    )
                     .child(content)
                     .child(buttons),
             )

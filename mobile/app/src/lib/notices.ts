@@ -3,11 +3,12 @@
 // while ket is not the app in front. The desktop's notify.rs, on the phone,
 // under Settings → Notifications.
 //
-// The phone posts these itself, from the snapshots it keeps receiving: a
-// notice is local, not pushed. iOS keeps the connection alive for about half
-// a minute after the app leaves the screen, so news from later waits for the
-// next open. A push service carrying the same words through APNs would plug
-// in here, under the same switches.
+// The phone posts these itself, from the snapshots it keeps receiving. iOS
+// keeps the connection alive for about half a minute after the app leaves the
+// screen; from then on a desktop from 1.34 pushes the same notices through
+// APNs, under the same switches — see lib/push.ts. A pushed notice that is no
+// longer so — its prompt answered, its finished task read, its checks passing
+// — is taken back once the phone hears from that desktop again.
 //
 // Only the move into a state is announced: a worktree that stays waiting is
 // not announced again, one that stops and starts again is, and nothing is
@@ -25,11 +26,9 @@ import { AppState, Linking, Platform } from 'react-native';
 
 import { agentOf, agentTerminal, everyWorktree } from './activity';
 import { connection, type HostConnection } from './connection';
+import { type Pushed, forgetToken, pushable, pushedOf, pushedPath, syncPush } from './push';
 import { DEFAULT_NOTIFY, type NotifyConfig, getNotify, listHosts, saveNotify } from './store';
 import { agentLabel } from './theme';
-
-/** Whether this phone can show notices at all: a browser cannot. */
-export const available = Platform.OS !== 'web';
 
 /** The three kinds of notice, each with its own switch. */
 export type Kind = 'waiting' | 'finished' | 'checks';
@@ -74,7 +73,6 @@ export async function turnOn(): Promise<boolean> {
 /** Turns them off, taking back the ones showing and the badge. */
 export async function turnOff(): Promise<void> {
   await keep({ ...state.config, on: false }, false);
-  if (!available) return;
   await Notifications.dismissAllNotificationsAsync().catch(() => {});
   await Notifications.setBadgeCountAsync(0).catch(() => {});
 }
@@ -91,10 +89,26 @@ export function openPhoneSettings(): void {
 async function keep(config: NotifyConfig, refused: boolean): Promise<void> {
   await saveNotify(config);
   publish({ config, refused });
+  tellDesktops();
+}
+
+/** The desktops followed now — see `useNoticeFollowing`. */
+let followed: HostConnection[] = [];
+
+/** What push is to carry: what the switches say, and nothing while the
+ * phone refuses to show it. */
+function wanted() {
+  const { config, refused } = state;
+  return { ...config, on: config.on && !refused };
+}
+
+/** Tells every connected desktop what this phone wants pushed, after a
+ * switch changed or iOS handed out a new token. */
+function tellDesktops(): void {
+  for (const conn of followed) void syncPush(conn, wanted());
 }
 
 async function ask(): Promise<boolean> {
-  if (!available) return false;
   const had = await Notifications.getPermissionsAsync();
   if (had.granted) return true;
   if (!had.canAskAgain) return false;
@@ -216,7 +230,7 @@ function waitingCount(): number {
 }
 
 async function refreshBadge(): Promise<void> {
-  if (!available || !state.config.on || state.refused) return;
+  if (!state.config.on || state.refused) return;
   await Notifications.setBadgeCountAsync(waitingCount()).catch(() => {});
 }
 
@@ -239,8 +253,9 @@ async function post(notice: Notice): Promise<void> {
 
 /** Takes in a desktop's snapshot: posts the news, takes back the answered. */
 async function look(conn: HostConnection, named: boolean): Promise<void> {
-  const { fresh, answered } = compare(conn.host, conn.snapshot, named);
-  if (!available) return;
+  const { fresh, answered } = compare(conn.state.host, conn.state.snapshot, named);
+  void syncPush(conn, wanted());
+  void clearPushed(conn);
   for (const id of answered) void Notifications.dismissNotificationAsync(id).catch(() => {});
   const { config, refused } = state;
   if (!config.on || refused) return;
@@ -248,6 +263,44 @@ async function look(conn: HostConnection, named: boolean): Promise<void> {
     for (const notice of fresh) if (config[notice.kind]) await post(notice);
   }
   await refreshBadge();
+}
+
+/** How often a desktop's pushed notices are checked against what it says. */
+const CLEAR_EVERY_MS = 5000;
+const clearedAt = new Map<string, number>();
+
+/** Takes back the notices `conn`'s desktop pushed that are no longer so, as
+ * it would not have sent them: the prompt answered, the finished task read
+ * at the Mac or here, the checks passing again, the worktree gone. */
+async function clearPushed(conn: HostConnection): Promise<void> {
+  const snapshot = conn.state.snapshot;
+  if (!pushable || !snapshot) return;
+  const now = Date.now();
+  if (now - (clearedAt.get(conn.id) ?? 0) < CLEAR_EVERY_MS) return;
+  clearedAt.set(conn.id, now);
+  const shown = await Notifications.getPresentedNotificationsAsync().catch(() => []);
+  for (const notification of shown) {
+    const pushed = pushedOf(notification.request.content.data);
+    if (pushed?.host !== conn.id || stillSo(pushed, snapshot)) continue;
+    void Notifications.dismissNotificationAsync(notification.request.identifier).catch(() => {});
+  }
+}
+
+/** The desktop's own rule for whether a notice still stands (`still` in
+ * notices.rs). */
+function stillSo(pushed: Pushed, snapshot: HostSnapshot): boolean {
+  const worktree = everyWorktree(snapshot).find((x) => x.worktree.id === pushed.worktree)?.worktree;
+  if (!worktree) return false;
+  switch (pushed.kind) {
+    case 'waiting':
+      return worktree.activity === Activity.BLOCKED;
+    case 'finished':
+      return !MOVING.has(worktree.activity) && worktree.terminals.some((terminal) => terminal.unread);
+    case 'failed':
+      return worktree.activity === Activity.FAILED;
+    case 'checks':
+      return checksFailed(worktree);
+  }
 }
 
 /** The tapped notices already opened: the listener and the last response
@@ -259,7 +312,20 @@ function open(response: Notifications.NotificationResponse | null | undefined): 
   if (!response) return;
   const tap = `${response.notification.request.identifier}@${response.notification.date}`;
   if (opened.has(tap)) return;
-  const path = response.notification.request.content.data?.path;
+  const data = response.notification.request.content.data;
+  // A pushed notice, opened by the notification extension, names its
+  // desktop: it opens only one this phone is still paired with.
+  const pushed = pushedOf(data);
+  if (pushed) {
+    opened.add(tap);
+    void listHosts()
+      .then((hosts) => {
+        if (hosts.some((host) => host.id === pushed.host)) router.push(pushedPath(pushed));
+      })
+      .catch(() => {});
+    return;
+  }
+  const path = data?.path;
   if (typeof path !== 'string' || !path.startsWith('/')) return;
   opened.add(tap);
   router.push(path);
@@ -273,12 +339,10 @@ const RELIST_MS = 5000;
  * when the app starts. */
 export function startNotices(): void {
   void getNotify().then(async (config) => {
-    let refused = false;
-    if (available && config.on) refused = !(await Notifications.getPermissionsAsync()).granted;
+    const refused = config.on && !(await Notifications.getPermissionsAsync()).granted;
     publish({ config, refused });
     await refreshBadge();
   });
-  if (!available) return;
   Notifications.setNotificationHandler({
     // In front, the rows say it already: a notice landing then is kept in
     // the list without a banner.
@@ -296,6 +360,13 @@ export function startNotices(): void {
     });
   }
   Notifications.addNotificationResponseReceivedListener(open);
+  // iOS hands out a new token now and then: every desktop is told it.
+  if (pushable) {
+    Notifications.addPushTokenListener(() => {
+      forgetToken();
+      tellDesktops();
+    });
+  }
 }
 
 /** Follows the paired desktops' snapshots for news, and opens what a tapped
@@ -320,6 +391,7 @@ export function useNoticeFollowing(ready: boolean): void {
           ids = next;
           offs.forEach((off) => off());
           const conns = hosts.map((host) => connection(host));
+          followed = conns;
           const named = conns.length > 1;
           offs = conns.map((c) => c.onChange(() => void look(c, named)));
           conns.forEach((c) => void look(c, named));
@@ -334,6 +406,7 @@ export function useNoticeFollowing(ready: boolean): void {
       live = false;
       clearInterval(timer);
       offs.forEach((off) => off());
+      followed = [];
     };
   }, []);
 }

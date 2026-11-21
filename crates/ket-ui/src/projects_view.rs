@@ -11,8 +11,8 @@ use crate::Shell;
 use crate::fonts::Prose;
 use crate::paint::paint;
 use crate::projects::rail_colour;
-use crate::tree::{Selection, row_mark, state_word};
-use crate::ui::agent::MARK;
+use crate::tree::{Selection, state_word};
+use crate::ui::chip::BADGE;
 use crate::ui::row::block_row_with_rail;
 use crate::ui::{CAPTION, ICON_GAP, LABEL};
 
@@ -34,6 +34,7 @@ struct Entry {
     signal: Signal,
     /// Pinned rows lead the list, ahead of the status order.
     pinned: bool,
+    updated_at_ms: Option<u64>,
 }
 
 impl Shell {
@@ -61,6 +62,7 @@ impl Shell {
                         branch: worktree_node.label(),
                         signal: self.row_signal(worktree_node, now),
                         pinned: worktree_node.pinned,
+                        updated_at_ms: self.activity.last_updated_ms(&worktree_node.id),
                     })
             })
             // The sidebar's filter holds here too: sorted or grouped, it is
@@ -68,11 +70,14 @@ impl Shell {
             .filter(|entry| self.sidebar_filter.admits(entry.signal))
             .collect();
         entries.sort_by_key(|entry| {
-            (
-                std::cmp::Reverse(entry.pinned),
-                status_rank(entry.signal),
-                entry.project,
-                entry.worktree,
+            status_sort_key(
+                entry.pinned,
+                entry.signal,
+                entry.updated_at_ms,
+                Selection {
+                    project: entry.project,
+                    worktree: entry.worktree,
+                },
             )
         });
 
@@ -89,8 +94,11 @@ impl Shell {
                 let row_id = entry.project * 1000 + entry.worktree;
                 let node = &self.projects[project].worktrees[worktree];
                 let activity = self.activity.activity(&node.id, now);
+                // Its session's `/color`, as the grouped tree draws it.
+                let color = self.row_color(&node.id, &activity, now);
                 let meta = self.worktree_meta(node, project, worktree, None, window, cx);
-                let state = state_word(node, entry.signal, &self.theme);
+                let unread = self.activity.unread(&node.id);
+                let state = state_word(node, entry.signal, unread, &self.theme);
                 let t = &self.theme;
                 let rail = rail_colour(entry.project_color, t);
                 block_row_with_rail(("activity-worktree", row_id), selected, rail, t)
@@ -106,8 +114,16 @@ impl Shell {
                             .flex_none()
                             .items_center()
                             .justify_center()
-                            .w(MARK)
-                            .child(row_mark(&activity, node.dirty, node.missing, t)),
+                            // As wide as a project's badge, as the grouped
+                            // tree's is: room for the mark's well.
+                            .w(BADGE)
+                            .child(crate::session_color::row_mark(
+                                &activity,
+                                color,
+                                node.dirty,
+                                node.missing,
+                                t,
+                            )),
                     )
                     .child(
                         div()
@@ -115,7 +131,14 @@ impl Shell {
                             .flex_col()
                             .flex_1()
                             .min_w_0()
-                            .child(div().truncate().child(entry.branch))
+                            .child(
+                                div()
+                                    .truncate()
+                                    .when_some(color, |el, color| {
+                                        el.text_color(paint(crate::session_color::label(color, t)))
+                                    })
+                                    .child(entry.branch),
+                            )
                             // Which project, in its own colour: a list sorted
                             // across repositories is scanned by whose a row is.
                             // Nothing after it: this list is for finding a
@@ -168,6 +191,29 @@ impl Shell {
     }
 }
 
+/// Pinned rows first, then status, then the most recently updated session.
+/// Original project/worktree order breaks ties and places rows with no activity.
+pub(crate) fn status_sort_key(
+    pinned: bool,
+    signal: Signal,
+    updated_at_ms: Option<u64>,
+    at: Selection,
+) -> (
+    std::cmp::Reverse<bool>,
+    u8,
+    std::cmp::Reverse<Option<u64>>,
+    usize,
+    usize,
+) {
+    (
+        std::cmp::Reverse(pinned),
+        status_rank(signal),
+        std::cmp::Reverse(updated_at_ms),
+        at.project,
+        at.worktree,
+    )
+}
+
 /// Where a state sorts in the status view: waiting on a person first.
 pub(crate) fn status_rank(signal: Signal) -> u8 {
     match signal {
@@ -177,5 +223,86 @@ pub(crate) fn status_rank(signal: Signal) -> u8 {
         Signal::Running => 3,
         Signal::Failed => 4,
         Signal::Quiet => 5,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn status_sort_keeps_priority_then_orders_by_recency_across_projects() {
+        let mut rows = [
+            (
+                false,
+                Signal::Quiet,
+                Some(900),
+                Selection {
+                    project: 0,
+                    worktree: 0,
+                },
+            ),
+            (
+                false,
+                Signal::Working,
+                Some(100),
+                Selection {
+                    project: 0,
+                    worktree: 1,
+                },
+            ),
+            (
+                false,
+                Signal::Working,
+                Some(200),
+                Selection {
+                    project: 1,
+                    worktree: 0,
+                },
+            ),
+            (
+                false,
+                Signal::Blocked,
+                Some(50),
+                Selection {
+                    project: 1,
+                    worktree: 1,
+                },
+            ),
+            (
+                true,
+                Signal::Quiet,
+                None,
+                Selection {
+                    project: 2,
+                    worktree: 0,
+                },
+            ),
+            (
+                false,
+                Signal::Working,
+                None,
+                Selection {
+                    project: 0,
+                    worktree: 2,
+                },
+            ),
+            (
+                false,
+                Signal::Working,
+                Some(200),
+                Selection {
+                    project: 1,
+                    worktree: 2,
+                },
+            ),
+        ];
+        rows.sort_by_key(|&(pinned, signal, updated, at)| {
+            status_sort_key(pinned, signal, updated, at)
+        });
+        assert_eq!(
+            rows.map(|(_, _, _, at)| (at.project, at.worktree)),
+            [(2, 0), (1, 1), (1, 0), (1, 2), (0, 1), (0, 2), (0, 0)]
+        );
     }
 }

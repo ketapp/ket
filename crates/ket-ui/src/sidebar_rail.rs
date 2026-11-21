@@ -25,9 +25,9 @@ use ket_core::theme::Theme;
 use crate::Shell;
 use crate::fonts::Prose;
 use crate::paint::{alpha, paint};
-use crate::tree::{ProjectNode, Selection, SidebarFilter, row_mark, state_word};
+use crate::tree::{ProjectNode, Selection, SidebarFilter, state_word};
 use crate::ui::button::icon_button;
-use crate::ui::chip::{BADGE, badge};
+use crate::ui::chip::{BADGE, image_badge};
 use crate::ui::icon::{Icon, sized_icon};
 use crate::ui::menu::{MenuEntry, MenuItem, MenuKey, OpenMenu, dropdown};
 use crate::ui::popup::{self, Placement};
@@ -581,7 +581,12 @@ impl Shell {
                 let launches = project.override_summary().is_some();
 
                 let face = tile(("rail-project", pi), TILE, selected == Some(pi), t)
-                    .child(badge(project.color, project_mark(project), t))
+                    .child(image_badge(
+                        project.image.clone(),
+                        project.color,
+                        project_mark(project),
+                        t,
+                    ))
                     .when_some(urgent, |el, band| {
                         el.child(
                             div()
@@ -692,7 +697,7 @@ impl Shell {
     /// Sorted by status: a tile per worktree, in a band per state.
     fn rail_bands(&self, now: u64, window: &Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let t = &self.theme;
-        let mut entries: Vec<(Selection, Signal, bool)> = self
+        let mut entries: Vec<_> = self
             .projects
             .iter()
             .enumerate()
@@ -706,17 +711,13 @@ impl Shell {
                         },
                         self.row_signal(node, now),
                         node.pinned,
+                        self.activity.last_updated_ms(&node.id),
                     )
                 })
             })
             .collect();
-        entries.sort_by_key(|(at, signal, pinned)| {
-            (
-                std::cmp::Reverse(*pinned),
-                crate::projects_view::status_rank(*signal),
-                at.project,
-                at.worktree,
-            )
+        entries.sort_by_key(|(at, signal, pinned, updated_at_ms)| {
+            crate::projects_view::status_sort_key(*pinned, *signal, *updated_at_ms, *at)
         });
 
         let mut out = Vec::new();
@@ -727,7 +728,7 @@ impl Shell {
         ] {
             let members: Vec<_> = entries
                 .iter()
-                .filter(|(_, signal, _)| SidebarFilter::of(*signal) == band)
+                .filter(|(_, signal, _, _)| SidebarFilter::of(*signal) == band)
                 .collect();
             if members.is_empty() {
                 continue;
@@ -748,7 +749,7 @@ impl Shell {
                         .h(px(12.0))
                         .child(div().size(px(6.0)).rounded_full().bg(band_colour(band, t))),
                 );
-            for &&(at, signal, _) in &members {
+            for &&(at, signal, _, _) in &members {
                 let Some(project) = self.projects.get(at.project) else {
                     continue;
                 };
@@ -761,8 +762,13 @@ impl Shell {
                     t,
                 )
                 .child(
-                    badge(project.color, project_mark(project), t)
-                        .when(quiet, |el| el.opacity(0.5)),
+                    image_badge(
+                        project.image.clone(),
+                        project.color,
+                        project_mark(project),
+                        t,
+                    )
+                    .when(quiet, |el| el.opacity(0.5)),
                 )
                 .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                     let over = if *hovered {
@@ -832,7 +838,12 @@ impl Shell {
             .gap(ICON_GAP)
             .h(px(30.0))
             .px(px(8.0))
-            .child(badge(project.color, project_mark(project), t))
+            .child(image_badge(
+                project.image.clone(),
+                project.color,
+                project_mark(project),
+                t,
+            ))
             .child(
                 div()
                     .prose()
@@ -895,6 +906,8 @@ impl Shell {
         };
         let project = &self.projects[at.project];
         let activity = self.activity.activity(&node.id, now);
+        // Its session's `/color`, as the sidebar's own rows draw it.
+        let color = self.row_color(&node.id, &activity, now);
         let detail = activity.detail();
         let selected = self.selection == Some(at);
         let hover = paint(t.hover);
@@ -930,7 +943,14 @@ impl Shell {
             .flex_col()
             .flex_1()
             .min_w_0()
-            .child(div().truncate().child(node.label()))
+            .child(
+                div()
+                    .truncate()
+                    .when_some(color, |el, color| {
+                        el.text_color(paint(crate::session_color::label(color, t)))
+                    })
+                    .child(node.label()),
+            )
             .when(with_project || !detail.is_empty(), |el| el.child(second));
 
         div()
@@ -952,10 +972,16 @@ impl Shell {
                     .items_center()
                     .justify_center()
                     .w(BADGE)
-                    .child(row_mark(&activity, node.dirty, node.missing, t)),
+                    .child(crate::session_color::row_mark(
+                        &activity,
+                        color,
+                        node.dirty,
+                        node.missing,
+                        t,
+                    )),
             )
             .child(lines)
-            .children(state_word(node, signal, t))
+            .children(state_word(node, signal, self.activity.unread(&node.id), t))
             .on_click(cx.listener(move |this, _, _, cx| this.rail_select(at, cx)))
     }
 }

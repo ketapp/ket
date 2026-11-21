@@ -171,6 +171,12 @@ pub enum Request {
         /// The phone's id, as [`Reply::Devices`] gives it.
         id: String,
     },
+    /// Push a phone a test notification now, connected or not. Answered
+    /// with [`Reply::PushTested`] once the push service has.
+    TestPush {
+        /// The phone's id, as [`Reply::Devices`] gives it.
+        id: String,
+    },
     /// Phones that have paired and are waiting for a person to approve them.
     /// Answered with [`Reply::Pairings`].
     Pairings,
@@ -299,6 +305,22 @@ pub enum Request {
         /// `Ctrl-C`, a latched verdict, rather than Escape's unlatched
         /// guess — see [`crate::agent_status`].
         cancel: bool,
+    },
+    /// One of the host's terminals is in front of a person in this window:
+    /// what its agent last said is read — see
+    /// [`crate::agent_status::StatusStore::seen`].
+    Seen {
+        /// The terminal's pane key.
+        pane: String,
+    },
+    /// A worktree marked unread from a window's worktree menu, or the mark
+    /// taken off as someone comes to it — see
+    /// [`crate::agent_status::StatusStore::mark_unread`].
+    MarkUnread {
+        /// The worktree's id.
+        worktree: String,
+        /// Whether it is marked, or the mark comes off.
+        unread: bool,
     },
     /// New work asked for from a terminal — `ket start`, `ket backlog
     /// start` — handed to one window as [`Reply::StartWork`], the way a
@@ -693,6 +715,9 @@ pub struct DeviceEntry {
     /// existed, which is given full access when it next connects.
     #[serde(default)]
     pub role: Option<DeviceRole>,
+    /// Whether it has asked for notifications while it isn't connected.
+    #[serde(default)]
+    pub push: bool,
 }
 
 /// The host answering, or telling a window something happened.
@@ -790,6 +815,11 @@ pub enum Reply {
         /// Whether a phone by that id was paired.
         found: bool,
         /// Why it could not be done.
+        error: Option<String>,
+    },
+    /// The answer to [`Request::TestPush`].
+    PushTested {
+        /// Why it didn't go; `None` when Apple took it.
         error: Option<String>,
     },
     /// A phone or a terminal asked for new work: a worktree in `project`

@@ -26,6 +26,7 @@ use ket_core::theme::Theme;
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
 use super::RADIUS_SM;
+use super::rule::rule;
 use crate::fonts::Prose;
 use crate::paint::{alpha, paint};
 
@@ -160,8 +161,7 @@ impl Doc<'_> {
             Event::Html(text) | Event::InlineHtml(text) => self.push(&text, self.style),
             Event::Rule => {
                 self.flush();
-                let rule = div().h(px(1.0)).my(px(4.0)).bg(paint(self.t.border));
-                self.child(rule.into_any_element());
+                self.child(rule(self.t).my(px(4.0)).into_any_element());
             }
             Event::TaskListMarker(done) => {
                 let marker = if done { "\u{2611}" } else { "\u{2610}" };

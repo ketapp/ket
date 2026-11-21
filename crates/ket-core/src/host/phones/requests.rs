@@ -2,127 +2,51 @@
 //! not applied twice, and doing it.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
 use ket_remote::proto::{self, envelope::Payload};
 
+use super::backlog::{backlog_from_phone, edit_from_phone, start_note_from_phone};
+use super::conversation::{agent_session_from_phone, conversation_from_phone};
 use super::keys::{OFFER_FOCUS, answer_on_screen, answers_offer, is_interrupt};
-use super::places::{Place, Places};
+use super::pulls::{
+    PrAction, address_comments_from_phone, draft_from_phone, file_change, fix_checks_from_phone,
+    open_pull_request_from_phone, review_from_phone, start_pr_action,
+};
 use super::session::{Phone, pump};
 use super::typing::Typed;
+use super::work::{
+    delete_from_phone, fresh_from_phone, merge_from_phone, pin_from_phone, rename_from_phone,
+    start_options_from_phone, start_session_from_phone, start_work_from_phone, wake_from_phone,
+};
 use super::{Event, MAX_ATTACHMENTS, MAX_SUBSCRIPTIONS, epoch, lock};
 use crate::agent_hooks::{Decision, Prompt};
 use crate::agent_status::CancelSource;
-use crate::github::{MergeMethod, PullRequestStatus};
-use crate::host::server::{AnswerRefused, Handed, Host, NotDeleted};
+use crate::host::server::{AnswerRefused, Host};
 use crate::host::wire::DeviceRole;
-use crate::id::{ProjectId, WorktreeId};
 use crate::terminal::TerminalSize;
 
 /// How many finished fixes are remembered with their answers, for phones
 /// that ask again after a reconnect. The same for reviews and pull requests.
 const FIXES_KEPT: usize = 64;
 
-/// The most comments one review sends, and the most text in them all: a
-/// message typed into an agent, not a file transfer.
-const MAX_REVIEW_COMMENTS: usize = 50;
-const MAX_REVIEW_BYTES: usize = 64 * 1024;
-
-/// The most a phone's pull request title and description carry, in bytes:
-/// a bound on one request, not GitHub's own limits, which `gh` reports.
-const MAX_PULL_REQUEST_TITLE: usize = 1024;
-const MAX_PULL_REQUEST_BODY: usize = 64 * 1024;
-
-/// Every Fix checks with agent phones have asked for, by the device and the
-/// idempotency key each was asked under: going, with who is waiting for its
-/// answer, or that answer. Kept here rather than with a session, which a
-/// phone that loses its connection while it waits does not come back to:
-/// asking again under the same key, it is told how its fix went rather than
-/// giving the agent the message twice.
-static FIXES: Mutex<Fixes> = Mutex::new(Fixes {
-    asks: BTreeMap::new(),
-    going: BTreeSet::new(),
-    finished: VecDeque::new(),
-});
-
-/// Every review phones have asked to send, kept the same way as [`FIXES`]:
-/// a phone whose connection dropped while the window was sending it asks
-/// again under the same key, and is told how it went rather than giving
-/// the agent the review twice.
-static REVIEWS: Mutex<Fixes> = Mutex::new(Fixes {
-    asks: BTreeMap::new(),
-    going: BTreeSet::new(),
-    finished: VecDeque::new(),
-});
-
-/// Every pull request phones have asked to open, kept the same way as
-/// [`FIXES`]: a phone whose connection dropped during the push asks again
-/// under the same key, and is told how it went rather than pushing twice.
-static PULLS: Mutex<Fixes> = Mutex::new(Fixes {
-    asks: BTreeMap::new(),
-    going: BTreeSet::new(),
-    finished: VecDeque::new(),
-});
-
-/// Merge, update, ready and reopen, kept the same way as [`PULLS`].
-static PR_ACTIONS: Mutex<Fixes> = Mutex::new(Fixes {
-    asks: BTreeMap::new(),
-    going: BTreeSet::new(),
-    finished: VecDeque::new(),
-});
-
-/// Address comments with agent, kept the same way as [`FIXES`].
-static COMMENTS: Mutex<Fixes> = Mutex::new(Fixes {
-    asks: BTreeMap::new(),
-    going: BTreeSet::new(),
-    finished: VecDeque::new(),
-});
-
-/// Deletes of worktrees, kept the same way as [`FIXES`]: a phone whose
-/// connection dropped while the window was deleting asks again under the
-/// same key, and is told how it went rather than being told the worktree is
-/// not there.
-static DELETES: Mutex<Fixes> = Mutex::new(Fixes {
-    asks: BTreeMap::new(),
-    going: BTreeSet::new(),
-    finished: VecDeque::new(),
-});
-
-/// Wakes of asleep tabs, kept the same way as [`DELETES`]: a phone whose
-/// connection dropped while the window was waking asks again under the same
-/// key, and is told the terminal rather than waking a second time.
-static WAKES: Mutex<Fixes> = Mutex::new(Fixes {
-    asks: BTreeMap::new(),
-    going: BTreeSet::new(),
-    finished: VecDeque::new(),
-});
-
-/// Start freshes, kept the same way as [`WAKES`]: a phone whose connection
-/// dropped while the window was starting a fresh session asks again under
-/// the same key, and is told the fresh terminal rather than starting another.
-static FRESHES: Mutex<Fixes> = Mutex::new(Fixes {
-    asks: BTreeMap::new(),
-    going: BTreeSet::new(),
-    finished: VecDeque::new(),
-});
-
 /// A device, and the idempotency key it asked under.
-type FixAsk = (Vec<u8>, String);
+pub(super) type FixAsk = (Vec<u8>, String);
 
-struct Fixes {
-    asks: BTreeMap<FixAsk, Fix>,
+pub(super) struct Fixes {
+    pub(super) asks: BTreeMap<FixAsk, Fix>,
     /// The worktrees one is going in: another ask for one, under a new key,
     /// is refused meanwhile.
-    going: BTreeSet<String>,
+    pub(super) going: BTreeSet<String>,
     /// The finished asks, oldest first — see [`FIXES_KEPT`].
-    finished: VecDeque<FixAsk>,
+    pub(super) finished: VecDeque<FixAsk>,
 }
 
-enum Fix {
+pub(super) enum Fix {
     /// Being done; each request waiting for the answer, and the session
     /// feed it goes to.
     Going(Vec<(u64, mpsc::Sender<Event>)>),
@@ -133,7 +57,7 @@ enum Fix {
 impl Fixes {
     /// Takes an ask under a key seen before: answers it on `feed` if it is
     /// done, or puts it among those waiting. `false` for a new ask.
-    fn again(&mut self, ask: &FixAsk, id: u64, feed: &mpsc::Sender<Event>) -> bool {
+    pub(super) fn again(&mut self, ask: &FixAsk, id: u64, feed: &mpsc::Sender<Event>) -> bool {
         match self.asks.get_mut(ask) {
             Some(Fix::Going(waiting)) => waiting.push((id, feed.clone())),
             Some(Fix::Done(answer)) => {
@@ -145,7 +69,13 @@ impl Fixes {
     }
 
     /// Starts `ask` on `worktree`. `false` when one is going there already.
-    fn start(&mut self, ask: FixAsk, worktree: &str, id: u64, feed: &mpsc::Sender<Event>) -> bool {
+    pub(super) fn start(
+        &mut self,
+        ask: FixAsk,
+        worktree: &str,
+        id: u64,
+        feed: &mpsc::Sender<Event>,
+    ) -> bool {
         if !self.going.insert(worktree.to_owned()) {
             return false;
         }
@@ -155,7 +85,7 @@ impl Fixes {
 
     /// Ends `ask` with `answer`: sent to every request waiting for it, and
     /// kept for any that ask again.
-    fn finish(&mut self, ask: FixAsk, worktree: &str, answer: Payload) {
+    pub(super) fn finish(&mut self, ask: FixAsk, worktree: &str, answer: Payload) {
         self.going.remove(worktree);
         if let Some(Fix::Going(waiting)) = self
             .asks
@@ -174,7 +104,7 @@ impl Fixes {
     }
 
     /// Forgets `ask`, which could not be started.
-    fn forget(&mut self, ask: &FixAsk, worktree: &str) {
+    pub(super) fn forget(&mut self, ask: &FixAsk, worktree: &str) {
         self.asks.remove(ask);
         self.going.remove(worktree);
     }
@@ -196,7 +126,7 @@ pub(super) fn error(request_id: u64, code: proto::ErrorCode, message: &str) -> p
     )
 }
 
-fn ack(request_id: u64) -> Option<proto::Envelope> {
+pub(super) fn ack(request_id: u64) -> Option<proto::Envelope> {
     (request_id != 0).then(|| envelope(request_id, Payload::Ack(proto::Ack {})))
 }
 
@@ -241,6 +171,7 @@ pub(super) fn handle(
             | Payload::ReopenPullRequest(_)
             | Payload::AddressComments(_)
             | Payload::PinWorktree(_)
+            | Payload::RenameWorktree(_)
             | Payload::DeleteWorktree(_)
             | Payload::OpenAgentSession(_)
             | Payload::StartSession(_)
@@ -300,7 +231,8 @@ pub(super) fn handle(
         .is_none_or(|reply| !matches!(reply.payload, Some(Payload::Error(_))));
     // A fix of checks, a review, a pull request and the actions on one keep
     // their own records, with their answers: see `FIXES`, `REVIEWS`, `PULLS`,
-    // `PR_ACTIONS`, `COMMENTS` and `DELETES`.
+    // `PR_ACTIONS` and `COMMENTS` in `pulls`, and `DELETES`, `WAKES` and
+    // `FRESHES` in `work`.
     let kept_here = !matches!(
         payload,
         Payload::FixChecks(_)
@@ -364,7 +296,7 @@ fn expensive_cost(payload: &Payload) -> Option<u32> {
         // Commands typed into an agent, each confirmed.
         Payload::SetModel(_) => Some(2),
         // One write to ket's store.
-        Payload::PinWorktree(_) => Some(1),
+        Payload::PinWorktree(_) | Payload::RenameWorktree(_) => Some(1),
         _ => None,
     }
 }
@@ -391,11 +323,16 @@ fn payload_name(payload: &Payload) -> &'static str {
         Payload::ReopenPullRequest(_) => "reopen_pull_request",
         Payload::AddressComments(_) => "address_comments",
         Payload::PinWorktree(_) => "pin_worktree",
+        Payload::RenameWorktree(_) => "rename_worktree",
         Payload::DeleteWorktree(_) => "delete_worktree",
         Payload::WakeTerminal(_) => "wake_terminal",
         Payload::SetMode(_) => "set_mode",
         Payload::SetModel(_) => "set_model",
         Payload::StartFresh(_) => "start_fresh",
+        Payload::MarkSeen(_) => "mark_seen",
+        Payload::MarkUnread(_) => "mark_unread",
+        Payload::RegisterPush(_) => "register_push",
+        Payload::UnregisterPush(_) => "unregister_push",
         Payload::OpenAgentSession(_) => "open_agent_session",
         _ => "other",
     }
@@ -426,8 +363,10 @@ fn apply(
         | Payload::ReadyPullRequest(_)
         | Payload::ReopenPullRequest(_)
         | Payload::AddressComments(_)
-        // A worktree's place in the sidebar, and the worktree itself.
+        // A worktree's place and name in the sidebar, and the worktree
+        // itself.
         | Payload::PinWorktree(_)
+        | Payload::RenameWorktree(_)
         | Payload::DeleteWorktree(_) => DeviceRole::Operator,
         // Fixing checks and a review are messages typed into the
         // worktree's agent, which a controller may type itself.
@@ -651,6 +590,7 @@ fn apply(
                     name: device.name,
                     paired_at: device.paired_at,
                     connected: device.connected,
+                    push: device.push,
                 })
                 .collect();
             Some(envelope(
@@ -677,211 +617,44 @@ fn apply(
             }
             ack(id)
         }
-        Payload::StartWork(work) => {
-            let prompt = work.prompt.trim();
-            if prompt.is_empty() {
-                return Some(error(
-                    id,
-                    proto::ErrorCode::Unspecified,
-                    "say what the agent is to do",
-                ));
-            }
-            let known = phone
-                .phones
-                .places()
-                .projects
-                .iter()
-                .any(|project| project.id == work.project_id);
-            if !known {
-                return Some(error(
-                    id,
-                    proto::ErrorCode::NotFound,
-                    "no such project on this desktop",
-                ));
-            }
-            let agent = Some(work.agent.trim().to_owned()).filter(|agent| !agent.is_empty());
-            let base = Some(work.base.trim().to_owned()).filter(|value| !value.is_empty());
-            let model = Some(work.model.trim().to_owned()).filter(|value| !value.is_empty());
-            let effort = Some(work.effort.trim().to_owned()).filter(|value| !value.is_empty());
-            let options = start_options(host, phone, &work.project_id);
-            if let Some(base) = &base
-                && !options.local_branches.contains(base)
-            {
-                return Some(error(
-                    id,
-                    proto::ErrorCode::NotFound,
-                    "that base branch no longer exists",
-                ));
-            }
-            // A phone from before 1.14 could name an agent before the window
-            // had published its runnable list. Preserve that old request's
-            // desktop fallback when it carries no new launch choices.
-            if !(options.agents.is_empty() && model.is_none() && effort.is_none())
-                && let Err(why) = validate_launch(
-                    &options,
-                    agent.as_deref(),
-                    model.as_deref(),
-                    effort.as_deref(),
-                )
-            {
-                return Some(error(id, proto::ErrorCode::Unspecified, why));
-            }
-            if host.start_phone_session(
-                work.project_id.clone(),
-                prompt.to_owned(),
-                agent,
-                base,
-                model,
-                effort,
-                None,
-                false,
-            ) {
-                ack(id)
-            } else {
-                Some(error(
-                    id,
-                    proto::ErrorCode::NotFound,
-                    "open ket on your Mac to start work from here",
-                ))
-            }
+        Payload::MarkSeen(seen) => {
+            host.seen_terminal(seen.terminal_id);
+            ack(id)
         }
-        Payload::GetStartOptions(ask) => {
-            if phone_project(phone, &ask.project_id).is_none() {
-                return Some(no_project(id));
-            }
-            Some(envelope(
-                id,
-                Payload::StartOptions(start_options(host, phone, &ask.project_id)),
-            ))
-        }
-        Payload::StartSession(session) => {
-            let places = phone.phones.places();
-            let Some(place) = places.get(&session.worktree_id) else {
+        Payload::MarkUnread(mark) => {
+            // Only a worktree this desktop has: the host keeps a mark until it
+            // is taken off, and sends every one to every window.
+            if mark.unread && phone.phones.places().get(&mark.worktree_id).is_none() {
                 return Some(error(
                     id,
                     proto::ErrorCode::NotFound,
                     "no such worktree on this desktop",
                 ));
-            };
-            if !place.path.is_dir() {
-                return Some(error(
-                    id,
-                    proto::ErrorCode::NotFound,
-                    "that worktree's directory is missing",
-                ));
             }
-            let agent = Some(session.agent.trim().to_owned()).filter(|name| !name.is_empty());
-            let model = Some(session.model.trim().to_owned()).filter(|value| !value.is_empty());
-            let effort = Some(session.effort.trim().to_owned()).filter(|value| !value.is_empty());
-            let options = start_options(host, phone, &place.project);
-            if let Err(why) = validate_launch(
-                &options,
-                agent.as_deref(),
-                model.as_deref(),
-                effort.as_deref(),
-            ) {
-                return Some(error(id, proto::ErrorCode::Unspecified, why));
-            }
-            if host.start_phone_session(
-                place.project.clone(),
-                session.prompt.trim().to_owned(),
-                agent,
-                None,
-                model,
-                effort,
-                Some(place.id.clone()),
-                session.agent.is_empty(),
-            ) {
-                ack(id)
-            } else {
-                Some(error(
-                    id,
-                    proto::ErrorCode::NotFound,
-                    "open ket on your Mac to start a session from here",
-                ))
+            host.mark_unread(&mark.worktree_id, mark.unread);
+            ack(id)
+        }
+        // Only ever about the phone asking: the session's own device key,
+        // never one named in the payload.
+        Payload::RegisterPush(register) => {
+            match super::pushes::Registration::from_proto(register, crate::now_ms() / 1000) {
+                Ok(registration) => match phone.phones.set_push(&phone.device, registration) {
+                    Ok(()) => ack(id),
+                    Err(e) => Some(error(id, proto::ErrorCode::Unspecified, &e.to_string())),
+                },
+                Err(why) => Some(error(id, proto::ErrorCode::Unspecified, why)),
             }
         }
-        Payload::GetBacklog(ask) => {
-            let Some(project) = phone_project(phone, &ask.project_id) else {
-                return Some(no_project(id));
-            };
-            Some(match crate::backlog::Backlog::load(&project) {
-                Ok(backlog) => backlog_reply(id, &ask.project_id, backlog),
-                Err(why) => error(
-                    id,
-                    proto::ErrorCode::Unspecified,
-                    &format!("could not read the backlog: {why}"),
-                ),
-            })
-        }
-        Payload::EditBacklog(edit) => {
-            let Some(project) = phone_project(phone, &edit.project_id) else {
-                return Some(no_project(id));
-            };
-            let edited = edit_backlog(&project, edit);
-            phone.phones.forget_backlogs();
-            Some(match edited {
-                Ok(backlog) => backlog_reply(id, &edit.project_id, backlog),
-                Err((code, why)) => error(id, code, &why),
-            })
-        }
-        Payload::StartNote(start) => {
-            let Some(project) = phone_project(phone, &start.project_id) else {
-                return Some(no_project(id));
-            };
-            let note = match crate::backlog::Backlog::load(&project) {
-                Ok(backlog) => backlog
-                    .notes
-                    .into_iter()
-                    .find(|note| note.id == start.note_id),
-                Err(why) => {
-                    return Some(error(
-                        id,
-                        proto::ErrorCode::Unspecified,
-                        &format!("could not read the backlog: {why}"),
-                    ));
-                }
-            };
-            let Some(note) = note else {
-                return Some(no_note(id));
-            };
-            if note.done.is_some() {
-                return Some(error(
-                    id,
-                    proto::ErrorCode::Unspecified,
-                    "that note has already been started or done",
-                ));
-            }
-            // What a window from before `note` existed starts on: the words
-            // the desktop's own Start hands the agent, without the files.
-            let words: Vec<&str> = [note.title.trim(), note.body.trim()]
-                .into_iter()
-                .filter(|part| !part.is_empty())
-                .collect();
-            if words.is_empty() {
-                return Some(error(
-                    id,
-                    proto::ErrorCode::Unspecified,
-                    "write what the work is first",
-                ));
-            }
-            let started = host.start_work(
-                start.project_id.clone(),
-                words.join("\n\n"),
-                None,
-                Some(note.id),
-                crate::host::wire::WorkSource::Phone,
-            );
-            if started {
-                ack(id)
-            } else {
-                Some(error(
-                    id,
-                    proto::ErrorCode::NotFound,
-                    "open ket on your Mac to start work from here",
-                ))
-            }
-        }
+        Payload::UnregisterPush(_) => match phone.phones.set_push(&phone.device, None) {
+            Ok(()) => ack(id),
+            Err(e) => Some(error(id, proto::ErrorCode::Unspecified, &e.to_string())),
+        },
+        Payload::StartWork(work) => start_work_from_phone(host, phone, id, work),
+        Payload::GetStartOptions(ask) => start_options_from_phone(host, phone, id, ask),
+        Payload::StartSession(session) => start_session_from_phone(host, phone, id, session),
+        Payload::GetBacklog(ask) => backlog_from_phone(phone, id, ask),
+        Payload::EditBacklog(edit) => edit_from_phone(phone, id, edit),
+        Payload::StartNote(start) => start_note_from_phone(host, phone, id, start),
         Payload::GetChanges(ask) => {
             let places = phone.phones.places();
             let reply = match places.get(&ask.worktree_id) {
@@ -932,280 +705,12 @@ fn apply(
             };
             Some(envelope(id, Payload::Diff(reply)))
         }
-        Payload::MergeWorktree(merge) => {
-            let places = phone.phones.places();
-            match places.get(&merge.worktree_id) {
-                None => Some(error(
-                    id,
-                    proto::ErrorCode::NotFound,
-                    "no such worktree on this desktop",
-                )),
-                Some(place) if place.base.is_none() => Some(error(
-                    id,
-                    proto::ErrorCode::Unspecified,
-                    "the repository's own checkout has nothing to merge into",
-                )),
-                Some(_) if host.merge_work(merge.worktree_id.clone()) => ack(id),
-                Some(_) => Some(error(
-                    id,
-                    proto::ErrorCode::NotFound,
-                    "open ket on your Mac to merge from here",
-                )),
-            }
-        }
-        Payload::FixChecks(fix) => {
-            let ask: FixAsk = (phone.device.clone(), request.idempotency_key.clone());
-            if lock(&FIXES).again(&ask, id, feed) {
-                return None;
-            }
-            let places = phone.phones.places();
-            let open = host.pull_request(&fix.worktree_id);
-            let (place, open) = match (places.get(&fix.worktree_id), open) {
-                (None, _) => {
-                    return Some(error(
-                        id,
-                        proto::ErrorCode::NotFound,
-                        "no such worktree on this desktop",
-                    ));
-                }
-                (Some(_), None) => {
-                    return Some(error(
-                        id,
-                        proto::ErrorCode::NotFound,
-                        "ket on your Mac has not found a pull request for this worktree",
-                    ));
-                }
-                (Some(place), Some(open)) => (place, open),
-            };
-            if open.failed().next().is_none() {
-                return Some(error(
-                    id,
-                    proto::ErrorCode::Unspecified,
-                    "none of this pull request's checks have failed",
-                ));
-            }
-            // Checked first, so as not to read logs nobody can be given.
-            if !host.has_window() {
-                return Some(no_window_to_fix(id));
-            }
-            {
-                let mut fixes = lock(&FIXES);
-                // Asked again while the above was looked at.
-                if fixes.again(&ask, id, feed) {
-                    return None;
-                }
-                if !fixes.start(ask.clone(), &fix.worktree_id, id, feed) {
-                    return Some(error(
-                        id,
-                        proto::ErrorCode::Unspecified,
-                        "ket is already giving this pull request's failed checks to the agent",
-                    ));
-                }
-            }
-            // Reading the logs takes `gh` a few seconds a job, and starting
-            // an agent longer, which this session's terminals do not wait
-            // for; the phone does. The answer goes to whoever is waiting for
-            // it when it comes — see `FIXES`.
-            let project = ProjectId::new(place.project.clone());
-            let worktree = fix.worktree_id.clone();
-            let host = Arc::clone(host);
-            let fixing = ask.clone();
-            let spawned = std::thread::Builder::new()
-                .name("ket-host-fix-checks".into())
-                .spawn(move || {
-                    let answer = fix_checks(&host, &project, worktree.clone(), &open);
-                    lock(&FIXES).finish(fixing, &worktree, answer);
-                });
-            match spawned {
-                Ok(_) => None,
-                Err(why) => {
-                    lock(&FIXES).forget(&ask, &fix.worktree_id);
-                    Some(error(
-                        id,
-                        proto::ErrorCode::Unspecified,
-                        &format!("could not start reading the checks: {why}"),
-                    ))
-                }
-            }
-        }
-        // Written into one message by a window, as the desktop's own Send to
-        // agent does, with the same refusals. A window takes it within a
-        // quarter of a second, but one that is busy is waited for longer,
-        // off this thread — see `Host::send_review` — and the answer goes to
-        // whoever is waiting for it then: see `REVIEWS`.
-        Payload::SendReview(review) => {
-            let ask: FixAsk = (phone.device.clone(), request.idempotency_key.clone());
-            if lock(&REVIEWS).again(&ask, id, feed) {
-                return None;
-            }
-            let places = phone.phones.places();
-            let Some(place) = places.get(&review.worktree_id) else {
-                return Some(error(
-                    id,
-                    proto::ErrorCode::NotFound,
-                    "no such worktree on this desktop",
-                ));
-            };
-            if let Err(why) = review_fits(&review.comments) {
-                return Some(error(id, proto::ErrorCode::Unspecified, &why));
-            }
-            if !host.has_window() {
-                return Some(error(
-                    id,
-                    proto::ErrorCode::NotFound,
-                    "open ket on your Mac to send a review from here",
-                ));
-            }
-            {
-                let mut reviews = lock(&REVIEWS);
-                if reviews.again(&ask, id, feed) {
-                    return None;
-                }
-                if !reviews.start(ask.clone(), &review.worktree_id, id, feed) {
-                    return Some(error(
-                        id,
-                        proto::ErrorCode::Unspecified,
-                        "a review is already on its way to this worktree's agent",
-                    ));
-                }
-            }
-            let worktree = review.worktree_id.clone();
-            let base = place.base.clone();
-            let comments = review
-                .comments
-                .iter()
-                .map(|comment| crate::host::wire::PhoneReviewComment {
-                    rel: comment.path.clone(),
-                    lines: comment.lines.clone(),
-                    text: comment.text.clone(),
-                    comment: comment.comment.trim().to_owned(),
-                })
-                .collect();
-            let host = Arc::clone(host);
-            let sending = ask.clone();
-            let spawned = std::thread::Builder::new()
-                .name("ket-host-send-review".into())
-                .spawn(move || {
-                    let answer = match host.send_review(worktree.clone(), base, comments) {
-                        Ok(()) => Payload::Ack(proto::Ack {}),
-                        Err(message) => Payload::Error(proto::Error {
-                            code: proto::ErrorCode::Unspecified as i32,
-                            message,
-                        }),
-                    };
-                    lock(&REVIEWS).finish(sending, &worktree, answer);
-                });
-            match spawned {
-                Ok(_) => None,
-                Err(why) => {
-                    lock(&REVIEWS).forget(&ask, &review.worktree_id);
-                    Some(error(
-                        id,
-                        proto::ErrorCode::Unspecified,
-                        &format!("could not start sending the review: {why}"),
-                    ))
-                }
-            }
-        }
-        Payload::GetPullRequestDraft(ask) => {
-            let places = phone.phones.places();
-            let place = match pull_request_place(&places, &ask.worktree_id) {
-                Ok(place) => place,
-                Err((code, why)) => return Some(error(id, code, why)),
-            };
-            // The note the branch was started from names it best; a backlog
-            // that will not load leaves the branch to name it.
-            let notes = crate::backlog::Backlog::load(&ProjectId::new(place.project.clone()))
-                .map(|backlog| backlog.notes)
-                .unwrap_or_default();
-            let drafted = crate::workspace::Workspace::open().and_then(|workspace| {
-                workspace.pull_request_draft(&WorktreeId::new(ask.worktree_id.as_str()), &notes)
-            });
-            Some(match drafted {
-                Ok(draft) => envelope(
-                    id,
-                    Payload::PullRequestDraft(proto::PullRequestDraft {
-                        worktree_id: ask.worktree_id.clone(),
-                        branch: draft.branch,
-                        base: draft.base,
-                        remote: draft.remote.unwrap_or_default(),
-                        title: draft.title,
-                        body: draft.body,
-                        changes: u32::try_from(draft.changes).unwrap_or(u32::MAX),
-                        existing_number: draft.existing.as_ref().map_or(0, |link| link.number),
-                        existing_url: draft.existing.map(|link| link.url).unwrap_or_default(),
-                    }),
-                ),
-                Err(why) => error(id, proto::ErrorCode::Unspecified, &why.to_string()),
-            })
-        }
+        Payload::MergeWorktree(merge) => merge_from_phone(host, phone, id, merge),
+        Payload::FixChecks(fix) => fix_checks_from_phone(host, phone, request, feed, id, fix),
+        Payload::SendReview(review) => review_from_phone(host, phone, request, feed, id, review),
+        Payload::GetPullRequestDraft(ask) => draft_from_phone(phone, id, ask),
         Payload::OpenPullRequest(open) => {
-            let ask: FixAsk = (phone.device.clone(), request.idempotency_key.clone());
-            if lock(&PULLS).again(&ask, id, feed) {
-                return None;
-            }
-            let places = phone.phones.places();
-            if let Err((code, why)) = pull_request_place(&places, &open.worktree_id) {
-                return Some(error(id, code, why));
-            }
-            let title = open.title.trim();
-            if title.is_empty() {
-                return Some(error(
-                    id,
-                    proto::ErrorCode::Unspecified,
-                    "a pull request needs a title",
-                ));
-            }
-            if title.len() > MAX_PULL_REQUEST_TITLE || open.body.len() > MAX_PULL_REQUEST_BODY {
-                return Some(error(
-                    id,
-                    proto::ErrorCode::Unspecified,
-                    "that title or description is too long to send",
-                ));
-            }
-            {
-                let mut pulls = lock(&PULLS);
-                // Asked again while the above was looked at.
-                if pulls.again(&ask, id, feed) {
-                    return None;
-                }
-                if !pulls.start(ask.clone(), &open.worktree_id, id, feed) {
-                    return Some(error(
-                        id,
-                        proto::ErrorCode::Unspecified,
-                        "this worktree's branch is already being pushed",
-                    ));
-                }
-            }
-            // Committing runs the repository's hooks and pushing talks to
-            // the remote, which this session's terminals do not wait for;
-            // the phone does. The answer goes to whoever is waiting for it
-            // when it comes — see `PULLS`.
-            let worktree = open.worktree_id.clone();
-            let options = crate::workspace::PullRequestOptions {
-                title: title.to_owned(),
-                body: open.body.clone(),
-                draft: open.draft,
-            };
-            let host = Arc::clone(host);
-            let opening = ask.clone();
-            let spawned = std::thread::Builder::new()
-                .name("ket-host-open-pull-request".into())
-                .spawn(move || {
-                    let answer = open_pull_request(&host, &worktree, &options);
-                    lock(&PULLS).finish(opening, &worktree, answer);
-                });
-            match spawned {
-                Ok(_) => None,
-                Err(why) => {
-                    lock(&PULLS).forget(&ask, &open.worktree_id);
-                    Some(error(
-                        id,
-                        proto::ErrorCode::Unspecified,
-                        &format!("could not start pushing: {why}"),
-                    ))
-                }
-            }
+            open_pull_request_from_phone(host, phone, request, feed, id, open)
         }
         Payload::MergePullRequest(merge) => start_pr_action(
             host,
@@ -1246,45 +751,8 @@ fn apply(
         Payload::AddressComments(ask) => {
             address_comments_from_phone(host, phone, request, feed, id, &ask.worktree_id)
         }
-        Payload::PinWorktree(pin) => {
-            let places = phone.phones.places();
-            match places.get(&pin.worktree_id) {
-                None => Some(error(
-                    id,
-                    proto::ErrorCode::NotFound,
-                    "no such worktree on this desktop",
-                )),
-                // No record carries a pin for it, as the desktop's menu says.
-                Some(place) if place.base.is_none() => Some(error(
-                    id,
-                    proto::ErrorCode::Unspecified,
-                    "the repository's own checkout can't be pinned",
-                )),
-                Some(_) => {
-                    let pinned = crate::workspace::Workspace::open().and_then(|workspace| {
-                        workspace.set_worktree_pinned(
-                            &WorktreeId::new(pin.worktree_id.as_str()),
-                            pin.pinned,
-                        )
-                    });
-                    match pinned {
-                        Ok(()) => {
-                            phone.phones.forget_places();
-                            host.worktrees_changed();
-                            ack(id)
-                        }
-                        Err(why) => Some(error(
-                            id,
-                            proto::ErrorCode::Unspecified,
-                            &format!(
-                                "could not {} it: {why}",
-                                if pin.pinned { "pin" } else { "unpin" }
-                            ),
-                        )),
-                    }
-                }
-            }
-        }
+        Payload::PinWorktree(pin) => pin_from_phone(host, phone, id, pin),
+        Payload::RenameWorktree(rename) => rename_from_phone(host, phone, id, rename),
         Payload::WakeTerminal(wake) => wake_from_phone(host, phone, request, feed, id, wake),
         Payload::DeleteWorktree(delete) => {
             delete_from_phone(host, phone, request, feed, id, delete)
@@ -1304,28 +772,7 @@ fn apply(
                 Payload::Snippets(proto::SnippetList { snippets }),
             ))
         }
-        Payload::GetConversation(ask) => {
-            let listed = (!ask.session.is_empty())
-                .then(|| {
-                    agent_view_session(host, &phone.phones.places(), ask.terminal_id, &ask.session)
-                })
-                .flatten();
-            Some(envelope(
-                id,
-                Payload::Conversation(conversation(
-                    host,
-                    &phone.phones.places(),
-                    ask.terminal_id,
-                    ask.after,
-                    &ask.session,
-                    listed.is_some(),
-                )),
-            ))
-        }
-        // A message for one of the sessions a terminal's agent view holds:
-        // that session opened there first, by the keys a person would press,
-        // then the message typed — all in the terminal's typing turn, since
-        // each step waits for agent view to draw. See `crate::agent_view`.
+        Payload::GetConversation(ask) => conversation_from_phone(host, phone, id, ask),
         // The agent put in a mode: its own key, pressed on the terminal's
         // typing turn until it reports the mode — see `crate::agent_mode`.
         Payload::SetMode(set) => {
@@ -1396,7 +843,17 @@ fn apply(
             let agent = key.split('|').nth(1).unwrap_or_default().to_owned();
             let status = host.agent_status();
             let pane = status.panes.iter().find(|pane| pane.pane == key);
-            if pane.is_some_and(|pane| pane.state != crate::event::AgentState::Idle) {
+            // Busy as the tab says it, on the phone and in the sidebar, not
+            // by the agent's last word alone. A session nobody has given a
+            // turn yet, or one just compacted, last said "starting" and sits
+            // at its prompt; a cancelled turn says nothing, so its last word
+            // stays "thinking" until the report lapses.
+            let doing = {
+                let mut activity = lock(&phone.phones.activity);
+                activity.accept_snapshot(status.clone());
+                activity.pane(&key, crate::now_ms())
+            };
+            if doing.is_some_and(|(_, signal)| signal != crate::activity::Signal::Quiet) {
                 return Some(error(
                     id,
                     proto::ErrorCode::Unspecified,
@@ -1434,82 +891,7 @@ fn apply(
                 )),
             }
         }
-        Payload::OpenAgentSession(open) => {
-            if !host.controls(open.terminal_id, holder) {
-                return no_control();
-            }
-            let Some(terminal) = host.find(open.terminal_id) else {
-                return Some(error(id, proto::ErrorCode::NotFound, "no such terminal"));
-            };
-            // Sent by the session's id, never through agent view's screen:
-            // `claude --bg` for a new one, `claude attach` for one it lists.
-            let Some(cwd) = agent_view_cwd(host, &phone.phones.places(), open.terminal_id) else {
-                return Some(error(
-                    id,
-                    proto::ErrorCode::NotFound,
-                    "that terminal isn't in a checkout ket knows",
-                ));
-            };
-            let session = if open.session.is_empty() {
-                if open.text.trim().is_empty() {
-                    return Some(error(
-                        id,
-                        proto::ErrorCode::Unspecified,
-                        "say what the new session is to do",
-                    ));
-                }
-                None
-            } else {
-                let Some((found, _)) = agent_view_session(
-                    host,
-                    &phone.phones.places(),
-                    open.terminal_id,
-                    &open.session,
-                ) else {
-                    return Some(error(
-                        id,
-                        proto::ErrorCode::NotFound,
-                        "agent view doesn't list that session",
-                    ));
-                };
-                if found.state == crate::agent_view::SessionState::NeedsYou {
-                    return Some(error(
-                        id,
-                        proto::ErrorCode::Unspecified,
-                        "it's waiting on an answer in agent view on your Mac — answer it there first",
-                    ));
-                }
-                Some(found)
-            };
-            // A new session runs under the account agent view does.
-            let config_dir = terminal
-                .foreground_group()
-                .and_then(crate::agent_view::config_dir_of);
-            let feed = feed.clone();
-            let job = Typed::AgentView {
-                session,
-                cwd,
-                config_dir,
-                text: open.text.clone(),
-                done: Box::new(move |opened| {
-                    let reply = match opened {
-                        Ok(()) => ack(id),
-                        Err(why) => Some(error(id, proto::ErrorCode::Unspecified, &why.reason())),
-                    };
-                    if let Some(reply) = reply {
-                        let _ = feed.send(Event::Send(Box::new(reply)));
-                    }
-                }),
-            };
-            match phone.phones.typing.files(open.terminal_id, terminal, job) {
-                Ok(_) => None,
-                Err(_) => Some(error(
-                    id,
-                    proto::ErrorCode::Unspecified,
-                    "the Mac is too busy to type that right now",
-                )),
-            }
-        }
+        Payload::OpenAgentSession(open) => agent_session_from_phone(host, phone, feed, id, open),
         Payload::Answer(answer) => {
             let choice = proto::answer::Choice::try_from(answer.choice).ok()?;
             // The very prompt the phone showed, checked and answered in one
@@ -1540,7 +922,7 @@ fn apply(
 }
 
 /// The project a phone named, when this desktop has it.
-fn phone_project(phone: &Phone<'_>, id: &str) -> Option<crate::id::ProjectId> {
+pub(super) fn phone_project(phone: &Phone<'_>, id: &str) -> Option<crate::id::ProjectId> {
     phone
         .phones
         .places()
@@ -1548,948 +930,6 @@ fn phone_project(phone: &Phone<'_>, id: &str) -> Option<crate::id::ProjectId> {
         .iter()
         .any(|project| !id.is_empty() && project.id == id)
         .then(|| crate::id::ProjectId::from(id))
-}
-
-/// The choices ket knows how to pass to each interactive agent: Claude's and
-/// Codex's are what the desktop's dialog and the chat's model sheet offer,
-/// so the three never disagree.
-fn launch_choices(agent: &str) -> (Vec<String>, Vec<String>) {
-    let ids = |choices: Vec<crate::agent_model::Choice>| {
-        choices.into_iter().map(|choice| choice.id).collect()
-    };
-    match agent {
-        "claude" | "codex" => crate::agent_model::settings(agent, None).map_or_else(
-            || (Vec::new(), Vec::new()),
-            |settings| (ids(settings.models), ids(settings.efforts)),
-        ),
-        "grok" => (
-            vec!["grok-4.6".to_owned()],
-            ["low", "medium", "high", "xhigh"]
-                .map(str::to_owned)
-                .to_vec(),
-        ),
-        _ => (Vec::new(), Vec::new()),
-    }
-}
-
-fn start_options(host: &Host, phone: &Phone<'_>, project: &str) -> proto::StartOptions {
-    let places = phone.phones.places();
-    let primary = places
-        .worktrees
-        .iter()
-        .find(|place| place.project == project && place.base.is_none());
-    let (default_base, local_branches) = primary.map_or_else(
-        || (String::new(), Vec::new()),
-        |place| {
-            (
-                place.branch.clone(),
-                crate::git::Git::new(&place.path)
-                    .local_branches()
-                    .unwrap_or_default(),
-            )
-        },
-    );
-    let agents = host
-        .agents()
-        .into_iter()
-        .map(|agent| {
-            let (models, efforts) = launch_choices(&agent);
-            proto::AgentStartOptions {
-                agent,
-                models,
-                efforts,
-            }
-        })
-        .collect();
-    proto::StartOptions {
-        project_id: project.to_owned(),
-        default_base,
-        local_branches,
-        agents,
-    }
-}
-
-fn validate_launch(
-    options: &proto::StartOptions,
-    agent: Option<&str>,
-    model: Option<&str>,
-    effort: Option<&str>,
-) -> std::result::Result<(), &'static str> {
-    let Some(agent) = agent else {
-        return if model.is_none() && effort.is_none() {
-            Ok(())
-        } else {
-            Err("choose an agent before choosing a model or effort")
-        };
-    };
-    let Some(choices) = options.agents.iter().find(|choices| choices.agent == agent) else {
-        return Err("that agent is no longer available on this desktop");
-    };
-    if model.is_some_and(|value| !choices.models.iter().any(|item| item == value)) {
-        return Err("that model is not available for this agent");
-    }
-    if effort.is_some_and(|value| !choices.efforts.iter().any(|item| item == value)) {
-        return Err("that effort is not available for this agent");
-    }
-    Ok(())
-}
-
-/// A phone's Fix checks with agent, off the session's thread: reads what
-/// `open`'s failed checks printed, as the desktop's own menu item does, and
-/// hands the message to a window to type into `worktree`'s agent. The
-/// answer says how that went, so a phone is not told its fix is on the way
-/// when the logs could not be read or the agent would not start.
-fn fix_checks(
-    host: &Host,
-    project: &ProjectId,
-    worktree: String,
-    open: &PullRequestStatus,
-) -> Payload {
-    let failed = |message: String| {
-        Payload::Error(proto::Error {
-            code: proto::ErrorCode::Unspecified as i32,
-            message,
-        })
-    };
-    let handed = crate::checks::checkout(project).and_then(|at| {
-        let logs = crate::checks::logs_dir()?;
-        crate::checks::hand_over(&at, &WorktreeId::new(worktree.as_str()), open, &logs)
-    });
-    let prompt = match handed {
-        Ok(prompt) => prompt,
-        Err(why) => {
-            tracing::warn!(%why, "could not read failed checks for a phone");
-            return failed(format!(
-                "could not read #{}'s failed checks: {why}",
-                open.number
-            ));
-        }
-    };
-    match host.fix_checks(worktree, prompt) {
-        Handed::Given => Payload::ChecksHandedOver(proto::ChecksHandedOver { starting: false }),
-        Handed::Starting => Payload::ChecksHandedOver(proto::ChecksHandedOver { starting: true }),
-        Handed::Failed(why) => failed(why),
-    }
-}
-
-/// The worktree a phone's pull request is for, or why there is none to
-/// open: no worktree by that id, or a repository's own checkout, which has
-/// no branch of its own to open one from.
-fn pull_request_place<'a>(
-    places: &'a Places,
-    worktree: &str,
-) -> std::result::Result<&'a Place, (proto::ErrorCode, &'static str)> {
-    match places.get(worktree) {
-        None => Err((
-            proto::ErrorCode::NotFound,
-            "no such worktree on this desktop",
-        )),
-        Some(place) if place.base.is_none() => Err((
-            proto::ErrorCode::Unspecified,
-            "the repository's own checkout has no branch of its own to open a pull request from",
-        )),
-        Some(place) => Ok(place),
-    }
-}
-
-/// A phone's pull request, off the session's thread: ket's own commit,
-/// push and pull request, as the desktop's Pull request… runs them, with no
-/// window needed. One opened is put among the pull requests phones are
-/// shown at once, rather than when a window next reads GitHub.
-fn open_pull_request(
-    host: &Host,
-    worktree: &str,
-    options: &crate::workspace::PullRequestOptions,
-) -> Payload {
-    let opened = crate::workspace::Workspace::open()
-        .and_then(|workspace| workspace.open_pull_request(&WorktreeId::new(worktree), options));
-    let report = match opened {
-        Ok(report) => report,
-        Err(why) => {
-            tracing::info!(worktree, %why, "a phone's pull request was refused");
-            return Payload::Error(proto::Error {
-                code: proto::ErrorCode::Unspecified as i32,
-                message: why.to_string(),
-            });
-        }
-    };
-    host.remember_pull_request(
-        worktree,
-        PullRequestStatus {
-            number: report.pull_request.number,
-            url: report.pull_request.url.clone(),
-            branch: report.branch.clone(),
-            // One already open may be a draft or not; the window's next read
-            // says which.
-            draft: options.draft && !report.existed,
-            review: crate::github::Review::None,
-            checks: Vec::new(),
-            state: crate::github::PullRequestState::Open,
-            base: report.base.clone(),
-            behind: false,
-            unresolved_comments: 0,
-            merge_methods: crate::github::MergeMethods::default(),
-        },
-    );
-    Payload::PullRequestOpened(proto::PullRequestOpened {
-        number: report.pull_request.number,
-        url: report.pull_request.url,
-        branch: report.branch,
-        base: report.base,
-        remote: report.remote,
-        existed: report.existed,
-        committed: report
-            .committed
-            .map_or(0, |commit| u32::try_from(commit.files).unwrap_or(u32::MAX)),
-    })
-}
-
-#[derive(Clone, Copy)]
-enum PrAction {
-    Merge(i32),
-    Update,
-    Ready,
-    Reopen,
-}
-
-fn start_pr_action(
-    host: &Arc<Host>,
-    phone: &Phone<'_>,
-    request: &proto::Envelope,
-    feed: &mpsc::Sender<Event>,
-    id: u64,
-    worktree: &str,
-    action: PrAction,
-) -> Option<proto::Envelope> {
-    let ask: FixAsk = (phone.device.clone(), request.idempotency_key.clone());
-    if lock(&PR_ACTIONS).again(&ask, id, feed) {
-        return None;
-    }
-    let places = phone.phones.places();
-    let (place, status) = match pr_place(&places, host, worktree) {
-        Ok(found) => found,
-        Err((code, why)) => return Some(error(id, code, why)),
-    };
-    if let Err(why) = action.allowed_for(&status) {
-        return Some(error(id, proto::ErrorCode::Unspecified, why));
-    }
-    {
-        let mut actions = lock(&PR_ACTIONS);
-        if actions.again(&ask, id, feed) {
-            return None;
-        }
-        if !actions.start(ask.clone(), worktree, id, feed) {
-            return Some(error(
-                id,
-                proto::ErrorCode::Unspecified,
-                "ket is already changing this pull request",
-            ));
-        }
-    }
-    let project = ProjectId::new(place.project.clone());
-    let owned = worktree.to_owned();
-    let host = Arc::clone(host);
-    let running = ask.clone();
-    let spawned = std::thread::Builder::new()
-        .name("ket-host-pr-action".into())
-        .spawn(move || {
-            let answer = run_pr_action(&host, &project, &owned, status, action);
-            lock(&PR_ACTIONS).finish(running, &owned, answer);
-        });
-    match spawned {
-        Ok(_) => None,
-        Err(why) => {
-            lock(&PR_ACTIONS).forget(&ask, worktree);
-            Some(error(
-                id,
-                proto::ErrorCode::Unspecified,
-                &format!("could not start: {why}"),
-            ))
-        }
-    }
-}
-
-fn address_comments_from_phone(
-    host: &Arc<Host>,
-    phone: &Phone<'_>,
-    request: &proto::Envelope,
-    feed: &mpsc::Sender<Event>,
-    id: u64,
-    worktree: &str,
-) -> Option<proto::Envelope> {
-    let ask: FixAsk = (phone.device.clone(), request.idempotency_key.clone());
-    if lock(&COMMENTS).again(&ask, id, feed) {
-        return None;
-    }
-    let places = phone.phones.places();
-    let (place, status) = match pr_place(&places, host, worktree) {
-        Ok(found) => found,
-        Err((code, why)) => return Some(error(id, code, why)),
-    };
-    if !status.can_address_comments() {
-        return Some(error(
-            id,
-            proto::ErrorCode::Unspecified,
-            "this pull request has no review comments to address",
-        ));
-    }
-    if !host.has_window() {
-        return Some(error(
-            id,
-            proto::ErrorCode::NotFound,
-            "open ket on your Mac to address comments from here",
-        ));
-    }
-    {
-        let mut comments = lock(&COMMENTS);
-        if comments.again(&ask, id, feed) {
-            return None;
-        }
-        if !comments.start(ask.clone(), worktree, id, feed) {
-            return Some(error(
-                id,
-                proto::ErrorCode::Unspecified,
-                "ket is already giving this pull request's comments to the agent",
-            ));
-        }
-    }
-    let project = ProjectId::new(place.project.clone());
-    let owned = worktree.to_owned();
-    let host = Arc::clone(host);
-    let running = ask.clone();
-    let spawned = std::thread::Builder::new()
-        .name("ket-host-address-comments".into())
-        .spawn(move || {
-            let answer = address_comments(&host, &project, owned.clone(), &status);
-            lock(&COMMENTS).finish(running, &owned, answer);
-        });
-    match spawned {
-        Ok(_) => None,
-        Err(why) => {
-            lock(&COMMENTS).forget(&ask, worktree);
-            Some(error(
-                id,
-                proto::ErrorCode::Unspecified,
-                &format!("could not start reading the comments: {why}"),
-            ))
-        }
-    }
-}
-
-/// Hands a phone's delete to a window — see [`Host::delete_work`] — off
-/// this thread, since a delete takes seconds; the answer goes to whoever is
-/// waiting for it then: see [`DELETES`].
-/// Wakes an asleep tab for a phone — see `crate::host::server::Host::wake`
-/// — answering with the terminal it becomes. A tab whose key is already a
-/// running terminal is answered at once: a retry after the wake went
-/// through, or a tab the desktop woke itself.
-fn wake_from_phone(
-    host: &Arc<Host>,
-    phone: &Phone<'_>,
-    request: &proto::Envelope,
-    feed: &mpsc::Sender<Event>,
-    id: u64,
-    wake: &proto::WakeTerminal,
-) -> Option<proto::Envelope> {
-    let ask: FixAsk = (phone.device.clone(), request.idempotency_key.clone());
-    if lock(&WAKES).again(&ask, id, feed) {
-        return None;
-    }
-    // Only a terminal still running: one that exited before its sleep
-    // reached the host has the key too, and is nothing to be woken into.
-    if let Some((terminal_id, _, _)) = host.listing().into_iter().find(|(_, key, terminal)| {
-        key.as_deref() == Some(wake.key.as_str()) && !terminal.is_closed()
-    }) {
-        return Some(envelope(
-            id,
-            Payload::TerminalWoken(proto::TerminalWoken { terminal_id }),
-        ));
-    }
-    if !host
-        .asleep_tabs()
-        .iter()
-        .any(|(_, tab)| tab.key == wake.key && tab.worktree == wake.worktree_id)
-    {
-        return Some(error(
-            id,
-            proto::ErrorCode::NotFound,
-            "that tab isn't asleep on this desktop",
-        ));
-    }
-    {
-        let mut wakes = lock(&WAKES);
-        if wakes.again(&ask, id, feed) {
-            return None;
-        }
-        if !wakes.start(ask.clone(), &wake.key, id, feed) {
-            return Some(error(
-                id,
-                proto::ErrorCode::Unspecified,
-                "ket is already waking this tab",
-            ));
-        }
-    }
-    let key = wake.key.clone();
-    let host = Arc::clone(host);
-    let waking = ask.clone();
-    let spawned = std::thread::Builder::new()
-        .name("ket-host-wake".into())
-        .spawn(move || {
-            let answer = match host.wake(&key) {
-                Ok(terminal_id) => Payload::TerminalWoken(proto::TerminalWoken { terminal_id }),
-                Err(message) => Payload::Error(proto::Error {
-                    code: proto::ErrorCode::Unspecified as i32,
-                    message,
-                }),
-            };
-            lock(&WAKES).finish(waking, &key, answer);
-        });
-    match spawned {
-        Ok(_) => None,
-        Err(why) => {
-            lock(&WAKES).forget(&ask, &wake.key);
-            Some(error(
-                id,
-                proto::ErrorCode::Unspecified,
-                &format!("the Mac couldn't start waking the tab: {why}"),
-            ))
-        }
-    }
-}
-
-/// Starts a terminal whose session went cold on a new conversation for a
-/// phone, in place — see `crate::host::server::Host::start_fresh` —
-/// answering with the terminal it is in. Refused unless it is still the cold spell the phone was shown and
-/// the agent is idle: a prompt sent since may not have reached the
-/// transcript yet, and a session at work is not cold.
-fn fresh_from_phone(
-    host: &Arc<Host>,
-    phone: &Phone<'_>,
-    request: &proto::Envelope,
-    feed: &mpsc::Sender<Event>,
-    id: u64,
-    fresh: &proto::StartFresh,
-) -> Option<proto::Envelope> {
-    let ask: FixAsk = (phone.device.clone(), request.idempotency_key.clone());
-    if lock(&FRESHES).again(&ask, id, feed) {
-        return None;
-    }
-    if !host.controls(fresh.terminal_id, phone.holder) {
-        return Some(error(
-            id,
-            proto::ErrorCode::NotController,
-            "take control of this terminal first",
-        ));
-    }
-    let Some(key) = host.key(fresh.terminal_id) else {
-        return Some(error(
-            id,
-            proto::ErrorCode::NotFound,
-            "that terminal has closed",
-        ));
-    };
-    // Busy by its own report. A session just resumed still reads Starting
-    // until its first turn, so that passes here; the window, which can tell
-    // a started agent from a starting one, checks again before acting.
-    let status = host.agent_status();
-    let pane = status.panes.iter().find(|pane| pane.pane == key);
-    let busy = pane.is_some_and(|pane| {
-        use crate::event::AgentState;
-        matches!(
-            pane.state,
-            AgentState::Thinking | AgentState::ExecutingTool | AgentState::AwaitingPermission
-        )
-    });
-    if busy {
-        return Some(error(
-            id,
-            proto::ErrorCode::Unspecified,
-            "it's working — start fresh once this turn is done",
-        ));
-    }
-    let session = pane
-        .and_then(|pane| pane.session.clone())
-        .or_else(|| host.bound_session(&key));
-    let last = session
-        .as_deref()
-        .filter(|session| *session == fresh.session)
-        .and_then(crate::conversation::claude_transcript)
-        .and_then(|path| crate::cold::claude_last_call(&path));
-    if last.is_none_or(|last| last.at_ms != fresh.since_ms) {
-        return Some(error(
-            id,
-            proto::ErrorCode::Unspecified,
-            "that session has been used since — it isn't cold any more",
-        ));
-    }
-    {
-        let mut freshes = lock(&FRESHES);
-        if freshes.again(&ask, id, feed) {
-            return None;
-        }
-        if !freshes.start(ask.clone(), &key, id, feed) {
-            return Some(error(
-                id,
-                proto::ErrorCode::Unspecified,
-                "ket is already starting this one fresh",
-            ));
-        }
-    }
-    let host = Arc::clone(host);
-    let starting = ask.clone();
-    let tab = key.clone();
-    let session = fresh.session.clone();
-    let since_ms = fresh.since_ms;
-    let typing = phone.phones.typing.clone();
-    let terminal_id = fresh.terminal_id;
-    let spawned = std::thread::Builder::new()
-        .name("ket-host-fresh".into())
-        .spawn(move || {
-            // What phones type into it waits while the window types its
-            // `/clear` and the new session starts: a message sent meanwhile
-            // goes in after, to the new session, rather than into the
-            // command. Released when this thread is done with it.
-            let (_release, released) = mpsc::channel();
-            if let Some(terminal) = host.find(terminal_id) {
-                let _ = typing.files(terminal_id, terminal, Typed::Hold(released));
-            }
-            let answer = match host.start_fresh(&tab, &session, since_ms) {
-                Ok(terminal_id) => Payload::FreshStarted(proto::FreshStarted { terminal_id }),
-                Err(message) => Payload::Error(proto::Error {
-                    code: proto::ErrorCode::Unspecified as i32,
-                    message,
-                }),
-            };
-            lock(&FRESHES).finish(starting, &tab, answer);
-        });
-    match spawned {
-        Ok(_) => None,
-        Err(why) => {
-            lock(&FRESHES).forget(&ask, &key);
-            Some(error(
-                id,
-                proto::ErrorCode::Unspecified,
-                &format!("the Mac couldn't start fresh: {why}"),
-            ))
-        }
-    }
-}
-
-fn delete_from_phone(
-    host: &Arc<Host>,
-    phone: &Phone<'_>,
-    request: &proto::Envelope,
-    feed: &mpsc::Sender<Event>,
-    id: u64,
-    delete: &proto::DeleteWorktree,
-) -> Option<proto::Envelope> {
-    let ask: FixAsk = (phone.device.clone(), request.idempotency_key.clone());
-    if lock(&DELETES).again(&ask, id, feed) {
-        return None;
-    }
-    let places = phone.phones.places();
-    match places.get(&delete.worktree_id) {
-        None => {
-            return Some(error(
-                id,
-                proto::ErrorCode::NotFound,
-                "no such worktree on this desktop",
-            ));
-        }
-        // It is the repository: deleting it is not a worktree's delete.
-        Some(place) if place.base.is_none() => {
-            return Some(error(
-                id,
-                proto::ErrorCode::Unspecified,
-                "the repository's own checkout can't be deleted",
-            ));
-        }
-        Some(_) => {}
-    }
-    if !host.has_window() {
-        return Some(error(
-            id,
-            proto::ErrorCode::NotFound,
-            "open ket on your Mac to delete a worktree from here",
-        ));
-    }
-    {
-        let mut deletes = lock(&DELETES);
-        if deletes.again(&ask, id, feed) {
-            return None;
-        }
-        if !deletes.start(ask.clone(), &delete.worktree_id, id, feed) {
-            return Some(error(
-                id,
-                proto::ErrorCode::Unspecified,
-                "ket is already deleting this worktree",
-            ));
-        }
-    }
-    let worktree = delete.worktree_id.clone();
-    let force = delete.force;
-    let host = Arc::clone(host);
-    let deleting = ask.clone();
-    let spawned = std::thread::Builder::new()
-        .name("ket-host-delete-worktree".into())
-        .spawn(move || {
-            let answer = match host.delete_work(worktree.clone(), force) {
-                Ok(kept) => Payload::WorktreeDeleted(proto::WorktreeDeleted {
-                    kept_branch: kept.unwrap_or_default(),
-                }),
-                // Only an unforced refusal is one forcing would get past.
-                Err(NotDeleted::Refused(message)) if !force => Payload::Error(proto::Error {
-                    code: proto::ErrorCode::WouldLoseWork as i32,
-                    message,
-                }),
-                Err(NotDeleted::Refused(message) | NotDeleted::Failed(message)) => {
-                    Payload::Error(proto::Error {
-                        code: proto::ErrorCode::Unspecified as i32,
-                        message,
-                    })
-                }
-            };
-            lock(&DELETES).finish(deleting, &worktree, answer);
-        });
-    match spawned {
-        Ok(_) => None,
-        Err(why) => {
-            lock(&DELETES).forget(&ask, &delete.worktree_id);
-            Some(error(
-                id,
-                proto::ErrorCode::Unspecified,
-                &format!("could not start deleting it: {why}"),
-            ))
-        }
-    }
-}
-
-fn pr_place<'a>(
-    places: &'a super::places::Places,
-    host: &Host,
-    worktree: &str,
-) -> std::result::Result<
-    (&'a super::places::Place, PullRequestStatus),
-    (proto::ErrorCode, &'static str),
-> {
-    match places.get(worktree) {
-        None => Err((
-            proto::ErrorCode::NotFound,
-            "no such worktree on this desktop",
-        )),
-        Some(place) if place.base.is_none() => Err((
-            proto::ErrorCode::Unspecified,
-            "the repository's own checkout has no pull request of its own",
-        )),
-        Some(_) => match host.pull_request(worktree) {
-            None => Err((
-                proto::ErrorCode::NotFound,
-                "ket on your Mac has not found a pull request for this worktree",
-            )),
-            Some(status) => Ok((places.get(worktree).expect("still there"), status)),
-        },
-    }
-}
-
-impl PrAction {
-    fn allowed_for(self, status: &PullRequestStatus) -> std::result::Result<(), &'static str> {
-        match self {
-            Self::Merge(_) if !status.can_merge() => Err("this pull request cannot be merged yet"),
-            Self::Update if !status.can_update() => {
-                Err("this pull request's branch is not behind its base")
-            }
-            Self::Ready if !status.can_ready() => Err("this pull request is not a draft"),
-            Self::Reopen if !status.can_reopen() => Err("this pull request is not closed"),
-            _ => Ok(()),
-        }
-    }
-}
-
-fn run_pr_action(
-    host: &Host,
-    project: &ProjectId,
-    worktree: &str,
-    status: PullRequestStatus,
-    action: PrAction,
-) -> Payload {
-    let failed = |message: String| {
-        Payload::Error(proto::Error {
-            code: proto::ErrorCode::Unspecified as i32,
-            message,
-        })
-    };
-    let at = match crate::checks::checkout(project) {
-        Ok(at) => at,
-        Err(why) => return failed(why.to_string()),
-    };
-    let method = match action {
-        PrAction::Merge(raw) => match pick_merge_method(raw, status.merge_methods) {
-            Ok(method) => Some(method),
-            Err(why) => return failed(why.to_owned()),
-        },
-        _ => None,
-    };
-    let ran = match action {
-        PrAction::Merge(_) => {
-            crate::github::merge_pull_request(&at, status.number, method.expect("picked"))
-        }
-        PrAction::Update => crate::github::update_branch(&at, status.number),
-        PrAction::Ready => crate::github::mark_ready(&at, status.number),
-        PrAction::Reopen => crate::github::reopen_pull_request(&at, status.number),
-    };
-    if let Err(why) = ran {
-        tracing::info!(worktree, %why, "a phone's pull request action was refused");
-        return failed(why.to_string());
-    }
-    let mut next = crate::github::pull_request(&at, status.number).unwrap_or_else(|_| {
-        let mut next = status.clone();
-        match action {
-            PrAction::Merge(_) => next.state = crate::github::PullRequestState::Merged,
-            PrAction::Ready => next.draft = false,
-            PrAction::Reopen => next.state = crate::github::PullRequestState::Open,
-            PrAction::Update => next.behind = false,
-        }
-        next
-    });
-    next.merge_methods = status.merge_methods;
-    host.replace_pull_request(worktree, next.clone());
-    match action {
-        PrAction::Merge(_) => Payload::PullRequestMerged(proto::PullRequestMerged {
-            number: next.number,
-            url: next.url,
-            method: match method.expect("picked") {
-                MergeMethod::Merge => proto::PullRequestMergeMethod::MergeCommit as i32,
-                MergeMethod::Squash => proto::PullRequestMergeMethod::Squash as i32,
-                MergeMethod::Rebase => proto::PullRequestMergeMethod::Rebase as i32,
-            },
-        }),
-        PrAction::Update => Payload::PullRequestUpdated(proto::PullRequestUpdated {
-            number: next.number,
-        }),
-        PrAction::Ready => Payload::PullRequestReadied(proto::PullRequestReadied {
-            number: next.number,
-        }),
-        PrAction::Reopen => Payload::PullRequestReopened(proto::PullRequestReopened {
-            number: next.number,
-        }),
-    }
-}
-
-fn pick_merge_method(
-    raw: i32,
-    allowed: crate::github::MergeMethods,
-) -> std::result::Result<MergeMethod, &'static str> {
-    let method = match proto::PullRequestMergeMethod::try_from(raw) {
-        Ok(proto::PullRequestMergeMethod::Unspecified) | Err(_) => allowed
-            .default_method()
-            .ok_or("this repository allows no merge methods")?,
-        Ok(proto::PullRequestMergeMethod::MergeCommit) => MergeMethod::Merge,
-        Ok(proto::PullRequestMergeMethod::Squash) => MergeMethod::Squash,
-        Ok(proto::PullRequestMergeMethod::Rebase) => MergeMethod::Rebase,
-    };
-    if allowed.allows(method) {
-        Ok(method)
-    } else {
-        Err("that merge method is not allowed on this repository")
-    }
-}
-
-fn address_comments(
-    host: &Host,
-    project: &ProjectId,
-    worktree: String,
-    status: &PullRequestStatus,
-) -> Payload {
-    let failed = |message: String| {
-        Payload::Error(proto::Error {
-            code: proto::ErrorCode::Unspecified as i32,
-            message,
-        })
-    };
-    let handed = crate::checks::checkout(project).and_then(|at| {
-        crate::address_comments::hand_over(&at, &WorktreeId::new(worktree.as_str()), status)
-    });
-    let prompt = match handed {
-        Ok(prompt) => prompt,
-        Err(why) => {
-            tracing::warn!(%why, "could not read review comments for a phone");
-            return failed(format!(
-                "could not read #{}'s review comments: {why}",
-                status.number
-            ));
-        }
-    };
-    match host.fix_checks(worktree, prompt) {
-        Handed::Given => Payload::CommentsHandedOver(proto::CommentsHandedOver { starting: false }),
-        Handed::Starting => {
-            Payload::CommentsHandedOver(proto::CommentsHandedOver { starting: true })
-        }
-        Handed::Failed(why) => failed(why),
-    }
-}
-
-/// Whether a phone's review is one to send: some comments, each saying
-/// something, and not more of them than [`MAX_REVIEW_COMMENTS`] or
-/// [`MAX_REVIEW_BYTES`] allow. Why not, when it is not.
-fn review_fits(comments: &[proto::ReviewComment]) -> std::result::Result<(), String> {
-    if comments.is_empty() {
-        return Err("write a comment on the diff first".to_owned());
-    }
-    if comments.len() > MAX_REVIEW_COMMENTS {
-        return Err(format!(
-            "a review sends at most {MAX_REVIEW_COMMENTS} comments at a time"
-        ));
-    }
-    if comments
-        .iter()
-        .any(|comment| comment.comment.trim().is_empty())
-    {
-        return Err("write what should change in every comment first".to_owned());
-    }
-    let bytes: usize = comments
-        .iter()
-        .map(|comment| {
-            comment.path.len() + comment.lines.len() + comment.text.len() + comment.comment.len()
-        })
-        .sum();
-    if bytes > MAX_REVIEW_BYTES {
-        return Err("the review is too long to send at once; send fewer comments".to_owned());
-    }
-    Ok(())
-}
-
-fn no_window_to_fix(id: u64) -> proto::Envelope {
-    error(
-        id,
-        proto::ErrorCode::NotFound,
-        "open ket on your Mac to fix checks from here",
-    )
-}
-
-fn no_project(id: u64) -> proto::Envelope {
-    error(
-        id,
-        proto::ErrorCode::NotFound,
-        "no such project on this desktop",
-    )
-}
-
-fn no_note(id: u64) -> proto::Envelope {
-    error(
-        id,
-        proto::ErrorCode::NotFound,
-        "no such note in the backlog",
-    )
-}
-
-/// A project's backlog, as a phone is sent it.
-fn backlog_reply(id: u64, project: &str, backlog: crate::backlog::Backlog) -> proto::Envelope {
-    let notes = backlog
-        .notes
-        .into_iter()
-        .map(|note| proto::BacklogNote {
-            done_ms: note.done.as_ref().map_or(0, |done| done.at_ms),
-            branch: note.done.and_then(|done| done.branch).unwrap_or_default(),
-            id: note.id,
-            title: note.title,
-            body: note.body,
-            files: note.attachments,
-            created_ms: note.created_ms,
-            updated_ms: note.updated_ms,
-            priority: wire_priority(note.priority).into(),
-        })
-        .collect();
-    envelope(
-        id,
-        Payload::Backlog(proto::Backlog {
-            project_id: project.to_owned(),
-            notes,
-        }),
-    )
-}
-
-/// A note's priority as a phone is sent it.
-fn wire_priority(priority: crate::backlog::Priority) -> proto::BacklogPriority {
-    use crate::backlog::Priority;
-    match priority {
-        Priority::Low => proto::BacklogPriority::Low,
-        Priority::Medium => proto::BacklogPriority::Medium,
-        Priority::High => proto::BacklogPriority::High,
-        Priority::Urgent => proto::BacklogPriority::Urgent,
-    }
-}
-
-/// The priority a phone asked for, or `None` when it named none — an older
-/// phone, or a level this desktop does not know.
-fn asked_priority(wire: i32) -> Option<crate::backlog::Priority> {
-    use crate::backlog::Priority;
-    match proto::BacklogPriority::try_from(wire).ok()? {
-        proto::BacklogPriority::Unspecified => None,
-        proto::BacklogPriority::Low => Some(Priority::Low),
-        proto::BacklogPriority::Medium => Some(Priority::Medium),
-        proto::BacklogPriority::High => Some(Priority::High),
-        proto::BacklogPriority::Urgent => Some(Priority::Urgent),
-    }
-}
-
-/// Applies one phone's change to a note — see [`proto::EditBacklog`].
-fn edit_backlog(
-    project: &crate::id::ProjectId,
-    edit: &proto::EditBacklog,
-) -> std::result::Result<crate::backlog::Backlog, (proto::ErrorCode, String)> {
-    use crate::backlog::{Backlog, Done, Note};
-    use proto::edit_backlog::Action;
-
-    let failed = |why: crate::KetError| (proto::ErrorCode::Unspecified, why.to_string());
-    let saved = Backlog::load(project).map_err(failed)?;
-    let action = Action::try_from(edit.action).unwrap_or(Action::Unspecified);
-    let exists = saved.notes.iter().any(|note| note.id == edit.note_id);
-    // Every change but a new note names one that is there: the library
-    // would otherwise do nothing, or — for a save — add it.
-    let new = action == Action::Save && edit.note_id.is_empty();
-    if !new && !exists {
-        return Err((
-            proto::ErrorCode::NotFound,
-            "no such note in the backlog".to_owned(),
-        ));
-    }
-    match action {
-        Action::Save => {
-            let title = edit.title.trim();
-            let body = edit.body.trim();
-            if title.is_empty() && body.is_empty() {
-                return Err((
-                    proto::ErrorCode::Unspecified,
-                    "write what the work is first".to_owned(),
-                ));
-            }
-            // An existing note starts as saved, so what a phone is not sent —
-            // its tags — is saved back as it was rather than cleared.
-            let mut note = match new {
-                true => Note::new(&saved.notes),
-                false => saved
-                    .notes
-                    .iter()
-                    .find(|note| note.id == edit.note_id)
-                    .cloned()
-                    .unwrap_or_default(),
-            };
-            title.clone_into(&mut note.title);
-            body.clone_into(&mut note.body);
-            // A phone that names no priority leaves the note's as it was.
-            if let Some(priority) = asked_priority(edit.priority) {
-                note.priority = priority;
-            }
-            Backlog::save_note(project, &note).map_err(failed)
-        }
-        Action::Done => Backlog::mark_done(project, &edit.note_id, Done::by_hand()).map_err(failed),
-        Action::Reopen => Backlog::reopen(project, &edit.note_id).map_err(failed),
-        Action::Remove => Backlog::remove(project, &edit.note_id).map_err(failed),
-        Action::Unspecified => Err((
-            proto::ErrorCode::Unspecified,
-            "not a change this desktop knows; update ket".to_owned(),
-        )),
-    }
 }
 
 /// What a person's Respond decides about the prompt it names, or `None` when
@@ -2600,217 +1040,4 @@ fn refusal(id: u64, why: AnswerRefused) -> proto::Envelope {
         ),
     };
     error(id, code, message)
-}
-
-/// A changed file, on the phone protocol.
-fn file_change(file: crate::review::FileChange) -> proto::FileChange {
-    let (added, removed) = file.lines.unwrap_or_default();
-    proto::FileChange {
-        path: file.path,
-        added,
-        removed,
-        status: match file.status {
-            crate::review::Status::Modified => proto::file_change::Status::Modified,
-            crate::review::Status::Added => proto::file_change::Status::Added,
-            crate::review::Status::Deleted => proto::file_change::Status::Deleted,
-        } as i32,
-        binary: file.lines.is_none(),
-    }
-}
-
-/// The checkout the agent view terminal `terminal_id` lists sessions for.
-fn agent_view_cwd(host: &Host, places: &Places, terminal_id: u64) -> Option<std::path::PathBuf> {
-    let key = host.key(terminal_id)?;
-    let worktree = key.split('|').next()?;
-    Some(places.get(worktree)?.path.clone())
-}
-
-/// Background session `session`, if the agent view terminal `terminal_id`
-/// shows lists it for its worktree's checkout, with the names of the others
-/// it lists.
-fn agent_view_session(
-    host: &Host,
-    places: &Places,
-    terminal_id: u64,
-    session: &str,
-) -> Option<(crate::agent_view::BackgroundSession, Vec<String>)> {
-    let key = host.key(terminal_id)?;
-    let worktree = key.split('|').next()?;
-    let place = places.get(worktree)?;
-    let (wanted, others): (Vec<_>, Vec<_>) = crate::agent_view::sessions(&place.path)
-        .into_iter()
-        .partition(|listed| listed.session == session);
-    let wanted = wanted.into_iter().next()?;
-    Some((wanted, others.into_iter().map(|other| other.name).collect()))
-}
-
-/// The background session Claude has terminal `terminal_id` attached to,
-/// and its transcript — see [`crate::agent_view::attached_name`]. Its own
-/// process is the daemon's and reports nothing to the terminal, whose own
-/// session is one nothing was ever said in.
-fn attached_session(
-    host: &Host,
-    places: &Places,
-    terminal_id: u64,
-    key: &str,
-) -> Option<(String, crate::conversation::Transcript)> {
-    let terminal = host.find(terminal_id)?;
-    let rows = terminal.with_term(|term| crate::screen::bottom_rows(term, usize::MAX));
-    let name = crate::agent_view::attached_name(&rows)?;
-    let place = places.get(key.split('|').next()?)?;
-    let session = crate::agent_view::named(&place.path, &name)?.session;
-    let transcript = crate::conversation::Transcript::locate("claude", &session)?;
-    Some((session, transcript))
-}
-
-/// What the agent in terminal `terminal_id` has said since cursor `after` of
-/// its session — see `crate::conversation`: the session its hooks named for
-/// the terminal's pane, for each agent ket can read. `wanted`, when set, is
-/// one of the background sessions its agent view lists instead, and
-/// `listed` whether it does. A Claude terminal whose own session has nothing
-/// to read, attached to one of those sessions, reads that one — see
-/// [`attached_session`].
-fn conversation(
-    host: &Host,
-    places: &Places,
-    terminal_id: u64,
-    after: u64,
-    wanted: &str,
-    listed: bool,
-) -> proto::Conversation {
-    let unsupported = |reason: String| proto::Conversation {
-        terminal_id,
-        supported: false,
-        reason,
-        ..Default::default()
-    };
-    let Some(key) = host.key(terminal_id) else {
-        return unsupported("that terminal has closed".to_owned());
-    };
-    // One of the sessions the terminal's agent view holds, which report
-    // nothing to the terminal: read by Claude's own id, once it is one the
-    // terminal lists, so a phone cannot name any transcript on the Mac.
-    if !wanted.is_empty() {
-        if !listed {
-            return unsupported("agent view doesn't list that session".to_owned());
-        }
-        let Some(transcript) = crate::conversation::Transcript::locate("claude", wanted) else {
-            return unsupported("the session's transcript isn't there yet".to_owned());
-        };
-        return read_conversation(terminal_id, wanted.to_owned(), &transcript, after);
-    }
-    let status = host.agent_status();
-    // The agent's own report of which session it is; failing one, the
-    // session ket resumed in this terminal when it opened it. OpenCode says
-    // nothing on resuming until a message is typed, and a session read from
-    // its transcript needs no report.
-    let (agent, session) = match status.panes.iter().find(|pane| pane.pane == key) {
-        Some(pane) => (pane.agent.clone(), pane.session.clone()),
-        None => {
-            let agent = key.split('|').nth(1).unwrap_or_default().to_owned();
-            let bound = host.bound_session(&key);
-            // A Claude terminal attached to a background session may never
-            // report at all: read below by the session it shows.
-            if agent.is_empty() || (bound.is_none() && crate::agents::harness(&agent) != "claude") {
-                return unsupported("no agent has reported from this terminal yet".to_owned());
-            }
-            (agent, bound)
-        }
-    };
-    let reported = session.is_some();
-    if !crate::conversation::Transcript::readable(&agent) {
-        return unsupported(format!(
-            "{agent}'s sessions can't be read as a conversation yet"
-        ));
-    }
-    let found = session
-        .and_then(|session| {
-            crate::conversation::Transcript::locate(&agent, &session).map(|found| (session, found))
-        })
-        .or_else(|| {
-            (crate::agents::harness(&agent) == "claude")
-                .then(|| attached_session(host, places, terminal_id, &key))
-                .flatten()
-        });
-    let mut last = LAST_READ
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let (session, transcript) = match found {
-        Some((session, transcript)) => {
-            last.insert(key.clone(), (agent, session.clone(), transcript.clone()));
-            (session, transcript)
-        }
-        // A session with nothing to read — not written yet, or one of the
-        // agent's own side threads reporting through the same hooks, as
-        // Codex's do, or an attached session's name hidden for a moment by
-        // a dialog — leaves the chat on the session last read here, rather
-        // than putting an error in the middle of it.
-        None => match last.get(&key) {
-            Some((read_agent, session, transcript)) if *read_agent == agent => {
-                (session.clone(), transcript.clone())
-            }
-            _ if !reported => {
-                return unsupported("no agent has reported from this terminal yet".to_owned());
-            }
-            _ => return unsupported("the session's transcript isn't there yet".to_owned()),
-        },
-    };
-    drop(last);
-    read_conversation(terminal_id, session, &transcript, after)
-}
-
-/// The agent, session and transcript a pane's conversation was last read
-/// from.
-type LastRead = (String, String, crate::conversation::Transcript);
-
-/// For each pane, where its conversation was last read from — see
-/// [`conversation`].
-static LAST_READ: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashMap<String, LastRead>>,
-> = std::sync::LazyLock::new(Default::default);
-
-/// What `transcript` has said since cursor `after`, for terminal
-/// `terminal_id`'s phone.
-fn read_conversation(
-    terminal_id: u64,
-    session: String,
-    transcript: &crate::conversation::Transcript,
-    after: u64,
-) -> proto::Conversation {
-    let unsupported = |reason: String| proto::Conversation {
-        terminal_id,
-        supported: false,
-        reason,
-        ..Default::default()
-    };
-    // Only Claude records a queue: another agent's message typed mid-turn
-    // shows once it is taken in.
-    let queued = transcript.queued();
-    let read = transcript.read(after);
-    match read {
-        Ok(chunk) => proto::Conversation {
-            queued,
-            terminal_id,
-            supported: true,
-            reason: String::new(),
-            session,
-            turns: chunk
-                .turns
-                .into_iter()
-                .map(|turn| proto::Turn {
-                    kind: match turn.kind {
-                        crate::conversation::TurnKind::User => proto::turn::Kind::User,
-                        crate::conversation::TurnKind::Assistant => proto::turn::Kind::Assistant,
-                        crate::conversation::TurnKind::Tool => proto::turn::Kind::Tool,
-                    } as i32,
-                    text: turn.text,
-                    tool: turn.tool,
-                    images: turn.images,
-                })
-                .collect(),
-            next: chunk.next,
-            fresh: chunk.fresh,
-        },
-        Err(error) => unsupported(format!("couldn't read the session: {error}")),
-    }
 }

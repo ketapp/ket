@@ -144,6 +144,12 @@ pub fn backlog_dir() -> Result<PathBuf> {
     Ok(data_dir()?.join("backlog"))
 }
 
+/// Directory holding the images projects show on their badges, each
+/// project's in a directory of its own — see [`crate::project_image`].
+pub fn project_images_dir() -> Result<PathBuf> {
+    Ok(data_dir()?.join("project-images"))
+}
+
 /// Directory holding the photos and files phones send with a message, each
 /// message's in a directory of its own — see [`crate::attachments::keep`].
 /// Outside every worktree, so what a phone sends never shows up in `git

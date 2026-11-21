@@ -29,7 +29,9 @@
 //! dialog stays open only when something needs saying — a refusal, or the one
 //! success that looks identical to a broken button.
 
-use gpui::{AnyElement, Context, FontWeight, MouseButton, SharedString, div, prelude::*, px};
+use gpui::{
+    AnyElement, Context, FontWeight, MouseButton, SharedString, WeakEntity, div, prelude::*, px,
+};
 use ket_core::id::WorktreeId;
 use ket_core::workspace::{MergeError, MergeReport, Workspace};
 
@@ -37,7 +39,7 @@ use crate::Shell;
 use crate::fonts::Prose;
 use crate::paint::{alpha, paint};
 use crate::ui::banner::banner;
-use crate::ui::button::{Variant, button, icon_button};
+use crate::ui::button::{Variant, button};
 use crate::ui::dialog::{card, centered, footer, header};
 use crate::ui::filetype::file_mark;
 use crate::ui::icon::{Icon, sized_icon};
@@ -92,6 +94,9 @@ pub(crate) struct MergeWorktreeConfirm {
     pub(crate) changes: usize,
     /// The first [`LISTED_PATHS`] of them. This is what `git add -A` will take.
     pub(crate) paths: Vec<SharedString>,
+    /// Whether they're still being read. The merge waits for them: it
+    /// commits everything, and nothing is confirmed before it is shown.
+    pub(crate) reading: bool,
     /// Why an attempt was refused, if it was.
     pub(crate) refusal: Option<SharedString>,
     /// Whether forcing would get past that refusal.
@@ -122,9 +127,9 @@ const AGENT_TIP: &str = "Asks this worktree's agent to inspect the refusal, comm
 impl Shell {
     /// Opens the merge dialog for one row, or merges outright.
     ///
-    /// Reads the worktree once, here, so the dialog can say what is about to be
-    /// committed. That read is `gix` in-process — the same one the sidebar's
-    /// own tick does — rather than a `git` spawn.
+    /// Opens at once on the row's own count of changed paths, and names them
+    /// once a read of the worktree, off the window's thread, says which: on a
+    /// big tree that read held the dialog back.
     pub(crate) fn request_merge_worktree(
         &mut self,
         project: usize,
@@ -155,6 +160,7 @@ impl Shell {
         if node.primary || node.missing {
             return;
         }
+        let (changes, path) = (node.changes, node.path.clone());
 
         let target = WorktreeTarget {
             id: node.id.clone(),
@@ -189,24 +195,13 @@ impl Shell {
             return;
         }
 
-        let status = ket_core::status::of_worktree(&node.path, None).ok();
-        let changes = status.as_ref().map_or(0, |status| status.total_changes);
-        let paths = status
-            .map(|status| {
-                status
-                    .files
-                    .iter()
-                    .take(LISTED_PATHS)
-                    .map(|file| SharedString::from(file.path.clone()))
-                    .collect()
-            })
-            .unwrap_or_default();
-
+        let id = target.id.clone();
         self.confirm_merge_worktree = Some(MergeWorktreeConfirm {
             target,
             base: base.into(),
             changes,
-            paths,
+            paths: Vec::new(),
+            reading: true,
             refusal: None,
             waivable: false,
             outcome: None,
@@ -215,6 +210,43 @@ impl Shell {
             agent_tip: false,
         });
         cx.notify();
+
+        let read = cx
+            .background_executor()
+            .spawn(async move { ket_core::status::of_worktree(&path, None) });
+        cx.spawn(async move |shell: WeakEntity<Shell>, cx| {
+            let read = read.await;
+            let _ = shell.update(cx, |shell, cx| {
+                // Still the dialog it was read for.
+                let Some(confirm) = shell
+                    .confirm_merge_worktree
+                    .as_mut()
+                    .filter(|confirm| confirm.target.id == id)
+                else {
+                    return;
+                };
+                confirm.reading = false;
+                match read {
+                    Ok(status) => {
+                        confirm.changes = crate::tree::changed_paths(&status);
+                        confirm.paths = crate::tree::distinct_paths(&status)
+                            .take(LISTED_PATHS)
+                            .map(|path| SharedString::from(path.to_owned()))
+                            .collect();
+                    }
+                    // Said, and the merge offered as it was before there was
+                    // a list: on the row's own count.
+                    Err(error) => shell.toast_detail(
+                        Tone::Warning,
+                        "Couldn't list what the merge will commit",
+                        error.to_string(),
+                        cx,
+                    ),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// "Merge with agent": the refused merge, handed to the worktree's agent
@@ -258,6 +290,14 @@ impl Shell {
     /// enough to freeze a window sometimes. Blocking the window on git is a
     /// mistake the status tick made once, and this one does not need to copy.
     pub(crate) fn merge_worktree_confirmed(&mut self, force: bool, cx: &mut Context<Self>) {
+        // Not before the dialog has shown what it will commit.
+        if self
+            .confirm_merge_worktree
+            .as_ref()
+            .is_some_and(|confirm| confirm.reading)
+        {
+            return;
+        }
         let Some(id) = self
             .confirm_merge_worktree
             .as_ref()
@@ -443,13 +483,6 @@ impl Shell {
         let escalated = refused && confirm.waivable;
         let finished = confirm.outcome.is_some();
 
-        let close = icon_button("close-merge-worktree", Icon::Close)
-            .bare()
-            .render(t)
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.confirm_merge_worktree = None;
-                cx.notify();
-            }));
         let cancel = button(
             "cancel-merge-worktree",
             if finished { "Close" } else { "Cancel" },
@@ -472,13 +505,14 @@ impl Shell {
                 "confirm-merge-worktree",
                 match (running, escalated) {
                     (true, _) => "Merging\u{2026}",
+                    (false, _) if confirm.reading => "Reading\u{2026}",
                     (false, true) => "Merge anyway",
                     (false, false) => "Merge",
                 },
             )
             .primary()
             .leading(Icon::GitMerge)
-            .enabled(!running && (confirm.refusal.is_none() || escalated))
+            .enabled(!running && !confirm.reading && (confirm.refusal.is_none() || escalated))
             .render(t)
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.merge_worktree_confirmed(escalated, cx);
@@ -616,6 +650,8 @@ impl Shell {
             {
                 let verb = if finished { "Committed" } else { "Commit" };
                 let (words, colour) = match confirm.changes {
+                    // The row's own count can be a tick old: not said as fact.
+                    _ if confirm.reading => ("Reading changes on".to_owned(), paint(t.text.dim)),
                     0 => ("Nothing to commit on".to_owned(), paint(t.text.dim)),
                     1 => (format!("{verb} 1 change to"), paint(t.text.primary)),
                     many => (format!("{verb} {many} changes to"), paint(t.text.primary)),
@@ -699,7 +735,15 @@ impl Shell {
                 card("merge-worktree", WIDTH, t)
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .child(
-                        header(if finished { "Merged" } else { "Merge worktree" }, t).child(close),
+                        header(
+                            "close-merge-worktree",
+                            if finished { "Merged" } else { "Merge worktree" },
+                        )
+                        .on_close(cx.listener(|this, _, _, cx| {
+                            this.confirm_merge_worktree = None;
+                            cx.notify();
+                        }))
+                        .render(t),
                     )
                     .child(top)
                     .children(listed)

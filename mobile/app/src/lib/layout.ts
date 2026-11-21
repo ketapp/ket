@@ -1,7 +1,6 @@
-// The app on a wide screen — an iPad, or a browser window wide enough for
-// two columns: the worktree list stays on the left as a sidebar, and what
-// it opens is drawn beside it rather than over it. Narrower, every screen is
-// the whole screen, as on a phone.
+// On a screen wide enough for two columns, the worktree list stays on
+// the left as a sidebar and opens screens beside it. On a narrower display,
+// each screen fills the window.
 //
 // Either way a screen's own text never runs wider than READABLE_WIDTH: a
 // conversation or a settings card stretched across an iPad's width is

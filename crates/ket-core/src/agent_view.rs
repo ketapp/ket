@@ -60,8 +60,9 @@ pub fn is_agent_view_title(title: &str) -> bool {
     title.trim().ends_with("claude agents")
 }
 
-/// A rule agent view draws over and under its input box.
-fn is_rule(row: &str) -> bool {
+/// A rule agent view draws over and under its input box, as an ordinary
+/// Claude session does over and under its own.
+pub(crate) fn is_rule(row: &str) -> bool {
     let row = row.trim();
     row.chars().count() >= 20 && row.chars().all(|c| c == '─')
 }
@@ -337,6 +338,22 @@ struct Listing {
 fn listings() -> &'static Mutex<HashMap<PathBuf, Listing>> {
     static LISTINGS: OnceLock<Mutex<HashMap<PathBuf, Listing>>> = OnceLock::new();
     LISTINGS.get_or_init(Mutex::default)
+}
+
+/// Seeds a listing without starting Claude, for tests of attached sessions.
+#[cfg(test)]
+pub(crate) fn cache_sessions_for_tests(cwd: &Path, sessions: Vec<BackgroundSession>) {
+    listings()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(
+            cwd.to_owned(),
+            Listing {
+                at: Some(Instant::now()),
+                refreshing: false,
+                sessions,
+            },
+        );
 }
 
 /// The background sessions agent view lists under `cwd`, as last read.

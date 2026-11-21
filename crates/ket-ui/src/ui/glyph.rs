@@ -1,13 +1,23 @@
 //! A project's glyph: a small picture in its badge where the letter goes.
 //!
-//! Forty-seven marks from **Phosphor** 2.1.1, its fill weight (MIT; the
-//! licence sits beside them), vendored under `assets/icons/glyphs` the way the
-//! chrome's icons are, with `currentColor` written out as a literal. A fixed
-//! set rather than any file or emoji: a badge is twenty pixels, and a picture
-//! there is noise. Filled rather than outlined, as Lucide drew them at first:
-//! a stroke of under a pixel on a coloured tile could not be read at a
-//! glance, and a solid shape can. Two are stand-ins for marks Phosphor does
-//! not draw: `telescope` is binoculars and `toothbrush` a tooth.
+//! Forty-seven marks from **Fluent UI System Icons** 1.1.346, filled (MIT;
+//! the licence sits beside them), vendored under `assets/icons/glyphs` the way
+//! the chrome's icons are: the path data only, with the fill written out as a
+//! literal. Fluent because its filled marks are drawn for 16 px rather than
+//! shrunk from a large grid, and a badge draws its glyph at 14. Each keeps its
+//! own grid: 16 units, or 20 for the three Fluent draws no smaller
+//! (`terminal`, `layers`, `stethoscope`). The table below names each one's
+//! Fluent icon.
+//!
+//! A fixed set rather than any file or emoji: a badge is twenty pixels, and a
+//! picture there is noise. Filled rather than outlined, as Lucide drew them at
+//! first: a stroke of under a pixel on a coloured tile could not be read at a
+//! glance, and a solid shape can. Phosphor's fill weight came between, drawn
+//! once on a 256-unit grid for every size.
+//!
+//! Three are stand-ins for marks Fluent does not draw: `toothbrush` is a tooth
+//! (`dentist`), `telescope` a magnifying glass (`search`) and `orbit` a ringed
+//! planet (`planet`).
 //!
 //! Stored in `ProjectSettings::icon` as `glyph:<name>`. Core keeps that field
 //! verbatim and leaves its meaning to the shell, so the prefix is what tells a
@@ -31,55 +41,56 @@ macro_rules! glyphs {
     };
 }
 
-/// Every glyph a badge can wear: work, then things, then the rest.
+/// Every glyph a badge can wear: work, then things, then the rest. Beside
+/// each, the Fluent icon it was drawn from, `_filled` left off.
 pub(crate) const GLYPHS: [(&str, &str, &[u8]); 47] = glyphs![
-    "terminal",
-    "code",
-    "braces",
-    "database",
-    "server",
-    "cpu",
-    "bug",
-    "git-branch",
-    "package",
-    "layers",
-    "cloud",
-    "wrench",
-    "rocket",
-    "flask-conical",
-    "bot",
-    "brain",
-    "smartphone",
-    "monitor",
-    "globe",
-    "mail",
-    "message-square",
-    "camera",
-    "music",
-    "gamepad-2",
-    "book-open",
-    "graduation-cap",
-    "heart",
-    "stethoscope",
-    "toothbrush",
-    "coins",
-    "chart-line",
-    "shopping-cart",
-    "house",
-    "briefcase",
-    "map-pin",
-    "plane",
-    "leaf",
-    "sun",
-    "moon",
-    "star",
-    "zap",
-    "flame",
-    "telescope",
-    "orbit",
-    "shield",
-    "key",
-    "sparkles",
+    "terminal",       // window_console_20
+    "code",           // code_block_16
+    "braces",         // braces_16
+    "database",       // database_16
+    "server",         // server_16
+    "cpu",            // developer_board_16
+    "bug",            // bug_16
+    "git-branch",     // branch_16
+    "package",        // box_16
+    "layers",         // layer_20
+    "cloud",          // cloud_16
+    "wrench",         // wrench_16
+    "rocket",         // rocket_16
+    "flask-conical",  // beaker_16
+    "bot",            // bot_16
+    "brain",          // brain_16
+    "smartphone",     // phone_16
+    "monitor",        // desktop_16
+    "globe",          // globe_16
+    "mail",           // mail_16
+    "message-square", // comment_16
+    "camera",         // camera_16
+    "music",          // music_note_2_16
+    "gamepad-2",      // games_16
+    "book-open",      // book_open_16
+    "graduation-cap", // hat_graduation_16
+    "heart",          // heart_16
+    "stethoscope",    // stethoscope_20
+    "toothbrush",     // dentist_16, a stand-in
+    "coins",          // coin_multiple_16
+    "chart-line",     // data_trending_16
+    "shopping-cart",  // cart_16
+    "house",          // home_16
+    "briefcase",      // briefcase_16
+    "map-pin",        // location_16
+    "plane",          // airplane_16
+    "leaf",           // leaf_one_16
+    "sun",            // weather_sunny_16
+    "moon",           // weather_moon_16
+    "star",           // star_16
+    "zap",            // flash_16
+    "flame",          // fire_16
+    "telescope",      // search_16, a stand-in
+    "orbit",          // planet_16, a stand-in
+    "shield",         // shield_16
+    "key",            // key_16
+    "sparkles",       // sparkle_16
 ];
 
 /// One of [`GLYPHS`], by its place in the table.

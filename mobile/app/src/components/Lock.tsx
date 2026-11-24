@@ -18,6 +18,7 @@ import {
   waitMs,
 } from '../lib/lock';
 import { font, size, t } from '../lib/theme';
+import { surface } from './ui/surface';
 import { BrandMark, Erase, FaceScan, Fingerprint } from './icons';
 
 /** The icon for a way of unlocking, by its name from `biometry()`. */
@@ -115,7 +116,7 @@ function Key({
       disabled={disabled}
       style={({ pressed }) => [
         styles.key,
-        well && { backgroundColor: t.sunken },
+        well && surface.well,
         pressed && { backgroundColor: t.selection },
         disabled && { opacity: 0.4 },
       ]}

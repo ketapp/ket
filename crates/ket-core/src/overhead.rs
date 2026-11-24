@@ -866,21 +866,42 @@ mod sample {
             assert!(!theirs);
         }
 
+        /// Set in the copy of this test that stands in for the helper: it
+        /// only waits to be looked at.
+        const STAND_IN: &str = "KET_OVERHEAD_STAND_IN";
+
         #[test]
         fn a_chromium_helper_is_kets_whichever_group_it_is_in() {
             use std::os::unix::process::CommandExt;
 
-            // `sleep`, under a helper's name: what the system calls a
-            // process is the name of the file it ran.
+            if std::env::var_os(STAND_IN).is_some() {
+                std::thread::sleep(std::time::Duration::from_secs(5));
+                return;
+            }
+            // This test's own program, run as just this test, under a
+            // helper's name: what the system calls a process is the name of
+            // the file it ran. Never a copy of one of Apple's: outside the
+            // system volume its signature fails, macOS kills it, and the
+            // daemon that checks signatures crashed reading the copy as it
+            // was deleted, until nothing new could start.
             let dir = std::env::temp_dir().join(format!("ket-overhead-{}", std::process::id()));
             std::fs::create_dir_all(&dir).expect("a directory");
             let binary = dir.join("ket Helper (Renderer)");
-            std::fs::copy("/bin/sleep", &binary).expect("a copy of sleep");
+            let program = std::env::current_exe().expect("this test's program");
+            // A link is the same, already checked file; a copy for a target
+            // directory on another volume.
+            std::fs::hard_link(&program, &binary)
+                .or_else(|_| std::fs::copy(&program, &binary).map(drop))
+                .expect("the helper's file");
             let pid = i32::try_from(std::process::id()).expect("a pid");
             let mut found = Vec::new();
             for apart in [false, true] {
                 let mut command = std::process::Command::new(&binary);
-                command.arg("5");
+                command
+                    .arg("a_chromium_helper_is_kets_whichever_group_it_is_in")
+                    .env(STAND_IN, "1")
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null());
                 if apart {
                     command.process_group(0);
                 }

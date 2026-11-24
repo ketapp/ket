@@ -11,10 +11,9 @@ import { router, useLocalSearchParams } from 'expo-router';
 import type { StartOptions } from '@ket/remote';
 import { type ReactNode, useEffect, useRef, useState } from 'react';
 import { Keyboard, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
-import Animated, { type SharedValue, useAnimatedStyle } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { MenuCard, type MenuItem, MenuList, type MenuSection } from '../../components/FloatMenu';
+import { type MenuItem, type MenuSection, SheetMenu } from '../../components/FloatMenu';
 import { KeyCommands } from '../../components/KeyCommands';
 import { AgentMark, Check, ChevronDown } from '../../components/icons';
 import { SHEET_HEAD, SHEET_INSET, SheetPanel, type SheetMeasure } from '../../components/Sheet';
@@ -24,6 +23,7 @@ import { useHost, useHostState } from '../../lib/hosts';
 import { showBeside, useSplit } from '../../lib/layout';
 import { getLastWork, saveLastWork } from '../../lib/store';
 import { agentLabel, font, size, t } from '../../lib/theme';
+import { surface } from '../../components/ui/surface';
 
 /** Which dropdown is open. */
 type Which = 'project' | 'target' | 'agent' | 'base' | 'model' | 'effort' | 'kind';
@@ -309,7 +309,7 @@ export default function NewTask() {
         open && place && measure ? (
           <>
             <Pressable accessibilityLabel="Close menu" onPress={() => setOpen(null)} style={StyleSheet.absoluteFill} />
-            <Menu
+            <SheetMenu
               rise={measure.rise}
               bottom={menuBottom}
               left={menuLeft}
@@ -457,44 +457,19 @@ function Field({
  * the sheet comes down off the keyboard — which opening it puts away. The
  * app's one menu card and rows (components/FloatMenu.tsx), placed by the
  * sheet rather than by the screen. */
-function Menu({
-  rise,
-  bottom,
-  left,
-  width,
-  maxHeight,
-  sections,
-}: {
-  rise: SharedValue<number>;
-  /** Over the foot of the sheet's room, with the body where it lays out. */
-  bottom: number;
-  left: number;
-  width: number;
-  maxHeight: number;
-  sections: MenuSection[];
-}) {
-  // `bottom`, not a transform: a transform moves where an item is drawn but
-  // not where its press is judged, and a tap there could be dropped (see
-  // KeyboardLift).
-  const held = useAnimatedStyle(() => ({ bottom: bottom + rise.get() }), [bottom]);
-  return (
-    <Animated.View style={[styles.menu, { left, width }, held]}>
-      <MenuCard open from="below" label="Choices">
-        {/* The card's own edge is two points of the room. */}
-        <MenuList sections={sections} onChoose={(item) => item.onPress()} maxHeight={maxHeight - 2} />
-      </MenuCard>
-    </Animated.View>
-  );
-}
-
 const styles = StyleSheet.create({
   fields: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  // Two to a row, each growing into what the row has left, so a row ends
+  // where the prompt and the button under it do. 48% twice and the gap
+  // between came up some 6 pt short of that. A field alone on the last row
+  // takes the whole of it.
   field: {
-    width: '48%',
+    flexBasis: '48%',
+    flexGrow: 1,
     minWidth: 0,
     height: 56,
     borderRadius: size.radiusLg,
-    backgroundColor: t.sunken,
+    ...surface.well,
     borderWidth: 1,
     borderColor: 'transparent',
     paddingVertical: 8,
@@ -510,7 +485,7 @@ const styles = StyleSheet.create({
   prompt: {
     height: 112,
     borderRadius: size.radiusLg,
-    backgroundColor: t.sunken,
+    ...surface.well,
     padding: 12,
     color: t.text,
     fontFamily: font.prose,
@@ -519,5 +494,4 @@ const styles = StyleSheet.create({
     textAlignVertical: 'top',
   },
   note: { fontSize: size.detail },
-  menu: { position: 'absolute' },
 });

@@ -4,7 +4,7 @@
 // own chat would be empty; since 1.21 the desktop lists them instead.
 
 import { type AgentView, BackgroundSession_State, type BackgroundSession, type HostSnapshot } from '@ket/remote';
-import { router } from 'expo-router';
+import { router, useIsFocused } from 'expo-router';
 import { useEffect, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -14,6 +14,7 @@ import type { HostConnection } from '../lib/connection';
 import { useHost, useHostState } from '../lib/hosts';
 import { reasonOf } from '../lib/text';
 import { font, size, t } from '../lib/theme';
+import { surface } from './ui/surface';
 import { ChevronDown, Send, TerminalWindow } from './icons';
 import { KeyboardLift } from './KeyboardLift';
 import { Bar, Button, Card, Dot, IconCluster, Prose, Row, Screen, field, oneLine } from './ui';
@@ -102,7 +103,8 @@ export function AgentViewList({
   left: boolean;
 }) {
   const conn = useHost(hostId);
-  const hostState = useHostState(conn);
+  // Held while a session opened from it is on top: see `useHostState`.
+  const hostState = useHostState(conn, useIsFocused());
   const insets = useSafeAreaInsets();
   // Read on a timer, not each render: the ages only need the minute.
   const [now, setNow] = useState(() => Date.now());
@@ -297,5 +299,5 @@ const styles = StyleSheet.create({
     backgroundColor: t.backdrop,
   },
   task: { flex: 1, height: 46, borderRadius: 23, paddingHorizontal: 16 },
-  send: { width: 46, height: 46, borderRadius: 23, alignItems: 'center', justifyContent: 'center', backgroundColor: t.sunken },
+  send: { width: 46, height: 46, borderRadius: 23, alignItems: 'center', justifyContent: 'center', ...surface.well },
 });

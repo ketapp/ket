@@ -1438,21 +1438,7 @@ impl Workspace {
             ))
         })?;
 
-        if let Some(known) = state
-            .worktrees
-            .iter()
-            .find(|w| canonical(&w.path) == wanted)
-        {
-            return Ok(known.clone());
-        }
-
         let id = worktree::id_for(project_id, &branch);
-        if state.worktrees.iter().any(|w| w.id == id) {
-            return Err(KetError::Conflict(format!(
-                "a worktree for {branch} is already registered"
-            )));
-        }
-
         let base = project.default_base.clone();
         let base_commit = git
             .merge_base(&base, &branch)
@@ -1490,13 +1476,27 @@ impl Workspace {
         let record = adopted.clone();
         let focus = adopted.id.clone();
         let owner = project_id.clone();
-        self.store.update(move |state| {
+        // Checked under the lock: two adoptions of one checkout can overlap.
+        let known = self.store.update(move |state| {
+            let same = |w: &&Worktree| canonical(&w.path) == record.path;
+            if let Some(known) = state.worktrees.iter().find(same) {
+                return Ok(Some(known.clone()));
+            }
+            if state.worktrees.iter().any(|w| w.id == record.id) {
+                let branch = &record.branch;
+                return Err(KetError::Conflict(format!(
+                    "a worktree for {branch} is already registered"
+                )));
+            }
             state.worktrees.push(record);
             let project_state = state.project_state.entry(owner).or_default();
             project_state.open.push(focus.clone());
             project_state.active = Some(focus);
-            Ok(())
+            Ok(None)
         })?;
+        if let Some(known) = known {
+            return Ok(known);
+        }
 
         self.bus.publish(Event::WorktreeCreated {
             worktree_id: adopted.id.clone(),

@@ -59,6 +59,7 @@ pub(crate) struct Button {
     hint: Option<SharedString>,
     enabled: bool,
     small: bool,
+    large: bool,
     busy: Option<SharedString>,
 }
 
@@ -72,6 +73,10 @@ const SHEEN: Duration = Duration::from_millis(1400);
 /// full control would be taller than the line it acts on.
 const SMALL_H: Pixels = px(26.0);
 
+/// A large button's height: for the one action of a surface that holds
+/// nothing else yet, where it is what the surface is for.
+const LARGE_H: Pixels = px(52.0);
+
 /// A secondary button, which is what most buttons are.
 pub(crate) fn button(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Button {
     Button {
@@ -83,6 +88,7 @@ pub(crate) fn button(id: impl Into<ElementId>, label: impl Into<SharedString>) -
         hint: None,
         enabled: true,
         small: false,
+        large: false,
         busy: None,
     }
 }
@@ -147,6 +153,13 @@ impl Button {
         self
     }
 
+    /// The large size: 52px, 17px type, a 20px leading icon. For an empty
+    /// surface's one action, set under a heading of its own.
+    pub(crate) fn large(mut self) -> Self {
+        self.large = true;
+        self
+    }
+
     /// Shows the button working: a spinner in the leading icon's place and
     /// `label` — "Deleting…" — in the label's. It keeps its variant's
     /// colours, so a delete in progress still reads as the delete, and it is
@@ -206,6 +219,7 @@ impl Button {
         };
         let link = self.variant == Variant::Link;
         let small = self.small;
+        let large = self.large;
         let hovered_text = match self.variant {
             Variant::Ghost | Variant::Link => paint(t.text.primary),
             Variant::Danger => paint(t.status.failed),
@@ -227,17 +241,23 @@ impl Button {
             .flex()
             .flex_none()
             .items_center()
-            .gap(if small { px(6.0) } else { ICON_GAP })
-            .when(!link, |el| {
-                el.h(if small { SMALL_H } else { CONTROL_H }).px(if small {
-                    px(9.0)
-                } else {
-                    PAD_X
-                })
+            .gap(match (small, large) {
+                (_, true) => px(10.0),
+                (true, _) => px(6.0),
+                _ => ICON_GAP,
             })
-            .rounded(RADIUS_MD)
+            .when(!link, |el| match (small, large) {
+                (_, true) => el.h(LARGE_H).px(px(28.0)),
+                (true, _) => el.h(SMALL_H).px(px(9.0)),
+                _ => el.h(CONTROL_H).px(PAD_X),
+            })
+            .rounded(if large { px(12.0) } else { RADIUS_MD })
             .bg(fill)
-            .text_size(if small { px(12.0) } else { LABEL })
+            .text_size(match (small, large) {
+                (_, true) => px(17.0),
+                (true, _) => px(12.0),
+                _ => LABEL,
+            })
             .text_color(text)
             .font_weight(if primary {
                 FontWeight::SEMIBOLD
@@ -251,7 +271,10 @@ impl Button {
             })
             .map(|el| match self.busy {
                 None => el
-                    .children(self.leading.map(|which| icon(which, text)))
+                    .children(self.leading.map(|which| match large {
+                        true => super::icon::sized_icon(which, px(20.0), text),
+                        false => icon(which, text),
+                    }))
                     .child(self.label)
                     .children(self.trailing.map(|which| {
                         super::icon::sized_icon(
@@ -307,6 +330,71 @@ impl Button {
                     .child(keys)
             }))
     }
+}
+
+/// The narrow half of a split button: a chevron beside a [`Button`] that
+/// opens a menu of other ways to do what the button does — Start ▾ →
+/// Schedule…. Drawn in the button's own fill, so the two read as one
+/// control. Join them with [`split`]; attach `on_click` to what comes back.
+pub(crate) fn split_more(
+    id: impl Into<ElementId>,
+    variant: Variant,
+    open: bool,
+    t: &Theme,
+) -> Stateful<Div> {
+    let primary = variant == Variant::Primary;
+    let (fill, ink, hovered) = if primary {
+        (paint(t.accent), paint(t.on_accent), paint(t.accent_hover))
+    } else {
+        (
+            transparent_black().into(),
+            paint(t.text.dim),
+            paint(t.hover),
+        )
+    };
+    let mut divider = ink;
+    divider.a *= 0.18;
+    div()
+        .id(id)
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .h(CONTROL_H)
+        .w(px(28.0))
+        .rounded_tr(RADIUS_MD)
+        .rounded_br(RADIUS_MD)
+        .bg(if open { hovered } else { fill })
+        .border_l_1()
+        .border_color(divider)
+        .when(!primary, |el| {
+            el.border_t_1()
+                .border_r_1()
+                .border_b_1()
+                .border_color(paint(t.border))
+        })
+        .cursor_pointer()
+        .hover(|style| style.bg(hovered))
+        .child(super::icon::sized_icon(
+            if open {
+                Icon::ChevronUp
+            } else {
+                Icon::ChevronDown
+            },
+            px(14.0),
+            ink,
+        ))
+}
+
+/// A [`Button`] and its [`split_more`], touching: the button gives up its
+/// right-hand corners to the chevron.
+pub(crate) fn split(button: Stateful<Div>, more: impl IntoElement) -> Div {
+    div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .child(button.rounded_tr(px(0.0)).rounded_br(px(0.0)))
+        .child(more)
 }
 
 /// A ring going round, in `colour`: a faint full track under a quarter arc

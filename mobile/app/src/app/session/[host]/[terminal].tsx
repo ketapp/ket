@@ -25,6 +25,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -52,7 +53,7 @@ import { ChatBar, ChatNote, type Tone } from '../../../components/ChatBar';
 import { Asking, cardStyles } from '../../../components/ChatCards';
 import { Tools, TurnView } from '../../../components/ChatTurns';
 import { commandRow } from '../../../components/Commands';
-import { COMPOSER_GAP, PlusButton, SendButton, composerRest, plusMenu, slashMenu } from '../../../components/Composer';
+import { COMPOSER_GAP, Fold, PlusButton, SendButton, composerRest, plusMenu, slashMenu } from '../../../components/Composer';
 import { FloatMenu } from '../../../components/FloatMenu';
 import { KeyboardLift } from '../../../components/KeyboardLift';
 import { KeyCommands } from '../../../components/KeyCommands';
@@ -88,9 +89,11 @@ import { useHost, useHostState } from '../../../lib/hosts';
 import { carries, fits, grouped, join, type Pending, type Said, saidIn } from '../../../lib/chat';
 import { type Seed, reconcileTask, taskForTerminal } from '../../../lib/starting';
 import { useDictation } from '../../../lib/dictation';
+import { draftFor, keepDraft } from '../../../lib/drafts';
 import { confirmIdentity } from '../../../lib/lock';
 import { Refused } from '../../../lib/refused';
-import { agentLabel, font, size, t, tint } from '../../../lib/theme';
+import { agentLabel, font, messagePlaceholder, size, t, tint } from '../../../lib/theme';
+import { surface } from '../../../components/ui/surface';
 import { canDictate } from '../../../lib/voice';
 import { reasonOf, sentence } from '../../../lib/text';
 
@@ -140,8 +143,12 @@ type WaitingCard = Tuckable &
 
 /** The photos and files messages from here carried, by host, terminal and
  * message, while the app runs: the conversation read back has only their
- * count, so a message shows its pictures for as long as the phone has them. */
+ * count, so a message shows its pictures for as long as the phone has them.
+ * Without their bytes, which went with the message: a picture is drawn from
+ * its file, and every photo sent was otherwise held whole until the app
+ * quit. */
 const carriedFiles = new Map<string, Attachment[]>();
+const SENT = new Uint8Array(0);
 const carriedKey = (where: string, said: Said) => `${where}\n${said.images}\n${said.words}`;
 
 /** Photos, one just taken, files, or what was copied: at most `room`. */
@@ -166,8 +173,20 @@ const REPLIES = ['Continue', 'Looks good', 'Run the tests', 'Commit it'];
 
 /** What each conversation last showed, by host and terminal, while the app
  * runs: coming back to a chat draws it at once and reads on from where it
- * was, rather than starting over at "Loading the conversation…". */
+ * was, rather than starting over at "Loading the conversation…". Only the
+ * KEPT_CHATS come to last: each is its conversation as read so far — the
+ * desktop's latest turns as it opened, and every one since — and one for
+ * every chat ever opened grew for as long as the app ran. One let go opens
+ * as a first visit does. */
 const kept = new Map<string, { turns: Turn[]; cursor: bigint; session: string }>();
+const KEPT_CHATS = 12;
+
+/** Keeps `chat` as `key`'s, the newest, letting go of the oldest past KEPT_CHATS. */
+function keep(key: string, chat: { turns: Turn[]; cursor: bigint; session: string }): void {
+  kept.delete(key);
+  kept.set(key, chat);
+  if (kept.size > KEPT_CHATS) kept.delete(kept.keys().next().value as string);
+}
 
 /** Tells the desktop the terminal's conversation is read, while this screen
  * is the one in front and its agent has an answer nobody has looked at. */
@@ -251,7 +270,8 @@ const sessionNames = new Map<string, string>();
 export default function Session() {
   const { host: hostId, terminal, chat } = useLocalSearchParams<{ host: string; terminal: string; chat?: string }>();
   const conn = useHost(hostId);
-  const hostState = useHostState(conn);
+  // Held while another screen is on top: see `useHostState`.
+  const hostState = useHostState(conn, useIsFocused());
   const snapshot = hostState?.snapshot ?? null;
   const at = terminalAt(snapshot, BigInt(terminal));
   const [mode, setMode] = useState<'list' | 'chat' | undefined>(chat ? 'chat' : undefined);
@@ -296,7 +316,9 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
   const background = started ? '' : (params.session ?? '');
   const terminalId = BigInt(terminal);
   const conn = useHost(hostId);
-  const hostState = useHostState(conn);
+  // Held while another screen is on top, as its conversation is not asked
+  // for then either: see `useHostState`.
+  const hostState = useHostState(conn, useIsFocused());
   const insets = useSafeAreaInsets();
   const keptKey = background ? `${hostId}:${terminal}:${background}` : `${hostId}:${terminal}`;
   // The task a new worktree was started on from this phone: see `started`.
@@ -349,9 +371,13 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
   // The draft as it is this moment, for what reads it after a wait: Send
   // after the mic's last words, which arrive between renders.
   const draft = useRef(carriedIn?.draft ?? seed?.draft ?? '');
+  // The worktree this chat's terminal is in, once the snapshot says: what
+  // is typed here is kept on the phone under it (lib/drafts.ts).
+  const draftWhere = useRef<string | undefined>(undefined);
   const write = (text: string) => {
     draft.current = text;
     setMessage(text);
+    if (draftWhere.current !== undefined) keepDraft(keptKey, draftWhere.current, text);
   };
   // A line for the reader, in a capsule over the top of the conversation,
   // and what kind it is: done, copied, a heads-up, or by the way.
@@ -397,7 +423,7 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
   // without new turns only leaves the kept cursor behind, over records that
   // make no turns, so reading on from it never repeats one.
   useEffect(() => {
-    if (turns.length > 0) kept.set(keptKey, { turns, cursor: cursor.current, session: session.current });
+    if (turns.length > 0) keep(keptKey, { turns, cursor: cursor.current, session: session.current });
   }, [keptKey, turns]);
   const held = useRef(false);
   // The conversation's list, for scrolls to its end (see `toEnd`).
@@ -417,6 +443,18 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
     .map((l) => ({ ...l, terminal: l.worktree.terminals.find((x) => x.id === terminalId) }))
     .find((l) => l.terminal);
   const worktree = located?.worktree;
+  // The draft kept for this chat — left by a crash, an update or leaving it
+  // — back in the field once its worktree is known, unless something is in
+  // the field already, which is kept in its place. Before the first paint.
+  const worktreeId = worktree?.id;
+  useLayoutEffect(() => {
+    if (worktreeId === undefined || draftWhere.current !== undefined) return;
+    draftWhere.current = worktreeId;
+    const text = draft.current || draftFor(keptKey, worktreeId);
+    draft.current = text;
+    setMessage(text);
+    keepDraft(keptKey, worktreeId, text);
+  }, [worktreeId, keptKey]);
   // One of the terminal's agent view sessions: its own state, not the tab's.
   const backgroundSession = background
     ? located?.terminal?.agentView?.sessions.find((s) => s.session === background)
@@ -551,7 +589,9 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
               if (p.key === 0 && reply.turns.some((turn) => turn.kind === Turn_Kind.USER && carries(saidIn(turn).words, p.text))) return false;
               const at = left.findIndex((said) => fits(said, p));
               if (at < 0) return true;
-              if (p.files.length > 0) carriedFiles.set(carriedKey(keptKey, left[at]), p.files);
+              if (p.files.length > 0) {
+                carriedFiles.set(carriedKey(keptKey, left[at]), p.files.map((file) => ({ ...file, bytes: SENT })));
+              }
               left.splice(at, 1);
               return false;
             });
@@ -712,6 +752,8 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
     const text = (said ?? draft.current).trim();
     const attached = said === undefined && !background ? files : [];
     if (!text && attached.length === 0) return;
+    const resetsChat = !background && attached.length === 0
+      && commands.some((command) => command.resetsChat && command.name === text);
     // Sent as typed, cold or not: sending is the answer Continue.
     answerCold();
     setLaunches((n) => n + 1);
@@ -727,8 +769,11 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
     setNote('');
     setToSettings(false);
     setAttaching(false);
+    setListing(false);
     const key = ++sentCount.current;
-    setPending((before) => [...before, { key, text, at: Date.now(), behind: working, files: attached }]);
+    if (!resetsChat) {
+      setPending((before) => [...before, { key, text, at: Date.now(), behind: working, files: attached }]);
+    }
     atEnd.current = true;
     const sent = background
       ? await toBackground(text)
@@ -922,6 +967,8 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
       return;
     }
     carried.set(`${hostId}:${started}`, { draft: draft.current, files: filesNow.current });
+    // The draft goes with it, so this chat's is let go.
+    if (draftWhere.current !== undefined) keepDraft(keptKey, draftWhere.current, '');
     router.replace(`/session/${hostId}/${started}`);
   };
   const drawCard = (c: WaitingCard) => {
@@ -1162,6 +1209,7 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
           connected={hostState?.status === 'connected'}
           busy={isBusy}
           onWorktree={worktree ? () => router.push(`/worktree/${hostId}/${encodeURIComponent(worktree.id)}`) : undefined}
+          uncommitted={(worktree?.filesChanged ?? 0) > 0}
           onTerminal={openTerminal}
         />
         <ChatNote text={note} tone={notice.tone} toSettings={toSettings} onDismiss={() => setNote('')} onCopy={copy} />
@@ -1316,9 +1364,11 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
           <Compacting style={styles.compacting} />
         ) : null}
         {/* Chips send at once, so not while photos wait to go with the next
-            message, or while the mic is writing one. Under a menu they
-            stay where they are: the menu floats over them. */}
-        {!tooOld && !quiet && !message && files.length === 0 && !hearing ? (
+            message, or while the mic is writing one. Nor while the agent is
+            at work, from Send on: they fold away, and the chat has their
+            room. Under a menu they stay where they are: the menu floats
+            over them. */}
+        <Fold shown={!tooOld && !quiet && !message && files.length === 0 && !hearing && !isBusy && !handingOver}>
           <ScrollView
             horizontal
             showsHorizontalScrollIndicator={false}
@@ -1371,7 +1421,7 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
               </Pressable>
             ))}
           </ScrollView>
-        ) : null}
+        </Fold>
         <KeyCommands title="Send" onSend={() => void send()} style={[styles.composer, { paddingBottom: rest }]}>
           {/* The + and / menus: floats hung from the composer's top edge,
               over the chat and the chips, which stay put under them. */}
@@ -1413,7 +1463,7 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
                 onSelectionChange={(e) => {
                   selection.current = e.nativeEvent.selection;
                 }}
-                placeholder={`Message ${agent ? agentLabel(agent) : 'the agent'}`}
+                placeholder={messagePlaceholder(agent)}
                 placeholderTextColor={t.faint}
                 multiline
                 style={[styles.input, !canDictate && styles.inputAlone, files.length > 0 && styles.inputUnderTray]}
@@ -1495,9 +1545,7 @@ const styles = StyleSheet.create({
     padding: 12,
     gap: 8,
     borderRadius: size.radiusCard,
-    backgroundColor: t.elevated,
-    borderWidth: 1,
-    borderColor: t.border,
+    ...surface.float,
   },
   coldTitle: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   // Dictating: a white dot and what is listening, where a note would be.
@@ -1513,9 +1561,7 @@ const styles = StyleSheet.create({
     maxWidth: 220,
     paddingHorizontal: 11,
     borderRadius: 15,
-    borderWidth: 1,
-    borderColor: t.rule,
-    backgroundColor: t.card,
+    ...surface.float,
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
@@ -1531,7 +1577,7 @@ const styles = StyleSheet.create({
     gap: 8,
     paddingHorizontal: size.gutter,
   },
-  field: { flex: 1, minWidth: 0, minHeight: size.control, borderRadius: size.control / 2, backgroundColor: t.sunken },
+  field: { flex: 1, minWidth: 0, minHeight: size.control, borderRadius: size.control / 2, ...surface.well },
   // With photos in it: a well, the tray over the words.
   fieldTray: { borderRadius: 20 },
   // Listening: a faint ring, inside, so nothing moves.
@@ -1567,9 +1613,7 @@ const styles = StyleSheet.create({
     width: 40,
     height: 40,
     borderRadius: 20,
-    backgroundColor: t.elevated,
-    borderWidth: 1,
-    borderColor: t.border,
+    ...surface.float,
     alignItems: 'center',
     justifyContent: 'center',
   },

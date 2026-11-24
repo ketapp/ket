@@ -12,6 +12,7 @@ import { Bolt, Check, Pause, Pencil, Shield, Sliders } from './icons';
 import { ModelSheet } from './ModelSheet';
 import type { HostConnection } from '../lib/connection';
 import { font, t } from '../lib/theme';
+import { surface } from './ui/surface';
 
 /** Picks the desktop has made and its snapshot hasn't reported yet: each
  * the value picked, and what the snapshot said when it was picked. */
@@ -273,9 +274,7 @@ const styles = StyleSheet.create({
     paddingLeft: 10,
     paddingRight: 12,
     borderRadius: 17,
-    borderWidth: 1,
-    borderColor: t.border,
-    backgroundColor: t.sunken,
+    ...surface.float,
   },
   pillText: { fontFamily: font.prose, fontSize: 13.5, fontWeight: '500', color: t.text, maxWidth: 104 },
 });

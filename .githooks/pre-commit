@@ -1,9 +1,80 @@
 #!/bin/sh
 # Turned on with `git config core.hooksPath .githooks`; see CONTRIBUTING.md.
 #
-# The repository asks nothing of a commit's content. A checkout may: a
-# `pre-commit.local` beside git's own hooks runs here when it is executable,
-# and is never part of the repository.
+# Checks only what the commit touches, so a commit takes a second or two.
+# Clippy takes up to a minute after a change to ket-core, so it runs once per
+# push instead (see pre-push), and in CI.
+set -e
+
+top=$(git rev-parse --show-toplevel)
+cd "$top"
+scratch=$(mktemp -d)
+trap 'rm -rf "$scratch"' EXIT
+
+staged() { git diff --cached --name-only --diff-filter=ACMR -- "$@"; }
+
+# Rust: format each staged file as it is staged, not as it is on disk. A file
+# with no unstaged changes is rewritten and staged again; one that has them is
+# left alone, and the commit stops.
+unformatted=
+for f in $(staged 'crates/*.rs'); do
+	git show ":$f" >"$scratch/staged.rs"
+	rustfmt --edition 2024 <"$scratch/staged.rs" >"$scratch/formatted.rs"
+	cmp -s "$scratch/staged.rs" "$scratch/formatted.rs" && continue
+	if git diff --quiet -- "$f"; then
+		cp "$scratch/formatted.rs" "$f"
+		git add -- "$f"
+		printf 'Formatted %s\n' "$f"
+	else
+		unformatted="$unformatted $f"
+	fi
+done
+if [ -n "$unformatted" ]; then
+	printf '%s\n' 'Not formatted, and not rewritten because they have unstaged changes:' $unformatted \
+		'Format them, stage them whole, and commit again.' >&2
+	exit 1
+fi
+
+# Phone: lint the staged files, and typecheck the packages they belong to. The
+# app imports mobile/remote, so a change there typechecks both.
+app_lint=$(staged 'mobile/app/*.ts' 'mobile/app/*.tsx' 'mobile/app/*.js' 'mobile/app/*.jsx' 'mobile/app/*.mjs' 'mobile/app/*.cjs')
+app=$(git diff --cached --name-only -- mobile/app mobile/remote)
+remote=$(git diff --cached --name-only -- mobile/remote)
+if [ -n "$app" ]; then
+	# A shell that loads nvm lazily runs hooks with no node on PATH.
+	if ! command -v node >/dev/null 2>&1; then
+		nvm=${NVM_DIR:-$HOME/.nvm}
+		want=$(cat "$nvm/alias/default" 2>/dev/null || true)
+		want=${want#v}
+		case $want in [0-9]*) ;; *) want= ;; esac
+		found=$(ls -d "$nvm/versions/node/v$want"* 2>/dev/null | sort -V | tail -n 1)
+		[ -n "$found" ] && PATH=$found/bin:$PATH
+	fi
+	command -v node >/dev/null 2>&1 || {
+		printf '%s\n' 'The phone checks need node, and none is on PATH.' >&2
+		exit 1
+	}
+	for pkg in mobile/app mobile/remote; do
+		[ -x "$pkg/node_modules/.bin/tsc" ] || {
+			printf '%s\n' "$pkg has no node_modules. Run: npm ci --prefix $pkg" >&2
+			exit 1
+		}
+	done
+	cache=node_modules/.cache/ket-pre-commit
+	if [ -n "$app_lint" ]; then
+		printf '%s\n' 'Linting staged phone app files…'
+		printf '%s\n' "$app_lint" | sed 's|^mobile/app/||' | tr '\n' '\0' |
+			(cd mobile/app && xargs -0 node_modules/.bin/eslint --no-warn-ignored --cache --cache-location "$cache/eslint")
+	fi
+	printf '%s\n' 'Checking phone app types…'
+	(cd mobile/app && node_modules/.bin/tsc --noEmit --incremental --tsBuildInfoFile "$cache/tsbuildinfo")
+	if [ -n "$remote" ]; then
+		printf '%s\n' 'Checking phone protocol types…'
+		(cd mobile/remote && node_modules/.bin/tsc --noEmit --incremental --tsBuildInfoFile "$cache/tsbuildinfo")
+	fi
+fi
+
+# Run any extra checks installed for this clone.
 local=$(git rev-parse --git-common-dir)/hooks/pre-commit.local
 if [ -x "$local" ]; then
 	exec "$local" "$@"

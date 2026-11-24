@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, jest, test } from '@jest/globals';
-import { act, fireEvent, render, waitFor } from '@testing-library/react-native';
+import { Answer_Choice } from '@ket/remote';
+import { act, fireEvent, render, userEvent, waitFor } from '@testing-library/react-native';
 import { useEffect as mockUseEffect } from 'react';
 import { Alert, Linking } from 'react-native';
 import Needs from './app/(tabs)/needs';
@@ -17,7 +18,9 @@ import { STARTING_FOR_MS } from './lib/connection';
 import { SETTLE_MS } from './lib/settling';
 import type { HostConnection } from './lib/connection';
 
-const mockNavigation = { setParams: jest.fn() };
+// The stack as a screen reads it: nothing under the screen under test, so
+// the worktree's chat rows open their chat rather than go back to it.
+const mockNavigation = { setParams: jest.fn(), getState: jest.fn(() => ({ index: 0, routes: [{ name: 'worktree/[host]/[worktree]' }] })) };
 const mockRouter = {
   push: jest.fn(),
   navigate: jest.fn(),
@@ -34,6 +37,8 @@ let mockParams: Record<string, string> = {};
  * the state they draw from, in one object a test can change as it goes. */
 type FakeConnection = any;
 let mockConns: FakeConnection[] = [];
+/** The paired desktops not read yet, and none held: `useHeldHosts` has nothing. */
+let mockUnread = false;
 let mockHost: FakeConnection = null;
 const mockSaveDesktop = jest.fn(async (_id: string) => {});
 const mockSaveCollapsed = jest.fn(async (_host: string, _projects: string[]) => {});
@@ -88,6 +93,7 @@ jest.mock('@ket/remote', () => ({
 }));
 jest.mock('./lib/hosts', () => ({
   statusLine: jest.requireActual<typeof import('./lib/hosts')>('./lib/hosts').statusLine,
+  useHeldHosts: () => (mockUnread ? null : mockConns),
   useHost: () => mockHost,
   useHosts: () => mockConns,
   // A fake connection stands for its own state.
@@ -101,6 +107,7 @@ jest.mock('./lib/store', () => ({
   getHiddenProjects: jest.fn(async () => mockHidden),
   getPinnedProjects: jest.fn(async () => []),
   getLastWork: jest.fn(async () => null),
+  heldDesktop: () => 'host',
   saveCollapsed: (host: string, projects: string[]) => mockSaveCollapsed(host, projects),
   saveDesktop: (id: string) => mockSaveDesktop(id),
   saveHiddenProjects: (host: string, projects: string[]) => mockSaveHidden(host, projects),
@@ -176,6 +183,7 @@ beforeEach(() => {
   mockParams = {};
   mockPath = '/';
   mockConns = [];
+  mockUnread = false;
   mockHost = null;
   mockHidden = [];
 });
@@ -214,6 +222,91 @@ describe('top-level screens', () => {
     await fireEvent.press(view.getByLabelText('Switch desktop'));
     await fireEvent.press(view.getByText('Other Mac'));
     await view.unmount();
+  });
+
+  test('Worktrees opens a waiting prompt on tap and allows it once on hold', async () => {
+    const question = { id: 8n, terminalId: 9n, tool: 'Bash', subject: 'Run the tests', answerable: true, always: true };
+    const conn = connection([project([tree('waiting', 4, { questions: [question], question })])]);
+    mockConns = [conn];
+    const view = await render(<Worktrees />);
+
+    await fireEvent.press(view.getByText('Answer'));
+    expect(mockRouter.navigate).toHaveBeenCalledWith('/session/host/9');
+    expect(conn.answer).not.toHaveBeenCalled();
+
+    mockRouter.navigate.mockClear();
+    await userEvent.setup().longPress(view.getByText('Hold to allow once'));
+    expect(conn.answer).toHaveBeenCalledWith(question, Answer_Choice.ALLOW_ONCE);
+    expect(mockRouter.navigate).not.toHaveBeenCalled();
+  });
+
+  test('Worktrees approves a waiting plan and lets you retry if refused', async () => {
+    const question = { id: 8n, terminalId: 9n, tool: 'ExitPlanMode', subject: 'Test plan', answerable: true };
+    const conn = connection([project([tree('waiting', 4, { question })])]);
+    const respond = jest.fn<HostConnection['respond']>(async () => null).mockResolvedValueOnce('Desktop is busy.');
+    conn.respond = respond;
+    mockConns = [conn];
+    const alert = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    try {
+      const view = await render(<Worktrees />);
+      const banner = view.getByRole('button', { name: /1 waiting on you/ });
+      await fireEvent(banner, 'accessibilityAction', { nativeEvent: { actionName: 'answerWaiting' } });
+      expect(respond).toHaveBeenCalledWith(question, { approve: true });
+      expect(alert).toHaveBeenCalledWith('Couldn’t answer the prompt', 'Desktop is busy.');
+      await fireEvent(view.getByText('Hold to approve'), 'longPress');
+      expect(respond).toHaveBeenCalledTimes(2);
+      expect(conn.answer).not.toHaveBeenCalled();
+    } finally {
+      alert.mockRestore();
+    }
+  });
+
+  test('Worktrees offers no quick approval for a question or an unavailable prompt', async () => {
+    const question = { id: 8n, terminalId: 9n, tool: 'Bash', subject: 'Run the tests', answerable: true };
+    for (const questions of [
+      [{ ...question, tool: 'AskUserQuestion' }],
+      [{ ...question, answerable: false }],
+    ]) {
+      const conn = connection([project([tree('waiting', 4, { questions })])]);
+      mockConns = [conn];
+      const view = await render(<Worktrees />);
+      expect(view.queryByText('Hold to allow once')).toBeNull();
+      await fireEvent(view.getByText('Answer'), 'longPress');
+      expect(conn.answer).not.toHaveBeenCalled();
+      await view.unmount();
+    }
+  });
+
+  test('Worktrees holds several waiting prompts open and answers each one in place', async () => {
+    const permission = { id: 8n, terminalId: 9n, tool: 'Bash', subject: 'Run the tests', answerable: true };
+    const plan = { id: 10n, terminalId: 11n, tool: 'ExitPlanMode', subject: 'Test plan', answerable: true };
+    const other = { ...permission, id: 12n, terminalId: 13n, subject: 'Run the linter' };
+    const firstTree = tree('first', 4, { questions: [permission, plan] });
+    const otherTree = tree('second', 4, { questions: [other] });
+    const conn = connection([project([firstTree, otherTree])]);
+    conn.respond = jest.fn<HostConnection['respond']>(async () => null);
+    mockConns = [conn];
+    const view = await render(<Worktrees />);
+
+    expect(view.getByText('3 waiting on you')).toBeTruthy();
+    await fireEvent(view.getByText('Hold to choose a prompt'), 'longPress');
+    expect(conn.answer).not.toHaveBeenCalled();
+    expect(conn.respond).not.toHaveBeenCalled();
+    expect(view.getByText('Run the tests')).toBeTruthy();
+    expect(view.getByText('Run the linter')).toBeTruthy();
+    await fireEvent.press(view.getByText('Approve'));
+    expect(conn.respond).toHaveBeenCalledWith(plan, { approve: true });
+    expect(conn.answer).not.toHaveBeenCalled();
+
+    conn.snapshot = { projects: [project([{ ...firstTree, questions: [permission] }])] };
+    await view.rerender(<Worktrees />);
+    await fireEvent.press(view.getByText('Allow once'));
+    expect(conn.answer).toHaveBeenCalledWith(permission, Answer_Choice.ALLOW_ONCE);
+    expect(mockRouter.navigate).not.toHaveBeenCalled();
+
+    conn.snapshot = { projects: [project([tree('first', 0)])] };
+    await view.rerender(<Worktrees />);
+    await waitFor(() => expect(view.queryByRole('button', { name: 'Close' })).toBeNull());
   });
 
   test('Worktrees holds a project for work in it, its backlog, a pin and hiding it; the hidden wait under the cards', async () => {
@@ -309,8 +402,8 @@ describe('top-level screens', () => {
     const alert = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
     const view = await render(<Worktrees />);
 
-    // At work, a worktree opens up: its step in a terminal's well, its lines,
-    // its pull request.
+    // At work, a worktree's line is its agent's step; its lines and its pull
+    // request end the row.
     expect(view.getByText('Editing src/main.rs')).toBeTruthy();
     expect(view.queryByText(/`src\/main.rs`/)).toBeNull();
     expect(view.getByText('#21')).toBeTruthy();
@@ -656,7 +749,7 @@ describe('top-level screens', () => {
     await waitFor(() => expect(view.getByText('Require Face ID')).toBeTruthy());
     expect(view.getByText('Version')).toBeTruthy();
     await fireEvent.press(view.getByText('Studio Mac'));
-    await fireEvent.press(view.getByText('Pair a desktop'));
+    await fireEvent.press(view.getByLabelText('Pair a desktop'));
     await fireEvent.press(view.getByText('Change PIN'));
     expect(mockRouter.push.mock.calls).toEqual(expect.arrayContaining([['/devices/host'], ['/pair'], ['/pin']]));
     // Off: only the one switch shows. On, it asks the phone.
@@ -696,6 +789,34 @@ describe('top-level screens', () => {
     expect(view.getByText('No usage reporting')).toBeTruthy();
     expect(view.getByText('1 session running here')).toBeTruthy();
     await view.unmount();
+  });
+
+  test('Usage says there is nothing only once that is known', async () => {
+    // The paired desktops not read yet: no note saying none is paired.
+    mockUnread = true;
+    const unread = await render(<Usage />);
+    expect(unread.queryByText(/No desktop paired yet/)).toBeNull();
+    await unread.unmount();
+    mockUnread = false;
+    const none = await render(<Usage />);
+    expect(none.getByText('No desktop paired yet. Pair one in Settings.')).toBeTruthy();
+    await none.unmount();
+
+    // Welcomed, its list on the way: no note before the cards.
+    const host = { ...connection([]), snapshot: null, attempts: 1 };
+    mockConns = [host];
+    const waiting = await render(<Usage />);
+    expect(waiting.queryByText(/No usage yet/)).toBeNull();
+    await waiting.unmount();
+    // Its list here with no usage in it, or the desktop out of reach: said.
+    mockConns = [{ ...host, snapshot: { projects: [], usage: [] } }];
+    const empty = await render(<Usage />);
+    expect(empty.getByText(/No usage yet\. It shows once ket is open on Studio Mac/)).toBeTruthy();
+    await empty.unmount();
+    mockConns = [{ ...host, status: 'offline' }];
+    const away = await render(<Usage />);
+    expect(away.getByText(/No usage yet/)).toBeTruthy();
+    await away.unmount();
   });
 
   test('Host saves selection then redirects', async () => {

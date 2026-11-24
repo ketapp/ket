@@ -48,6 +48,7 @@
 //! Dim text is approximated by blending toward the background rather than
 //! drawn with a fainter weight.
 
+pub(crate) mod cli;
 mod colors;
 mod element;
 mod find;
@@ -55,7 +56,7 @@ mod keys;
 mod mouse;
 
 use std::ops::Range;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -145,29 +146,10 @@ fn sleep_session<'a>(
         .ok_or_else(|| "agent has not reported a session ID".to_owned())
 }
 
-/// The CLI shipped beside the app, or beside a development `ket-ui` binary.
-fn cli_path_for(exe: &Path) -> Option<PathBuf> {
-    let bin = exe.parent()?;
-    if bin.file_name().is_some_and(|name| name == "MacOS")
-        && bin
-            .parent()?
-            .file_name()
-            .is_some_and(|name| name == "Contents")
-    {
-        Some(bin.parent()?.join("Resources/bin/ket"))
-    } else {
-        Some(bin.join("ket"))
-    }
-}
-
 /// Put ket's CLI on the PATH inherited by shells and the agents they start,
 /// and tell those agents it is there — see `ket_core::agent_hooks::CLI_NOTE`.
 fn expose_cli(spec: &mut TerminalSpec) {
-    let Some(cli) = std::env::current_exe()
-        .ok()
-        .and_then(|exe| cli_path_for(&exe))
-        .filter(|path| path.is_file())
-    else {
+    let Some(cli) = cli::path() else {
         return;
     };
     let Some(dir) = cli.parent() else {
@@ -3758,20 +3740,6 @@ mod tests {
         pane.state = ket_core::event::AgentState::Idle;
         pane.session = None;
         assert!(check(Some(&pane), Some(Signal::Quiet)).is_err());
-    }
-
-    #[test]
-    fn finds_the_cli_in_app_and_development_layouts() {
-        assert_eq!(
-            cli_path_for(Path::new("/Applications/ket.app/Contents/MacOS/ket")),
-            Some(PathBuf::from(
-                "/Applications/ket.app/Contents/Resources/bin/ket"
-            ))
-        );
-        assert_eq!(
-            cli_path_for(Path::new("/checkout/target/debug/ket-ui")),
-            Some(PathBuf::from("/checkout/target/debug/ket"))
-        );
     }
 
     fn chars(text: &str) -> Vec<char> {

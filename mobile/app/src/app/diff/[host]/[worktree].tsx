@@ -33,6 +33,7 @@ import {
   useReview,
 } from '../../../lib/review';
 import { font, size, t, tint } from '../../../lib/theme';
+import { surface } from '../../../components/ui/surface';
 import { canDictate } from '../../../lib/voice';
 
 /** Most lines drawn; a longer diff is cut here with a note. */
@@ -523,7 +524,7 @@ const styles = StyleSheet.create({
     marginTop: 10,
     paddingHorizontal: size.gutter + 4,
     paddingVertical: 6,
-    backgroundColor: t.sunken,
+    ...surface.well,
   },
   hunkText: { fontFamily: font.chrome, fontSize: size.caption, color: t.dim },
   line: { flexDirection: 'row', paddingHorizontal: 6 },
@@ -546,9 +547,7 @@ const styles = StyleSheet.create({
     padding: 10,
     gap: 6,
     borderRadius: size.radiusCard,
-    borderWidth: 1,
-    borderColor: t.rule,
-    backgroundColor: t.card,
+    ...surface.panel,
   },
   cardHead: { flexDirection: 'row', alignItems: 'center', gap: 4, minHeight: 32 },
   cardHeading: { fontFamily: font.proseMedium, fontSize: size.detail, color: t.dim },
@@ -564,7 +563,7 @@ const styles = StyleSheet.create({
     alignItems: 'flex-end',
     minHeight: size.control,
     borderRadius: 20,
-    backgroundColor: t.sunken,
+    ...surface.well,
   },
   // Listening: a faint ring, inside, so nothing moves.
   fieldHearing: { boxShadow: `inset 0 0 0 1px ${tint(t.accent, 0.22)}` },

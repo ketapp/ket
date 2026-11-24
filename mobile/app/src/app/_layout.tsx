@@ -101,6 +101,14 @@ export default function Layout() {
             it opens from the bar, and the bar's other tabs swap in place. */}
         <Stack.Screen name="usage" options={{ animation: 'none' }} />
         <Stack.Screen name="pin" options={{ presentation: 'modal' }} />
+        {/* The chats go back only from the screen's left edge. iOS 26 goes
+            back on a swipe from anywhere, and that won over a table or code
+            block scrolled sideways whenever its scroll couldn't start: with
+            the keyboard up, or the chat still gliding, the chat's list holds
+            the touch, to close the keyboard on a tap. */}
+        <Stack.Screen name="session/[host]/[terminal]" options={{ fullScreenGestureEnabled: false }} />
+        <Stack.Screen name="agent-session/[host]/[terminal]/[session]" options={{ fullScreenGestureEnabled: false }} />
+        <Stack.Screen name="starting/[host]/[at]" options={{ fullScreenGestureEnabled: false }} />
         {/* A sheet over Worktrees, which stays drawn behind it. It animates
             itself in and out — see new/[host].tsx. */}
         <Stack.Screen

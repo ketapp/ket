@@ -9,6 +9,7 @@ import { Linking, Pressable, ScrollView, StyleSheet, Text, View } from 'react-na
 import { Check } from './icons';
 import { type Block, type Run, markdown } from '../lib/markdown';
 import { font, size, t } from '../lib/theme';
+import { surface } from './ui/surface';
 
 /** An agent's words, read as markdown — see lib/markdown.ts: fenced code as
  * a block of its own, tables sideways, the rest as prose with its headings,
@@ -288,12 +289,13 @@ const styles = StyleSheet.create({
     height: 24,
     paddingHorizontal: 8,
     borderRadius: size.radiusSm,
-    backgroundColor: t.elevated,
+    // On the code block's raised fill, so a step up from it.
+    ...surface.chosen,
     justifyContent: 'center',
   },
   codeCopyText: { fontFamily: font.proseMedium, fontSize: 11.5, color: t.dim },
   inlineCode: { fontFamily: font.code, fontSize: size.label, color: t.text, backgroundColor: t.sunken },
-  codeBlock: { backgroundColor: t.sunken, borderRadius: size.radius },
+  codeBlock: { ...surface.well, borderRadius: size.radius },
   table: { borderWidth: 1, borderColor: t.border, borderRadius: size.radius, overflow: 'hidden' },
   tableInner: { flexDirection: 'row' },
   tableColumn: { minWidth: 56 },

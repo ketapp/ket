@@ -18,7 +18,7 @@ use super::pulls::{
     open_pull_request_from_phone, review_from_phone, start_pr_action,
 };
 use super::session::{Phone, pump};
-use super::typing::Typed;
+use super::typing::{Typed, as_typed};
 use super::work::{
     delete_from_phone, fresh_from_phone, merge_from_phone, pin_from_phone, rename_from_phone,
     start_options_from_phone, start_session_from_phone, start_work_from_phone, wake_from_phone,
@@ -160,6 +160,7 @@ pub(super) fn handle(
             | Payload::StartWork(_)
             | Payload::MergeWorktree(_)
             | Payload::EditBacklog(_)
+            | Payload::EditAutomation(_)
             | Payload::StartNote(_)
             | Payload::FixChecks(_)
             | Payload::SendFiles(_)
@@ -296,7 +297,9 @@ fn expensive_cost(payload: &Payload) -> Option<u32> {
         // Commands typed into an agent, each confirmed.
         Payload::SetModel(_) => Some(2),
         // One write to ket's store.
-        Payload::PinWorktree(_) | Payload::RenameWorktree(_) => Some(1),
+        Payload::PinWorktree(_) | Payload::RenameWorktree(_) | Payload::EditAutomation(_) => {
+            Some(1)
+        }
         _ => None,
     }
 }
@@ -324,6 +327,8 @@ fn payload_name(payload: &Payload) -> &'static str {
         Payload::AddressComments(_) => "address_comments",
         Payload::PinWorktree(_) => "pin_worktree",
         Payload::RenameWorktree(_) => "rename_worktree",
+        Payload::GetAutomations(_) => "get_automations",
+        Payload::EditAutomation(_) => "edit_automation",
         Payload::DeleteWorktree(_) => "delete_worktree",
         Payload::WakeTerminal(_) => "wake_terminal",
         Payload::SetMode(_) => "set_mode",
@@ -367,7 +372,10 @@ fn apply(
         // itself.
         | Payload::PinWorktree(_)
         | Payload::RenameWorktree(_)
-        | Payload::DeleteWorktree(_) => DeviceRole::Operator,
+        | Payload::DeleteWorktree(_)
+        // Starting an automation now is starting work; pausing or deleting
+        // one changes what work starts.
+        | Payload::EditAutomation(_) => DeviceRole::Operator,
         // Fixing checks and a review are messages typed into the
         // worktree's agent, which a controller may type itself.
         Payload::Input(_)
@@ -477,10 +485,11 @@ fn apply(
                         .typing
                         .keys(input.terminal_id, &terminal, OFFER_FOCUS.to_vec());
                 }
-                phone
-                    .phones
-                    .typing
-                    .keys(input.terminal_id, &terminal, input.bytes.clone());
+                phone.phones.typing.keys(
+                    input.terminal_id,
+                    &terminal,
+                    as_typed(&terminal, input.bytes.clone()),
+                );
             }
             ack(id)
         }
@@ -653,6 +662,10 @@ fn apply(
         Payload::GetStartOptions(ask) => start_options_from_phone(host, phone, id, ask),
         Payload::StartSession(session) => start_session_from_phone(host, phone, id, session),
         Payload::GetBacklog(ask) => backlog_from_phone(phone, id, ask),
+        Payload::GetAutomations(_) => super::automations::automations_from_phone(phone, id),
+        Payload::EditAutomation(edit) => {
+            super::automations::edit_automation_from_phone(phone, id, edit)
+        }
         Payload::EditBacklog(edit) => edit_from_phone(phone, id, edit),
         Payload::StartNote(start) => start_note_from_phone(host, phone, id, start),
         Payload::GetChanges(ask) => {

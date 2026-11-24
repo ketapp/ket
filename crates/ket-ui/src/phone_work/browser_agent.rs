@@ -144,6 +144,12 @@ impl Shell {
         } = ask;
         let worktree = WorktreeId::from(worktree.as_str());
         let tab = self.agent_browser_tab(&worktree);
+        let turn = DRIVEN.fetch_add(1, Ordering::Relaxed) + 1;
+        if let Some(tab) = &tab
+            && !matches!(action, BrowserAction::Tabs | BrowserAction::Close)
+        {
+            self.mark_driven(tab.id, turn);
+        }
         // The page is stopped until its dialog is answered, and anything
         // asked of it would wait as long: said at once instead.
         if let Some(open) = tab.as_ref().and_then(|tab| tab.dialog.as_ref())
@@ -152,6 +158,9 @@ impl Shell {
             return finish_browser(req, Err(dialog::waiting(open)));
         }
         let step = match (action, tab.as_ref()) {
+            // Not the tab in front: the person may have gone to one of their
+            // own since, and closing is for the one `ket browser` was using.
+            (BrowserAction::Close, _) => return self.close_driven_tab(req, &worktree, cx),
             (BrowserAction::Tabs, _) => {
                 let acted_on = tab.as_ref().map(|tab| tab.id);
                 let tabs = self
@@ -171,7 +180,10 @@ impl Shell {
             (BrowserAction::RecordStop, _) => return self.stop_recording(req, worktree, cx),
             (BrowserAction::Open { url: Some(url) }, None) => {
                 return match self.open_chromium_tab(&worktree, &url, cx) {
-                    Ok(id) => self.drive_browser(req, id, Step::Opened(normalize_url(&url)), cx),
+                    Ok(id) => {
+                        self.mark_driven(id, turn);
+                        self.drive_browser(req, id, Step::Opened(normalize_url(&url)), cx);
+                    }
                     Err(why) => finish_browser(req, Err(why)),
                 };
             }
@@ -229,6 +241,35 @@ impl Shell {
         if let Some(tab) = tab {
             self.drive_browser(req, tab.id, step, cx);
         }
+    }
+
+    /// `ket browser close`: closes the tab in `worktree` that `ket browser`
+    /// used last, and says what it showed. A tab it hasn't used since ket
+    /// started is left to the person.
+    fn close_driven_tab(&mut self, req: u64, worktree: &WorktreeId, cx: &mut Context<Self>) {
+        let driven = self
+            .chromium_tabs()
+            .into_iter()
+            .filter(|tab| &tab.worktree == worktree && tab.driven > 0)
+            .max_by_key(|tab| tab.driven);
+        let Some(tab) = driven else {
+            return finish_browser(
+                req,
+                Err(
+                    "no tab here that `ket browser` has used since ket started; \
+                     the person closes their own"
+                        .to_owned(),
+                ),
+            );
+        };
+        self.close_chromium_tab(tab.id, cx);
+        finish_browser(
+            req,
+            Ok(BrowserAnswer::Done {
+                url: tab.url,
+                title: tab.title,
+            }),
+        );
     }
 
     /// The tab `ket browser` acts on in `worktree`: the Chromium tab in its
@@ -643,6 +684,10 @@ impl Page<'_> {
 
 /// Counts the actions done to pages, for each one's [`Objects`].
 static ACTIONS: AtomicU64 = AtomicU64::new(0);
+
+/// Counts `ket browser`'s requests, for the tab each used — see
+/// `Shell::mark_driven`.
+static DRIVEN: AtomicU64 = AtomicU64::new(0);
 
 /// The DevTools object group the handles one action takes on a page's nodes
 /// are in, let go of together once it is done. Each action has its own: two

@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, jest, test } from '@jest/globals';
 import { act, fireEvent, render, waitFor, within } from '@testing-library/react-native';
 import { useEffect as mockUseEffect } from 'react';
-import { Linking } from 'react-native';
+import { Linking, StyleSheet } from 'react-native';
 import Session, { Chat } from './app/session/[host]/[terminal]';
 
 const mockRouter = { push: jest.fn(), replace: jest.fn() };
@@ -361,6 +361,56 @@ describe('Session', () => {
     await waitFor(() => expect(view.queryByText(failure)).toBeNull());
     await view.rerender(<Session />);
     expect(view.queryByText(failure)).toBeNull();
+    await view.unmount();
+  });
+
+  test.each([
+    ['opencode:ollama/huihui_ai/qwen3-abliterated:30b-a3b-instruct-2507-q4_K_M', 'qwen'],
+    ['ollama:huihui_ai/llama3.2:latest', 'llama3.2'],
+    ['opencode:ollama/vendor/extraordinarily-long-model-name:latest', 'extraordinarily…'],
+  ])('uses a short composer placeholder for %s', async (agent, label) => {
+    mockConn = connection(tree({ agent, terminals: [{ id: 7n, agent, closed: false }] }));
+    const view = await render(<Session />);
+    await waitFor(() => expect(view.getByPlaceholderText(`Message ${label}`)).toBeTruthy());
+    await view.unmount();
+  });
+
+  test('clears a Codex conversation from the slash menu and keeps the chat open', async () => {
+    mockParams = { host: 'codex-clear', terminal: '7' };
+    const conversation = jest.fn(async () => ({
+      supported: true, reason: '', fresh: true, session: 'old', next: 1n, queued: [],
+      turns: [{ kind: 2, text: 'Previous answer' }],
+    }));
+    mockConn = connection(tree(), { conversation });
+    const view = await render(<Session />);
+    await waitFor(() => expect(view.getByText('Previous answer')).toBeTruthy());
+    await fireEvent.press(view.getByLabelText('Commands'));
+    expect(view.queryByText('/new')).toBeNull();
+    await fireEvent.press(view.getByText('/clear'));
+    await waitFor(() => expect(mockConn.type.mock.calls).toEqual([[7n, '/clear'], [7n, '\r']]));
+    expect(view.queryByText('/clear')).toBeNull();
+    expect(mockRouter.push).not.toHaveBeenCalled();
+
+    conversation.mockResolvedValue({ supported: true, reason: '', fresh: true, session: 'new', next: 0n, queued: [], turns: [] });
+    await waitFor(() => expect(view.queryByText('Previous answer')).toBeNull(), { timeout: 3000 });
+    await fireEvent.changeText(view.getByPlaceholderText('Message Codex'), 'A fresh question');
+    await fireEvent.press(view.getByLabelText('Send'));
+    await waitFor(() => expect(mockConn.type.mock.calls.slice(-2)).toEqual([[7n, 'A fresh question'], [7n, '\r']]));
+    await view.unmount();
+  });
+
+  test('Send stays above the slash menu backdrop and sends the draft in one press', async () => {
+    const view = await render(<Session />);
+    await fireEvent.press(view.getByLabelText('Commands'));
+    const input = view.getByPlaceholderText('Message Codex');
+    await fireEvent.changeText(input, '/status');
+    const send = view.getByLabelText('Send');
+    const backdrop = view.getByLabelText('Close menu');
+    // Jest dispatches directly to the button, so check the native stacking too.
+    expect(StyleSheet.flatten(send.props.style).zIndex).toBeGreaterThan(StyleSheet.flatten(backdrop.props.style).zIndex);
+    await fireEvent.press(send);
+    await waitFor(() => expect(mockConn.type.mock.calls).toEqual([[7n, '/status'], [7n, '\r']]));
+    expect(view.queryByLabelText('Close menu')).toBeNull();
     await view.unmount();
   });
 

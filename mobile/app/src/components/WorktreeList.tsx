@@ -1,9 +1,10 @@
-// Worktrees: the desktop sidebar, on a phone. Along the top, ket's mark and
-// whether the line is encrypted, over the desktop's name as a large title
-// and how it is reached; under it the sidebar's filter and Start, which
-// opens the New task sheet, then what waits on you and a card for each
-// project, its worktrees in it, on the desk. The cards scroll under the tab
-// bar, which floats over the desk's foot, and come to rest above it.
+// Worktrees: the desktop sidebar, on a phone. Along the top, the desktop's
+// name as a large title over a line saying the link is encrypted and how it
+// runs, with Start, which opens the New task sheet, across from them; under
+// them the sidebar's filter as a row of tabs, then what waits on you and each
+// project, its name on the desk over a ruled card of its worktrees. The cards
+// scroll under the tab bar, which floats over the desk's foot, and come to
+// rest above it.
 //
 // Holding a project offers work started in it, its backlog, pinning it to
 // the top and hiding it — both this phone's own. A hidden project is back
@@ -19,7 +20,7 @@
 // On a phone it is the Worktrees tab. On a wide screen it is the sidebar,
 // always drawn, and what a row opens goes beside it (see lib/layout.ts).
 
-import { Activity, type ProjectSummary, type WorktreeSummary } from '@ket/remote';
+import { Activity, Answer_Choice, type ProjectSummary, type WorktreeSummary } from '@ket/remote';
 import { router, useFocusEffect, useGlobalSearchParams, usePathname } from 'expo-router';
 import { type ComponentType, type ReactNode, createElement, useCallback, useEffect, useRef, useState } from 'react';
 import { Alert, Pressable, ScrollView, StyleSheet, Text, View, type ViewInstance } from 'react-native';
@@ -27,55 +28,61 @@ import Animated, { FadeIn, ReduceMotion } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Svg, { Defs, LinearGradient, Rect, Stop } from 'react-native-svg';
 
+import { AutomationsSheet } from './AutomationsSheet';
 import { Connecting } from './Connecting';
 import { ListSkeleton } from './ListSkeleton';
 import { Track } from './Track';
+import type { AddressKind } from '../lib/address-kind';
 import { FloatMenu, type MenuItem, type MenuSection, type Place, placeOf } from './FloatMenu';
 import { Seal } from './Seal';
 import { Sheet, SheetItem, SheetList, SheetNote } from './Sheet';
 import { Unpaired } from './Unpaired';
 import {
-  AgentMark,
-  BrandMark,
+  Bolt,
+  Bubble,
   Chevron,
   ChevronDown,
+  Clock,
   Desktop,
   EyeOff,
-  Hand,
   ListTodo,
   Merge,
   Pin,
   PinOff,
   Plus,
   Sparkle,
-  ADDRESS_ICON,
+  Wildcard,
 } from './icons';
 import {
+  AgentTile,
   Badge,
   Button,
-  Dot,
+  Pill,
   ProjectHeading,
   Prose,
   Row,
-  MARK_GAP,
-  MARK_SLOT,
-  ROW_INSET,
+  RuledCard,
   Screen,
-  Segmented,
+  SectionLabel,
   TAB_BAR_HEIGHT,
   TabBar,
+  Tabs,
   tabBarFoot,
 } from './ui';
 import {
   type Filter,
+  agentOf,
   agentTerminal,
   asleepTab,
+  colorOf,
   detail,
   everyWorktree,
   isUnread,
   passes,
   projectColor,
   projectKey,
+  promptKind,
+  questionsOf,
 } from '../lib/activity';
 import { elapsed, firstLine, progressOf, stageText, startingAt } from '../lib/starting';
 import type { HostConnection } from '../lib/connection';
@@ -93,15 +100,24 @@ import {
   saveHiddenProjects,
   savePinnedProjects,
 } from '../lib/store';
-import { font, size, t, tint } from '../lib/theme';
+import { agentLabel, font, size, t, tint } from '../lib/theme';
+import { surface } from './ui/surface';
 import { worktreeMenu } from './WorktreeMenu';
 import { WorktreeRow } from './WorktreeRow';
 
 /** Between the last card, at rest, and the tab bar under it. */
 const FOOT_GAP = 10;
 
-/** The filter track and Start beside it, a capsule each. */
-const FILTER_HEIGHT = 41;
+/** The screen's edge: the desk's gutter round the cards, and the header's. */
+const EDGE = 16;
+
+/** How the link to the desktop runs, after "Secure" under its name. */
+const ROUTE_WORD: Record<AddressKind, string> = {
+  local: 'Wi-Fi',
+  tailnet: 'Tailscale',
+  'ket-relay': 'Relay',
+  relay: 'Relay',
+};
 
 /** What a filter with nothing under it says. */
 const EMPTY: Record<Exclude<Filter, 'all'>, string> = {
@@ -139,6 +155,10 @@ export function WorktreeList({ sidebar = false, refresh }: { sidebar?: boolean; 
   const [picking, setPicking] = useState(false);
   // The projects hidden on this phone, a sheet, while it is up.
   const [tucking, setTucking] = useState(false);
+  const [automating, setAutomating] = useState(false);
+  // Automations, asked for from the Macs sheet: it rises once that sheet's
+  // modal is gone, since iOS shows one at a time.
+  const [toAutomations, setToAutomations] = useState(false);
   const [menu, setMenu] = useState<{ worktree: WorktreeSummary; place: Place } | null>(null);
   const [projectMenu, setProjectMenu] = useState<{ project: ProjectSummary; place: Place } | null>(null);
   // Worktrees being deleted from here: out of the list from the moment
@@ -151,6 +171,7 @@ export function WorktreeList({ sidebar = false, refresh }: { sidebar?: boolean; 
   // Each worktree's row, and each project's heading, to find where it is
   // when it is held.
   const held = useRef(new Map<string, ViewInstance>());
+  const approving = useRef(new Set<string>());
 
   const readChosen = useCallback(() => {
     void getDesktop().then(setChosen);
@@ -269,8 +290,29 @@ export function WorktreeList({ sidebar = false, refresh }: { sidebar?: boolean; 
   const named = (word: string, f: Filter) => (filling ? word : `${word}, ${count(f)}`);
   // Nothing at all on the desktop, now that its list has settled.
   const empty = !filling && hostState?.status === 'connected' && hostState.snapshot !== null && hostState.snapshot.projects.length === 0;
-  const waiting = located.filter((l) => l.worktree.activity === Activity.BLOCKED);
+  // Every prompt waiting on you, a row each, over the projects.
+  const waiting = located
+    .filter(({ worktree }) => worktree.activity === Activity.BLOCKED)
+    .flatMap((row) => questionsOf(row.worktree).map((question, at) => ({ ...row, question, at })));
+  type Waiting = (typeof waiting)[number];
+  // What holding a prompt's row does: allow it once, or approve the plan. A
+  // question with answers of its own is answered in its chat.
+  const holdLabel = ({ question }: Waiting) => {
+    const kind = question ? promptKind(question.tool) : undefined;
+    if (!question?.answerable || !question.id || !question.terminalId || kind === 'ask') return undefined;
+    return kind === 'plan' ? 'Approve plan' : 'Allow once';
+  };
+  // A changed prompt remounts its row, cancelling any hold in progress.
+  const waitingKey = (w: Waiting) =>
+    `waiting/${hostId}/${w.worktree.id}/${w.question?.terminalId}/${w.question?.id ?? w.at}/${holdLabel(w)}`;
   const status = statusLine(hostState);
+  const statusWords = status.connected
+    ? status.kind
+      ? `Secure · ${ROUTE_WORD[status.kind]}`
+      : 'Secure'
+    : hostState?.status === 'offline'
+      ? 'Offline'
+      : 'Reaching';
   // Reaching for the desktop: its worktrees are not known yet, so the screen
   // shows the reaching instead of an empty list.
   const down = hostState !== null && hostState.status !== 'connected';
@@ -290,16 +332,29 @@ export function WorktreeList({ sidebar = false, refresh }: { sidebar?: boolean; 
     void saveDesktop(c.id);
   };
 
-  const answer = () =>
-    waiting.length === 1 && conn
-      ? open(
-          (waiting[0].worktree.questions[0] ?? waiting[0].worktree.question)?.terminalId
-            ? `/session/${conn.id}/${(waiting[0].worktree.questions[0] ?? waiting[0].worktree.question)!.terminalId.toString()}`
-            : `/worktree/${conn.id}/${encodeURIComponent(waiting[0].worktree.id)}`,
-        )
-      : sidebar
-        ? showBeside('/needs')
-        : router.replace('/needs');
+  // A prompt's chat, where it is answered.
+  const answer = ({ worktree, question }: Waiting) => {
+    if (!conn) return;
+    open(
+      question?.terminalId
+        ? `/session/${conn.id}/${question.terminalId}`
+        : `/worktree/${conn.id}/${encodeURIComponent(worktree.id)}`,
+    );
+  };
+
+  const approve = async (w: Waiting) => {
+    const label = holdLabel(w);
+    const key = waitingKey(w);
+    if (!conn || !w.question || !label || approving.current.has(key)) return;
+    approving.current.add(key);
+    const request =
+      label === 'Approve plan'
+        ? conn.respond(w.question, { approve: true })
+        : conn.answer(w.question, Answer_Choice.ALLOW_ONCE);
+    const refused = await request.catch((error: unknown) => (error instanceof Error ? error.message : String(error)));
+    approving.current.delete(key);
+    if (refused) Alert.alert('Couldn’t answer the prompt', refused);
+  };
 
   // Straight into the work: the agent's conversation, or with no agent, the
   // first terminal still open.
@@ -442,40 +497,49 @@ export function WorktreeList({ sidebar = false, refresh }: { sidebar?: boolean; 
     );
 
   // The list's rows as the scroll view's own children, and which of them are
-  // project headings: only a direct child can be pinned.
+  // project headings: only a direct child can be pinned. Each section stands
+  // 18 under the one above it; a label is 6 over its card.
   const listed = ((): { rows: ReactNode[]; pinned: number[] } => {
     const out: ReactNode[] = [];
     const pinned: number[] = [];
-    const add = (row: ReactNode) => {
-      if (row) out.push(row);
-    };
-    add(
-      waiting.length > 0 && conn && !filling ? (
-        <Pressable key="waiting" style={({ pressed }) => [styles.alertRow, pressed && { backgroundColor: tint(t.attention, 0.14) }]} onPress={answer}>
-          <View style={styles.mark}>
-            <Hand size={17} color={t.attention} />
-          </View>
-          <View style={styles.alertText}>
-            <Text style={styles.bannerTitle}>{waiting.length === 1 ? '1 waiting on you' : `${waiting.length} waiting on you`}</Text>
-            <Text style={styles.bannerDetail} numberOfLines={1}>
-              {waiting[0].worktree.name} ·{' '}
-              {(waiting[0].worktree.questions[0] ?? waiting[0].worktree.question)?.subject || detail(waiting[0].worktree)}
-            </Text>
-          </View>
-          <View style={styles.answerLink}>
-            <Text style={styles.answerLinkText}>Answer</Text>
-            <Chevron size={13} color={t.attention} />
-          </View>
-        </Pressable>
-      ) : null,
-    );
-    add(
-      filling ? (
-        <View key="skeleton" style={styles.card}>
-          <ListSkeleton />
-        </View>
-      ) : null,
-    );
+    const after = () => (out.length > 0 ? styles.section : null);
+    if (conn && !filling && waiting.length > 0) {
+      out.push(
+        <SectionLabel key="waiting-label" color={t.attention}>
+          Waiting on you
+        </SectionLabel>,
+      );
+      out.push(
+        <RuledCard key="waiting" style={styles.cardGap}>
+          {waiting.map((w) => {
+            const label = holdLabel(w);
+            const agent = agentOf(w.worktree);
+            return (
+              <Row
+                key={waitingKey(w)}
+                ruled
+                mark={
+                  <AgentTile
+                    agent={agent}
+                    session={colorOf(w.worktree)}
+                    tone={t.attention}
+                    label={`${agent ? agentLabel(agent) : 'Terminal'}, waiting on you`}
+                  />
+                }
+                title={w.worktree.name || 'Other terminals'}
+                detail={w.question?.subject || detail(w.worktree)}
+                detailColor={t.dim}
+                meta={<Pill title="Answer" tone={t.attention} onPress={() => answer(w)} />}
+                actions={label ? [{ name: 'answerWaiting', label, run: () => void approve(w) }] : undefined}
+                onPress={() => answer(w)}
+                onLongPress={label ? () => void approve(w) : undefined}
+              />
+            );
+          })}
+        </RuledCard>,
+      );
+    }
+    if (filling) out.push(<ListSkeleton key="skeleton" />);
     for (const project of filling ? [] : projects) {
       const rows = project.worktrees.filter(
         (w) => !gone.includes(w.id) && (passes(w, filter) || (filter === 'unread' && stay.includes(w.id))),
@@ -489,59 +553,45 @@ export function WorktreeList({ sidebar = false, refresh }: { sidebar?: boolean; 
       // a desktop from 1.9 sends them running or not. The other
       // filters list only projects with a row to show.
       if (rows.length === 0 && starting.length === 0 && filter !== 'all') continue;
-      // A desktop from 1.9 keeps its backlogs.
-      const keeps = hostState !== null && hostState.hostMinor >= 9 && project.id !== '';
       const key = projectKey(project);
       const folded = collapsed.includes(key);
-      // Folded with nothing starting, the heading is the whole card: a body
-      // with no rows is 5 pt tall, too short for its 12 pt corners, which
-      // the platform shrinks to fit, so they would not match the top's.
+      // Folded with nothing starting, the heading is all there is of it.
       const closed = folded && starting.length === 0;
-      // The card in two: its heading, pinned, over the page's own colour so
-      // nothing shows round its corners; and its rows.
+      // Its heading, pinned, over the desk's own colour, so the rows pass
+      // under it; then its card.
       pinned.push(out.length);
       out.push(
-        <View key={`${key}:head`} style={styles.cardHeadGround}>
-          <View style={[styles.cardHead, closed && styles.cardHeadClosed]}>
-            <View
-              collapsable={false}
-              ref={(view) => {
-                if (view) held.current.set(`project:${key}`, view);
-                else held.current.delete(`project:${key}`);
-              }}
-            >
-              <ProjectHeading
-                name={project.name || 'Elsewhere'}
-                color={projectColor(project)}
-                icon={project.icon}
-                collapsed={folded}
-                inside={rows.map((w) => w.name || 'Other terminals').join(' · ')}
-                pinned={pinnedHere(project)}
-                waiting={rows.some((w) => w.activity === Activity.BLOCKED)}
-                onToggle={() => toggle(key)}
-                onHold={() => holdProject(project)}
-                backlog={project.backlog}
-                onBacklog={
-                  keeps && conn
-                    ? () => open(`/backlog/${conn.id}/${encodeURIComponent(project.id)}`)
-                    : undefined
-                }
-              />
-            </View>
+        <View key={`${key}:head`} style={[styles.headGround, after()]}>
+          <View
+            collapsable={false}
+            ref={(view) => {
+              if (view) held.current.set(`project:${key}`, view);
+              else held.current.delete(`project:${key}`);
+            }}
+          >
+            <ProjectHeading
+              name={project.name || 'Elsewhere'}
+              color={projectColor(project)}
+              icon={project.icon}
+              collapsed={folded}
+              pinned={pinnedHere(project)}
+              waiting={rows.some((w) => w.activity === Activity.BLOCKED)}
+              onToggle={() => toggle(key)}
+              onHold={() => holdProject(project)}
+            />
           </View>
         </View>,
       );
       if (closed) continue;
       out.push(
-        <View key={key} style={styles.cardBody}>
+        <RuledCard key={key} style={styles.cardGap}>
           {starting.map((work) => (
             <View key={`starting-${work.at}`}>
               <Row
-                mark={work.agent ? <AgentMark agent={work.agent} size={16} well /> : null}
+                ruled
+                mark={<AgentTile agent={work.agent || ''} tone={t.brand} label="Starting" />}
                 title={firstLine(work.prompt)}
                 detail={`${stageText(progressOf(work, hostState?.snapshot ?? null), hostState?.host.name || 'your desktop', work.agent)} · ${elapsed(work.at, now)}`}
-                state={{ word: 'starting', color: t.brand }}
-                chevron
                 onPress={() => open(`/starting/${conn?.id ?? ''}/${work.at}`)}
               />
               <View style={styles.startingTrack}>
@@ -550,7 +600,9 @@ export function WorktreeList({ sidebar = false, refresh }: { sidebar?: boolean; 
             </View>
           ))}
           {!folded && rows.length === 0 && starting.length === 0 ? (
-            <Prose style={styles.idle}>Nothing running</Prose>
+            <Prose key="idle" style={styles.idle}>
+              Nothing running
+            </Prose>
           ) : null}
           {folded
             ? null
@@ -574,80 +626,78 @@ export function WorktreeList({ sidebar = false, refresh }: { sidebar?: boolean; 
                   />
                 </View>
               ))}
-        </View>,
+        </RuledCard>,
       );
     }
-    add(empty && conn ? <NothingRunning key="nothing" host={hostState.host.name} /> : null);
-    add(
-      !filling && filter !== 'all' && all.length > 0 && count(filter) === 0 && stay.length === 0 ? (
-        <Prose key="note" style={styles.note}>
+    if (empty && conn) out.push(<NothingRunning key="nothing" host={hostState.host.name} />);
+    if (!filling && filter !== 'all' && all.length > 0 && count(filter) === 0 && stay.length === 0) {
+      out.push(
+        <Prose key="note" style={[styles.note, after()]}>
           {EMPTY[filter]}
-        </Prose>
-      ) : null,
-    );
-    add(
-      !filling && tuckedAway > 0 ? (
+        </Prose>,
+      );
+    }
+    if (!filling && tuckedAway > 0) {
+      const gap = after();
+      out.push(
         <Pressable
           key="tucked"
           accessibilityRole="button"
           onPress={() => setTucking(true)}
-          style={({ pressed }) => [styles.tucked, pressed && { backgroundColor: t.selection }]}
+          style={({ pressed }) => [styles.tucked, gap, pressed && { backgroundColor: t.hover }]}
         >
           <EyeOff size={14} color={t.faint} />
           <Text style={styles.tuckedText}>{tuckedAway} hidden on this phone</Text>
-        </Pressable>
-      ) : null,
-    );
+        </Pressable>,
+      );
+    }
     return { rows: out, pinned };
   })();
 
   return (
     <Screen>
-      {/* ket's mark, where Back sits on every other screen, wears the line
-          to the desktop: its green when up, grey while reaching, red when
-          down. Across from it, the lock on that line, what it says, and
-          after a hairline a mark for how it runs: Wi-Fi, VPN or a cloud. */}
-      <View style={styles.top}>
-        <View style={styles.brand}>
-          <BrandMark size={17} color={status.connected ? t.brand : hostState?.status === 'offline' ? t.failed : t.faint} />
-        </View>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel={`Secure: end-to-end encrypted${status.kind ? `, ${status.text}` : ''}`}
-          onPress={explainSecure}
-          hitSlop={6}
-          style={({ pressed }) => [
-            styles.secure,
-            { backgroundColor: status.connected ? tint(t.running, pressed ? 0.22 : 0.13) : pressed ? t.border : t.selection },
-          ]}
-        >
-          <Seal sealed={status.connected} size={13} />
-          <Text style={[styles.secureText, { color: status.connected ? t.running : t.dim }]}>
-            {status.connected ? 'Secure' : hostState?.status === 'offline' ? 'Offline' : 'Reaching'}
-          </Text>
-          {status.kind ? (
-            <>
-              <View style={styles.secureRule} />
-              {createElement(ADDRESS_ICON[status.kind], { size: 14, color: t.running, weight: 2.2 })}
-            </>
-          ) : null}
-        </Pressable>
-      </View>
       {/* The desktop is the screen's large title; a tap opens the Mac
-          switcher. */}
-      <Pressable
-        accessibilityRole="button"
-        accessibilityLabel="Switch desktop"
-        onPress={() => setPicking(true)}
-        style={({ pressed }) => [styles.title, (pressed || picking) && { backgroundColor: t.selection }]}
-      >
-        <View style={styles.titleRow}>
-          <Text style={styles.titleText} numberOfLines={1}>
-            {hostState?.host.name ?? ''}
-          </Text>
-          <ChevronDown size={14} color={t.dim} weight={2.4} />
+          switcher. Under it, the lock on the line to it and how it runs —
+          a tap says what that means. Across from them, Start. */}
+      <View style={styles.head}>
+        <View style={styles.headText}>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Switch desktop"
+            onPress={() => setPicking(true)}
+            hitSlop={6}
+            style={({ pressed }) => [styles.titleRow, pressed && styles.pressed]}
+          >
+            <Text style={styles.titleText} numberOfLines={1}>
+              {hostState?.host.name ?? ''}
+            </Text>
+            <ChevronDown size={14} color={t.faint} weight={2.4} />
+          </Pressable>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={`${status.connected ? 'Secure: end-to-end encrypted' : statusWords}${status.kind ? `, ${status.text}` : ''}`}
+            onPress={explainSecure}
+            hitSlop={6}
+            style={({ pressed }) => [styles.status, pressed && styles.pressed]}
+          >
+            <Seal sealed={status.connected} size={11} />
+            <Text style={styles.statusText} numberOfLines={1}>
+              {statusWords}
+            </Text>
+          </Pressable>
         </View>
-      </Pressable>
+        {conn && status.connected ? (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Start a task"
+            onPress={() => open(`/new/${conn.id}`)}
+            style={({ pressed }) => [styles.new, pressed && { backgroundColor: '#9aeaa4' }]}
+          >
+            <Sparkle size={15} color={t.onBrand} weight={2.2} />
+            <Text style={styles.newText}>Start</Text>
+          </Pressable>
+        ) : null}
+      </View>
 
       {conn && down ? (
         <ScrollView contentContainerStyle={styles.downPage}>
@@ -655,33 +705,47 @@ export function WorktreeList({ sidebar = false, refresh }: { sidebar?: boolean; 
         </ScrollView>
       ) : (
         <>
-          <View style={styles.filters}>
-            <Segmented
-              style={styles.track}
-              round
-              height={FILTER_HEIGHT - 6}
-              value={filter}
-              onChange={pickFilter}
-              segments={[
-                { key: 'all' as Filter, label: 'All', count: tally('all') },
-                { key: 'active' as Filter, label: '', name: named('Active', 'active'), icon: <Dot color={t.running} size={7} />, count: tally('active') },
-                // The row's own unread mark.
-                { key: 'unread' as Filter, label: '', name: named('Unread', 'unread'), icon: <Dot color={t.accent} size={7} />, count: tally('unread') },
-                { key: 'ready' as Filter, label: '', name: named('Ready', 'ready'), icon: <Merge size={12} color={t.merging} weight={2.4} />, count: tally('ready') },
-              ]}
-            />
-            {conn && status.connected ? (
-              <Pressable
-                accessibilityRole="button"
-                accessibilityLabel="Start a task"
-                onPress={() => open(`/new/${conn.id}`)}
-                style={({ pressed }) => [styles.new, pressed && { backgroundColor: '#9aeaa4' }]}
-              >
-                <Sparkle size={15} color={t.onBrand} weight={2.2} />
-                <Text style={styles.newText}>Start</Text>
-              </Pressable>
-            ) : null}
-          </View>
+          {/* What the list shows: an icon each, in its state's colour. */}
+          <Tabs
+            style={styles.tabs}
+            value={filter}
+            onChange={pickFilter}
+            tabs={[
+              {
+                key: 'all' as Filter,
+                label: 'All',
+                name: named('All', 'all'),
+                count: tally('all'),
+                icon: (on) => <Wildcard size={15} color={on ? t.text : t.dim} weight={2.4} />,
+              },
+              {
+                key: 'active' as Filter,
+                label: 'Active',
+                tone: t.brand,
+                name: named('Active', 'active'),
+                count: tally('active'),
+                icon: (on) => <Bolt size={15} color={t.brand} weight={1.9} fill={on ? tint(t.brand, 0.25) : undefined} />,
+              },
+              // A conversation wearing the row's own unread dot.
+              {
+                key: 'unread' as Filter,
+                label: 'Unread',
+                name: named('Unread', 'unread'),
+                count: tally('unread'),
+                icon: (on) => (
+                  <Bubble size={15} color={t.text} weight={1.9} dot={t.backdrop} fill={on ? tint(t.text, 0.18) : undefined} />
+                ),
+              },
+              {
+                key: 'ready' as Filter,
+                label: 'Ready',
+                tone: t.merging,
+                name: named('Ready', 'ready'),
+                count: tally('ready'),
+                icon: () => <Merge size={15} color={t.merging} weight={1.9} />,
+              },
+            ]}
+          />
 
           <Animated.ScrollView
             // Mounted anew as the list lands, so it fades in over its skeleton.
@@ -706,7 +770,15 @@ export function WorktreeList({ sidebar = false, refresh }: { sidebar?: boolean; 
         onClose={() => setMenu(null)}
         anchor={menu?.place ?? null}
         label={menu ? `${menu.worktree.name} actions` : 'Worktree actions'}
-        lifted={menu ? <WorktreeRow worktree={menu.worktree} /> : null}
+        lifted={
+          menu ? (
+            // On its card's colour, as it was in the list: its tile is the
+            // raised grey the lifted ground is.
+            <View style={styles.liftedRow}>
+              <WorktreeRow worktree={menu.worktree} />
+            </View>
+          ) : null
+        }
         sections={sections}
       />
       <FloatMenu
@@ -721,7 +793,6 @@ export function WorktreeList({ sidebar = false, refresh }: { sidebar?: boolean; 
               color={projectColor(projectMenu.project)}
               icon={projectMenu.project.icon}
               collapsed
-              inside={projectMenu.project.worktrees.map((w) => w.name || 'Other terminals').join(' · ')}
               pinned={pinnedHere(projectMenu.project)}
             />
           ) : null
@@ -763,7 +834,17 @@ export function WorktreeList({ sidebar = false, refresh }: { sidebar?: boolean; 
       {/* Every paired Mac, and a way to add one — offered with a single Mac
           too, so the switcher says it can hold more. Adding one is not wired
           yet. */}
-      <Sheet open={picking} onClose={() => setPicking(false)} title="Macs" detail="Paired with this device">
+      <Sheet
+        open={picking}
+        onClose={() => setPicking(false)}
+        onGone={() => {
+          if (!toAutomations) return;
+          setToAutomations(false);
+          setAutomating(true);
+        }}
+        title="Macs"
+        detail="Paired with this device"
+      >
         <SheetList>
           {(hosts ?? []).map(({ conn: c, hostState: h }) => (
             <SheetItem
@@ -782,6 +863,20 @@ export function WorktreeList({ sidebar = false, refresh }: { sidebar?: boolean; 
             />
           ))}
         </SheetList>
+        {conn && hostState && hostState.hostMinor >= 36 ? (
+          <SheetList>
+            <SheetItem
+              label="Automations"
+              mark={<Clock size={18} color={t.text} />}
+              detail={`Work that starts itself on ${hostState.host.name}: pause one, or start it now.`}
+              icon={<Chevron size={12} color={t.dim} weight={2.4} />}
+              onPress={() => {
+                setToAutomations(true);
+                setPicking(false);
+              }}
+            />
+          </SheetList>
+        ) : null}
         <SheetList>
           <SheetItem
             label="Add another Mac"
@@ -797,6 +892,12 @@ export function WorktreeList({ sidebar = false, refresh }: { sidebar?: boolean; 
         </SheetList>
         <SheetNote>On that Mac: Settings › Devices › Pair a device, then scan its code here.</SheetNote>
       </Sheet>
+      <AutomationsSheet
+        open={automating}
+        onClose={() => setAutomating(false)}
+        conn={conn ?? null}
+        hostName={hostState?.host.name ?? 'your Mac'}
+      />
     </Screen>
   );
 }
@@ -836,18 +937,22 @@ function NothingRunning({ host }: { host: string }) {
 }
 
 const styles = StyleSheet.create({
-  // ket's mark and the lock's pill, over the title.
-  top: { height: 44, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: size.gutter },
-  // Back's slot on the other screens: 40 square, in 6 from the gutter.
-  brand: { width: 40, height: 40, marginLeft: -6, alignItems: 'center', justifyContent: 'center' },
-  secure: { height: 37, flexDirection: 'row', alignItems: 'center', gap: 6, paddingLeft: 11, paddingRight: 13, borderRadius: 18.5 },
-  secureText: { fontFamily: font.chrome, fontSize: 11.5 },
-  secureRule: { width: StyleSheet.hairlineWidth * 2, height: 14, marginHorizontal: 2, backgroundColor: tint(t.running, 0.35) },
-  // The desktop's name as a large title, in from the gutter as a card's
-  // heading is, so it lines up with the list under it.
-  title: { marginHorizontal: size.gutter, marginTop: 2, paddingHorizontal: 6, paddingVertical: 2, gap: 4, borderRadius: size.radiusLg },
-  titleRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  // The title and the line under it, and Start across from them.
+  head: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+    paddingTop: 10,
+    paddingHorizontal: EDGE,
+  },
+  headText: { flexShrink: 1, minWidth: 0, gap: 3 },
+  titleRow: { alignSelf: 'flex-start', maxWidth: '100%', flexDirection: 'row', alignItems: 'center', gap: 7 },
   titleText: { flexShrink: 1, fontFamily: font.proseSemibold, fontSize: 22, lineHeight: 28, letterSpacing: -0.3, color: t.text },
+  status: { alignSelf: 'flex-start', flexDirection: 'row', alignItems: 'center', gap: 5 },
+  statusText: { fontFamily: font.chrome, fontSize: size.label, lineHeight: 18, color: t.faint },
+  pressed: { opacity: 0.6 },
+  tabs: { marginTop: 14 },
   // The empty slot a Mac would fill: a dashed square with a plus in it.
   addMark: {
     width: 18,
@@ -860,87 +965,30 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   downPage: { flexGrow: 1, padding: size.gutter, paddingTop: 4 },
-  // The filter and Start, on the desk over the cards.
-  filters: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: size.gutter, paddingTop: 6, paddingBottom: 8 },
-  track: { flex: 1 },
-  // A project: a card on the desk, its heading and its worktrees in it.
-  card: {
-    padding: 4,
-    backgroundColor: t.card,
-    borderWidth: 1,
-    borderColor: t.rule,
-    borderRadius: size.radiusCard,
-  },
-  // A project's card in two pieces, so its heading can stay at the top of
-  // the list: the heading's half, and under it the rows', pulled up over the
-  // list's gap to meet it.
-  cardHeadGround: { backgroundColor: t.backdrop },
-  cardHead: {
-    padding: 4,
-    paddingBottom: 0,
-    backgroundColor: t.card,
-    borderWidth: 1,
-    borderBottomWidth: 0,
-    borderColor: t.rule,
-    borderTopLeftRadius: size.radiusCard,
-    borderTopRightRadius: size.radiusCard,
-  },
-  // A folded card's heading, closing the card where its body would: the
-  // body's 4 pt foot and its border, so the card stands as tall as before.
-  cardHeadClosed: {
-    paddingBottom: 4,
-    borderBottomWidth: 1,
-    borderBottomLeftRadius: size.radiusCard,
-    borderBottomRightRadius: size.radiusCard,
-  },
-  cardBody: {
-    marginTop: -6,
-    padding: 4,
-    paddingTop: 0,
-    backgroundColor: t.card,
-    borderWidth: 1,
-    borderTopWidth: 0,
-    borderColor: t.rule,
-    borderBottomLeftRadius: size.radiusCard,
-    borderBottomRightRadius: size.radiusCard,
-  },
   // The one way to start work from here, so it wears ket's green — the
   // colour Send fills with when there is something to send.
   new: {
-    height: FILTER_HEIGHT,
+    height: 40,
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
-    paddingLeft: 14,
+    paddingLeft: 13,
     paddingRight: 16,
-    borderRadius: FILTER_HEIGHT / 2,
+    borderRadius: 20,
     backgroundColor: t.brand,
   },
   // A row read since it was opened from under Unread.
   read: { opacity: 0.55 },
   newText: { fontFamily: font.proseSemibold, fontSize: size.label, color: t.onBrand },
-  // What waits on you: a card of its own, over the projects. Its hand
-  // stands in the column the badges and marks below share — in by a
-  // card's padding and a row's inset — so its words start where theirs do.
-  alertRow: {
-    borderRadius: size.radiusCard,
-    borderWidth: 1,
-    borderColor: tint(t.attention, 0.16),
-    paddingVertical: 11,
-    paddingLeft: 4 + ROW_INSET,
-    paddingRight: 11,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: MARK_GAP,
-    backgroundColor: tint(t.attention, 0.08),
-  },
-  alertText: { flex: 1, minWidth: 0, gap: 2 },
-  bannerTitle: { fontFamily: font.proseMedium, fontSize: size.body, color: t.text },
-  bannerDetail: { fontFamily: font.chrome, fontSize: 12, color: t.dim },
-  answerLink: { flexDirection: 'row', alignItems: 'center', gap: 2 },
-  answerLinkText: { fontFamily: font.proseMedium, fontSize: size.label, color: t.attention },
-  // The cards, 6 apart; under the tab bar, it pads the foot — see `under`.
-  list: { paddingHorizontal: size.gutter, gap: 6 },
+  // Under the tab bar, it pads the foot — see `under`.
+  list: { paddingHorizontal: EDGE, paddingTop: 16 },
+  // A section under the one above it: a project, what waits on you.
+  section: { marginTop: 18 },
+  // A card under its label.
+  cardGap: { marginTop: 6 },
+  // A heading's ground: the desk's, so the rows pass under it.
+  headGround: { backgroundColor: t.backdrop },
+  liftedRow: { backgroundColor: t.card },
   fade: { position: 'absolute', left: 0, right: 0, bottom: 0 },
   // Under the cards: the line to the projects hidden on this phone.
   tucked: {
@@ -965,14 +1013,13 @@ const styles = StyleSheet.create({
     borderRadius: size.radiusLg,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: t.sunken,
+    ...surface.well,
   },
   emptyTitle: { fontFamily: font.proseSemibold, fontSize: size.title, color: t.text, textAlign: 'center' },
   emptyNote: { textAlign: 'center' },
-  mark: { width: MARK_SLOT, alignItems: 'center' },
   note: { padding: 8 },
-  // Under a project's heading, in from the edge its rows start at.
-  idle: { fontSize: size.detail, paddingLeft: 14, paddingBottom: 8 },
+  // A project's card with nothing in it, in from the edge its rows start at.
+  idle: { fontSize: size.label, paddingHorizontal: 14, paddingVertical: 12 },
   // Under a row standing in for new work: the line that says it is moving.
   startingTrack: { paddingHorizontal: 14, paddingBottom: 8 },
 });

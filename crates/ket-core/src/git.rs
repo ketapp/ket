@@ -241,6 +241,28 @@ pub fn discover_root(path: &Path) -> Result<PathBuf> {
     Ok(PathBuf::from(trimmed))
 }
 
+/// A branch name's readable part from a prompt or a name: its first five
+/// words, lowercased and dashed, cut to 40 characters — `Fix the login
+/// redirect` is `fix-the-login-redirect`. Empty when there is no word in it.
+///
+/// One rule for every place work starts: the phone, `ket start`, the New
+/// worktree dialog and an automation's runs. The phone mirrors it
+/// (`branchStem` in the app's lib/starting.ts) to recognise the worktree it
+/// asked for: change the rule here and there together.
+pub fn branch_stem(words: &str) -> String {
+    let words: Vec<String> = words
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .take(5)
+        .map(str::to_ascii_lowercase)
+        .collect();
+    let mut stem = words.join("-");
+    stem.truncate(40);
+    let cut = stem.trim_end_matches('-').len();
+    stem.truncate(cut);
+    stem
+}
+
 /// Turns what a person typed into a name git will accept for a branch.
 ///
 /// Spaces become dashes, so `new worktree bug` is the branch
@@ -1359,6 +1381,20 @@ fn parse_worktree_porcelain(text: &str) -> Vec<GitWorktree> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_stem_is_the_first_words_or_nothing() {
+        use super::branch_stem;
+        assert_eq!(
+            branch_stem("Fix the login redirect, please now"),
+            "fix-the-login-redirect-please"
+        );
+        assert_eq!(branch_stem("  ...  "), "");
+        assert_eq!(
+            branch_stem("Internationalisation internationalisation internationalisation x"),
+            "internationalisation-internationalisatio"
+        );
+    }
+
     #[test]
     fn a_typed_name_becomes_a_branch_git_accepts() {
         use super::branch_name_from;

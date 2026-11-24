@@ -112,7 +112,9 @@ them. Never emoji, never filled glyphs for chrome.
   its shape at 55% ink. A key hint trails the label in Mono 11.
 - `.detail()` names what the action acts on — the branch a Start makes — in
   Mono 11 after the label, cut short past 180.
-- Sizes: default 32 / 13px; small 26 / 12px; `.w_full()` for a block button.
+- Sizes: default 32 / 13px; small 26 / 12px; large 52 / 17px with a 12
+  corner, for the one action of a surface with nothing in it yet;
+  `.w_full()` for a block button.
 
 `icon_button` for a glyph alone: a 32 well in toolbars, `.bare()` inside rows
 and headers, `.small()` 28, `.dense()` 24. Pressed is the `selection` fill.

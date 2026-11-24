@@ -163,13 +163,25 @@ export async function forgetHost(id: string): Promise<void> {
   await set(HOSTS, JSON.stringify(ids.filter((i) => i !== id)));
 }
 
+/** The desktop last read or saved here, for a screen's first draw before the
+ * Keychain answers; `undefined` before either. */
+let desktop: string | null | undefined;
+
 /** The desktop the Worktrees screen shows, when more than one is paired. */
 export async function saveDesktop(id: string): Promise<void> {
+  desktop = id;
   await set(DESKTOP, id);
 }
 
 export async function getDesktop(): Promise<string | null> {
-  return (await get(DESKTOP)) ?? null;
+  desktop = (await get(DESKTOP)) ?? null;
+  return desktop;
+}
+
+/** The desktop as last read or saved, without asking the Keychain; `null`
+ * before either. */
+export function heldDesktop(): string | null {
+  return desktop ?? null;
 }
 
 /** The projects folded on the Worktrees screen, per desktop. The phone's own:

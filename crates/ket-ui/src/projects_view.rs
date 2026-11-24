@@ -1,8 +1,8 @@
 //! Compact, status-first project list used to find active worktrees.
 
 use gpui::{
-    AnyElement, Context, MouseButton, MouseDownEvent, Pixels, SharedString, Window, div,
-    prelude::*, px,
+    AnyElement, Context, FontWeight, MouseButton, MouseDownEvent, Pixels, SharedString, Window,
+    div, prelude::*, px,
 };
 use ket_core::activity::Signal;
 use ket_core::theme::Color;
@@ -134,6 +134,8 @@ impl Shell {
                             .child(
                                 div()
                                     .truncate()
+                                    // Unread in bold, as the grouped tree draws it.
+                                    .when(unread, |el| el.font_weight(FontWeight::BOLD))
                                     .when_some(color, |el, color| {
                                         el.text_color(paint(crate::session_color::label(color, t)))
                                     })

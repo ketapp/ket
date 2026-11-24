@@ -1,15 +1,18 @@
 // A screen and what it is made of: the bar across its top, cards on the
-// desk, headings, figures, prose and banners.
+// desk, ruled cards of rows, headings, figures, prose and banners.
 
 import { router } from 'expo-router';
-import { type ReactNode } from 'react';
+import { Children, Fragment, isValidElement, type ReactNode } from 'react';
 import { StyleSheet, Text, View, type StyleProp, type TextStyle, type ViewStyle } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { READABLE_WIDTH, useSplit } from '../../lib/layout';
-import { font, size, t, tint } from '../../lib/theme';
+import { font, size, t } from '../../lib/theme';
+import { surface, tinted } from './surface';
 import { Back } from '../icons';
 import { IconButton } from './controls';
+import { TILE } from './marks';
+import { ROW_INSET, TILE_GAP } from './rows';
 import { shared } from './shared';
 
 /** A whole screen: the desk, clear of the status bar. On a wide screen its
@@ -74,17 +77,52 @@ export function Bar({
   );
 }
 
-/** A card: a region of the screen, on the desk. */
+/** A card: a region of the screen, on the desk. The app's panel: its fill
+ * and hairline are the shared stylesheet's. */
 export function Card({ children, style }: { children: ReactNode; style?: StyleProp<ViewStyle> }) {
-  return <View style={[styles.card, style]}>{children}</View>;
+  return <View style={[surface.panel, styles.card, style]}>{children}</View>;
 }
 
-/** A section's name inside a card, with a count at the end. */
-export function Heading({ children, count, color }: { children: ReactNode; count?: ReactNode; color?: string }) {
+/** A ruled card's corners: rounder than a card's, as the desk's gutter is
+ * wider round it. */
+const RULED_RADIUS = 16;
+
+/**
+ * A card of rows, each a `ruled` Row, with a rule between each two that
+ * starts where the rows' words do, so the tiles stand clear of it.
+ */
+export function RuledCard({ children, style }: { children: ReactNode; style?: StyleProp<ViewStyle> }) {
+  const rows = Children.toArray(children);
   return (
-    <View style={styles.heading}>
+    <View style={[surface.panel, styles.ruled, style]}>
+      {rows.map((row, at) => (
+        // Each row's own key, so a row keeps its state as others come and go.
+        <Fragment key={isValidElement(row) && row.key !== null ? row.key : at}>
+          {at > 0 ? <View style={styles.rule} /> : null}
+          {row}
+        </Fragment>
+      ))}
+    </View>
+  );
+}
+
+/** A section's name inside a card, with a count at the end, or with
+ * `action` there instead: a `Pill` for the one thing the section offers. */
+export function Heading({
+  children,
+  count,
+  color,
+  action,
+}: {
+  children: ReactNode;
+  count?: ReactNode;
+  color?: string;
+  action?: ReactNode;
+}) {
+  return (
+    <View style={[styles.heading, action ? styles.headingWithAction : null]}>
       <Text style={[styles.headingText, color ? { color } : null]}>{children}</Text>
-      {count !== undefined ? <Text style={[shared.count, color ? { color } : null]}>{count}</Text> : null}
+      {action ?? (count !== undefined ? <Text style={[shared.count, color ? { color } : null]}>{count}</Text> : null)}
     </View>
   );
 }
@@ -111,9 +149,9 @@ export function Readout({ children, style }: { children: ReactNode; style?: Styl
   return <View style={[shared.readout, style]}>{children}</View>;
 }
 
-/** A message tinted by its signal: 8% fill, 25% edge. */
+/** A message tinted by its signal, as the shared stylesheet tints one. */
 export function Banner({ tone, children, style }: { tone: string; children: ReactNode; style?: StyleProp<ViewStyle> }) {
-  return <View style={[styles.banner, { backgroundColor: tint(tone, 0.08), borderColor: tint(tone, 0.25) }, style]}>{children}</View>;
+  return <View style={[styles.banner, tinted(tone), style]}>{children}</View>;
 }
 
 /** Prose: a sentence, dim unless told otherwise. */
@@ -138,13 +176,9 @@ const styles = StyleSheet.create({
   barText: { flex: 1, minWidth: 0, gap: 1 },
   barTitle: { fontFamily: font.proseSemibold, fontSize: size.value, color: t.text },
   barDetail: { fontFamily: font.prose, fontSize: 12, color: t.dim },
-  card: {
-    backgroundColor: t.card,
-    borderWidth: 1,
-    borderColor: t.rule,
-    borderRadius: size.radiusCard,
-    overflow: 'hidden',
-  },
+  card: { borderRadius: size.radiusCard, overflow: 'hidden' },
+  ruled: { borderRadius: RULED_RADIUS, overflow: 'hidden' },
+  rule: { height: 1, marginLeft: ROW_INSET + TILE + TILE_GAP, backgroundColor: t.rule },
   heading: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -153,11 +187,14 @@ const styles = StyleSheet.create({
     paddingTop: 6,
     paddingBottom: 4,
   },
+  // Room for a pill, 30 tall, and a finger on it; the pill ends at the
+  // card's own padding.
+  headingWithAction: { paddingTop: 7, paddingBottom: 7, paddingRight: 0 },
   headingText: { fontFamily: font.proseMedium, fontSize: size.detail, color: t.dim },
   figure: { gap: 3, minWidth: 0 },
   figureLabel: { fontFamily: font.prose, fontSize: 12, color: t.dim },
   figureValue: { flexDirection: 'row', alignItems: 'center', gap: 7 },
   value: { fontFamily: font.chromeMedium, fontSize: size.value, color: t.text },
   prose: { fontFamily: font.prose, fontSize: size.label, lineHeight: 19, color: t.dim },
-  banner: { borderWidth: 1, borderRadius: size.radiusCard, padding: 12, gap: 10 },
+  banner: { borderRadius: size.radiusCard, padding: 12, gap: 10 },
 });

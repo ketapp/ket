@@ -206,6 +206,25 @@ impl BrowserHandle {
     fn history(&self) -> (bool, bool) {
         (self.chromium.back, self.chromium.forward)
     }
+
+    /// Whether the address field holds somewhere other than the page it
+    /// shows: what the field's arrow is there to go to. A trailing slash is
+    /// no difference, since a page reports `/` where none was typed.
+    fn address_edited(&self, cx: &gpui::App) -> bool {
+        let text = self.address.read(cx).text();
+        if text.trim().is_empty() {
+            return false;
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let typed = normalize_url(&text);
+            self.page
+                .as_ref()
+                .is_none_or(|(page, _)| page.trim_end_matches('/') != typed.trim_end_matches('/'))
+        }
+        #[cfg(not(target_os = "macos"))]
+        true
+    }
 }
 
 /// Where a link clicked in a terminal opens.
@@ -1173,6 +1192,7 @@ impl Shell {
             )
         });
         let (can_back, can_forward) = browser.history();
+        let edited = browser.address_edited(cx);
         #[cfg(target_os = "macos")]
         let still = match &browser.still {
             Still::Settling(image, _) | Still::Shown(image) => Some(image.clone()),
@@ -1234,28 +1254,47 @@ impl Shell {
                         cx.notify();
                     })),
             )
-            .child(
+            .child({
+                // Go, as an arrow inside the field, once there is somewhere
+                // new to go; Return does the same. Four pixels in from the
+                // well's edge, as from its top and bottom.
+                let style = Style::new(&theme, self.caret.visible).leading(Icon::Search);
+                let style = if edited {
+                    style.trailing(
+                        div()
+                            // A press here is the arrow's, not the field's
+                            // caret placement under it.
+                            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                                cx.stop_propagation()
+                            })
+                            .mr(px(-6.0))
+                            .child(
+                                icon_button(("browser-go", id.0), Icon::ArrowRight)
+                                    .dense()
+                                    .sized(px(22.0), px(14.0))
+                                    .primary()
+                                    .render(&theme)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.navigate_browser(id, cx);
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+                } else {
+                    style
+                };
                 text_field(
                     &address,
                     ("browser-address", id.0),
                     false,
-                    Style::new(&theme, self.caret.visible).leading(Icon::Search),
+                    style,
                     window,
                     cx,
                 )
                 .flex_1()
                 .min_w_0()
-                .h(px(30.0)),
-            )
-            .child(
-                button(("browser-go", id.0), "Go")
-                    .primary()
-                    .render(&theme)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.navigate_browser(id, cx);
-                        cx.notify();
-                    })),
-            );
+                .h(px(30.0))
+            });
         // A screenshot of the page to an agent, then Chromium's DevTools, in a
         // window of their own.
         #[cfg(feature = "chromium")]

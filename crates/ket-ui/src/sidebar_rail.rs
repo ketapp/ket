@@ -69,6 +69,8 @@ const MENU_ORIGIN: &str = "sidebar-more";
 pub(crate) enum SidebarAction {
     QuickPrompt,
     AddProject,
+    /// The Automations dialog.
+    Automations,
     /// Folds every project when any is open, else opens them all.
     FoldProjects,
 }
@@ -290,6 +292,9 @@ impl Shell {
             MenuEntry::Item(
                 MenuItem::new(SidebarAction::AddProject, "Add project…").icon(Icon::FolderPlus),
             ),
+            MenuEntry::Item(
+                MenuItem::new(SidebarAction::Automations, "Automations").icon(Icon::Clock),
+            ),
         ];
         // Only where projects fold: the status sort and the rail list no
         // project with a caret, so there the pick would change nothing on
@@ -321,6 +326,7 @@ impl Shell {
         match action {
             SidebarAction::QuickPrompt => self.open_quick_prompt(cx),
             SidebarAction::AddProject => self.add_project(cx),
+            SidebarAction::Automations => self.open_automations(None, cx),
             SidebarAction::FoldProjects => {
                 let open = !self.projects.iter().any(|project| project.expanded);
                 for project in &mut self.projects {

@@ -1,4 +1,5 @@
-// Settings: the desktops this phone is paired with, and pairing another;
+// Settings: the desktops this phone is paired with, each led by whether it
+// is connected, and pairing another from the heading;
 // which notices the phone shows; the app lock; and About.
 
 import { router, useFocusEffect } from 'expo-router';
@@ -6,8 +7,8 @@ import { Activity } from '@ket/remote';
 import { useEffect, useState } from 'react';
 import { Linking, ScrollView, Share, StyleSheet, Text, View } from 'react-native';
 
-import { BrandMark, Desktop, External } from '../../components/icons';
-import { Button, Card, Heading, Prose, Row, Screen, Segmented, TAB_BAR_ROOM, TabBar, Tag, Toggle } from '../../components/ui';
+import { BrandMark, External, Plus } from '../../components/icons';
+import { Card, Dot, Heading, Pill, Prose, Row, Screen, Segmented, TAB_BAR_ROOM, TabBar, Tag, Toggle } from '../../components/ui';
 import { everyWorktree } from '../../lib/activity';
 import { reportText, useErrorReports } from '../../lib/crashes';
 import { statusLine, useHosts, useHostStates } from '../../lib/hosts';
@@ -55,22 +56,45 @@ export default function Settings() {
           <Text style={styles.wordmark}>ket</Text>
         </View>
         <Card style={styles.card}>
-          <Heading count={hostStates.length}>Paired desktops</Heading>
-          {hostStates.map((hostState) => (
-            <Row
-              key={hostState.host.id}
-              small
-              chevron
-              mark={<Desktop size={16} />}
-              title={hostState.host.name}
-              detail={`${statusLine(hostState).text} · ${hostState.displayAddress ? hostOf(hostState.displayAddress) : 'trying saved addresses'}`}
-              onPress={() => router.push(`/devices/${hostState.host.id}`)}
-            />
-          ))}
-          {hostStates.length === 0 ? <Prose style={styles.note}>No desktop paired yet.</Prose> : null}
-          <View style={styles.actions}>
-            <Button kind="primary" title="Pair a desktop" onPress={() => router.push('/pair')} />
+          <Heading
+            action={
+              <Pill
+                title="Pair"
+                label="Pair a desktop"
+                icon={<Plus size={13} color={t.text} weight={2.2} />}
+                onPress={() => router.push('/pair')}
+              />
+            }
+          >
+            Paired desktops
+          </Heading>
+          <View style={styles.desktops}>
+            {hostStates.map((hostState) => {
+              const status = statusLine(hostState);
+              const offline = hostState.status === 'offline';
+              return (
+                <Row
+                  key={hostState.host.id}
+                  small
+                  chevron
+                  mark={
+                    // The line to it: up, down, or still being reached.
+                    <View accessible accessibilityLabel={status.connected ? 'Connected' : offline ? 'Offline' : 'Connecting'}>
+                      <Dot
+                        size={8}
+                        color={status.connected ? t.running : offline ? t.failed : t.faint}
+                        hollow={!status.connected}
+                      />
+                    </View>
+                  }
+                  title={hostState.host.name}
+                  detail={`${status.text} · ${hostState.displayAddress ? hostOf(hostState.displayAddress) : 'trying saved addresses'}`}
+                  onPress={() => router.push(`/devices/${hostState.host.id}`)}
+                />
+              );
+            })}
           </View>
+          {hostStates.length === 0 ? <Prose style={styles.note}>No desktop paired yet.</Prose> : null}
         </Card>
         <Card style={styles.card}>
           <Heading>Notifications</Heading>
@@ -206,7 +230,9 @@ const styles = StyleSheet.create({
   page: { padding: size.gutter, paddingTop: 4, gap: size.gutter, paddingBottom: TAB_BAR_ROOM },
   card: { padding: 8, gap: 2 },
   note: { padding: 8 },
-  actions: { padding: 6, paddingTop: 10, alignItems: 'flex-start' },
+  // A desktop's row starts at the heading's inset: its dot stands under the
+  // heading's first letters, and its chevron under the pill's end.
+  desktops: { marginHorizontal: -8 },
   footnote: { fontSize: size.detail, lineHeight: 18, paddingHorizontal: 6 },
   setting: { flexDirection: 'row', alignItems: 'flex-start', gap: 14, padding: 8 },
   settingText: { flex: 1, gap: 4 },

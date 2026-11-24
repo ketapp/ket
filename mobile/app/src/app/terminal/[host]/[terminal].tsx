@@ -34,6 +34,7 @@ import { useReadOnArrival } from '../../../lib/arrival';
 import { type Command, commandsFor, matching } from '../../../lib/commands';
 import { useHost, useHostState } from '../../../lib/hosts';
 import { font, size, t, tint } from '../../../lib/theme';
+import { surface } from '../../../components/ui/surface';
 
 /** The pause between a message and its Enter — see `send`. */
 const ENTER_AFTER_MS = 80;
@@ -590,7 +591,7 @@ const styles = StyleSheet.create({
     flex: 1,
     height: 38,
     borderRadius: 6,
-    backgroundColor: t.elevated,
+    ...surface.well,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -602,7 +603,7 @@ const styles = StyleSheet.create({
     flex: 1,
     height: size.control,
     borderRadius: size.control / 2,
-    backgroundColor: t.sunken,
+    ...surface.well,
     paddingHorizontal: 16,
     color: t.text,
     fontFamily: font.prose,
@@ -627,7 +628,7 @@ const styles = StyleSheet.create({
     width: size.control,
     height: size.control,
     borderRadius: size.control / 2,
-    backgroundColor: t.sunken,
+    ...surface.well,
     alignItems: 'center',
     justifyContent: 'center',
   },

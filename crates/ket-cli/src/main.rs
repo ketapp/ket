@@ -12,7 +12,7 @@
 //! CLI, the palette, and a keybinding file all reach the same list of things ket
 //! can do. `ket commands` prints that list.
 //!
-//! Each area — `agent`, `app`, `backlog`, `browser`, `filter`, `host`,
+//! Each area — `agent`, `app`, `automation`, `backlog`, `browser`, `filter`, `host`,
 //! `project`, `worktree` — is a module holding its subcommands' argv, how they
 //! become invocations, its implementations and its share of the argv list the
 //! tests check the registry against.
@@ -28,6 +28,7 @@ use ket_core::{KetError, logging};
 
 mod agent;
 mod app;
+mod automation;
 mod backlog;
 mod browser;
 mod filter;
@@ -36,6 +37,7 @@ mod project;
 mod worktree;
 
 use app::ConfigCmd;
+use automation::AutomationCmd;
 use backlog::BacklogCmd;
 use browser::BrowserCmd;
 use filter::FilterArgs;
@@ -191,6 +193,12 @@ enum Cmd {
     Backlog {
         #[command(subcommand)]
         cmd: BacklogCmd,
+    },
+
+    /// Work that starts itself: a prompt or a command, once or on a repeat.
+    Automation {
+        #[command(subcommand)]
+        cmd: AutomationCmd,
     },
 
     /// Create and manage worktrees.
@@ -383,6 +391,8 @@ impl Cmd {
 
             Cmd::Backlog { cmd } => cmd.invocation(),
 
+            Cmd::Automation { cmd } => cmd.invocation(),
+
             Cmd::Worktree { cmd } => cmd.invocation(),
 
             Cmd::Run { agent, on, prompt } => Invocation::new("agent.run")
@@ -426,6 +436,7 @@ fn registry() -> Result<Registry, KetError> {
     let mut registry = Registry::builtin();
     agent::register(&mut registry)?;
     app::register(&mut registry)?;
+    automation::register(&mut registry)?;
     backlog::register(&mut registry)?;
     browser::register(&mut registry)?;
     filter::register(&mut registry)?;
@@ -500,6 +511,7 @@ mod tests {
     const ARGV: &[&[&[&str]]] = &[
         agent::ARGV,
         app::ARGV,
+        automation::ARGV,
         backlog::ARGV,
         browser::ARGV,
         filter::ARGV,

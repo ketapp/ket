@@ -1,5 +1,10 @@
 import { beforeEach, describe, expect, jest, test } from '@jest/globals';
-import { renderHook } from '@testing-library/react-native';
+import { act, renderHook } from '@testing-library/react-native';
+import * as Notifications from 'expo-notifications';
+import { AppState } from 'react-native';
+
+import { connection } from './connection';
+import { listHosts } from './store';
 
 import { compare, forgetSeen, startNotices, turnOff, turnOn, useNoticeFollowing, useNotices } from './notices';
 import type { NotifyConfig } from './store';
@@ -182,6 +187,42 @@ describe('a tapped notice', () => {
     open(tap('host/b', 3_000, 'https://example.com'));
     expect(mockPush).toHaveBeenCalledTimes(2);
     await hook.unmount();
+  });
+});
+
+describe('following a desktop', () => {
+  test('hears of an agent that worked and went quiet between two draws', async () => {
+    expect(await turnOn()).toBe(true);
+    // Not 'active' under jest's React Native, as in the background.
+    expect(AppState.currentState).not.toBe('active');
+    const told = new Set<(message: object) => void>();
+    const conn = {
+      id: host.id,
+      state: { host, snapshot: snapshot([tree('a', 0)]), status: 'offline', hostMinor: 0, upSince: null },
+      onChange: () => () => {},
+      onMessage: (listener: (message: object) => void) => (told.add(listener), () => told.delete(listener)),
+    };
+    jest.mocked(listHosts).mockResolvedValue([{ id: host.id }] as never);
+    jest.mocked(connection).mockReturnValue(conn as never);
+    const hook = await renderHook(() => useNoticeFollowing(true));
+    await act(async () => {});
+
+    // A run of snapshots, drawn as one: the screens are told only of the
+    // last, quiet again, and never see it working.
+    for (const activity of [2, 2, 0]) {
+      conn.state = { ...conn.state, snapshot: snapshot([tree('a', activity)]) };
+      for (const listener of told) listener({ payload: { case: 'snapshot' } });
+    }
+    await act(async () => {});
+    expect(Notifications.scheduleNotificationAsync).toHaveBeenCalledTimes(1);
+    expect(jest.mocked(Notifications.scheduleNotificationAsync).mock.calls[0][0]).toMatchObject({
+      identifier: 'host/a/finished',
+      content: { body: 'Codex finished.' },
+    });
+
+    await hook.unmount();
+    jest.mocked(listHosts).mockResolvedValue([]);
+    await turnOff();
   });
 });
 

@@ -9,6 +9,7 @@ import Svg, { Circle } from 'react-native-svg';
 
 import { type Attachment, bytesLabel } from '../lib/attach';
 import { font, size, t, tint } from '../lib/theme';
+import { surface } from './ui/surface';
 import type { MenuItem, MenuSection } from './FloatMenu';
 import { Camera, Clipboard, Close, FileGlyph, Info, Picture } from './icons';
 
@@ -208,13 +209,11 @@ const styles = StyleSheet.create({
   trayInner: { gap: 10, paddingTop: 12, paddingHorizontal: 12, paddingBottom: 2 },
   thumbBox: { width: 64, height: 64 },
   tileBox: { width: 116, height: 64 },
-  thumb: { width: 64, height: 64, borderRadius: size.radiusLg, borderWidth: 1, borderColor: t.border, backgroundColor: t.backdrop },
+  thumb: { width: 64, height: 64, borderRadius: size.radiusLg, ...surface.float, backgroundColor: t.backdrop },
   tile: {
     flex: 1,
     borderRadius: size.radiusLg,
-    borderWidth: 1,
-    borderColor: t.border,
-    backgroundColor: t.card,
+    ...surface.float,
     paddingVertical: 9,
     paddingHorizontal: 10,
     justifyContent: 'space-between',
@@ -237,7 +236,7 @@ const styles = StyleSheet.create({
   },
   photos: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'flex-end', gap: 4 },
   photoBox: { width: 96, height: 128 },
-  photo: { width: 96, height: 128, borderRadius: 14, borderWidth: 1, borderColor: t.border, backgroundColor: t.card },
+  photo: { width: 96, height: 128, borderRadius: 14, ...surface.float },
   veil: {
     ...StyleSheet.absoluteFill,
     borderRadius: 14,
@@ -267,7 +266,7 @@ const styles = StyleSheet.create({
     paddingLeft: 7,
     paddingRight: 9,
     borderRadius: 6,
-    backgroundColor: t.sunken,
+    ...surface.well,
   },
   imagesText: { fontFamily: font.prose, fontSize: size.detail, color: t.dim },
 });

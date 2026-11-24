@@ -661,15 +661,41 @@ pub fn reading_from_codex(
             .get("rate_limits")
             .is_some_and(serde_json::Value::is_object)
             .then_some(Billing::Plan),
-        usage: SessionUsage {
-            used: count(total, "input_tokens"),
-            size: info
-                .get("model_context_window")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or_default(),
-            cost: None,
-        },
+        usage: context_from_codex(info),
     })
+}
+
+/// What is in a Codex session's context window, from one `token_count`
+/// record's `info`.
+///
+/// **`last_token_usage.total_tokens`, the field Codex itself documents as "the
+/// latest active context size"** (`tokens_in_context_window` in its TUI's
+/// `token_usage.rs`), against `model_context_window`. Not
+/// `total_token_usage`, which Codex calls "the accumulated session total":
+/// every request re-sends the whole conversation, so a long session's total
+/// runs to millions against a window of a few hundred thousand, and reading
+/// it drew every long Codex tab as full.
+///
+/// Codex's own "% context left" also sets aside 12,000 tokens of prompt and
+/// tools from both sides before dividing. That is not repeated here, so the
+/// two can differ by a point or so; at the 80% a tab starts showing this,
+/// it is under one.
+///
+/// A record without that field is no reading: the window is reported unknown
+/// rather than worked out from other counts.
+fn context_from_codex(info: &serde_json::Value) -> SessionUsage {
+    let used = info
+        .get("last_token_usage")
+        .and_then(|last| last.get("total_tokens"))
+        .and_then(serde_json::Value::as_u64);
+    SessionUsage {
+        used: used.unwrap_or_default(),
+        size: used
+            .and(info.get("model_context_window"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or_default(),
+        cost: None,
+    }
 }
 
 // ---- history -----------------------------------------------------------------

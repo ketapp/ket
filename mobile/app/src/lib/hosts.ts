@@ -12,7 +12,7 @@ import { useFocusEffect } from 'expo-router';
 import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 'react';
 
 import { type AddressKind, WAY_PHRASE, addressKind, wayOf } from './address-kind';
-import { type ConnectionState, connection, type HostConnection, liveConnection } from './connection';
+import { type ConnectionState, connection, heldConnections, type HostConnection, liveConnection } from './connection';
 import { getHost, listHosts } from './store';
 import { adoptPalette } from './theme';
 
@@ -31,6 +31,18 @@ export function useHosts(refresh?: string): HostConnection[] | null {
   }, [refresh, read]);
 
   return conns;
+}
+
+/** `useHosts`, but with the connections this app already holds until the
+ * Keychain gives the list back: a screen opened from Worktrees has its
+ * desktops on its first draw, rather than drawing none for a moment. `null`
+ * only while none is held and the list has not been read. */
+export function useHeldHosts(): HostConnection[] | null {
+  const [held] = useState(() => {
+    const now = heldConnections();
+    return now.length > 0 ? now : null;
+  });
+  return useHosts() ?? held;
 }
 
 /** One paired desktop's connection; `null` until it has been found. A desktop
@@ -59,11 +71,21 @@ export function useHost(id: string): HostConnection | null {
 }
 
 /** What `conn` is now, drawn again whenever it changes; `null` without a
- * connection. */
-export function useHostState(conn: HostConnection): ConnectionState;
-export function useHostState(conn: HostConnection | null): ConnectionState | null;
-export function useHostState(conn: HostConnection | null): ConnectionState | null {
-  const subscribe = useCallback((changed: () => void) => (conn ? conn.onChange(changed) : () => {}), [conn]);
+ * connection.
+ *
+ * `shown` false holds it as it was until it is true again, then draws it as
+ * it is now. A screen others open on top of passes `useIsFocused()`: the
+ * stack keeps every screen under the top one mounted and running, and a
+ * chat, the worktree opened from its header and the chat opened again from
+ * there were each drawn again for every snapshot out of sight, so the app
+ * slowed with every screen the stack held. */
+export function useHostState(conn: HostConnection, shown?: boolean): ConnectionState;
+export function useHostState(conn: HostConnection | null, shown?: boolean): ConnectionState | null;
+export function useHostState(conn: HostConnection | null, shown = true): ConnectionState | null {
+  const subscribe = useCallback(
+    (changed: () => void) => (conn && shown ? conn.onChange(changed) : () => {}),
+    [conn, shown],
+  );
   return useSyncExternalStore(subscribe, () => conn?.state ?? null);
 }
 

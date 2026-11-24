@@ -14,6 +14,10 @@ import {
   BackgroundSession_State,
   type Answer_Choice,
   AnswerSchema,
+  AutomationEdit,
+  type AutomationSummary,
+  EditAutomationSchema,
+  GetAutomationsSchema,
   type Backlog,
   BacklogPriority,
   DialError,
@@ -173,6 +177,14 @@ const RESUME_AFTER_MS = 5_000;
  * handshake and snapshot. */
 const PROBE_MS = 1_500;
 
+/** How often snapshots are drawn while they come faster than the desktop
+ * makes them. A session kept through the lock screen is handed, at once,
+ * every snapshot the desktop sent while the app was suspended — the relay
+ * holds up to 8 MB of them — and drawing each in turn kept the app too busy
+ * to take a tap until the last was in. The desktop makes one a second at
+ * most, so a live one is never held back. */
+const SNAPSHOT_DRAW_MS = 250;
+
 /** New work this phone asked for that the desktop has not shown yet: the
  * desktop answers as soon as it has the request, and makes the worktree —
  * fetching, checking out, starting the agent — after, which can take a while.
@@ -314,6 +326,10 @@ export class HostConnection {
   /** Frames had from the desktop, over every session: a count going up is
    * a session that works — see `probe`. */
   private heard = 0;
+  /** When a snapshot was last drawn, and the draw waiting for the latest
+   * one, if any — see `drawSnapshot`. */
+  private snapshotDrawnAt = 0;
+  private snapshotDraw: ReturnType<typeof setTimeout> | null = null;
   /** The session is being ended on purpose, so its end is not an error. */
   private redialing = false;
   private readonly appState: NativeEventSubscription;
@@ -384,6 +400,21 @@ export class HostConnection {
 
   private notify(): void {
     for (const callback of this.changed) callback();
+  }
+
+  /** `notify` for a new snapshot, at most once every SNAPSHOT_DRAW_MS: in a
+   * run of them only the latest is drawn, and the ones before it, already
+   * out of date, never are. */
+  private drawSnapshot(): void {
+    if (this.snapshotDraw) return;
+    const wait = this.snapshotDrawnAt + SNAPSHOT_DRAW_MS - Date.now();
+    const draw = () => {
+      this.snapshotDraw = null;
+      this.snapshotDrawnAt = Date.now();
+      this.notify();
+    };
+    if (wait <= 0) draw();
+    else this.snapshotDraw = setTimeout(draw, wait);
   }
 
   /** What this connection is now — see `ConnectionState`. The same object
@@ -559,7 +590,7 @@ export class HostConnection {
           this.snapshot = this.withoutSettledQuestions(message.payload.value, true);
           this.snapshotAt = Date.now();
           this.settleStarting();
-          this.notify();
+          this.drawSnapshot();
           break;
         case 'error':
           if (message.payload.value.code === ErrorCode.UNSUPPORTED_VERSION) {
@@ -840,6 +871,27 @@ export class HostConnection {
       const project = this.snapshot?.projects.find((p) => p.id === work.project);
       return worktreeOf(work, project) === undefined;
     });
+  }
+
+  /** Every automation in the projects this phone sees, those to come
+   * soonest first (desktop 1.36). */
+  async automations(): Promise<AutomationSummary[]> {
+    const reply = await this.send({ case: 'getAutomations', value: create(GetAutomationsSchema, {}) });
+    if (reply.payload.case === 'automations') return reply.payload.value.automations;
+    throw new Error(
+      reply.payload.case === 'error' ? reply.payload.value.message : 'the desktop did not send its automations',
+    );
+  }
+
+  /** Pauses, resumes, starts now or deletes an automation (desktop 1.36).
+   * Resolves the list as it then is. */
+  async editAutomation(automationId: string, edit: AutomationEdit): Promise<AutomationSummary[]> {
+    const reply = await this.send(
+      { case: 'editAutomation', value: create(EditAutomationSchema, { automationId, edit }) },
+      true,
+    );
+    if (reply.payload.case === 'automations') return reply.payload.value.automations;
+    throw new Error(reply.payload.case === 'error' ? reply.payload.value.message : 'the desktop did not change it');
   }
 
   /** A project's backlog, open notes and done (desktop 1.9). */
@@ -1434,6 +1486,7 @@ export class HostConnection {
   close(): void {
     this.closed = true;
     this.appState.remove();
+    if (this.snapshotDraw) clearTimeout(this.snapshotDraw);
     this.clearLeases();
     this.remote?.close();
   }
@@ -1452,6 +1505,14 @@ export function dropConnection(id: string): void {
  * the Keychain gives the saved host back. */
 export function liveConnection(id: string): HostConnection | undefined {
   return connections.get(id);
+}
+
+/** Every connection this app holds now, oldest first. Only a saved desktop
+ * gets one, and a forgotten desktop's is dropped, so these are paired
+ * desktops — for a screen's first draw, before the Keychain gives the list
+ * back. */
+export function heldConnections(): HostConnection[] {
+  return [...connections.values()];
 }
 
 /** The one connection to a host, made on first use. */

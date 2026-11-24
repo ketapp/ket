@@ -100,8 +100,97 @@ const stored: Stored | null = (() => {
   }
 })();
 
-/** The colours, in the desktop's theme when it has said one. */
-export const t: Tokens = { ...DESK, ...stored, brand: DESK.brand, onBrand: DESK.onBrand };
+/** A colour in OKLab, where equal steps look equal. */
+type Lab = [number, number, number];
+
+function toLab(hex: string): Lab {
+  const n = parseInt(hex.slice(1), 16);
+  const [r, g, b] = [16, 8, 0].map((shift) => {
+    const c = ((n >> shift) & 255) / 255;
+    return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+  });
+  const l = Math.cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b);
+  const m = Math.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b);
+  const s = Math.cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b);
+  return [
+    0.2104542553 * l + 0.793617785 * m - 0.0040720468 * s,
+    1.9779984951 * l - 2.428592205 * m + 0.4505937099 * s,
+    0.0259040371 * l + 0.7827717662 * m - 0.808675766 * s,
+  ];
+}
+
+function fromLab([L, a, b]: Lab): string {
+  const l = (L + 0.3963377774 * a + 0.2158037573 * b) ** 3;
+  const m = (L - 0.1055613458 * a - 0.0638541728 * b) ** 3;
+  const s = (L - 0.0894841775 * a - 1.291485548 * b) ** 3;
+  const channels = [
+    4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
+    -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
+    -0.0041960863 * l - 0.7034186147 * m + 1.707614701 * s,
+  ];
+  return `#${channels
+    .map((x) => {
+      const c = Math.min(1, Math.max(0, x));
+      const v = c <= 0.0031308 ? 12.92 * c : 1.055 * c ** (1 / 2.4) - 0.055;
+      return Math.round(v * 255)
+        .toString(16)
+        .padStart(2, '0');
+    })
+    .join('')}`;
+}
+
+/** How far each grey stands from a theme's surface towards its text. */
+const STEP = { card: 0.027, raised: 0.121, active: 0.215, line: 0.289, quiet: 0.638, soft: 0.788 } as const;
+
+/**
+ * The phone's greys: one ramp, from a theme's surface to its text, in steps
+ * that look even. A theme says three colours — its backdrop, its surface and
+ * its text — and every grey the phone draws with is one of eight:
+ *
+ * - the ground (`backdrop`), as the theme has it;
+ * - the surface (`card`), a touch further from the ground than the theme's;
+ * - raised (`sunken`, `elevated`, `hover`): a well, a chip, a float;
+ * - active (`selection`): what is chosen, or under a finger;
+ * - a line (`border`), and the hairline round a card, which is the raised
+ *   grey (`rule`): an edge is one step above the fill it outlines;
+ * - three inks: quiet (`faint`), soft (`dim`) and the text.
+ *
+ * A theme's own sunken, elevated, hover, selection, border, rule and dim are
+ * not used: on Desk three of them were one grey to the eye, and no two
+ * themes spaced them alike. The quiet ink is moved towards the text until it
+ * reads at 4.5:1 on a raised fill, the darkest thing words stand on.
+ */
+export function ramp(backdrop: string, surface: string, text: string) {
+  const from = toLab(surface);
+  const to = toLab(text);
+  const at = (k: number) => fromLab([0, 1, 2].map((i) => from[i] + (to[i] - from[i]) * k) as Lab);
+  // Towards the text is away from the ground on a dark theme, where the
+  // card gains by it. On a light one the ground is that way too.
+  const lifts = (toLab(backdrop)[0] - from[0]) * (to[0] - from[0]) <= 0;
+  const raised = at(STEP.raised);
+  let quiet: number = STEP.quiet;
+  while (quiet < 0.9 && contrast(at(quiet), raised) < 4.5) quiet += 0.02;
+  return {
+    backdrop,
+    card: lifts ? at(STEP.card) : surface,
+    sunken: raised,
+    elevated: raised,
+    hover: raised,
+    selection: at(STEP.active),
+    border: at(STEP.line),
+    rule: raised,
+    faint: at(quiet),
+    dim: at(Math.min(0.95, Math.max(STEP.soft, quiet + 0.15))),
+    text,
+  };
+}
+
+/** The colours: the desktop's theme when it has said one, with its greys
+ * redrawn on the phone's ramp. */
+export const t: Tokens = (() => {
+  const said = { ...DESK, ...stored };
+  return { ...said, ...ramp(said.backdrop, said.card, said.text), brand: DESK.brand, onBrand: DESK.onBrand };
+})();
 
 /** Whether the desktop's theme is a light one: dark ink, a dark status bar. */
 export const light = stored?.light ?? false;
@@ -264,8 +353,8 @@ export const PROJECT_COLORS = [
 /** Agent brand colours, as ket's sidebar draws their marks. */
 export const AGENT_COLORS: Record<string, string> = {
   claude: '#d97757',
-  // OpenAI's grey, as the desktop draws it.
-  codex: '#6e6e80',
+  // OpenAI's mark is grey: the ramp's quiet ink, not a grey of its own.
+  codex: t.faint,
   // OpenCode's mark is one colour, and its brand allows no other.
   opencode: t.text,
   gemini: '#8e7bf5',
@@ -340,4 +429,17 @@ export function agentLabel(agent: string): string {
   };
   const name = agent.trim();
   return known[name.toLowerCase()] ?? name.charAt(0).toUpperCase() + name.slice(1);
+}
+
+/** A short recipient name for the phone chat's message field. */
+export function messagePlaceholder(agent: string | undefined): string {
+  const name = agent?.trim();
+  if (!name) return 'Message the agent';
+
+  const localModel = /^(?:opencode:ollama\/|ollama:)(.+)$/i.exec(name)?.[1];
+  const model = localModel?.split('/').pop()?.split(':', 1)[0];
+  if (model && /^qwen(?:\d|[-_.]|$)/i.test(model)) return 'Message qwen';
+  const label = model || agentLabel(name);
+  const characters = Array.from(label);
+  return `Message ${characters.length > 16 ? `${characters.slice(0, 15).join('')}…` : label}`;
 }

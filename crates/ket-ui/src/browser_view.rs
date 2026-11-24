@@ -299,6 +299,20 @@ impl NativeBrowser {
         self.shown.set(false);
     }
 
+    /// Tells a page made off screen that it is hidden. Chromium puts its
+    /// view in a slot that is hidden already, and AppKit only says
+    /// `viewDidHide` when a view's hidden state changes, so a page an agent
+    /// opened in the background believed it was on screen: it drew at the
+    /// display's rate and kept an on-screen page's graphics memory for as
+    /// long as nobody looked at it. Shown and hidden again in one turn,
+    /// parked off the window, it never draws.
+    pub(crate) fn settle_hidden(&self) {
+        if !self.shown.get() {
+            self.slot.setHidden(false);
+            self.slot.setHidden(true);
+        }
+    }
+
     /// Puts the slot where the pane laid it out, if that moved. Nothing while
     /// hidden: a parked slot stays parked until it is shown again.
     pub(crate) fn place(&self, bounds: Bounds<Pixels>) {

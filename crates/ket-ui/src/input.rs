@@ -70,9 +70,9 @@ use std::ops::Range;
 use gpui::{
     AnyElement, App, Bounds, ClipboardItem, Context, Div, Element, ElementId, ElementInputHandler,
     Entity, EntityInputHandler, FocusHandle, GlobalElementId, InspectorElementId, IntoElement,
-    Keystroke, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad,
-    Pixels, Point, ShapedLine, SharedString, Stateful, Style as GpuiStyle, TextRun, UTF16Selection,
-    UnderlineStyle, Window, div, fill, point, prelude::*, px, relative, size,
+    KeyDownEvent, Keystroke, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    PaintQuad, Pixels, Point, ShapedLine, SharedString, Stateful, Style as GpuiStyle, TextRun,
+    UTF16Selection, UnderlineStyle, Window, div, fill, point, prelude::*, px, relative, size,
 };
 use ket_core::buffer::Buffer;
 use ket_core::theme::Theme;
@@ -163,6 +163,19 @@ pub(crate) fn is_text(keystroke: &Keystroke) -> bool {
             .key_char
             .as_deref()
             .is_some_and(|c| !c.is_empty() && !c.chars().any(char::is_control))
+}
+
+/// Stops a key's propagation unless it is text.
+///
+/// A dialog that has taken a chord must keep it from the shell's bindings
+/// behind it. A character is different: the key event is not what puts it
+/// in the field — macOS's input method is, and that only runs once the
+/// event has propagated to the end. Stopping it there was how every field
+/// in a dialog went deaf at once.
+pub(crate) fn stop_unless_text(event: &KeyDownEvent, cx: &mut Context<Shell>) {
+    if !is_text(&event.keystroke) {
+        cx.stop_propagation();
+    }
 }
 
 /// A single-line text field: the text, the caret, and what to show when empty.

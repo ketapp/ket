@@ -89,8 +89,10 @@ describe('activity presentation', () => {
 
   test('accepts six-digit project colours and rejects malformed values', () => {
     expect(projectColor({ color: '#aBc123' } as ProjectSummary)).toBe('#aBc123');
-    expect(projectColor({ color: '#abc' } as ProjectSummary)).toBe(PROJECT_COLORS[0]);
-    expect(projectColor({ color: 'red' } as ProjectSummary)).toBe(PROJECT_COLORS[0]);
+    // No colour, or ket's default grey: the ramp's quiet ink.
+    expect(projectColor({ color: '#abc' } as ProjectSummary)).toBe(t.faint);
+    expect(projectColor({ color: 'red' } as ProjectSummary)).toBe(t.faint);
+    expect(projectColor({ color: PROJECT_COLORS[0].toUpperCase() } as ProjectSummary)).toBe(t.faint);
   });
 });
 

@@ -39,6 +39,7 @@ use crate::editor::NativeEdit;
 use crate::input::{Key, Style, TextInput, is_text, text_field};
 use crate::paint::{alpha, mix, paint};
 use crate::phone_work::{NewWork, WorkOrigin};
+use crate::starting::{Draft, Step};
 use crate::tabs::TabKind;
 use crate::terminal::{SessionLaunch, TerminalId};
 use crate::ui::CARD_PAD;
@@ -260,7 +261,7 @@ pub(crate) struct NewWorktree {
     pub(crate) name: Entity<TextInput>,
     /// Whether the branch was typed rather than taken from the prompt. Set
     /// when the field's text stops being what `synced_branch` last put
-    /// there, cleared when the field is emptied or its reset is clicked.
+    /// there, cleared when the field is emptied.
     pub(crate) branch_edited: bool,
     /// What the dialog last wrote into the branch field from the prompt, so
     /// a change made any other way — typed, pasted from the Edit menu — can
@@ -310,12 +311,12 @@ pub(crate) struct NewWorktree {
     pub(crate) agent_focus: FocusHandle,
     /// The shared dropdown while the agent field is expanded.
     pub(crate) agent_menu: Option<OpenMenu<usize>>,
+    /// Start ▾'s menu while it is open: start now, or Schedule….
+    pub(crate) start_menu: Option<OpenMenu<schedule::StartMode>>,
+    /// The Schedule section, once Schedule… is chosen — see [`schedule`].
+    pub(crate) schedule: Option<schedule::ScheduleForm>,
     /// Why the last attempt was refused, if it was.
     pub(crate) error: Option<SharedString>,
-    /// Whether a create is running off the window's thread, which is why
-    /// Enter and the button do nothing until it comes back. Not shown: a
-    /// create is usually over before a status line could be read.
-    pub(crate) busy: bool,
     /// The dialog's own keyboard focus, which is the prompt's: the composer
     /// has the keys whenever no field or picker has taken them.
     ///
@@ -543,11 +544,12 @@ impl Shell {
             effort_menu: None,
             agent_focus: cx.focus_handle(),
             agent_menu: None,
+            start_menu: None,
+            schedule: None,
             token_reduction: ket_core::worktree::default_token_reduction(),
             token_reduction_focus: cx.focus_handle(),
             token_reduction_menu: None,
             error: None,
-            busy: false,
             focus: cx.focus_handle(),
             wants_focus: true,
         });
@@ -627,6 +629,7 @@ impl Shell {
         dialog.project = id;
         dialog.project_name = name;
         dialog.error = None;
+        schedule::retarget(dialog);
     }
 
     /// Switches the dialog's agent, and the Model and Effort pickers to what
@@ -651,6 +654,7 @@ impl Shell {
 
     /// Fills the branch from the prompt, unless it has been typed in.
     fn sync_branch_from_prompt(&mut self, cx: &mut Context<Self>) {
+        self.sync_schedule_name(cx);
         let Some(dialog) = self.new_worktree.as_ref() else {
             return;
         };
@@ -699,6 +703,7 @@ impl Shell {
         dialog.model_menu = None;
         dialog.effort_menu = None;
         dialog.token_reduction_menu = None;
+        schedule::close_menus(dialog);
     }
 
     /// Opens or closes the project dropdown.
@@ -912,17 +917,20 @@ impl Shell {
     /// made as a phone's work is, and the agent started on the prompt with
     /// the model and effort picked here. Without one: a worktree and a shell.
     ///
-    /// Either way the dialog closes once the branch is known to be free, and
-    /// the worktree's row is shown at once while it is made — the fetch,
-    /// which is a network round trip, the checkout and the agent — with
-    /// what went wrong, if anything did. See `crate::starting`.
+    /// The dialog closes before any git work. The sidebar row shows the
+    /// branch check, fetch, checkout and agent start, including failures.
     pub(crate) fn create_worktree(&mut self, cx: &mut Context<Self>) {
+        if self
+            .new_worktree
+            .as_ref()
+            .is_some_and(|d| d.schedule.is_some())
+        {
+            self.create_automation(cx);
+            return;
+        }
         let Some(dialog) = self.new_worktree.as_ref() else {
             return;
         };
-        if dialog.busy {
-            return;
-        }
         let prompt = self.composer_text(PROMPT_EDITOR).trim().to_owned();
         let typed = dialog.name.read(cx).text();
         let edited = dialog.branch_edited;
@@ -939,96 +947,108 @@ impl Shell {
             .get(dialog.agent)
             .filter(|name| !name.is_empty())
             .cloned();
-        let token_reduction = dialog.token_reduction;
-        let economy_level_id = ket_core::worktree::token_reduction(token_reduction)
-            .id
-            .clone();
-
         if !prompt.is_empty() && agent.is_none() {
             self.refuse_new_worktree("pick an agent to give the prompt to", cx);
             return;
         }
-        let model = dialog.model.clone();
-        let effort = dialog.effort.clone();
-        if let Some(dialog) = self.new_worktree.as_mut() {
-            dialog.error = None;
-            dialog.busy = true;
+        let branch = if !edited && self.start_step(&project, &branch).is_some() {
+            crate::phone_work::branch_for(&prompt, &branch)
+        } else {
+            branch
+        };
+        if self.start_step(&project, &branch).is_some() {
+            self.refuse_new_worktree(format!("a worktree on {branch} is already starting"), cx);
+            return;
         }
-        // Only the quick part waits on the dialog: whether the branch is
-        // taken, which a typed name is refused for there. The rest — the
-        // fetch, the checkout, the agent — is shown as it happens, in the
-        // sidebar; see `crate::starting`.
-        let root = project.clone();
+        let draft = Draft {
+            project,
+            prompt,
+            branch,
+            branch_edited: edited,
+            agent,
+            model: dialog.model.clone(),
+            effort: dialog.effort.clone(),
+            economy: dialog.token_reduction,
+        };
+        self.close_new_worktree();
+        let step = self.begin_start(draft.clone());
+        // The pending row owns the submission. Its result must never edit
+        // or close a New worktree dialog opened while Git was running.
+        let asked = draft.clone();
         let named = cx.background_executor().spawn(async move {
             let workspace = Workspace::open()?;
             let exists = workspace
                 .projects()?
                 .into_iter()
-                .find(|p| p.id == root)
-                .is_some_and(|p| ket_core::git::Git::new(&p.root).branch_exists(&branch));
-            branch_when_taken(branch, &prompt, exists, edited).map(|branch| (branch, prompt))
+                .find(|p| p.id == asked.project)
+                .is_some_and(|p| ket_core::git::Git::new(&p.root).branch_exists(&asked.branch));
+            branch_when_taken(asked.branch, &asked.prompt, exists, asked.branch_edited)
         });
         cx.spawn(async move |shell: gpui::WeakEntity<Shell>, cx| {
             let named = named.await;
             let _ = shell.update(cx, |shell, cx| {
-                if let Some(dialog) = shell.new_worktree.as_mut() {
-                    dialog.busy = false;
-                }
-                let (branch, prompt) = match named {
-                    Ok(named) => named,
-                    Err(e) => {
-                        shell.refuse_new_worktree(e.to_string(), cx);
-                        cx.notify();
-                        return;
-                    }
-                };
-                shell.close_new_worktree();
-                let step = shell.begin_start(crate::starting::Draft {
-                    project: project.clone(),
-                    prompt: prompt.clone(),
-                    branch: branch.clone(),
-                    branch_edited: edited,
-                    agent: agent.clone(),
-                    model: model.clone(),
-                    effort: effort.clone(),
-                    economy: token_reduction,
-                });
-                if prompt.is_empty() {
-                    // The model and effort picked are for the first session,
-                    // which the landing opens — carried there rather than lost.
-                    let launch = (model.is_some() || effort.is_some())
-                        .then_some(SessionLaunch { model, effort });
-                    shell.create_bare_worktree(
-                        project,
-                        branch,
-                        agent,
-                        economy_level_id,
-                        step,
-                        launch,
-                        cx,
-                    );
-                } else {
-                    shell.start_work(
-                        NewWork {
-                            project,
-                            branch,
-                            prompt,
-                            attachments: Vec::new(),
-                            agent,
-                            base: None,
-                            economy: Some(token_reduction),
-                            model,
-                            effort,
-                            origin: WorkOrigin::Dialog,
-                        },
-                        cx,
-                    );
-                }
+                shell.start_named_worktree(draft, step, named, cx);
                 cx.notify();
             });
         })
         .detach();
         cx.notify();
+    }
+
+    fn start_named_worktree(
+        &mut self,
+        draft: Draft,
+        step: Step,
+        named: Result<String, KetError>,
+        cx: &mut Context<Self>,
+    ) {
+        let named = named.and_then(|branch| {
+            self.rename_start(&draft.project, &draft.branch, &branch)?;
+            Ok(branch)
+        });
+        let branch = match named {
+            Ok(branch) => branch,
+            Err(error) => {
+                self.start_failed(&draft.project, &draft.branch, error.to_string());
+                self.toast(
+                    crate::ui::toast::Tone::Error,
+                    format!("Couldn't start the worktree {}: {error}", draft.branch),
+                    cx,
+                );
+                return;
+            }
+        };
+        let Draft {
+            project,
+            prompt,
+            agent,
+            model,
+            effort,
+            economy,
+            ..
+        } = draft;
+        if prompt.is_empty() {
+            let level = ket_core::worktree::token_reduction(economy).id.clone();
+            let launch =
+                (model.is_some() || effort.is_some()).then_some(SessionLaunch { model, effort });
+            self.create_bare_worktree(project, branch, agent, level, step, launch, cx);
+        } else {
+            self.start_work(
+                NewWork {
+                    project,
+                    branch,
+                    prompt,
+                    agent,
+                    model,
+                    effort,
+                    attachments: Vec::new(),
+                    base: None,
+                    economy: Some(economy),
+                    origin: WorkOrigin::Dialog,
+                },
+                cx,
+            );
+        }
     }
 
     /// Makes a worktree with no prompt — a shell in it, or its agent's
@@ -1101,7 +1121,9 @@ impl Shell {
                     tracing::info!(worktree = %created.id, "{notice}");
                 }
                 self.start_settled(project, branch);
-                self.reload(cx);
+                if !self.add_row(&created.id, cx) {
+                    self.reload(cx);
+                }
                 // Otherwise the sidebar shows a worktree with no size at all
                 // until the next launch's sweep or someone opens the storage
                 // card — leaving the project's total looking like it counted
@@ -1248,8 +1270,11 @@ impl Shell {
         self.new_worktree.as_ref()?;
         // Whichever menu is open is the topmost thing on screen, so it
         // answers before any field does.
-        if self.new_worktree_menu_key(event) {
+        if self.schedule_menu_key(event, cx) || self.new_worktree_menu_key(event) {
             return Some(Key::Taken);
+        }
+        if let Some(taken) = self.schedule_key(event, window, cx) {
+            return Some(taken);
         }
         let dialog = self.new_worktree.as_ref()?;
         let on_name = dialog.name.read(cx).is_focused(window);
@@ -1262,7 +1287,12 @@ impl Shell {
             return Some(Key::Taken);
         }
         if key.key == "enter" && command {
-            self.create_worktree(cx);
+            // ⌥⌘⏎ is Start ▾ → Schedule…; ⌘⏎ is whichever the button says.
+            if key.modifiers.alt {
+                self.open_schedule(cx);
+            } else {
+                self.create_worktree(cx);
+            }
             return Some(Key::Taken);
         }
 
@@ -1391,10 +1421,33 @@ impl Shell {
                 &dialog.project_focus,
             ]
             .iter()
-            .any(|handle| handle.is_focused(window));
+            .any(|handle| handle.is_focused(window))
+            && !schedule::focused(dialog, window, cx);
         self.set_composer_caret(PROMPT_EDITOR, writing);
         let prompt_text = self.composer_text(PROMPT_EDITOR);
         let editor = self.editor_pane(PROMPT_EDITOR, None, window, cx);
+        // Schedule… swaps the branch for a name, adds its section, and
+        // makes the button Schedule — built first, while `self` is free.
+        let schedule_name = self.schedule_name_row(window, cx);
+        let schedule_section = self.schedule_section(window, cx);
+        // Start with a prompt, Create without one. Disabled until there is
+        // something to name the branch. The dialog still explains *why* if
+        // the chord is pressed anyway — see `create_worktree` — so this
+        // removes a dead click, not the message.
+        let start = {
+            let dialog = self.new_worktree.as_ref()?;
+            let empty = prompt_text.trim().is_empty();
+            let typed = dialog.name.read(cx).text();
+            let (label, enabled) = if dialog.schedule.is_some() {
+                ("Schedule", !empty)
+            } else {
+                (
+                    if empty { "Create worktree" } else { "Start" },
+                    !empty || !typed.trim().is_empty(),
+                )
+            };
+            self.start_split(label, enabled, cx)
+        };
         let dialog = self.new_worktree.as_ref()?;
         let t = &self.theme;
         let blink = self.caret.visible;
@@ -1420,9 +1473,24 @@ impl Shell {
             .map(|c| c.to_uppercase().to_string())
             .unwrap_or_default();
         let title = if dialog.choose_project {
-            header("new-worktree-close", "New worktree")
+            header(
+                "new-worktree-close",
+                if schedule_name.is_some() {
+                    "New automation"
+                } else {
+                    "New worktree"
+                },
+            )
         } else {
-            header("new-worktree-close", "New worktree in").after(
+            header(
+                "new-worktree-close",
+                if schedule_name.is_some() {
+                    "New automation in"
+                } else {
+                    "New worktree in"
+                },
+            )
+            .after(
                 div()
                     .flex()
                     .items_center()
@@ -1474,7 +1542,6 @@ impl Shell {
 
         // The prompt. Empty means a worktree and a shell, and the well says
         // so where the words would go.
-        let empty = prompt_text.trim().is_empty();
         let mut prompt = textarea("new-worktree-prompt", editor, PROMPT_HEIGHT)
             .inset(FORM_INSET)
             .active(writing);
@@ -1494,45 +1561,11 @@ impl Shell {
                 cx.notify();
             }));
 
-        // The branch: from the prompt, said so after it, until it is typed
-        // in — then the prompt's name is offered back as a reset.
-        let stem = crate::phone_work::branch_stem(&prompt_text);
-        let typed = dialog.name.read(cx).text();
-        let origin: Option<AnyElement> = if dialog.branch_edited {
-            (!stem.is_empty() && stem != typed).then(|| {
-                button("new-worktree-branch-reset", stem.clone())
-                    .link()
-                    .small()
-                    .leading(Icon::RotateCcw)
-                    .render(t)
-                    .font_family(chrome.clone())
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        if let Some(dialog) = this.new_worktree.as_mut() {
-                            dialog.branch_edited = false;
-                            dialog.error = None;
-                        }
-                        this.sync_branch_from_prompt(cx);
-                        cx.notify();
-                    }))
-                    .into_any_element()
-            })
-        } else {
-            (!stem.is_empty() && stem == typed).then(|| {
-                caption("from the prompt", t)
-                    .font_family(chrome.clone())
-                    .whitespace_nowrap()
-                    .into_any_element()
-            })
-        };
-        let mut style = Style::new(t, blink).leading(Icon::GitBranch);
-        if let Some(origin) = origin {
-            style = style.trailing(origin);
-        }
         let name_row = text_field(
             &dialog.name,
             "new-worktree-name",
             dialog.error.is_some(),
-            style,
+            Style::new(t, blink).leading(Icon::GitBranch),
             window,
             cx,
         )
@@ -1788,24 +1821,6 @@ impl Shell {
                 cx.notify();
             }));
 
-        // Start with a prompt, Create without one. Disabled until there is
-        // something to name the branch. The dialog still explains *why* if
-        // the chord is pressed anyway — see `create_worktree` — so this
-        // removes a dead click, not the message.
-        let can_submit = !dialog.busy && (!empty || !typed.trim().is_empty());
-        let create = button(
-            "new-worktree-create",
-            if empty { "Create worktree" } else { "Start" },
-        )
-        .primary()
-        .enabled(can_submit)
-        .hint("\u{2318}\u{23ce}")
-        .render(t)
-        .on_click(cx.listener(|this, _, _, cx| {
-            this.create_worktree(cx);
-            cx.notify();
-        }));
-
         let row = |title: &'static str, control: AnyElement| {
             div()
                 .flex()
@@ -1861,8 +1876,9 @@ impl Shell {
                         project_select.map(|select| row("Project", select.into_any_element())),
                     )
                     .child(row("Prompt", prompt.into_any_element()))
-                    .child(row("Branch", name_row.into_any_element()))
+                    .child(schedule_name.unwrap_or_else(|| name_row.into_any_element()))
                     .child(choices)
+                    .children(schedule_section)
                     .children(dialog.error.clone().map(|why| error(why, t)))
                     .child(
                         footer()
@@ -1879,7 +1895,7 @@ impl Shell {
                                     .children(saving),
                             )
                             .child(cancel)
-                            .child(create),
+                            .child(start),
                     ),
             )
             .into_any_element(),
@@ -1899,111 +1915,6 @@ fn dialog_focused(
         .is_some_and(|dialog| handle(dialog).is_focused(window))
 }
 
+mod schedule;
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn choices(ids: &[(&str, &str)]) -> Vec<Choice> {
-        ids.iter()
-            .map(|(id, label)| Choice {
-                id: (*id).to_owned(),
-                label: (*label).to_owned(),
-            })
-            .collect()
-    }
-
-    #[test]
-    fn the_branch_comes_from_the_prompt_until_it_is_typed() {
-        assert_eq!(
-            submitted_branch("Fix the login redirect after sign-in", "", false),
-            Ok("fix-the-login-redirect-after".to_owned())
-        );
-        // Typed over: the typed name, made fit for git, prompt or no prompt.
-        assert_eq!(
-            submitted_branch("Fix the login redirect", "login redirect", true),
-            Ok("login-redirect".to_owned())
-        );
-        assert_eq!(
-            submitted_branch("", "spike sqlite", true),
-            Ok("spike-sqlite".to_owned())
-        );
-    }
-
-    #[test]
-    fn a_submit_with_nothing_to_name_the_branch_says_why() {
-        assert_eq!(
-            submitted_branch("", "", false),
-            Err("a worktree needs a prompt or a branch name")
-        );
-        assert_eq!(
-            submitted_branch("...", "", false),
-            Err("the prompt needs a word or two to name the branch from")
-        );
-        // Typed as nothing git would take: the same as nothing typed.
-        assert_eq!(
-            submitted_branch("", "?*~", true),
-            Err("a worktree needs a prompt or a branch name")
-        );
-    }
-
-    #[test]
-    fn a_taken_name_from_the_prompt_gets_a_tag_and_a_typed_one_is_refused() {
-        let free = branch_when_taken("fix-login".to_owned(), "fix login", false, false).unwrap();
-        assert_eq!(free, "fix-login");
-
-        let tagged = branch_when_taken("fix-login".to_owned(), "fix login", true, false).unwrap();
-        assert!(tagged.starts_with("fix-login-"), "{tagged}");
-        assert_eq!(tagged.len(), "fix-login-".len() + 4);
-
-        let refused = branch_when_taken("fix-login".to_owned(), "fix login", true, true);
-        assert!(matches!(refused, Err(KetError::Conflict(ref why)) if why.contains("fix-login")));
-    }
-
-    #[test]
-    fn a_choice_menu_leads_with_the_default_and_ticks_the_current() {
-        let models = choices(&[("opus", "Opus"), ("sonnet", "Sonnet")]);
-        assert_eq!(choice_index(&models, None), 0);
-        assert_eq!(choice_index(&models, Some("sonnet")), 2);
-        assert_eq!(choice_index(&models, Some("gone")), 0);
-
-        let rows = choice_items(&models, Some("opus"), "What Claude Code starts with");
-        assert_eq!(rows.len(), 3);
-        let checked: Vec<usize> = rows
-            .iter()
-            .enumerate()
-            .filter_map(|(at, row)| match row {
-                MenuEntry::Item(item) if item.checked => Some(at),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(checked, vec![1]);
-    }
-
-    #[test]
-    fn a_trigger_reads_default_a_pick_or_nothing() {
-        let models = choices(&[("opus", "Opus")]);
-        assert_eq!(choice_label(&models, None), SharedString::from("Default"));
-        assert_eq!(
-            choice_label(&models, Some("opus")),
-            SharedString::from("Opus")
-        );
-        assert_eq!(
-            choice_label(&models, Some("gone")),
-            SharedString::from("Default")
-        );
-        assert_eq!(choice_label(&[], Some("opus")), SharedString::default());
-    }
-
-    #[test]
-    fn only_a_switchable_agent_offers_models_and_efforts() {
-        let (models, efforts) = agent_choices("");
-        assert!(models.is_empty() && efforts.is_empty());
-
-        let (models, efforts) = agent_choices("claude");
-        assert!(models.iter().any(|choice| choice.id == "fable"));
-        assert_eq!(efforts.len(), 5);
-
-        let (models, efforts) = agent_choices("no-such-agent");
-        assert!(models.is_empty() && efforts.is_empty());
-    }
-}
+mod tests;

@@ -7,10 +7,10 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use gpui::{
-    AnyElement, App, Axis, Bounds, BoxShadow, ClipboardItem, Context, CursorStyle, DragMoveEvent,
-    Entity, FontWeight, Image, ImageFormat, KeyDownEvent, MouseButton, MouseDownEvent, Pixels,
-    Point, Render, Rgba, SharedString, Window, WindowControlArea, deferred, div, point, prelude::*,
-    px, relative, size,
+    AnyElement, App, Axis, BoxShadow, ClipboardItem, Context, CursorStyle, DragMoveEvent, Entity,
+    FontWeight, Image, ImageFormat, KeyDownEvent, MouseButton, MouseDownEvent, Pixels, Point,
+    Render, Rgba, SharedString, Window, WindowControlArea, deferred, div, point, prelude::*, px,
+    relative,
 };
 use ket_core::activity::{Activity, Signal};
 use ket_core::config::AgentSpec;
@@ -35,6 +35,9 @@ use crate::ui::dialog::{body, card, centered, footer, header};
 use crate::ui::filetype::{file_mark, icon_mark};
 use crate::ui::icon::Icon;
 use crate::ui::menu::{MenuEntry, MenuItem, MenuKey, OpenMenu};
+
+mod landing;
+use landing::{body_area, body_drop, drop_wash, tab_rule};
 
 /// What picking an item in a pane's `+` menu does.
 ///
@@ -138,13 +141,6 @@ pub(crate) struct TabSnippetMenu {
     held: bool,
 }
 
-/// How far the submenu overlaps the panel it hangs off.
-///
-/// A submenu that starts exactly at its parent's edge reads as a second window
-/// that happens to be adjacent; a few pixels of overlap reads as one menu
-/// growing a branch, which is what it is.
-const SUBMENU_OVERLAP: Pixels = px(6.0);
-
 /// The submenu's width. Narrower than its parent: these are app names, and a
 /// panel as wide as the menu it hangs off would look like a second menu rather
 /// than a branch of one.
@@ -186,11 +182,6 @@ fn editor_icons() -> &'static [Option<Arc<Image>>] {
 pub(crate) struct TabContextMenu {
     menu: OpenMenu<TabContextAction>,
     target: TabContextTarget,
-    /// Where the panel was put, so a submenu can be hung off one of its rows.
-    /// The tab it belongs to is behind the open menu by then, and there is
-    /// nothing else left on screen to anchor to — the same reason
-    /// `WorktreeTarget` keeps one.
-    at: Point<Pixels>,
 }
 
 /// A tab title being edited in the strip.
@@ -234,7 +225,7 @@ const RENAME_W: Pixels = px(150.0);
 /// it read as the loudest thing on screen rather than as the quiet index it is.
 const TAB_LABEL: Pixels = px(11.0);
 
-/// The tab menu's own width, which is also how far right its submenu starts.
+/// The tab context menu's width.
 const TAB_MENU_W: Pixels = px(280.0);
 
 fn tab_context_origin(target: TabContextTarget) -> SharedString {
@@ -348,7 +339,6 @@ fn tab_context_menu(
     TabContextMenu {
         menu: OpenMenu::new(tab_context_origin(target), None, TAB_MENU_W, entries).at(at),
         target,
-        at,
     }
 }
 
@@ -895,39 +885,14 @@ impl Shell {
         .detach();
     }
 
-    /// Where a branch hung off `action`'s row starts: beside the row, level
-    /// with it.
-    ///
-    /// Measured from where the parent was *asked* to go, which is where it is
-    /// unless it was opened close enough to an edge to be snapped back inside
-    /// the window; the branch snaps too, so the worst that costs is a panel
-    /// sitting a little off its row rather than one off-screen.
-    fn submenu_anchor(parent: &TabContextMenu, action: TabContextAction) -> Point<Pixels> {
-        let row = parent
-            .menu
-            .sections()
-            .iter()
-            .flatten()
-            .position(|item| item.action == action)
-            .unwrap_or(0);
-        Point {
-            x: parent.at.x + TAB_MENU_W - SUBMENU_OVERLAP,
-            y: parent.at.y + parent.menu.row_top(row),
-        }
-    }
-
     /// Hangs the **Send snippet** submenu off its own row.
     fn open_tab_snippet_menu(&mut self, target: TabContextTarget, cx: &mut Context<Self>) {
         let Some(terminal) = self.agent_terminal_at(target) else {
             return;
         };
         let snippets = self.load_snippets(cx);
-        let Some(parent) = self.tab_context_menu.as_ref() else {
-            return;
-        };
-        let anchor = Self::submenu_anchor(parent, TabContextAction::SendSnippet);
         let mut open = SnippetMenu::new(tab_snippets_origin(target), snippets, false, None);
-        open.menu = open.menu.at(anchor);
+        open.menu = open.menu.uncapped();
         self.tab_snippets = Some(TabSnippetMenu {
             open,
             terminal,
@@ -973,9 +938,9 @@ impl Shell {
     }
 
     /// Renders the **Send snippet** submenu.
-    pub(crate) fn tab_snippets_view(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn tab_snippets_panel(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let open = self.tab_snippets.as_ref()?;
-        Some(open.open.menu.view_with_hover(
+        Some(open.open.menu.panel_with_hover(
             &self.theme,
             cx,
             |shell, pick, cx| shell.run_tab_snippet(*pick, cx),
@@ -998,9 +963,6 @@ impl Shell {
     /// in a different place each time reads as a new menu rather than a branch
     /// of the one already open.
     fn open_tab_open_in_menu(&mut self, target: TabContextTarget) {
-        let Some(parent) = self.tab_context_menu.as_ref() else {
-            return;
-        };
         let Some((path, at)) = self.open_in_target(target) else {
             return;
         };
@@ -1035,10 +997,8 @@ impl Shell {
             ));
         }
 
-        let anchor = Self::submenu_anchor(parent, TabContextAction::OpenIn);
-
         self.tab_open_in = Some(TabOpenInMenu {
-            menu: OpenMenu::new(tab_open_in_origin(target), None, SUBMENU_W, entries).at(anchor),
+            menu: OpenMenu::new(tab_open_in_origin(target), None, SUBMENU_W, entries).uncapped(),
             path,
             at,
             // Opened from its own row, by pointer or by key: nothing has moved
@@ -1109,9 +1069,9 @@ impl Shell {
     }
 
     /// Renders the **Open in** submenu.
-    pub(crate) fn tab_open_in_view(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn tab_open_in_panel(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let open = self.tab_open_in.as_ref()?;
-        Some(open.menu.view_with_hover(
+        Some(open.menu.panel_with_hover(
             &self.theme,
             cx,
             |shell, app, _| shell.run_open_in(*app),
@@ -1309,7 +1269,14 @@ impl Shell {
     /// Renders the tab context menu.
     pub(crate) fn tab_context_menu_view(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let open = self.tab_context_menu.as_ref()?;
-        Some(open.menu.view_with_hover(
+        let submenu = self
+            .tab_open_in_panel(cx)
+            .map(|panel| (TabContextAction::OpenIn, panel))
+            .or_else(|| {
+                self.tab_snippets_panel(cx)
+                    .map(|panel| (TabContextAction::SendSnippet, panel))
+            });
+        Some(open.menu.view_with_submenu(
             &self.theme,
             cx,
             |shell, action, cx| shell.run_tab_context_action(*action, cx),
@@ -1318,6 +1285,7 @@ impl Shell {
                 cx.notify();
             },
             |shell, action, cx| shell.hover_tab_context_row(*action, cx),
+            submenu,
         ))
     }
 
@@ -1766,15 +1734,6 @@ impl Render for PaneResize {
     }
 }
 
-/// How much of a pane's width or height each of its four edge bands takes.
-const EDGE_FRACTION: f32 = 0.22;
-
-/// The narrowest an edge band gets, so a small pane can still be aimed at.
-const EDGE_MIN: Pixels = px(48.0);
-
-/// The widest, so a large pane keeps a middle worth aiming at.
-const EDGE_MAX: Pixels = px(220.0);
-
 /// A tab picked up to be dropped somewhere else in the pane tree.
 ///
 /// Carries where the tab was rather than the tab itself. A strip can change
@@ -1872,145 +1831,6 @@ impl Render for TabDrag {
                 .child(self.title.clone()),
         )
     }
-}
-
-/// A pane's content area: everything it occupies but its tab strip.
-///
-/// The strip is a drop target in its own right — it names a gap between two
-/// tabs — so the body's edge bands are measured against what is left once it
-/// is taken off the top, and the wash is drawn there too. Otherwise the top
-/// band would sit under the strip, and the pointer would be offered a division
-/// while it hovered a gap.
-fn body_area(pane: Bounds<Pixels>) -> Bounds<Pixels> {
-    let strip = crate::tree::TOP_STRIP.min(pane.size.height);
-    Bounds {
-        origin: point(pane.origin.x, pane.origin.y + strip),
-        size: size(pane.size.width, pane.size.height - strip),
-    }
-}
-
-/// Which drop a pointer inside a pane's body is asking for.
-///
-/// Every edge offers its distance as a fraction of its own band, and the
-/// smallest fraction under one wins. Comparing raw distances instead would
-/// make a wide, short pane resolve both of its corners to a horizontal
-/// divider, because in such a pane the pointer is nearer the top or bottom
-/// edge almost everywhere.
-fn body_drop(pane: PaneId, bounds: Bounds<Pixels>, at: Point<Pixels>) -> TabDrop {
-    let band = |extent: Pixels| {
-        let wanted = extent * EDGE_FRACTION;
-        if wanted < EDGE_MIN {
-            EDGE_MIN
-        } else if wanted > EDGE_MAX {
-            EDGE_MAX
-        } else {
-            wanted
-        }
-    };
-    let across = band(bounds.size.width);
-    let down = band(bounds.size.height);
-
-    let edges = [
-        (at.x - bounds.left(), across, Axis::Horizontal, true),
-        (bounds.right() - at.x, across, Axis::Horizontal, false),
-        (at.y - bounds.top(), down, Axis::Vertical, true),
-        (bounds.bottom() - at.y, down, Axis::Vertical, false),
-    ];
-
-    // What this pane has left to give along each axis. A pane divided below
-    // `MIN_PANE_SIZE` has no reliably clickable tab strip left, and a pane
-    // that cannot be clicked is one that cannot be closed — so an edge with
-    // no room behind it stops offering a division and offers the pane itself
-    // instead. Height counts the strip the body does not include, because the
-    // minimum is about a whole pane rather than about its content area.
-    let divisible = |extent: Pixels| extent >= MIN_PANE_SIZE * 2.0;
-    let across_fits = divisible(bounds.size.width);
-    // `bounds` is the body, so the strip both panes would get goes back on.
-    let down_fits = divisible(bounds.size.height + crate::tree::TOP_STRIP);
-
-    let mut nearest: Option<(f32, Axis, bool)> = None;
-    for (distance, band, axis, before) in edges {
-        let fits = match axis {
-            Axis::Horizontal => across_fits,
-            Axis::Vertical => down_fits,
-        };
-        if !fits || band <= px(0.0) || distance >= band {
-            continue;
-        }
-        let share = distance / band;
-        if nearest.is_none_or(|(smallest, _, _)| share < smallest) {
-            nearest = Some((share, axis, before));
-        }
-    }
-
-    match nearest {
-        Some((_, axis, before)) => TabDrop::Split { pane, axis, before },
-        None => TabDrop::Into { pane },
-    }
-}
-
-/// The wash showing what a dragged tab would take if it landed here.
-///
-/// `accent` rather than `selection`, so the preview does not read as the
-/// focused-pane border it is drawn inside. A split shows the half it would
-/// take rather than the share it would really get: in the flattening case that
-/// share depends on how many children the *parent* has, which a pane cannot
-/// see from inside itself, and half is what every editor with this gesture
-/// draws.
-fn drop_wash(drop: TabDrop, t: &Theme) -> AnyElement {
-    // Inset from the top by the strip's height, because the wash is a child of
-    // the whole pane and belongs only over its body — see [`body_area`].
-    let wash = div()
-        .absolute()
-        .top(crate::tree::TOP_STRIP)
-        .left_0()
-        .right_0()
-        .bottom_0()
-        .bg(alpha(paint(t.accent), 0.16))
-        .border_1()
-        .border_color(paint(t.accent));
-
-    match drop {
-        TabDrop::Split {
-            axis: Axis::Horizontal,
-            before,
-            ..
-        } => wash
-            .when(before, |el| el.right(relative(0.5)))
-            .when(!before, |el| el.left(relative(0.5))),
-        TabDrop::Split {
-            axis: Axis::Vertical,
-            before,
-            ..
-        } => wash
-            // Half of the *body*, so the inset above is doubled back out of the
-            // half being taken — otherwise the top half would be short by a
-            // strip and the bottom half long by one.
-            .when(before, |el| {
-                el.bottom(relative(0.5)).mb(crate::tree::TOP_STRIP / 2.0)
-            })
-            .when(!before, |el| {
-                el.top(relative(0.5)).mt(crate::tree::TOP_STRIP / 2.0)
-            }),
-        TabDrop::Into { .. } | TabDrop::Strip { .. } => wash,
-    }
-    .into_any_element()
-}
-
-/// The rule drawn in the gap along a strip that a dragged tab would drop into.
-///
-/// Absolutely positioned, and that is the point: a rule taking part in the
-/// layout would push every label along the strip aside as the pointer crossed
-/// it, so the gap would move away from the pointer that was aiming at it.
-fn tab_rule(t: &Theme, trailing: bool) -> impl IntoElement {
-    div()
-        .absolute()
-        .top_0()
-        .bottom_0()
-        .w(px(2.0))
-        .bg(paint(t.accent))
-        .when(trailing, |el| el.right(px(-1.0)))
-        .when(!trailing, |el| el.left(px(-1.0)))
 }
 
 /// One node in a worktree's pane layout.
@@ -3952,6 +3772,16 @@ impl Shell {
                             })
                             .child(mark)
                             .child(label)
+                            // See `crate::tab_context`; not beside a rename field.
+                            .when(!renaming, |el| {
+                                el.children(self.tab_context_mark(
+                                    worktree.as_ref(),
+                                    &tab.kind,
+                                    now,
+                                    t,
+                                    cx,
+                                ))
+                            })
                             .when((closable || tab.pinned) && !renaming, |el| {
                                 // The unsaved dot and the close mark share one 16px
                                 // cell, and the pointer swaps them. Two cells would

@@ -21,6 +21,7 @@ import { statusLine, useHost, useHostState } from '../../lib/hosts';
 import { stopPushing } from '../../lib/push';
 import { forgetHost } from '../../lib/store';
 import { font, size, t } from '../../lib/theme';
+import { surface } from '../../components/ui/surface';
 
 export default function Devices() {
   const { host: id } = useLocalSearchParams<{ host: string }>();
@@ -343,7 +344,7 @@ const styles = StyleSheet.create({
     width: 40,
     height: 40,
     borderRadius: size.radiusLg,
-    backgroundColor: t.sunken,
+    ...surface.well,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -352,7 +353,7 @@ const styles = StyleSheet.create({
   statusTitle: { fontFamily: font.proseSemibold, fontSize: size.title, lineHeight: 18, color: t.text },
   statusDetail: { fontFamily: font.prose, fontSize: size.detail, lineHeight: 17, color: t.dim },
   facts: { flexDirection: 'row', gap: 6 },
-  fact: { flex: 1, backgroundColor: t.sunken, borderRadius: size.radius, paddingHorizontal: 10, paddingVertical: 8 },
+  fact: { flex: 1, ...surface.well, borderRadius: size.radius, paddingHorizontal: 10, paddingVertical: 8 },
   lock: { flexDirection: 'row', alignItems: 'center', gap: 5 },
   statusActions: { alignItems: 'flex-start', gap: 8 },
   hint: { fontSize: size.detail, lineHeight: 17 },
@@ -360,7 +361,7 @@ const styles = StyleSheet.create({
   addressText: { flex: 1, minWidth: 0 },
   outcome: { fontFamily: font.chrome, fontSize: size.caption },
   action: { fontFamily: font.prose, fontSize: size.label, color: t.dim },
-  well: { marginTop: 4, padding: 10, borderRadius: size.radiusRow, backgroundColor: t.sunken, gap: 8 },
+  well: { marginTop: 4, padding: 10, borderRadius: size.radiusRow, ...surface.well, gap: 8 },
   wellLabel: { fontFamily: font.proseMedium, fontSize: size.detail, color: t.dim },
   fieldBad: { borderWidth: 1, borderColor: t.failed, backgroundColor: t.card },
   wellActions: { flexDirection: 'row', justifyContent: 'flex-end', gap: 6, paddingTop: 2 },

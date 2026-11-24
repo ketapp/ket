@@ -1,0 +1,69 @@
+diff --git a/node_modules/react-native/Libraries/Renderer/implementations/ReactFabric-dev.js b/node_modules/react-native/Libraries/Renderer/implementations/ReactFabric-dev.js
+index 615eb91..c790ef7 100644
+--- a/node_modules/react-native/Libraries/Renderer/implementations/ReactFabric-dev.js
++++ b/node_modules/react-native/Libraries/Renderer/implementations/ReactFabric-dev.js
+@@ -1307,8 +1307,7 @@ __DEV__ &&
+           (_enableNativeEventTargetEventDispatching =
+             "function" === typeof event && event()));
+         if (_enableNativeEventTargetEventDispatching)
+-          null != eventTarget &&
+-            reactPrivateInterface.dispatchNativeEvent(
++          reactPrivateInterface.dispatchNativeEvent(
+               eventTarget,
+               topLevelType,
+               nativeEvent
+diff --git a/node_modules/react-native/Libraries/Renderer/implementations/ReactFabric-prod.js b/node_modules/react-native/Libraries/Renderer/implementations/ReactFabric-prod.js
+index bf3cacd..7f5122c 100644
+--- a/node_modules/react-native/Libraries/Renderer/implementations/ReactFabric-prod.js
++++ b/node_modules/react-native/Libraries/Renderer/implementations/ReactFabric-prod.js
+@@ -1338,8 +1338,7 @@ function dispatchEvent(target, topLevelType, nativeEventParam) {
+       (_enableNativeEventTargetEventDispatching =
+         "function" === typeof event && event()));
+     if (_enableNativeEventTargetEventDispatching)
+-      null != eventTarget &&
+-        reactPrivateInterface.dispatchNativeEvent(
++      reactPrivateInterface.dispatchNativeEvent(
+           eventTarget,
+           topLevelType,
+           nativeEvent
+diff --git a/node_modules/react-native/Libraries/Renderer/implementations/ReactFabric-profiling.js b/node_modules/react-native/Libraries/Renderer/implementations/ReactFabric-profiling.js
+index 1934f48..830c5a5 100644
+--- a/node_modules/react-native/Libraries/Renderer/implementations/ReactFabric-profiling.js
++++ b/node_modules/react-native/Libraries/Renderer/implementations/ReactFabric-profiling.js
+@@ -1405,8 +1405,7 @@ function dispatchEvent(target, topLevelType, nativeEventParam) {
+       (_enableNativeEventTargetEventDispatching =
+         "function" === typeof event && event()));
+     if (_enableNativeEventTargetEventDispatching)
+-      null != eventTarget &&
+-        reactPrivateInterface.dispatchNativeEvent(
++      reactPrivateInterface.dispatchNativeEvent(
+           eventTarget,
+           topLevelType,
+           nativeEvent
+diff --git a/node_modules/react-native/src/private/renderer/events/dispatchNativeEvent.js b/node_modules/react-native/src/private/renderer/events/dispatchNativeEvent.js
+index f733308..f9b1fb1 100644
+--- a/node_modules/react-native/src/private/renderer/events/dispatchNativeEvent.js
++++ b/node_modules/react-native/src/private/renderer/events/dispatchNativeEvent.js
+@@ -37,13 +37,21 @@ import {
+  * enableNativeEventTargetEventDispatching is enabled.
+  */
+ export default function dispatchNativeEvent(
+-  target: EventTarget,
++  target: EventTarget | null,
+   type: string,
+   payload: {[string]: unknown},
+ ): void {
+   // Process responder events before normal event dispatch.
+   processResponderEvent(type, target, payload);
+ 
++  // A touch whose view was unmounted before it ended has no target. The
++  // responder still has to see it end, or its touch count stays one too high
++  // and the next tap goes to whatever took the responder meanwhile. Nothing
++  // else is dispatched for it.
++  if (target == null) {
++    return;
++  }
++
+   try {
+     // Normal EventTarget dispatch
+     const bubbleConfig = customBubblingEventTypes[type];

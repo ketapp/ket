@@ -895,3 +895,101 @@ fn uninstall_hooks_says_a_settings_file_it_cannot_parse_could_not_be_read() {
     );
     assert!(!said.contains("still have ket"), "{said}");
 }
+
+#[test]
+fn an_automations_command_runs_as_saved_and_its_exit_status_is_kept() {
+    use ket_core::automation::{Outcome, Run as AutomationRun, Runs};
+
+    let sandbox = Sandbox::new("automation-exec");
+    sandbox.add_project();
+    let root = sandbox.path("data").join("ket").join("automations");
+    // Each runs as typed, whatever its ending: a comment, a trailing `;`.
+    for (line, code, outcome) in [("exit 3  # a note", 3, "Failed"), ("true;", 0, "Done")] {
+        let id = sandbox
+            .ket_in(
+                &sandbox.repo(),
+                &[
+                    "automation",
+                    "add",
+                    "Check",
+                    "--command",
+                    line,
+                    "--every",
+                    "day",
+                    "--at",
+                    "9am",
+                ],
+            )
+            .ok()
+            .first_word();
+        Runs::update_in(&root, |runs| {
+            runs.record(AutomationRun {
+                automation: id.clone(),
+                due_ms: 1000,
+                // Now: a record from 1970 would be past keeping.
+                at_ms: ket_core::now_ms(),
+                outcome: Outcome::Started,
+                worktree: None,
+                branch: None,
+                ended_ms: None,
+                tokens: None,
+                command: None,
+            });
+        })
+        .unwrap();
+        let ran = sandbox.ket_in(&sandbox.repo(), &["automation", "exec", &id, "1000"]);
+        assert_eq!(ran.code(), Some(code), "{line}: {}", ran.stderr());
+        let runs = Runs::load_in(&root).unwrap();
+        let run = runs.of(&id).next().unwrap();
+        assert_eq!(run.outcome.label(), outcome, "{line}");
+        assert!(run.ended_ms.is_some());
+    }
+}
+
+#[test]
+fn exec_runs_the_command_its_run_was_started_with_and_nothing_once_deleted() {
+    use ket_core::automation::{Outcome, Run as AutomationRun, Runs};
+
+    let sandbox = Sandbox::new("automation-exec-snapshot");
+    sandbox.add_project();
+    let root = sandbox.path("data").join("ket").join("automations");
+    let id = sandbox
+        .ket_in(
+            &sandbox.repo(),
+            &[
+                "automation",
+                "add",
+                "Check",
+                "--command",
+                "true",
+                "--every",
+                "day",
+                "--at",
+                "9am",
+            ],
+        )
+        .ok()
+        .first_word();
+    // Started with `exit 5`; the automation was edited to `true` since.
+    Runs::update_in(&root, |runs| {
+        runs.record(AutomationRun {
+            automation: id.clone(),
+            due_ms: 2000,
+            at_ms: ket_core::now_ms(),
+            outcome: Outcome::Started,
+            worktree: None,
+            branch: None,
+            ended_ms: None,
+            tokens: None,
+            command: Some("exit 5".to_owned()),
+        });
+    })
+    .unwrap();
+    let ran = sandbox.ket_in(&sandbox.repo(), &["automation", "exec", &id, "2000"]);
+    assert_eq!(ran.code(), Some(5), "{}", ran.stderr());
+
+    sandbox.ket(&["automation", "rm", &id]).ok();
+    let ran = sandbox.ket_in(&sandbox.repo(), &["automation", "exec", &id, "2000"]);
+    assert_ne!(ran.code(), Some(0));
+    assert!(ran.stderr().contains("nothing ran"), "{}", ran.stderr());
+}

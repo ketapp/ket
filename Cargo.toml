@@ -171,6 +171,10 @@ getrandom = "0.3"
 # where 0.14 and later would bring a second copy of each. Only X25519 and
 # ChaCha20-Poly1305: no P-256.
 hpke = { version = "0.13.0", default-features = false, features = ["alloc", "x25519"] }
+# Automations' calendar maths: a wall-clock time on a given day in the Mac's
+# time zone, through daylight saving. Already in the tree through gix-date,
+# with its default features, so naming it here adds no package.
+jiff = "0.2.35"
 # The randomness hpke takes, from the operating system through getrandom.
 rand_core = { version = "0.9", features = ["os_rng"] }
 # The pairing screen's QR code, in ket.app. Pure Rust, MIT OR Apache-2.0, and

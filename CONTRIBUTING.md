@@ -9,7 +9,7 @@ the design and scope can be agreed before substantial work begins.
    https://github.com/ketapp/ket/issues. A `feat` or `fix` names the issue
    it closes, so it needs one before the commit, not after.
 2. **Fork and clone.** Fork the repository on GitHub, clone your fork, and
-   turn the commit check on once per clone:
+   turn the Git hooks on once per clone:
 
    ```sh
    git clone https://github.com/<you>/ket.git && cd ket
@@ -36,11 +36,11 @@ the design and scope can be agreed before substantial work begins.
 
 6. **Make the change**, keeping the *Architectural invariants* below. Add or
    update tests when behaviour changes.
-7. **Run the checks** in *Before submitting*. CI runs the same ones on the
-   pull request.
-8. **Commit** in the format under *Commit messages*. The hook refuses a
-   subject that does not fit, and nothing else: it asks nothing of the
-   content.
+7. **Run the relevant checks** in *Before submitting*. CI runs the same ones
+   on the pull request. The pre-commit hook formats staged Rust files and
+   lints and typechecks phone changes; the pre-push hook runs Clippy.
+8. **Commit** in the format under *Commit messages*. The commit-msg hook
+   checks the subject.
 
    ```sh
    git commit -m "fix(editor): triple-click selects the line, not the line break (#142)"
@@ -163,14 +163,23 @@ chore(deps): bump tokio to 1.48
 - Pull requests are squash-merged, so the title is what lands on `main`. Put
   `Closes #142` in the description so merging closes the issue.
 
-Turn the local check on once per clone:
+Turn the Git hooks on once per clone:
 
 ```sh
 git config core.hooksPath .githooks
 ```
 
-CI runs the same check, `scripts/check-commit-msg.sh`, on every pull request
-title.
+The pre-commit hook checks only what the commit touches. It formats each
+staged Rust file with rustfmt and stages the result; a file that also has
+unstaged changes stops the commit instead, for you to format and stage whole.
+Staged files under `mobile/app` are linted, and `mobile/app` is typechecked,
+along with `mobile/remote` when it changed. Install both mobile packages as
+described in *Development setup* before committing phone changes.
+
+The pre-push hook runs `cargo clippy --workspace --all-targets -- -D warnings`
+when the push touches the Rust build. Clippy checks the files on disk, so
+uncommitted changes count. CI checks every pull request title with
+`scripts/check-commit-msg.sh`.
 
 ## Dependency policy
 

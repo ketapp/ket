@@ -28,6 +28,8 @@ pub(super) fn register(registry: &mut Registry) -> Result<(), KetError> {
 
     registry.register(browser("browser.tabs", "List the worktree's browser tabs"))?;
 
+    registry.register(browser("browser.close", "Close the worktree's browser tab"))?;
+
     registry.register(browser(
         "browser.back",
         "Go back a page in the worktree's browser tab",
@@ -76,6 +78,10 @@ pub(super) fn register(registry: &mut Registry) -> Result<(), KetError> {
 
     registry.bind("browser.tabs", |invocation, _| {
         drive_browser(invocation, BrowserAction::Tabs)
+    })?;
+
+    registry.bind("browser.close", |invocation, _| {
+        drive_browser(invocation, BrowserAction::Close)
     })?;
 
     registry.bind("browser.back", |invocation, _| {
@@ -302,6 +308,7 @@ impl BrowserCmd {
         match self {
             BrowserCmd::Open { url } => Invocation::new("browser.open").maybe_text("url", url),
             BrowserCmd::Tabs => Invocation::new("browser.tabs"),
+            BrowserCmd::Close => Invocation::new("browser.close"),
             BrowserCmd::Back => Invocation::new("browser.back"),
             BrowserCmd::Forward => Invocation::new("browser.forward"),
             BrowserCmd::Reload => Invocation::new("browser.reload"),
@@ -398,6 +405,9 @@ pub(super) enum BrowserCmd {
     },
     /// List the worktree's browser tabs; `*` marks the one ket acts on.
     Tabs,
+    /// Close the tab ket acts on, once you're done with it: a tab left open
+    /// keeps its page, and the memory it holds, until someone closes it.
+    Close,
     /// Go back a page, and wait for it.
     Back,
     /// Go forward a page, and wait for it.
@@ -799,6 +809,9 @@ pub(super) fn browser_text(answer: &BrowserAnswer, asked: &BrowserAction) -> Str
         title => format!("{url}  \"{title}\"\n"),
     };
     match answer {
+        BrowserAnswer::Done { url, title } if matches!(asked, BrowserAction::Close) => {
+            format!("closed {}", page(url, title))
+        }
         BrowserAnswer::Done { url, title } => page(url, title),
         BrowserAnswer::Tabs { tabs } if tabs.is_empty() => {
             "no browser tabs in this worktree; `ket browser open <url>` opens one\n".to_owned()

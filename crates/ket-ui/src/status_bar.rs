@@ -295,7 +295,7 @@ const COMPACT_BAR_W: Pixels = px(28.0);
 pub(crate) const WARM: f32 = 70.0;
 
 /// Where it starts to be worth planning around.
-const HOT: f32 = 80.0;
+pub(crate) const HOT: f32 = 80.0;
 
 /// Where it is about to stop.
 const CRITICAL: f32 = 90.0;
@@ -794,7 +794,7 @@ impl Shell {
                     .py(px(5.0))
             })
             .when(sections.is_empty(), |summary| {
-                summary.child(crate::header::stat(
+                summary.child(crate::ui::figure::figure(
                     "Usage",
                     crate::header::trail("no readings", t),
                     t,
@@ -874,7 +874,7 @@ impl Shell {
                                     .child(resets)
                             }))
                     }
-                    false => crate::header::stat(label, value, t),
+                    false => crate::ui::figure::figure(label, value, t),
                 }
             }))
             .on_click(cx.listener(move |this, _, _, cx| {
@@ -1003,6 +1003,7 @@ impl Shell {
     /// different thing at a different scope.
     pub(crate) fn window_status_bar(
         &self,
+        automations: Option<AnyElement>,
         overhead: Option<AnyElement>,
         feedback: AnyElement,
     ) -> AnyElement {
@@ -1029,6 +1030,7 @@ impl Shell {
                     .child(div().prose().child(words))
             }))
             .child(div().flex_grow())
+            .children(automations)
             .children(overhead)
             .child(feedback)
             .into_any_element()

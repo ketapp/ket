@@ -134,9 +134,12 @@ export function detail(worktree: WorktreeSummary): string {
   }
 }
 
-/** A project's colour: the one chosen in ket, else ket's default. */
+/** A project's colour: the one chosen in ket. A project left on ket's
+ * default grey, or with none, takes the ramp's quiet ink rather than a grey
+ * of its own. */
 export function projectColor(project: ProjectSummary): string {
-  return /^#[0-9a-f]{6}$/i.test(project.color) ? project.color : PROJECT_COLORS[0];
+  const chosen = /^#[0-9a-f]{6}$/i.test(project.color) ? project.color : PROJECT_COLORS[0];
+  return chosen.toLowerCase() === PROJECT_COLORS[0] ? t.faint : chosen;
 }
 
 /** A project's key wherever the phone keeps something of its own about it
@@ -218,6 +221,11 @@ export function terminalName(terminal: TerminalSummary): string {
   if (terminal.agentView) return 'Agent view';
   const title = terminal.agent ? terminal.title.replace(LEADING_GLYPHS, '') : terminal.title;
   return title.trim() || (terminal.agent ? agentLabel(terminal.agent) : 'Terminal');
+}
+
+/** The waiting panes, or the single question sent by older desktops. */
+export function questionsOf(worktree: WorktreeSummary) {
+  return worktree.questions.length > 0 ? worktree.questions : [worktree.question];
 }
 
 /** Which card a prompt takes, when it is not a permission. */

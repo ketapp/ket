@@ -157,6 +157,8 @@ pub enum Category {
     Project,
     /// Notes on work not started yet, kept until one becomes a worktree.
     Backlog,
+    /// Work that starts itself at a set time, or on a repeat.
+    Automation,
     /// Worktree lifecycle: create, list, provision, remove.
     Worktree,
     /// Reading what agents produced, and keeping the best of it.
@@ -167,11 +169,12 @@ pub enum Category {
 
 impl Category {
     /// Every category, in the order a listing should present them.
-    pub const ALL: [Category; 7] = [
+    pub const ALL: [Category; 8] = [
         Category::Application,
         Category::Config,
         Category::Project,
         Category::Backlog,
+        Category::Automation,
         Category::Worktree,
         Category::Review,
         Category::Agent,
@@ -184,6 +187,7 @@ impl Category {
             Category::Config => "config",
             Category::Project => "project",
             Category::Backlog => "backlog",
+            Category::Automation => "automation",
             Category::Worktree => "worktree",
             Category::Review => "review",
             Category::Agent => "agent",

@@ -1,0 +1,29 @@
+#!/bin/sh
+# Turned on with `git config core.hooksPath .githooks`; see CONTRIBUTING.md.
+#
+# Clippy runs here, once per push, rather than on every commit: after a change
+# to ket-core it takes up to a minute. It runs when what is pushed touches the
+# Rust build, and like any cargo command it checks the files on disk.
+set -e
+
+rust=
+while read -r _local_ref local_sha _remote_ref remote_sha; do
+	case $local_sha in *[!0]*) ;; *) continue ;; esac # deleting a branch
+	case $remote_sha in
+	*[!0]*) ;;
+	*) rust=yes; continue ;; # a new branch: nothing to compare with
+	esac
+	if ! git cat-file -e "$remote_sha^{commit}" 2>/dev/null; then
+		rust=yes # a remote tip this clone hasn't fetched
+	elif git diff --name-only "$remote_sha" "$local_sha" -- \
+		crates vendor Cargo.toml Cargo.lock rust-toolchain.toml | grep -q .; then
+		rust=yes
+	fi
+done
+
+if [ -n "$rust" ]; then
+	cd "$(git rev-parse --show-toplevel)"
+	printf '%s\n' 'Checking Rust lints…'
+	cargo clippy --workspace --all-targets -- -D warnings
+fi
+exit 0

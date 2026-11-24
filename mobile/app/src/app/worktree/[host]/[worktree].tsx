@@ -20,7 +20,7 @@ import {
   PullRequestSummary_State,
   type WorktreeSummary,
 } from '@ket/remote';
-import { router, useIsFocused, useLocalSearchParams } from 'expo-router';
+import { router, useIsFocused, useLocalSearchParams, useNavigation } from 'expo-router';
 import { useEffect, useRef, useState } from 'react';
 import { Alert, Linking, Pressable, ScrollView, StyleSheet, Text, View, type ViewInstance } from 'react-native';
 
@@ -74,17 +74,41 @@ import { confirmIdentity } from '../../../lib/lock';
 import { askMerge, prActions } from '../../../lib/pr-actions';
 import { commentsSaid, review, sendReview, useReview } from '../../../lib/review';
 import { agentLabel, font, size, t } from '../../../lib/theme';
+import { surface } from '../../../components/ui/surface';
 import { useNow } from '../../../lib/usage';
 
 /** What the desktop sends for a time it doesn't have. Out here because the
  * React Compiler skips a component with a BigInt literal in it. */
 const NEVER = 0n;
 
+/** Opens the chat of `terminal` on `host`, or goes back to it when it is the
+ * screen under this one: a chat's worktree button brings you here, and
+ * opening the same chat again stacked a second copy of it on top, with the
+ * first still running underneath. Each round from a chat to its worktree and
+ * back added two more. `navigate` for a row that can be tapped twice before
+ * the chat is up: the second tap finds the chat on top and opens nothing. */
+function useToChat(): (host: string, terminal: bigint, how?: 'push' | 'navigate') => void {
+  const navigation = useNavigation();
+  return (host, terminal, how = 'push') => {
+    const stack = navigation.getState();
+    const under = stack ? stack.routes[stack.index - 1] : undefined;
+    const params = under?.params as { host?: string; terminal?: string } | undefined;
+    if (under?.name === 'session/[host]/[terminal]' && params?.host === host && params.terminal === terminal.toString()) {
+      router.back();
+      return;
+    }
+    router[how](`/session/${host}/${terminal.toString()}`);
+  };
+}
+
 export default function Worktree() {
   const { host: hostId, worktree: raw } = useLocalSearchParams<{ host: string; worktree: string }>();
   const id = decodeURIComponent(raw);
   const conn = useHost(hostId);
-  const hostState = useHostState(conn);
+  // Held while another screen is on top: see `useHostState`.
+  const focused = useIsFocused();
+  const hostState = useHostState(conn, focused);
+  const toChat = useToChat();
   // The permission just answered, by its id: its buttons go on the tap and
   // stay gone until the desktop's next snapshot takes the question away.
   // Back only if the desktop would not take the answer, with its reason.
@@ -104,7 +128,6 @@ export default function Worktree() {
   // on top of it, and figures move with every edit an agent makes; asked for
   // out of sight, each one spent the desktop's budget for costly requests,
   // and the terminal's own subscribe was refused.
-  const focused = useIsFocused();
   const [changes, setChanges] = useState<Changes | null>(null);
   const [merging, setMerging] = useState(false);
   // Why the desktop would not merge from here, under the changes.
@@ -163,7 +186,7 @@ export default function Worktree() {
       return;
     }
     await conn.awaitTerminal(woke.terminalId);
-    router.push(`/session/${hostId}/${woke.terminalId.toString()}`);
+    toChat(hostId, woke.terminalId);
   };
   const agentName = worktree.agent ? agentLabel(worktree.agent) : 'The agent';
   const blocked = worktree.activity === Activity.BLOCKED;
@@ -358,7 +381,7 @@ export default function Worktree() {
                 <Button
                   kind="primary"
                   title={question.plan ? 'Review the plan' : 'Answer'}
-                  onPress={() => router.push(`/session/${hostId}/${question.terminalId.toString()}`)}
+                  onPress={() => toChat(hostId, question.terminalId)}
                 />
                 <Button kind="ghost" title="Open the terminal" onPress={() => open(question.terminalId)} />
               </>
@@ -469,7 +492,8 @@ function Tabs({
   onWake: (key: string) => void;
 }) {
   const now = useNow();
-  const hostState = useHostState(conn);
+  const hostState = useHostState(conn, useIsFocused());
+  const toChat = useToChat();
   const hostId = conn.id;
   const live = worktree.terminals.filter((x) => !x.closed);
   const knows = hostState.hostMinor >= 29;
@@ -495,7 +519,7 @@ function Tabs({
               detail={knows && !state ? `${agentLabel(agent)} · ready` : agentLabel(agent)}
               state={state}
               chevron
-              onPress={() => router.navigate(`/session/${hostId}/${terminal.id.toString()}`)}
+              onPress={() => toChat(hostId, terminal.id, 'navigate')}
             />
           );
         }
@@ -561,7 +585,8 @@ function runningFor(since: bigint, now: number): string {
 function usePullRequest(pr: PullRequestSummary | undefined, conn: HostConnection | null, worktreeId: string, terminal: bigint | null) {
   const [busy, setBusy] = useState<string | null>(null);
   const [said, setSaid] = useState<{ text: string; failed: boolean } | null>(null);
-  const hostState = useHostState(conn);
+  const hostState = useHostState(conn, useIsFocused());
+  const toChat = useToChat();
   const can = pr && hostState ? prActions(pr, hostState.hostMinor) : { fix: false, address: false, merge: false, update: false, ready: false, reopen: false };
 
   // Handed to the agent: off to its conversation to watch it work, or word
@@ -585,7 +610,7 @@ function usePullRequest(pr: PullRequestSummary | undefined, conn: HostConnection
       return;
     }
     if (terminal !== null) {
-      router.push(`/session/${conn.id}/${terminal.toString()}`);
+      toChat(conn.id, terminal);
       return;
     }
     setSaid({ text: `The agent on ${conn.state.host.name || 'your Mac'} has the ${what}.`, failed: false });
@@ -764,7 +789,7 @@ const styles = StyleSheet.create({
   grow: { flex: 1 },
   askHead: { flexDirection: 'row', alignItems: 'center', gap: 10 },
   askTitle: { fontFamily: font.proseSemibold, fontSize: size.body, color: t.text },
-  well: { backgroundColor: t.sunken, borderRadius: size.radius, paddingHorizontal: 12, paddingVertical: 11 },
+  well: { ...surface.well, borderRadius: size.radius, paddingHorizontal: 12, paddingVertical: 11 },
   wellText: { fontFamily: font.chrome, fontSize: 13, lineHeight: 20, color: t.text },
   list: { padding: 8, gap: 2 },
   // Under the heading, on its left edge: the lines, and the commits ahead.

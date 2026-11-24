@@ -1,5 +1,5 @@
-// What a person presses or sets: buttons, a segmented track, a stat filter,
-// toggles, choices, a meter, and a text field's well.
+// What a person presses or sets: buttons, a segmented track, a row of tabs,
+// a stat filter, toggles, choices, a meter, and a text field's well.
 
 import { Fragment, type ReactNode } from 'react';
 import {
@@ -15,6 +15,7 @@ import {
 import Animated, { Easing, Keyframe, ReduceMotion } from 'react-native-reanimated';
 
 import { font, size, t, tint } from '../../lib/theme';
+import { surface } from './surface';
 import { Check } from '../icons';
 import { Dot } from './marks';
 import { shared } from './shared';
@@ -95,6 +96,72 @@ export function Segmented<K extends string>({
   );
 }
 
+/** One tab in a {@link Tabs} row. */
+export interface Tab<K extends string> {
+  key: K;
+  label: string;
+  count?: number;
+  /** A state's own colour, which the tab wears chosen: its underline and its
+   * count. A tab with no state of its own — "All" — wears the text's. */
+  tone?: string;
+  /** Its icon, drawn chosen or not: an icon fills while its tab is chosen. */
+  icon?: (on: boolean) => ReactNode;
+  /** What a screen reader calls it, count and all. */
+  name?: string;
+}
+
+/**
+ * A row of tabs over a hairline: each an icon, a word and a count, the chosen
+ * one in the text's colour over a 2 pt underline in its tone. For a filter at
+ * the top of a list, where a track's well would be one more box.
+ */
+export function Tabs<K extends string>({
+  tabs,
+  value,
+  onChange,
+  style,
+}: {
+  tabs: Tab<K>[];
+  value: K;
+  onChange: (key: K) => void;
+  style?: StyleProp<ViewStyle>;
+}) {
+  return (
+    <View accessibilityRole="tablist" style={[styles.tabs, style]}>
+      <View style={styles.tabRow}>
+        {tabs.map((tab) => {
+          const on = tab.key === value;
+          return (
+            <Pressable
+              key={tab.key}
+              accessibilityRole="tab"
+              accessibilityLabel={tab.name}
+              accessibilityState={{ selected: on }}
+              onPress={() => onChange(tab.key)}
+              hitSlop={{ left: 9, right: 9 }}
+              style={({ pressed }) => [
+                styles.tab,
+                { borderBottomColor: on ? (tab.tone ?? t.text) : 'transparent' },
+                pressed && !on && { opacity: 0.6 },
+              ]}
+            >
+              {tab.icon?.(on)}
+              <Text style={[styles.tabText, on && styles.tabTextOn]} numberOfLines={1}>
+                {tab.label}
+              </Text>
+              {tab.count !== undefined ? (
+                <Text style={[styles.tabCount, on && { fontFamily: font.chromeSemibold, color: tab.tone ?? t.dim }]}>
+                  {tab.count}
+                </Text>
+              ) : null}
+            </Pressable>
+          );
+        })}
+      </View>
+    </View>
+  );
+}
+
 /** One tile in a {@link StatFilter}: a count that is also a filter. */
 export interface Stat<K extends string> {
   key: K;
@@ -146,6 +213,46 @@ export function StatFilter<K extends string>({
         );
       })}
     </View>
+  );
+}
+
+/**
+ * A small action beside a heading or in a bar: a capsule on the float's
+ * fill, its glyph before its word. For what a surface offers but is not
+ * there for — pairing another desktop from the list of them. Smaller than a
+ * finger, so it takes touches from the room around it. `label` is what a
+ * screen reader calls it when its word alone would not say.
+ */
+export function Pill({
+  title,
+  icon,
+  label,
+  tone,
+  onPress,
+}: {
+  title: string;
+  icon?: ReactNode;
+  label?: string;
+  /** A signal's own action, in a row that carries it — Answer, on what
+   * waits on you: 28 tall, on its colour at 18%, its word in it. */
+  tone?: string;
+  onPress: () => void;
+}) {
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={label ?? title}
+      onPress={onPress}
+      hitSlop={tone ? 8 : 7}
+      style={({ pressed }) =>
+        tone
+          ? [styles.pillToned, { backgroundColor: tint(tone, pressed ? 0.28 : 0.18) }]
+          : [styles.pill, pressed && surface.chosen]
+      }
+    >
+      {icon}
+      <Text style={[styles.pillText, tone ? [styles.pillTextToned, { color: tone }] : null]}>{title}</Text>
+    </Pressable>
   );
 }
 
@@ -250,8 +357,14 @@ export function IconButton({
  * Related glyph buttons in one frame — the desktop's `icon_cluster`: the
  * mode pill's edge, fill and height, touching cells with a hairline between.
  * The cells are 34 tall; hit-slop makes up the rest of the touch target.
+ * A cell with a `badge` wears a dot at its glyph's corner; the badge is what
+ * the dot means, said after the label.
  */
-export function IconCluster({ actions }: { actions: { label: string; onPress: () => void; icon: ReactNode }[] }) {
+export function IconCluster({
+  actions,
+}: {
+  actions: { label: string; onPress: () => void; icon: ReactNode; badge?: string }[];
+}) {
   return (
     <View style={styles.cluster}>
       {actions.map((action, index) => (
@@ -259,12 +372,13 @@ export function IconCluster({ actions }: { actions: { label: string; onPress: ()
           {index > 0 ? <View style={styles.clusterRule} /> : null}
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel={action.label}
+            accessibilityLabel={action.badge ? `${action.label}, ${action.badge}` : action.label}
             onPress={action.onPress}
             hitSlop={{ top: 5, bottom: 5 }}
             style={({ pressed }) => [styles.clusterCell, pressed && { backgroundColor: t.selection }]}
           >
             {action.icon}
+            {action.badge ? <View style={styles.clusterBadge} /> : null}
           </Pressable>
         </Fragment>
       ))}
@@ -373,7 +487,7 @@ export const oneLine = { lineBreakModeIOS: 'tail' } as const;
 export const field: TextStyle = {
   height: size.control,
   borderRadius: size.radius,
-  backgroundColor: t.sunken,
+  ...surface.well,
   paddingHorizontal: 12,
   color: t.text,
   fontFamily: font.prose,
@@ -382,7 +496,7 @@ export const field: TextStyle = {
 
 const styles = StyleSheet.create({
   meter: { backgroundColor: t.border, overflow: 'hidden' },
-  track: { flexDirection: 'row', gap: 2, padding: 3, backgroundColor: t.sunken, borderRadius: size.radius },
+  track: { flexDirection: 'row', gap: 2, padding: 3, ...surface.well, borderRadius: size.radius },
   segment: {
     flex: 1,
     height: 30,
@@ -411,6 +525,34 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     gap: 8,
   },
+  pill: {
+    height: 30,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingLeft: 9,
+    paddingRight: 12,
+    borderRadius: 15,
+    ...surface.float,
+  },
+  pillText: { fontFamily: font.proseMedium, fontSize: size.detail, color: t.text },
+  pillToned: { height: 28, flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 12, borderRadius: 14 },
+  pillTextToned: { fontFamily: font.proseSemibold },
+  // The tabs' hairline runs the screen's width; the tabs sit on it, in from
+  // its edges, their underlines over it.
+  tabs: { borderBottomWidth: 1, borderBottomColor: t.rule },
+  tabRow: { flexDirection: 'row', gap: 18, paddingHorizontal: 16 },
+  tab: {
+    height: 40,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    borderBottomWidth: 2,
+    marginBottom: -1,
+  },
+  tabText: { fontFamily: font.chromeMedium, fontSize: size.body, color: t.faint },
+  tabTextOn: { fontFamily: font.chromeSemibold, color: t.text },
+  tabCount: { fontFamily: font.chromeMedium, fontSize: 12, color: t.faint, fontVariant: ['tabular-nums'] },
   primary: { backgroundColor: t.accent },
   /** The one call to action on a screen that has nothing else yet: green, tall. */
   brand: {
@@ -426,7 +568,7 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     fontSize: 16,
   },
-  secondary: { borderWidth: 1, borderColor: t.border },
+  secondary: { ...surface.outline },
   danger: { borderWidth: 1, borderColor: tint(t.failed, 0.45) },
   buttonText: { fontFamily: font.proseMedium, fontSize: size.body, color: t.text },
   // Over the words it stands for, which keep the button its width.
@@ -438,21 +580,30 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'stretch',
     borderRadius: 17,
-    borderWidth: 1,
-    borderColor: t.border,
-    backgroundColor: t.sunken,
+    ...surface.float,
     overflow: 'hidden',
   },
   clusterRule: { width: 1, backgroundColor: t.border },
   clusterCell: { width: 40, alignItems: 'center', justifyContent: 'center' },
+  // Over the 18 pt glyph's top-right corner, ringed in the cluster's fill so
+  // it stands off the strokes under it.
+  clusterBadge: {
+    position: 'absolute',
+    top: 5,
+    right: 7,
+    width: 9,
+    height: 9,
+    borderRadius: 4.5,
+    borderWidth: 1.5,
+    borderColor: t.sunken,
+    backgroundColor: t.modified,
+  },
   toggle: {
     width: 44,
     height: 26,
     borderRadius: 13,
     padding: 2,
-    backgroundColor: t.sunken,
-    borderWidth: 1,
-    borderColor: t.border,
+    ...surface.float,
     justifyContent: 'center',
   },
   toggleOn: { backgroundColor: t.accent, borderColor: t.accent, alignItems: 'flex-end' },

@@ -2,99 +2,87 @@
 // its mark, words and chevron, on the shared mark column.
 
 import { Fragment, type ReactNode } from 'react';
-import { Pressable, StyleSheet, Text, View, type StyleProp, type TextStyle } from 'react-native';
+import { Pressable, StyleSheet, Text, TouchableOpacity, View, type StyleProp, type TextStyle } from 'react-native';
 
 import { caption, type Run } from '../../lib/markdown';
 import { font, size, t, tint } from '../../lib/theme';
-import { Chevron, ListTodo, Pin } from '../icons';
+import { Chevron, ChevronDown, Pin } from '../icons';
 import { Fade, Wipe } from '../Swap';
-import { Badge, Dot } from './marks';
+import { Badge, Dot, TILE } from './marks';
 import { shared } from './shared';
 
 /**
- * A project's heading, at the top of its card: its badge and its name. With
- * `onToggle` it folds the rows away; folded, the worktrees it holds are named
- * under it, and a dot in the attention colour says one of them is waiting on
- * you, so folding never hides a question. No count of its rows: they are
- * right there, or named.
+ * A project's heading, on the desk over its card: its badge and its name.
+ * With `onToggle` it folds the card away; folded, a dot in the attention
+ * colour says one of its worktrees is waiting on you, so folding never hides
+ * a question.
  *
- * With `onBacklog`, open backlog notes show as a count a tap opens, as the
- * desktop's sidebar has them. Holding the heading is `onHold`: the project's
- * menu. A project pinned to the top wears a pin after its name.
+ * Holding the heading is `onHold`: the project's menu, which has its
+ * backlog. A project pinned to the top wears a pin after its name.
  */
 export function ProjectHeading({
   name,
   color,
   icon,
   collapsed,
-  inside,
   pinned,
   waiting,
   onToggle,
   onHold,
-  backlog = 0,
-  onBacklog,
 }: {
   name: string;
   color: string;
   icon?: string;
   collapsed?: boolean;
-  /** Its worktrees' names, said under it while it is folded. */
-  inside?: string;
   pinned?: boolean;
   waiting?: boolean;
   onToggle?: () => void;
   onHold?: () => void;
-  backlog?: number;
-  onBacklog?: () => void;
 }) {
+  // Pressed, it dims: on the desk, a fill would be a box round it.
   return (
-    <Pressable
+    <TouchableOpacity
+      activeOpacity={0.6}
       onPress={onToggle}
       onLongPress={onHold}
       disabled={!onToggle && !onHold}
       accessibilityRole="button"
       accessibilityState={{ expanded: !collapsed }}
       accessibilityHint={onHold ? 'Hold for more' : undefined}
-      style={({ pressed }) => [styles.project, pressed && { backgroundColor: t.selection }]}
+      style={styles.project}
     >
-      <Badge name={name} color={color} icon={icon} />
-      <View style={styles.projectText}>
-        <View style={styles.projectLine}>
-          <Text style={styles.projectName} numberOfLines={1}>
-            {name}
-          </Text>
-          {pinned ? (
-            <View accessible accessibilityLabel="Pinned">
-              <Pin size={13} color={t.faint} weight={1.8} />
-            </View>
-          ) : null}
-        </View>
-        {collapsed && inside ? (
-          <Text style={styles.projectInside} numberOfLines={1}>
-            {inside}
-          </Text>
+      <Badge name={name} color={color} icon={icon} size={20} />
+      <View style={styles.projectLine}>
+        <Text style={styles.projectName} numberOfLines={1}>
+          {name}
+        </Text>
+        {pinned ? (
+          <View accessible accessibilityLabel="Pinned">
+            <Pin size={13} color={t.faint} weight={1.8} />
+          </View>
         ) : null}
       </View>
+      <View style={styles.projectRest} />
       {collapsed && waiting ? <Dot color={t.attention} size={6} /> : null}
-      {onBacklog && backlog > 0 ? (
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel={`Backlog, ${backlog} open`}
-          onPress={onBacklog}
-          hitSlop={6}
-          style={({ pressed }) => [shared.readout, styles.backlog, pressed && { backgroundColor: t.selection }]}
-        >
-          <ListTodo size={13} color={t.dim} weight={2} />
-          <Text style={shared.count}>{backlog > 99 ? '99+' : backlog}</Text>
-        </Pressable>
-      ) : null}
       {onToggle ? (
-        <View style={collapsed ? styles.fold : styles.open}>
-          <Chevron size={14} color={t.faint} />
-        </View>
+        collapsed ? (
+          <Chevron size={14} color={t.faint} weight={2} />
+        ) : (
+          <ChevronDown size={14} color={t.faint} weight={2} />
+        )
       ) : null}
-    </Pressable>
+    </TouchableOpacity>
+  );
+}
+
+/** A section's label on the desk, over its card: a dot in its signal's
+ * colour and its name — "Waiting on you". */
+export function SectionLabel({ children, color }: { children: string; color: string }) {
+  return (
+    <View accessibilityRole="header" style={styles.section}>
+      <Dot color={color} size={7} />
+      <Text style={styles.sectionText}>{children}</Text>
+    </View>
   );
 }
 
@@ -126,6 +114,9 @@ export function Row({
   small,
   faded,
   live,
+  prompt,
+  ruled,
+  actions,
   onPress,
   onLongPress,
   children,
@@ -151,16 +142,25 @@ export function Row({
   /** Its detail and state change under a wipe as updates land, as a
    * worktree's do, rather than at once. */
   live?: boolean;
+  /** Its agent is at work: the line is a terminal's, a `›` in this colour
+   * before the words and a block cursor after them, wiped with them. */
+  prompt?: string;
+  /** A row in a ruled card (see `RuledCard`): square, so it meets the
+   * card's edges and the rules between rows; a 24 pt tile for its mark, 12
+   * from its words; its name in medium and its line a step larger. */
+  ruled?: boolean;
+  /** What a screen reader offers on it beyond a tap: what holding it does. */
+  actions?: { name: string; label: string; run: () => void }[];
   onPress?: () => void;
   /** Held: the row's menu. */
   onLongPress?: () => void;
   children?: ReactNode;
 }) {
-  const detailText = (text: string, color?: string) =>
+  const detailText = (text: string, color?: string, style?: StyleProp<TextStyle>) =>
     markdown ? (
-      <Caption text={text} color={color} />
+      <Caption text={text} color={color} style={[ruled && styles.ruledDetail, style]} />
     ) : (
-      <Text style={[shared.detail, color ? { color } : null]} numberOfLines={1}>
+      <Text style={[shared.detail, ruled && styles.ruledDetail, color ? { color } : null, style]} numberOfLines={1}>
         {text}
       </Text>
     );
@@ -172,17 +172,40 @@ export function Row({
   );
   const main = (
     <>
-      {mark !== undefined ? <View style={[styles.mark, faded && styles.faded]}>{mark}</View> : null}
+      {mark !== undefined ? (
+        <View style={[ruled ? styles.tileSlot : styles.mark, faded && (ruled ? styles.fadedRuled : styles.faded)]}>{mark}</View>
+      ) : null}
       <View style={shared.rowText}>
         <Text
-          style={[styles.name, small && { fontFamily: font.prose }, titleColor ? { color: titleColor } : null, faded && { color: t.dim }]}
+          style={[
+            styles.name,
+            ruled && styles.ruledName,
+            small && { fontFamily: font.prose },
+            titleColor ? { color: titleColor } : null,
+            faded && { color: t.dim },
+          ]}
           numberOfLines={1}
         >
           {title}
         </Text>
         {detail && live ? (
-          <Wipe token={detail} item={{ detail, detailColor }} fill={marker ? t.hover : t.card} style={styles.detailLine}>
-            {(it) => detailText(it.detail, it.detailColor)}
+          <Wipe
+            token={`${prompt ?? ''} ${detail}`}
+            item={{ detail, detailColor, prompt }}
+            fill={marker ? t.hover : t.card}
+            style={[styles.detailLine, prompt ? styles.promptLine : null]}
+          >
+            {(it) =>
+              it.prompt ? (
+                <>
+                  <Text style={[styles.prompt, { color: it.prompt }]}>›</Text>
+                  {detailText(it.detail, it.detailColor, styles.promptText)}
+                  <View style={[styles.cursor, ruled && styles.ruledCursor]} />
+                </>
+              ) : (
+                detailText(it.detail, it.detailColor)
+              )
+            }
           </Wipe>
         ) : detail ? (
           detailText(detail, detailColor)
@@ -208,8 +231,13 @@ export function Row({
       onPress={onPress}
       onLongPress={onLongPress}
       disabled={!onPress && !onLongPress}
+      accessibilityActions={actions?.map(({ name, label }) => ({ name, label }))}
+      onAccessibilityAction={
+        actions ? (event) => actions.find((a) => a.name === event.nativeEvent.actionName)?.run() : undefined
+      }
       style={({ pressed }) => [
         styles.row,
+        ruled && styles.ruledRow,
         children ? styles.rowWithTree : null,
         small && { minHeight: size.rowSm },
         marker && { backgroundColor: t.hover },
@@ -217,7 +245,7 @@ export function Row({
       ]}
     >
       {marker ? <View style={styles.marker} /> : null}
-      {children ? <View style={styles.rowMain}>{main}</View> : main}
+      {children ? <View style={[styles.rowMain, ruled && styles.ruledRow]}>{main}</View> : main}
       {children}
     </Pressable>
   );
@@ -281,33 +309,29 @@ export const MARK_SLOT = 22;
 /** From the slot to the row's words. */
 export const MARK_GAP = 8;
 
+/** From a ruled row's tile to its words. */
+export const TILE_GAP = 12;
+
 // How far a chevron's stroke ends inside its 24-unit box, as a share of its
-// size: 8.1 units pointing right, 5.1 turned down. A row's chevron is pulled
-// out by that much, so what you see ends at the row's inset, as its badge
-// starts at it.
+// size: 8.1 units pointing right. A row's chevron is pulled out by that much,
+// so what you see ends at the row's inset, as its badge starts at it.
 const CHEVRON_RIGHT = 8.1 / 24;
 
-const CHEVRON_DOWN = 5.1 / 24;
-
 const styles = StyleSheet.create({
-  // Its badge stands in the same slot a row's mark does, so the badge and
-  // the marks under it share one column and every name starts at the
-  // same inset. It ends at that inset too.
+  // On the desk, in 4 from the card's edge under it.
   project: {
-    minHeight: 50,
+    height: 36,
     flexDirection: 'row',
     alignItems: 'center',
-    gap: MARK_GAP,
-    paddingHorizontal: ROW_INSET,
+    gap: 10,
+    paddingHorizontal: 4,
     borderRadius: size.radiusRow,
   },
-  fold: { marginRight: -14 * CHEVRON_RIGHT },
-  open: { marginRight: -14 * CHEVRON_DOWN, transform: [{ rotate: '90deg' }] },
-  backlog: { gap: 5, paddingHorizontal: 8 },
-  projectText: { flex: 1, minWidth: 0, gap: 2 },
-  projectLine: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  projectName: { flexShrink: 1, fontFamily: font.proseSemibold, fontSize: size.title, color: t.text },
-  projectInside: { fontFamily: font.chrome, fontSize: 11.5, color: t.faint },
+  projectLine: { flexShrink: 1, flexDirection: 'row', alignItems: 'center', gap: 6 },
+  projectName: { flexShrink: 1, fontFamily: font.proseSemibold, fontSize: size.title, lineHeight: 20, color: t.text },
+  projectRest: { flex: 1 },
+  section: { height: 28, flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 4 },
+  sectionText: { fontFamily: font.proseSemibold, fontSize: size.label, color: t.dim },
   row: {
     minHeight: size.row,
     flexDirection: 'row',
@@ -321,6 +345,12 @@ const styles = StyleSheet.create({
   // in the mark's column and their label starts where the name does.
   rowWithTree: { flexDirection: 'column', alignItems: 'stretch', gap: 3 },
   rowMain: { flexDirection: 'row', alignItems: 'center', gap: MARK_GAP },
+  ruledRow: { gap: TILE_GAP, borderRadius: 0 },
+  tileSlot: { width: TILE, alignItems: 'center' },
+  fadedRuled: { opacity: 0.5 },
+  ruledName: { fontFamily: font.chromeMedium, lineHeight: 18 },
+  ruledDetail: { fontSize: size.label, lineHeight: 18 },
+  ruledCursor: { height: 12 },
   rowChevron: { marginRight: -16 * CHEVRON_RIGHT },
   marker: { position: 'absolute', left: 0, top: 12, bottom: 12, width: 3, borderRadius: 2, backgroundColor: t.marker },
   mark: { width: MARK_SLOT, alignItems: 'center' },
@@ -331,6 +361,12 @@ const styles = StyleSheet.create({
   captionEm: { fontStyle: 'italic' },
   // Only as wide as its words, so the wipe starts at the text's end.
   detailLine: { alignSelf: 'flex-start', maxWidth: '100%' },
+  // A terminal's line: the prompt, the words, the cursor, 6 apart. The words
+  // give way first, so the cursor stays on the line however long they run.
+  promptLine: { gap: 6 },
+  prompt: { fontFamily: font.code, fontSize: 12, lineHeight: 16 },
+  promptText: { flexShrink: 1 },
+  cursor: { width: 6, height: 13, backgroundColor: t.dim },
   state: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   stateText: { fontFamily: font.chrome, fontSize: 11.5 },
 });

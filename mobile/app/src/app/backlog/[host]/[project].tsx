@@ -19,6 +19,7 @@ import { Bar, Button, Card, Heading, IconButton, Prose, Screen, Segmented, Tag, 
 import type { BacklogChange } from '../../../lib/connection';
 import { useHost, useHostState } from '../../../lib/hosts';
 import { font, size, t } from '../../../lib/theme';
+import { surface } from '../../../components/ui/surface';
 import { sentence } from '../../../lib/text';
 
 /** How often the backlog is read again while it is on screen: a note written
@@ -542,7 +543,7 @@ const styles = StyleSheet.create({
     flex: 1,
     height: size.control,
     borderRadius: size.control / 2,
-    backgroundColor: t.sunken,
+    ...surface.well,
     paddingHorizontal: 16,
     color: t.text,
     fontFamily: font.prose,
@@ -560,7 +561,7 @@ const styles = StyleSheet.create({
   capturePriority: {
     height: size.control,
     borderRadius: size.control / 2,
-    backgroundColor: t.sunken,
+    ...surface.well,
     borderWidth: 1,
     borderColor: 'transparent',
     paddingHorizontal: 12,
@@ -584,7 +585,7 @@ const styles = StyleSheet.create({
   },
   title: { fontFamily: font.proseMedium, fontSize: size.body, color: t.text },
   detail: { fontFamily: font.prose, fontSize: size.detail, color: t.dim, marginTop: 3 },
-  opened: { gap: 8, padding: 8, borderRadius: size.radiusRow, backgroundColor: t.hover },
+  opened: { gap: 8, padding: 8, borderRadius: size.radiusRow, ...surface.well },
   openHead: { flexDirection: 'row', alignItems: 'center', gap: 4 },
   openTitle: { fontFamily: font.proseMedium },
   close: { width: 40, height: size.control },

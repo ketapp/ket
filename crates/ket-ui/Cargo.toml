@@ -15,6 +15,7 @@ publish.workspace = true
 # boundary used to provide for free in the abandoned web design.
 [dependencies]
 ket-core.workspace = true
+jiff.workspace = true
 gpui.workspace = true
 # Diagnostics only. Neither git nor a filesystem crate, so the rule above holds.
 tracing.workspace = true

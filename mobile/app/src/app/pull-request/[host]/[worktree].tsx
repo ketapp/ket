@@ -23,6 +23,7 @@ import { useDictation } from '../../../lib/dictation';
 import { useHost, useHostState } from '../../../lib/hosts';
 import { confirmIdentity } from '../../../lib/lock';
 import { font, size, t, tint } from '../../../lib/theme';
+import { surface } from '../../../components/ui/surface';
 import { canDictate } from '../../../lib/voice';
 
 /** What the desktop sends when the worktree has no pull request yet. Out
@@ -250,7 +251,7 @@ const styles = StyleSheet.create({
     alignItems: 'flex-end',
     minHeight: 112,
     borderRadius: size.radius,
-    backgroundColor: t.sunken,
+    ...surface.well,
   },
   // Listening: a faint ring, inside, so nothing moves.
   wellHearing: { boxShadow: `inset 0 0 0 1px ${tint(t.accent, 0.22)}` },

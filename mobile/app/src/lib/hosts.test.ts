@@ -1,11 +1,15 @@
 import { describe, expect, jest, test } from '@jest/globals';
 import { act, renderHook, waitFor } from '@testing-library/react-native';
-import { connection as connect, type ConnectionState, type HostConnection, liveConnection } from './connection';
-import { statusLine, useHost, useHostState, useHostStates } from './hosts';
-import { getHost } from './store';
+import { connection as connect, type ConnectionState, heldConnections, type HostConnection, liveConnection } from './connection';
+import { statusLine, useHeldHosts, useHost, useHostState, useHostStates } from './hosts';
+import { getHost, listHosts } from './store';
 
-jest.mock('./connection', () => ({ connection: jest.fn(), liveConnection: jest.fn() }));
+jest.mock('./connection', () => ({ connection: jest.fn(), heldConnections: jest.fn(), liveConnection: jest.fn() }));
 jest.mock('./store', () => ({ getHost: jest.fn(), listHosts: jest.fn() }));
+// Focused once, as it mounts.
+jest.mock('expo-router', () => ({
+  useFocusEffect: (effect: () => void) => jest.requireActual<typeof import('react')>('react').useEffect(effect, [effect]),
+}));
 
 const state = (status: ConnectionState['status'], error: string | null = null, activeAddress: string | null = null) =>
   ({ status, error, activeAddress, host: { manualAddresses: ['ws://typed.example:7979'] } }) as unknown as ConnectionState;
@@ -82,6 +86,39 @@ describe('useHost', () => {
     jest.mocked(connect).mockReturnValue(made);
     const { result, unmount } = await renderHook(() => useHost('studio'));
     await waitFor(() => expect(result.current).toBe(made));
+    await unmount();
+  });
+});
+
+describe('useHeldHosts', () => {
+  test('has the connections the app already holds on its first draw, then the list as read', async () => {
+    const held = live('studio').conn;
+    const read = live('studio').conn;
+    jest.mocked(heldConnections).mockReturnValue([held]);
+    jest.mocked(listHosts).mockResolvedValue([{ id: 'studio' }] as never);
+    jest.mocked(connect).mockReturnValue(read);
+    const drawn: (HostConnection[] | null)[] = [];
+    const { result, unmount } = await renderHook(() => {
+      const conns = useHeldHosts();
+      drawn.push(conns);
+      return conns;
+    });
+    expect(drawn[0]).toEqual([held]);
+    await waitFor(() => expect(result.current).toEqual([read]));
+    await unmount();
+  });
+
+  test('has nothing, rather than no desktops, while none is held and the list is unread', async () => {
+    jest.mocked(heldConnections).mockReturnValue([]);
+    jest.mocked(listHosts).mockResolvedValue([]);
+    const drawn: (HostConnection[] | null)[] = [];
+    const { result, unmount } = await renderHook(() => {
+      const conns = useHeldHosts();
+      drawn.push(conns);
+      return conns;
+    });
+    expect(drawn[0]).toBeNull();
+    await waitFor(() => expect(result.current).toEqual([]));
     await unmount();
   });
 });

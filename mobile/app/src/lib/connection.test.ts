@@ -63,6 +63,7 @@ type Internals = {
   redialing: boolean;
   foreground: (next: string) => void;
   notify: () => void;
+  drawSnapshot: () => void;
   settleStarting: () => void;
   // What `state` is made from, set directly to stage a moment.
   snapshot: unknown;
@@ -113,6 +114,8 @@ beforeEach(() => {
     watched: new Set(),
     backgroundedAt: null,
     heard: 0,
+    snapshotDrawnAt: 0,
+    snapshotDraw: null,
     redialing: false,
     appState: { remove: () => {} },
     snapshot: null,
@@ -463,5 +466,46 @@ describe('HostConnection coming back from the background', () => {
     expect(sent).toEqual([]);
     expect(remote.close).toHaveBeenCalledTimes(1);
     expect(inside.redialing).toBe(true);
+  });
+});
+
+describe('HostConnection drawing snapshots', () => {
+  /** How many times screens were told to draw again. */
+  const draws = () => {
+    let count = 0;
+    conn.onChange(() => (count += 1));
+    return () => count;
+  };
+
+  test('draws one at the pace the desktop makes them, as it comes', () => {
+    const drawn = draws();
+    inside.drawSnapshot();
+    expect(drawn()).toBe(1);
+    jest.advanceTimersByTime(1_000);
+    inside.drawSnapshot();
+    expect(drawn()).toBe(2);
+  });
+
+  test('draws a run of them, as a session kept through the lock screen is handed, as one', () => {
+    const drawn = draws();
+    // Every snapshot from the time away, at once.
+    for (let at = 0; at < 600; at += 1) inside.drawSnapshot();
+    expect(drawn()).toBe(1);
+    jest.advanceTimersByTime(249);
+    expect(drawn()).toBe(1);
+    // The last of them, the latest, is drawn after.
+    jest.advanceTimersByTime(1);
+    expect(drawn()).toBe(2);
+    jest.advanceTimersByTime(5_000);
+    expect(drawn()).toBe(2);
+  });
+
+  test('draws nothing once the connection is closed', () => {
+    const drawn = draws();
+    inside.drawSnapshot();
+    inside.drawSnapshot();
+    conn.close();
+    jest.advanceTimersByTime(1_000);
+    expect(drawn()).toBe(1);
   });
 });

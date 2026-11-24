@@ -152,6 +152,24 @@ impl WorktreeSessions {
         self.readings.first()
     }
 
+    /// The reading one tab's agent drew: the one naming `session` when its
+    /// pane has named one, else the one filed against `pane`. Never a
+    /// restored reading, which is history rather than the window as it is.
+    /// See [`crate::tab_context`].
+    pub(crate) fn for_tab(
+        &self,
+        session: Option<&str>,
+        pane: TerminalId,
+    ) -> Option<&SessionReading> {
+        self.readings
+            .iter()
+            .filter(|held| !held.restored)
+            .find(|held| match session {
+                Some(session) => held.reading.session.as_deref() == Some(session),
+                None => held.pane == Some(pane),
+            })
+    }
+
     /// How many others have reported from the same checkout.
     fn other_count(&self) -> usize {
         self.readings.len().saturating_sub(1)

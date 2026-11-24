@@ -41,9 +41,10 @@ pub(crate) struct Draft {
 /// Where ket-core's create has got to, written from the thread it runs on.
 pub(crate) type Step = Arc<Mutex<Option<CreateStep>>>;
 
-/// The three parts of making one.
+/// The parts of making a worktree.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Stage {
+    Branch,
     Fetch,
     Checkout,
     Agent,
@@ -76,8 +77,9 @@ impl Start {
             return Stage::Agent;
         }
         match *self.step.lock().unwrap_or_else(PoisonError::into_inner) {
+            None => Stage::Branch,
+            Some(CreateStep::Fetching { .. }) => Stage::Fetch,
             Some(CreateStep::CheckingOut) => Stage::Checkout,
-            _ => Stage::Fetch,
         }
     }
 
@@ -87,6 +89,7 @@ impl Start {
             return why.clone();
         }
         match self.stage() {
+            Stage::Branch => "Checking branch".to_owned(),
             Stage::Fetch => match &*self.step.lock().unwrap_or_else(PoisonError::into_inner) {
                 Some(CreateStep::Fetching { remote }) => format!("Fetching {remote}"),
                 _ => "Fetching".to_owned(),
@@ -134,6 +137,13 @@ impl Shell {
     /// Shows a worktree being made, in the sidebar, and returns where its
     /// creation should report its progress.
     pub(crate) fn begin_start(&mut self, draft: Draft) -> Step {
+        if let Some(project) = self
+            .projects
+            .iter_mut()
+            .find(|project| project.id == draft.project)
+        {
+            project.expanded = true;
+        }
         // Started again after it failed: the new start takes the old one's
         // place rather than standing under it.
         self.starting.list.retain(|start| {
@@ -170,6 +180,28 @@ impl Shell {
     pub(crate) fn start_step(&self, project: &ProjectId, branch: &str) -> Option<Step> {
         self.unborn(project, branch)
             .map(|at| self.starting.list[at].step.clone())
+    }
+
+    /// Keeps the pending row with its submission when a generated name
+    /// needs a suffix. Never take a branch already reserved by another row.
+    pub(crate) fn rename_start(
+        &mut self,
+        project: &ProjectId,
+        branch: &str,
+        resolved: &str,
+    ) -> Result<(), ket_core::KetError> {
+        if branch == resolved {
+            return Ok(());
+        }
+        if self.unborn(project, resolved).is_some() {
+            return Err(ket_core::KetError::Conflict(format!(
+                "a worktree on {resolved} is already starting"
+            )));
+        }
+        if let Some(at) = self.unborn(project, branch) {
+            self.starting.list[at].draft.branch = resolved.to_owned();
+        }
+        Ok(())
     }
 
     /// The worktree exists: its real row takes over, still saying it is
@@ -218,7 +250,8 @@ impl Shell {
             .find(|start| start.worktree.as_ref() == Some(id))
     }
 
-    /// The rows of `project`'s worktrees that do not exist yet.
+    /// The rows of `project`'s worktrees that do not exist yet, drawn where
+    /// [`lands`] says.
     pub(crate) fn starting_rows(&self, project: usize, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let t = &self.theme;
         let Some(node) = self.projects.get(project) else {
@@ -304,4 +337,17 @@ impl Shell {
         self.forget_start(key);
         self.reopen_new_worktree(&draft, cx);
     }
+}
+
+/// Which of a project's `rows` its worktrees being made are drawn above: the
+/// first one `shown` that is neither its own checkout nor pinned. That is
+/// where the registry puts a new worktree once it exists — newest first, and
+/// ahead of any order the rows were dragged into — so the row doesn't jump
+/// when the real one takes over. `None` draws them after the last row.
+pub(crate) fn lands(
+    rows: &[crate::tree::WorktreeNode],
+    shown: impl Fn(&crate::tree::WorktreeNode) -> bool,
+) -> Option<usize> {
+    rows.iter()
+        .position(|row| !row.primary && !row.pinned && shown(row))
 }

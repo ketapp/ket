@@ -373,6 +373,8 @@ pub enum BrowserAction {
     },
     /// List the worktree's browser tabs.
     Tabs,
+    /// Close the tab, and say what it showed — [`BrowserAnswer::Done`].
+    Close,
     /// Go back a page, and wait for it.
     Back,
     /// Go forward a page, and wait for it.
@@ -662,6 +664,27 @@ pub struct BrowserTab {
     pub dialog: Option<String>,
 }
 
+/// An automation's start, handed to a window with the work it does — see
+/// [`crate::automation`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutomationStart {
+    /// The automation's id.
+    pub id: String,
+    /// Its name, for what the window says.
+    pub name: String,
+    /// The branch its new worktree takes, one no branch has: the host found
+    /// it, so it can find the worktree again by it.
+    pub branch: String,
+    /// The Economy level its agent starts at; `None` leaves it to the
+    /// project, as a phone's start does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub economy: Option<u8>,
+    /// When the start was due, in milliseconds: with the id, which run this
+    /// is, for the window to say how it ended.
+    #[serde(default)]
+    pub due_ms: u64,
+}
+
 /// Who asked for work a window is handed: who its messages name.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -857,6 +880,11 @@ pub enum Reply {
         /// Open a plain shell rather than an agent.
         #[serde(default)]
         shell: bool,
+        /// An automation's start: its new worktree takes this branch, and
+        /// the window names the automation. A window from before it ignores
+        /// it and starts the work as `ket start` would.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        automation: Option<AutomationStart>,
     },
     /// The answer to [`Request::StartWork`].
     WorkTaken {
@@ -1220,6 +1248,41 @@ mod tests {
             panic!("not a device list");
         };
         assert_eq!(back, Some(hosted));
+    }
+
+    #[test]
+    fn work_from_a_host_before_automations_still_reads_and_an_automation_round_trips() {
+        let old = r#"{"type":"start_work","project":"p","prompt":"x","agent":null}"#;
+        let Reply::StartWork { automation, .. } = serde_json::from_str(old).unwrap() else {
+            panic!("not work");
+        };
+        assert!(automation.is_none());
+
+        let start = AutomationStart {
+            id: "abc".into(),
+            name: "Audit dependencies".into(),
+            branch: "audit-dependencies-1120".into(),
+            economy: Some(1),
+            due_ms: 1_795_000_000_000,
+        };
+        let json = serde_json::to_string(&Reply::StartWork {
+            project: "p".into(),
+            prompt: "npm run e2e".into(),
+            agent: None,
+            note: None,
+            from: WorkSource::Cli,
+            base: None,
+            model: None,
+            effort: None,
+            worktree: None,
+            shell: true,
+            automation: Some(start.clone()),
+        })
+        .unwrap();
+        let Reply::StartWork { automation, .. } = serde_json::from_str(&json).unwrap() else {
+            panic!("not work");
+        };
+        assert_eq!(automation, Some(start));
     }
 
     #[test]

@@ -364,11 +364,7 @@ pub(crate) fn worktree_menu(
 
 /// Git operations for the selected worktree, with the same availability rules
 /// as the commands in the app menu.
-fn git_menu(
-    at: Point<Pixels>,
-    primary: bool,
-    pull_request: Option<&PullRequestStatus>,
-) -> OpenMenu<WorktreeAction> {
+fn git_menu(primary: bool, pull_request: Option<&PullRequestStatus>) -> OpenMenu<WorktreeAction> {
     let failed_checks = pull_request.map_or(0, |open| open.failed().count());
     OpenMenu::new(
         GIT_ORIGIN.into(),
@@ -471,7 +467,7 @@ fn git_menu(
         ],
     )
     .with_header("Git")
-    .at(at)
+    .uncapped()
 }
 
 /// A worktree context menu and the Git branch that belongs to it. Keeping
@@ -479,7 +475,6 @@ fn git_menu(
 pub(crate) struct WorktreeMenu {
     menu: OpenMenu<WorktreeAction>,
     git: Option<OpenMenu<WorktreeAction>>,
-    at: Point<Pixels>,
     primary: bool,
     pull_request: Option<PullRequestStatus>,
     git_held: bool,
@@ -488,14 +483,12 @@ pub(crate) struct WorktreeMenu {
 impl WorktreeMenu {
     fn new(
         menu: OpenMenu<WorktreeAction>,
-        at: Point<Pixels>,
         primary: bool,
         pull_request: Option<&PullRequestStatus>,
     ) -> Self {
         Self {
             menu,
             git: None,
-            at,
             primary,
             pull_request: pull_request.cloned(),
             git_held: false,
@@ -504,18 +497,7 @@ impl WorktreeMenu {
 
     fn open_git(&mut self) {
         if self.git.is_none() {
-            let row = self
-                .menu
-                .sections()
-                .iter()
-                .flatten()
-                .position(|item| item.action == WorktreeAction::Git)
-                .unwrap_or(0);
-            let at = point(
-                self.at.x + MENU_WIDTH - px(4.0),
-                self.at.y + self.menu.row_top(row),
-            );
-            self.git = Some(git_menu(at, self.primary, self.pull_request.as_ref()));
+            self.git = Some(git_menu(self.primary, self.pull_request.as_ref()));
         }
         self.git_held = true;
     }
@@ -769,7 +751,7 @@ impl Shell {
             has_asleep_tab,
             &self.theme,
         );
-        self.worktree_menu = Some(WorktreeMenu::new(menu, at, node.primary, pull_request));
+        self.worktree_menu = Some(WorktreeMenu::new(menu, node.primary, pull_request));
         // Shift may already be down as the menu opens.
         self.worktree_menu_modifiers_changed_quietly();
     }
@@ -1029,7 +1011,24 @@ impl Shell {
     /// The menu panel, or nothing when it is closed.
     pub(crate) fn worktree_menu_view(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let menu = self.worktree_menu.as_ref()?;
-        let parent = menu.menu.view_with_hover(
+        let git = menu.git.as_ref().map(|git| {
+            let panel = git.panel_with_hover(
+                &self.theme,
+                cx,
+                |shell, action, cx| shell.run_worktree_action(*action, cx),
+                |shell, cx| {
+                    shell.worktree_menu = None;
+                    cx.notify();
+                },
+                |shell, _, _| {
+                    if let Some(open) = shell.worktree_menu.as_mut() {
+                        open.git_held = true;
+                    }
+                },
+            );
+            (WorktreeAction::Git, panel)
+        });
+        Some(menu.menu.view_with_submenu(
             &self.theme,
             cx,
             |shell, action, cx| {
@@ -1048,34 +1047,8 @@ impl Shell {
                 cx.notify();
             },
             |shell, action, cx| shell.hover_worktree_row(*action, cx),
-        );
-        let git = menu.git.as_ref().map(|git| {
-            git.view_with_hover(
-                &self.theme,
-                cx,
-                |shell, action, cx| shell.run_worktree_action(*action, cx),
-                |shell, cx| {
-                    shell.worktree_menu = None;
-                    cx.notify();
-                },
-                |shell, _, _| {
-                    if let Some(open) = shell.worktree_menu.as_mut() {
-                        open.git_held = true;
-                    }
-                },
-            )
-        });
-        // Out of the flow, as each menu inside it is: the window's root is a
-        // column with a gap between its children, and an in-flow wrapper,
-        // empty as it lays out, still took a gap's worth of height from the
-        // workspace, lifting the status bar while the menu was open.
-        Some(
-            div()
-                .absolute()
-                .child(parent)
-                .children(git)
-                .into_any_element(),
-        )
+            git,
+        ))
     }
 
     /// Open Git on hover, allowing a diagonal crossing into its panel.
@@ -1941,7 +1914,7 @@ mod tests {
 
     fn menu_with_failed_checks(primary: bool, failed: usize) -> OpenMenu<WorktreeAction> {
         let pull_request = (failed > 0).then(|| status_with_failed(failed));
-        git_menu(Point::default(), primary, pull_request.as_ref())
+        git_menu(primary, pull_request.as_ref())
     }
 
     fn status_with_failed(failed: usize) -> ket_core::github::PullRequestStatus {
@@ -2064,7 +2037,7 @@ mod tests {
     fn pull_request_actions_wait_for_a_pull_request_that_allows_them() {
         use ket_core::github::{PullRequestState, Review};
 
-        let idle = git_menu(Point::default(), false, None);
+        let idle = git_menu(false, None);
         assert!(!item(&idle, "Merge pull request…").enabled);
         assert!(!item(&idle, "Update branch").enabled);
         assert!(!item(&idle, "Ready for review").enabled);
@@ -2073,7 +2046,7 @@ mod tests {
 
         let mut open = status_with_failed(0);
         open.draft = false;
-        let merge = git_menu(Point::default(), false, Some(&open));
+        let merge = git_menu(false, Some(&open));
         let merge_item = item(&merge, "Merge pull request…");
         assert!(merge_item.enabled);
         assert_eq!(
@@ -2083,11 +2056,11 @@ mod tests {
         assert!(!item(&merge, "Ready for review").enabled);
 
         open.behind = true;
-        let update = git_menu(Point::default(), false, Some(&open));
+        let update = git_menu(false, Some(&open));
         assert!(item(&update, "Update branch").enabled);
 
         open.draft = true;
-        let draft = git_menu(Point::default(), false, Some(&open));
+        let draft = git_menu(false, Some(&open));
         assert!(!item(&draft, "Merge pull request…").enabled);
         assert!(item(&draft, "Ready for review").enabled);
 
@@ -2095,7 +2068,7 @@ mod tests {
         open.behind = false;
         open.review = Review::ChangesRequested;
         open.unresolved_comments = 2;
-        let comments = git_menu(Point::default(), false, Some(&open));
+        let comments = git_menu(false, Some(&open));
         let comments_item = item(&comments, "Address comments with agent");
         assert!(comments_item.enabled);
         assert_eq!(
@@ -2106,7 +2079,7 @@ mod tests {
         open.state = PullRequestState::Closed;
         open.review = Review::None;
         open.unresolved_comments = 0;
-        let closed = git_menu(Point::default(), false, Some(&open));
+        let closed = git_menu(false, Some(&open));
         assert!(item(&closed, "Reopen pull request").enabled);
         assert!(!item(&closed, "Merge pull request…").enabled);
     }
@@ -2237,7 +2210,7 @@ mod tests {
     #[test]
     fn git_actions_are_grouped_and_keep_the_primary_checkout_restriction() {
         let parent = default_menu(false);
-        let git = git_menu(Point::default(), false, None);
+        let git = git_menu(false, None);
         let parent_actions: Vec<_> = parent
             .sections()
             .into_iter()
@@ -2253,18 +2226,12 @@ mod tests {
                 .all(|item| !parent_actions.contains(&item.action))
         );
         assert!(item(&git, "Push and open pull request…").enabled);
-        assert!(
-            !item(
-                &git_menu(Point::default(), true, None),
-                "Push and open pull request…"
-            )
-            .enabled
-        );
+        assert!(!item(&git_menu(true, None), "Push and open pull request…").enabled);
     }
 
     #[test]
     fn keyboard_opens_git_picks_an_action_and_returns_to_the_parent() {
-        let mut open = WorktreeMenu::new(default_menu(false), Point::default(), false, None);
+        let mut open = WorktreeMenu::new(default_menu(false), false, None);
         // Clear build output, snippets, then Git.
         open.key(&key("down"));
         open.key(&key("down"));

@@ -33,6 +33,7 @@ import {
 import Animated, {
   Easing,
   ReduceMotion,
+  type SharedValue,
   useAnimatedStyle,
   useSharedValue,
   withDelay,
@@ -41,6 +42,7 @@ import Animated, {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { font, size, t, tint } from '../lib/theme';
+import { surface } from './ui/surface';
 
 /** Where something is on the screen, as `measureInWindow` reports it. */
 export interface Place {
@@ -227,7 +229,7 @@ export function MenuList({
             onPress={() => onChoose(item)}
             style={({ pressed }) => [
               styles.item,
-              item.selected && { backgroundColor: t.hover },
+              item.selected && surface.chosen,
               pressed && { backgroundColor: t.selection },
             ]}
           >
@@ -389,7 +391,44 @@ function OverScreen({ open, onClose, anchor, sections, lifted, label, width = WI
   );
 }
 
+/** A menu over a sheet, in the sheet's `overlay`: its foot `bottom` points
+ * over the foot of the sheet's room, following the sheet's `rise` as it
+ * scrolls and lifts — see `SheetMeasure`. In the sheet's own modal, so it
+ * never asks iOS for a second one over it. */
+export function SheetMenu({
+  rise,
+  bottom,
+  left,
+  width,
+  maxHeight,
+  sections,
+  label = 'Choices',
+}: {
+  rise: SharedValue<number>;
+  /** Over the foot of the sheet's room, with the body where it lays out. */
+  bottom: number;
+  left: number;
+  width: number;
+  maxHeight: number;
+  sections: MenuSection[];
+  label?: string;
+}) {
+  // `bottom`, not a transform: a transform moves where an item is drawn but
+  // not where its press is judged, and a tap there could be dropped (see
+  // KeyboardLift).
+  const held = useAnimatedStyle(() => ({ bottom: bottom + rise.get() }), [bottom]);
+  return (
+    <Animated.View style={[styles.sheetMenu, { left, width }, held]}>
+      <MenuCard open from="below" label={label}>
+        {/* The card's own edge is two points of the room. */}
+        <MenuList sections={sections} onChoose={(item) => item.onPress()} maxHeight={maxHeight - 2} />
+      </MenuCard>
+    </Animated.View>
+  );
+}
+
 const styles = StyleSheet.create({
+  sheetMenu: { position: 'absolute' },
   scrim: { ...StyleSheet.absoluteFill, backgroundColor: tint(t.backdrop, 0.72) },
   // No edge: it sits exactly on the row's measured frame, and a border
   // inside that frame moved everything in it a pixel as the menu opened.
@@ -404,9 +443,7 @@ const styles = StyleSheet.create({
   // off a chat that is not dimmed under it.
   menu: {
     borderRadius: size.radiusLg,
-    backgroundColor: t.elevated,
-    borderWidth: 1,
-    borderColor: t.border,
+    ...surface.float,
     shadowColor: '#000',
     shadowOpacity: 0.55,
     shadowRadius: 20,
@@ -442,7 +479,8 @@ const styles = StyleSheet.create({
     paddingVertical: 9,
     paddingHorizontal: 10,
     borderRadius: size.radius,
-    backgroundColor: t.sunken,
+    // On the menu's raised fill, a well is the card's grey.
+    backgroundColor: t.card,
     fontFamily: font.chrome,
     fontSize: size.caption,
     lineHeight: 16.5,

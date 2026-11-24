@@ -14,6 +14,8 @@ export type Command = {
   args?: boolean;
   /** Opens a picker or panel that is answered in the terminal. */
   picker?: boolean;
+  /** Starts a fresh chat without adding a message to the current one. */
+  resetsChat?: boolean;
 };
 
 const CLAUDE: Command[] = [
@@ -32,7 +34,7 @@ const CLAUDE: Command[] = [
 
 const CODEX: Command[] = [
   { name: '/compact', about: 'Summarise the conversation to free up context' },
-  { name: '/new', about: 'Start a new conversation' },
+  { name: '/clear', about: 'Start over with an empty conversation', resetsChat: true },
   { name: '/review', about: 'Review the current changes' },
   { name: '/diff', about: 'Show the changes, including untracked files' },
   { name: '/status', about: 'Model, approvals and token use' },

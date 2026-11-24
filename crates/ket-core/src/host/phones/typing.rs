@@ -10,6 +10,41 @@ use super::lock;
 use crate::Result;
 use crate::terminal::LocalTerminal;
 
+/// The most typing a terminal is sure to hand its program in one read.
+/// macOS gives a program at most 1,022 bytes of its input at a time — the
+/// tty's input limit less two — so anything longer arrives in pieces.
+const ONE_READ: usize = 1022;
+
+/// What a phone typed, as it goes into the terminal: text longer than
+/// [`ONE_READ`] as a paste, inside bracketed-paste marks, when the program
+/// asked for them, as the desktop pastes; anything else as it came.
+///
+/// Typed bare, a message that long reaches the program in pieces, and an
+/// agent that isn't told they are one paste can take each piece for a paste
+/// of its own: Claude Code keeps only the last, so a long message from a
+/// phone arrived as its last few lines. Only text is marked: anything with a
+/// control key in it — Escape, an Enter — goes in as typed, so nothing inside
+/// a paste can end it early.
+pub(super) fn as_typed(terminal: &LocalTerminal, bytes: Vec<u8>) -> Vec<u8> {
+    use alacritty_terminal::term::TermMode;
+
+    if bytes.len() <= ONE_READ {
+        return bytes;
+    }
+    let text = match String::from_utf8(bytes) {
+        Ok(text) => text,
+        Err(not_text) => return not_text.into_bytes(),
+    };
+    if text
+        .chars()
+        .any(|c| c.is_control() && c != '\n' && c != '\t')
+        || !terminal.with_term(|term| term.mode().contains(TermMode::BRACKETED_PASTE))
+    {
+        return text.into_bytes();
+    }
+    crate::attachments::paste(&text, true)
+}
+
 /// What phones have asked to be typed into each terminal, in the order they
 /// asked.
 ///

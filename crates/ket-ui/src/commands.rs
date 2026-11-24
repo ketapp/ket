@@ -68,6 +68,8 @@ pub(crate) enum Intent {
     /// Send the selected worktree's review comments to its agent. See
     /// `crate::review`.
     SendReview,
+    /// Open the Automations dialog. See `crate::automations`.
+    OpenAutomations,
 }
 
 /// Where handlers post intents for the shell to pick up.
@@ -169,6 +171,7 @@ pub(crate) fn registry() -> (Registry, Outbox) {
         // The first-run setup is a window, so only the window can open it: in
         // core's registry the CLI would have to implement it too.
         Command::new("setup.show", "Set up a coding agent", Category::Application),
+        Command::new("automation.show", "Open Automations", Category::Automation),
     ];
     for command in shell_commands {
         // A duplicate id here is a mistake in this file, not a runtime state.
@@ -206,6 +209,7 @@ fn bind(registry: &mut Registry, outbox: &Outbox) {
     wire("shell.refresh", Box::new(|_| Ok(Intent::Reload)));
     wire("config.show", Box::new(|_| Ok(Intent::OpenSettings)));
     wire("setup.show", Box::new(|_| Ok(Intent::OpenSetup)));
+    wire("automation.show", Box::new(|_| Ok(Intent::OpenAutomations)));
     wire("shell.split_right", Box::new(|_| Ok(Intent::SplitRight)));
     wire("shell.split_down", Box::new(|_| Ok(Intent::SplitDown)));
     wire("shell.close_pane", Box::new(|_| Ok(Intent::ClosePane)));

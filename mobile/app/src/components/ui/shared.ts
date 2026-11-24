@@ -3,12 +3,13 @@
 import { StyleSheet } from 'react-native';
 
 import { font, size, t } from '../../lib/theme';
+import { surface } from './surface';
 
 export const shared = StyleSheet.create({
   count: { fontFamily: font.chrome, fontSize: 12, color: t.faint },
   rowText: { flex: 1, minWidth: 0, gap: 3 },
   detail: { fontFamily: font.prose, fontSize: size.detail, color: t.dim },
-  segmentOn: { backgroundColor: t.selection },
+  segmentOn: { ...surface.chosen },
   readout: {
     height: 24,
     flexDirection: 'row',
@@ -16,6 +17,6 @@ export const shared = StyleSheet.create({
     gap: 6,
     paddingHorizontal: 9,
     borderRadius: size.radiusSm,
-    backgroundColor: t.sunken,
+    ...surface.well,
   },
 });

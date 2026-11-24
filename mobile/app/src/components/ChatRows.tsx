@@ -4,6 +4,7 @@
 // session's chat, and by the chat that stands in for one while the desktop
 // is still making its worktree — see app/starting.
 
+import { useIsFocused } from 'expo-router';
 import { useEffect, useId, useState } from 'react';
 import { Pressable, type StyleProp, StyleSheet, Text, TextInput, useWindowDimensions, View, type TextInputProps, type TextStyle, type ViewStyle } from 'react-native';
 import Animated, {
@@ -24,6 +25,7 @@ import Svg, { Circle, Defs, LinearGradient, Path, Rect, Stop, Text as SvgText } 
 
 import { fileName, type Attachment } from '../lib/attach';
 import { agentLabel, blend, font, size, t, tint } from '../lib/theme';
+import { surface } from './ui/surface';
 import { FileChip, SentFiles } from './Attachments';
 import { AgentMark, Bubble, Retry, TerminalWindow } from './icons';
 import { Slide } from './Swap';
@@ -168,12 +170,15 @@ export function Working({ agent, what, details = false }: { agent: string; what:
   const shine = useSharedValue(0);
   const words = what || 'Waiting for the agent';
   const name = agent ? agentLabel(agent) : 'Agent';
+  // Still while another screen is over the chat: a chat under it stays
+  // mounted, and its ring went on turning out of sight, a frame at a time.
+  const shown = useIsFocused();
 
   useEffect(() => {
     beat.set(0);
     arc.set(0.14);
     shine.set(0);
-    if (still) return;
+    if (still || !shown) return;
     beat.set(withRepeat(withTiming(1, { duration: BEAT_MS, easing: Easing.linear, ...motion }), -1));
     arc.set(withRepeat(withTiming(0.46, { duration: BEAT_MS, easing: Easing.bezier(0.42, 0, 0.58, 1), ...motion }), -1, true));
     shine.set(withRepeat(withTiming(1, { duration: 1500, easing: Easing.linear, ...motion }), -1));
@@ -182,7 +187,7 @@ export function Working({ agent, what, details = false }: { agent: string; what:
       cancelAnimation(arc);
       cancelAnimation(shine);
     };
-  }, [still, beat, arc, shine]);
+  }, [still, shown, beat, arc, shine]);
   const orbit = useAnimatedStyle(() => ({ transform: [{ rotate: `${beat.get() * 360}deg` }] }));
   const breathing = useAnimatedProps(() => ({
     strokeDasharray: [ORBIT_LENGTH * arc.get(), ORBIT_LENGTH * (1 - arc.get())],
@@ -352,19 +357,21 @@ const COMPACTING = 'Compacting conversation';
  */
 export function Compacting({ style }: { style?: ViewStyle }) {
   const still = useReducedMotion();
+  // Still while another screen is over the chat, as the working ring is.
+  const shown = useIsFocused();
   const shine = useSharedValue(0);
   const press = useSharedValue(0);
   useEffect(() => {
     shine.set(0);
     press.set(0);
-    if (still) return;
+    if (still || !shown) return;
     shine.set(withRepeat(withTiming(1, { duration: 2400, easing: Easing.linear, ...motion }), -1));
     press.set(withRepeat(withTiming(1, { duration: 800, easing: Easing.inOut(Easing.ease), ...motion }), -1, true));
     return () => {
       cancelAnimation(shine);
       cancelAnimation(press);
     };
-  }, [still, shine, press]);
+  }, [still, shown, shine, press]);
   // The chevrons close on the line and open again, out of step.
   const down = useAnimatedStyle(() => ({ transform: [{ translateY: (press.get() * 2 - 1) * NUDGE }] }));
   const up = useAnimatedStyle(() => ({ transform: [{ translateY: (1 - press.get() * 2) * NUDGE }] }));
@@ -626,9 +633,7 @@ const styles = StyleSheet.create({
     width: 52,
     height: 52,
     borderRadius: 26,
-    borderWidth: 1,
-    borderColor: t.rule,
-    backgroundColor: t.card,
+    ...surface.panel,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -660,7 +665,7 @@ const styles = StyleSheet.create({
   lostAction: { flex: 1, height: 48, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, borderRadius: 12 },
   retry: { backgroundColor: t.brand },
   retryText: { fontFamily: font.proseSemibold, fontSize: 15, color: t.onBrand },
-  terminal: { borderWidth: 1, borderColor: t.border, backgroundColor: t.card },
+  terminal: { ...surface.float },
   terminalText: { fontFamily: font.proseMedium, fontSize: 15, color: t.text },
   // Over the title, from the (i), its arrow at the (i).
   why: {
@@ -672,9 +677,7 @@ const styles = StyleSheet.create({
     paddingTop: 14,
     paddingBottom: 13,
     borderRadius: size.radiusCard,
-    borderWidth: 1,
-    borderColor: t.border,
-    backgroundColor: t.elevated,
+    ...surface.float,
     shadowColor: '#000',
     shadowOpacity: 0.55,
     shadowRadius: 18,
@@ -702,10 +705,10 @@ const styles = StyleSheet.create({
     right: 36 + 12 - 1 - 6,
     width: 12,
     height: 12,
-    backgroundColor: t.elevated,
+    ...surface.float,
+    borderWidth: 0,
     borderRightWidth: 1,
     borderBottomWidth: 1,
-    borderColor: t.border,
     transform: [{ rotate: '45deg' }],
   },
 });

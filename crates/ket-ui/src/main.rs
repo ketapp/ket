@@ -29,6 +29,7 @@ mod android_emulator;
 mod app_menu;
 mod appearance;
 mod audio;
+mod automations;
 mod backlog;
 mod browser;
 // The workspace's fifth `unsafe` carve-out; see its lint block and the
@@ -73,6 +74,7 @@ mod layout;
 mod local_models;
 mod merge_pull_request;
 mod merge_worktree;
+mod modals;
 mod motion;
 mod network_panel;
 mod notify;
@@ -93,6 +95,7 @@ mod region;
 mod release;
 mod review;
 mod savings;
+mod schedule_fields;
 mod search;
 mod session_color;
 mod setup;
@@ -103,6 +106,7 @@ mod snippets;
 mod starting;
 mod status_bar;
 mod storage;
+mod tab_context;
 mod tabs;
 mod terminal;
 mod toasts;
@@ -149,6 +153,7 @@ use crate::editor::EditorState;
 use crate::explorer::{Explorer, Finder, PanelResize};
 use crate::input::Key;
 use crate::input::Searches;
+use crate::input::stop_unless_text;
 #[cfg(target_os = "macos")]
 use crate::ios_simulator::IosSimulatorHandle;
 use crate::paint::paint;
@@ -619,6 +624,10 @@ struct Shell {
     pub(crate) device_strip_hovered: Option<&'static str>,
     /// A project's backlog, while open.
     pub(crate) backlog: Option<crate::backlog::BacklogDialog>,
+    /// The Automations dialog, while open.
+    pub(crate) automations: Option<crate::automations::AutomationsDialog>,
+    /// The next start and missed ones, for the status bar and toasts.
+    pub(crate) automation_glance: crate::automations::Glance,
     /// Where each project's GitHub issues were last read, and what ket is
     /// changing on GitHub now.
     pub(crate) issue_sync: crate::backlog::IssueSync,
@@ -764,6 +773,9 @@ struct Shell {
     /// The worktree whose merge mark is under the pointer, if any. Its own
     /// field for the same reason `hovered_primary` is.
     pub(crate) hovered_merge: Option<WorktreeId>,
+    /// The terminal whose tab context ring is under the pointer, if any — see
+    /// [`crate::tab_context`].
+    pub(crate) hovered_context: Option<TerminalId>,
     /// Which glyph-only control of the diff or its review is under the
     /// pointer, for its tooltip: its kind, and which row or comment —
     /// see `Shell::tipped`.
@@ -1070,73 +1082,6 @@ impl Focusable for Shell {
 }
 
 impl Shell {
-    /// Whether some field of the shell's is taking typed characters.
-    ///
-    /// Two things read this. The shell takes the window's focus back the
-    /// moment it goes false, and the caret's blink timer runs only while it is
-    /// true — so a surface that takes typing has to be named here, or the
-    /// field it just focused is blurred on the very next frame and the
-    /// characters go wherever the shell's handle points. That is a terminal
-    /// pane, which registers a text-input handler against exactly this handle:
-    /// the settings filter used to type into the shell behind the modal for
-    /// precisely this reason.
-    ///
-    /// The modals and overlays are named by whether they are *open*, not by
-    /// whether their field has the keyboard yet: focus is asked for when one
-    /// opens and granted a frame later, and a predicate that waited for the
-    /// grant would blur the field in between. The panel's search box has no
-    /// such gap — nothing but a click ever focuses it — so it answers for
-    /// itself.
-    fn typing(&self, window: &Window, cx: &App) -> bool {
-        self.new_worktree.is_some()
-            || self.settings.is_some()
-            || self.adding_project.is_some()
-            || self.preferences.is_some()
-            || self.palette.open
-            || self.snippet_picker.is_some()
-            || self.finder.open
-            || self.search.open
-            || self.workspace_search_typing(window, cx)
-            || self.find_open()
-            || self.terminal_find_open()
-            || self.tab_rename_open()
-            || self.worktree_rename.is_some()
-            || self.quick_prompt.is_some()
-            || self.backlog.is_some()
-            || self.quick_capture.is_some()
-            || self.review_draft_focused()
-            || self.feedback.typing()
-            || self.browser_typing(window, cx)
-            || self.chromium_dialog_typing_any(window, cx)
-            || self.searches.explorer.read(cx).is_focused(window)
-    }
-
-    /// Whether a modal currently owns the window.
-    pub(crate) fn modal_open(&self) -> bool {
-        self.storage_dialog.is_some()
-            || self.release_dialog.is_some()
-            || self.preferences.is_some()
-            || self.new_worktree.is_some()
-            || self.settings.is_some()
-            || self.adding_project.is_some()
-            || self.confirm_remove.is_some()
-            || self
-                .confirm_remove_worktree
-                .as_ref()
-                .is_some_and(|confirm| !confirm.quiet)
-            || self.confirm_clear_build.is_some()
-            || self.confirm_discard.is_some()
-            || self.confirm_close_session.is_some()
-            || self.cold_resume.dialog.is_some()
-            || self.confirm_merge_worktree.is_some()
-            || self.confirm_pull_request.is_some()
-            || self.confirm_merge_pull_request.is_some()
-            || self.worktree_rename.is_some()
-            || self.quick_prompt.is_some()
-            || self.backlog.is_some()
-            || self.quick_capture.is_some()
-    }
-
     /// The periodic refresh: everything that changes under the window without
     /// an event to say so. Runs on the tick, and once when the window regains
     /// focus.
@@ -1167,6 +1112,7 @@ impl Shell {
             self.persist_view();
         }
         self.refresh_savings();
+        self.refresh_automation_glance(cx);
         self.refresh_session_colors(cx);
         // Only for a bar someone can see. See `crate::overhead`.
         if self.status_bar_open {
@@ -1464,6 +1410,8 @@ impl Shell {
                     capturing_device: false,
                     device_strip_hovered: None,
                     backlog: None,
+                    automations: None,
+                    automation_glance: crate::automations::Glance::default(),
                     issue_sync: crate::backlog::IssueSync::default(),
                     pull_requests: crate::checks::PullRequests::default(),
                     github: crate::github::GitHubState::default(),
@@ -1493,6 +1441,7 @@ impl Shell {
                     override_hover: Default::default(),
                     hovered_primary: None,
                     hovered_merge: None,
+                    hovered_context: None,
                     hovered_diff_control: None,
                     hovered_pull_request: None,
                     hovered_footprint: None,
@@ -1595,7 +1544,7 @@ impl Shell {
             }
         };
 
-        let projects = Self::load_projects(&workspace);
+        let projects = Self::first_load(&workspace, cx);
 
         // What lets the tracker tell `claude` in a terminal from `cargo` in
         // one. Names only, from the same list the catalogue is built from, so
@@ -1654,6 +1603,8 @@ impl Shell {
             capturing_device: false,
             device_strip_hovered: None,
             backlog: None,
+            automations: None,
+            automation_glance: crate::automations::Glance::default(),
             issue_sync: crate::backlog::IssueSync::default(),
             pull_requests: crate::checks::PullRequests::default(),
             github: crate::github::GitHubState::default(),
@@ -1683,6 +1634,7 @@ impl Shell {
             override_hover: Default::default(),
             hovered_primary: None,
             hovered_merge: None,
+            hovered_context: None,
             hovered_diff_control: None,
             hovered_pull_request: None,
             hovered_footprint: None,
@@ -1910,19 +1862,6 @@ impl Shell {
     }
 }
 
-/// Stops a key's propagation unless it is text.
-///
-/// A dialog that has taken a chord must keep it from the shell's bindings
-/// behind it. A character is different: the key event is not what puts it
-/// in the field — macOS's input method is, and that only runs once the
-/// event has propagated to the end. Stopping it there was how every field
-/// in a dialog went deaf at once.
-fn stop_unless_text(event: &KeyDownEvent, cx: &mut Context<Shell>) {
-    if !crate::input::is_text(&event.keystroke) {
-        cx.stop_propagation();
-    }
-}
-
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let modal_open = self.modal_open();
@@ -2031,9 +1970,7 @@ impl Render for Shell {
         let tab_context_menu = (!modal_open)
             .then(|| self.tab_context_menu_view(cx))
             .flatten();
-        let tab_open_in = (!modal_open).then(|| self.tab_open_in_view(cx)).flatten();
         let link_menu = (!modal_open).then(|| self.link_menu_view(cx)).flatten();
-        let tab_snippets = (!modal_open).then(|| self.tab_snippets_view(cx)).flatten();
         let settings = self.settings_view(window, cx);
         let add_project = self.add_project_view(window, cx);
         let preferences = self.preferences_view(window, cx);
@@ -2074,6 +2011,7 @@ impl Render for Shell {
         let rename_worktree = self.worktree_rename_view(window, cx);
         let quick_prompt = self.quick_prompt_view(window, cx);
         let backlog = self.backlog_view(window, cx);
+        let automations = self.automations_view(window, cx);
         let quick_capture = self.quick_capture_view(window, cx);
         let close_session = self.close_session_view(cx);
         let cold_resume = self.cold_resume_view(cx);
@@ -2094,6 +2032,7 @@ impl Render for Shell {
             .or(rename_worktree)
             .or(quick_prompt)
             .or(backlog)
+            .or(automations)
             .or(quick_capture)
             .or(close_session)
             .or(cold_resume);
@@ -2105,7 +2044,8 @@ impl Render for Shell {
             let _span = crate::frametrace::span("build:status");
             let overhead = self.overhead_trigger(window, cx);
             let feedback = self.feedback_trigger(window, cx);
-            self.window_status_bar(overhead, feedback)
+            let automations = self.automation_chip(cx);
+            self.window_status_bar(automations, overhead, feedback)
         });
         let feedback_overlay = self.feedback_overlay(window, cx);
         let toasts = self.toasts_view(window, cx);
@@ -3077,7 +3017,9 @@ impl Render for Shell {
                         stop_unless_text(event, cx);
                         return;
                     }
-                    if this.backlog_key(event, window, cx) {
+                    if this.backlog_key(event, window, cx)
+                        || this.automations_key(event, window, cx)
+                    {
                         this.caret_wake(cx);
                         cx.notify();
                         stop_unless_text(event, cx);
@@ -3476,10 +3418,6 @@ impl Render for Shell {
             .children(tucked_menu.map(|el| deferred(el).with_priority(8)))
             .children(tab_context_menu.map(|el| deferred(el).with_priority(8)))
             .children(link_menu.map(|el| deferred(el).with_priority(8)))
-            // A priority above its parent's: a branch that drew under the menu
-            // it hangs off would be hidden by it.
-            .children(tab_open_in.map(|el| deferred(el).with_priority(9)))
-            .children(tab_snippets.map(|el| deferred(el).with_priority(9)))
             .children(worktree_menu.map(|el| deferred(el).with_priority(8)))
             .children(path_menu.map(|el| deferred(el).with_priority(8)))
             .children(token_reduction_menu.map(|el| deferred(el).with_priority(8)))

@@ -12,16 +12,20 @@ import { ScrollView, StyleSheet, Text, View } from 'react-native';
 import { AgentMark } from '../components/icons';
 import { Card, Meter, Prose, Screen, TAB_BAR_ROOM, TabBar } from '../components/ui';
 import { everyWorktree } from '../lib/activity';
-import { useHosts, useHostStates } from '../lib/hosts';
-import { getDesktop } from '../lib/store';
+import { useHeldHosts, useHostStates } from '../lib/hosts';
+import { getDesktop, heldDesktop } from '../lib/store';
 import { font, size, t } from '../lib/theme';
-import { metadata, pressure, resetsIn, sessions, useNow, usedOf } from '../lib/usage';
+import { heard, metadata, pressure, resetsIn, sessions, useNow, usedOf } from '../lib/usage';
 
 export default function Usage() {
-  const conns = useHosts();
+  // Opened from the tab bar, a new screen each time: the connections already
+  // held draw its cards at once, rather than a note saying none is paired
+  // until the Keychain gives the list back.
+  const conns = useHeldHosts();
   const hostStates = useHostStates(conns);
-  // The desktop chosen on the Worktrees tab, else the first.
-  const [chosen, setChosen] = useState<string | null>(null);
+  // The desktop chosen on the Worktrees tab, else the first; as last read,
+  // so the first draw is already that desktop's.
+  const [chosen, setChosen] = useState<string | null>(heldDesktop);
   useFocusEffect(
     useCallback(() => {
       void getDesktop().then(setChosen);
@@ -35,25 +39,26 @@ export default function Usage() {
   const now = useNow();
   const snapshot = hostState?.snapshot ?? null;
   const providers = snapshot?.usage ?? [];
+  // Saying there is nothing waits until that is known: the paired desktops
+  // read, and this one heard from (see `heard`).
+  const nothing = hostState
+    ? heard(hostState)
+      ? `No usage yet. It shows once ket is open on ${hostState.host.name} and has read it.`
+      : null
+    : conns
+      ? 'No desktop paired yet. Pair one in Settings.'
+      : null;
   return (
     <Screen>
       <ScrollView contentContainerStyle={styles.page}>
         {providers.map((provider) => (
           <Provider key={provider.provider} provider={provider} live={sessions(snapshot, provider.provider)} now={now} />
         ))}
-        {providers.length === 0 ? (
+        {providers.length === 0 && nothing ? (
           <Card style={styles.empty}>
-            <Prose>
-              {hostState
-                ? `No usage yet. It shows once ket is open on ${hostState.host.name} and has read it.`
-                : 'No desktop paired yet. Pair one in Settings.'}
-            </Prose>
+            <Prose>{nothing}</Prose>
           </Card>
-        ) : (
-          <Prose style={styles.footnote} color={t.faint}>
-            Plan quota, as ket on your desktop last read it. It reads again every few minutes.
-          </Prose>
-        )}
+        ) : null}
       </ScrollView>
       <TabBar active="usage" needs={waiting} />
     </Screen>
@@ -147,5 +152,4 @@ const styles = StyleSheet.create({
   figure: { minWidth: 40, textAlign: 'right', fontFamily: font.chromeSemibold, fontSize: size.label, color: t.text },
   note: { fontFamily: font.prose, fontSize: size.detail, color: t.dim },
   empty: { padding: 14 },
-  footnote: { fontSize: size.detail, lineHeight: 18, paddingHorizontal: 6 },
 });

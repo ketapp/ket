@@ -4,6 +4,7 @@ import {
   forgetHost,
   getCollapsed,
   getDesktop,
+  heldDesktop,
   getHiddenProjects,
   getHost,
   getLastWork,
@@ -92,7 +93,10 @@ describe('secure mobile storage', () => {
     expect(await getLastWork('other')).toBeNull();
 
     expect(await getDesktop()).toBeNull();
+    expect(heldDesktop()).toBeNull();
     await saveDesktop('h');
+    // Held from the save, for a first draw that cannot wait on the Keychain.
+    expect(heldDesktop()).toBe('h');
     expect(await getDesktop()).toBe('h');
 
     expect(await getCollapsed('h')).toEqual([]);

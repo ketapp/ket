@@ -21,7 +21,10 @@ npx expo-doctor             # diagnose dependency and config issues
 npx expo install --fix      # fix incompatible package versions
 ```
 
-Run lint and typecheck before declaring any task done.
+When committing app changes, let the repository's pre-commit hook lint the
+staged files and typecheck the app. Run `npx expo lint` and `npx tsc --noEmit`
+yourself before wrapping up if you are working without a commit or the hooks
+are off.
 
 ## Navigation & Routing
 
@@ -40,6 +43,7 @@ This project does not use EAS. Build on the Mac:
 
 ## Rules
 
+- Build every screen from the shared components: `src/components/ui/` (listed in its `index.ts`), `Sheet.tsx` and `FloatMenu.tsx`. Never draw a one-off button, row, field or menu. If nothing fits, say what's missing and ask. The repository's root `AGENTS.md` has the full rule, and its 2,000-line file limit applies here too.
 - If `ios/` and `android/` directories do not exist, they are generated (Continuous Native Generation). Never create or edit them by hand — configure native behavior in `app.json` and config plugins.
 - Expo Go only includes its bundled native modules. After adding a library with native code, the app needs a local development build: `npx expo run:ios|android`.
 - Prefer recommended Expo modules over third-party libraries, and check your available skills before adding dependencies. Docs: https://docs.expo.dev/versions/latest/index.md

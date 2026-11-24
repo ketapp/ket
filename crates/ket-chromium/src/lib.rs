@@ -35,6 +35,7 @@ mod browser;
 mod cdp;
 mod engine;
 mod handlers;
+mod privacy;
 /// CEF's message pump on the main run loop. Creating a CoreFoundation timer,
 /// naming the common modes and handing a block to the main run loop have no
 /// safe binding; this module holds those calls.

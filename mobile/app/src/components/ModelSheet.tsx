@@ -7,6 +7,7 @@ import type { AgentChoice, AgentModes, AgentSettings } from '@ket/remote';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { font, t } from '../lib/theme';
+import { surface } from './ui/surface';
 import { Sheet, SheetItem, SheetList, SheetNote } from './Sheet';
 
 /** A row of choices, the current one raised, as the desktop's segmented
@@ -149,7 +150,7 @@ export function ModelSheet({
 const styles = StyleSheet.create({
   group: { gap: 8 },
   label: { fontFamily: font.proseMedium, fontSize: 13, color: t.dim },
-  segments: { flexDirection: 'row', gap: 6, padding: 4, borderRadius: 12, backgroundColor: t.sunken },
+  segments: { flexDirection: 'row', gap: 6, padding: 4, borderRadius: 12, ...surface.well },
   segment: { flex: 1, height: 38, borderRadius: 9, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 4 },
   segmentOn: { backgroundColor: t.selection },
   segmentText: { fontFamily: font.prose, fontSize: 13.5, color: t.dim },

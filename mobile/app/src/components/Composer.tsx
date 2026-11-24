@@ -6,14 +6,16 @@
 //
 // Nothing on the bar changes size or place but these: the chat above, the
 // chips and the field stay where they are while a menu is up, so a menu
-// can open with the keyboard up and the keyboard stays.
+// can open with the keyboard up and the keyboard stays. The chips fold
+// away when they have nothing to offer — see Fold.
 
-import { useEffect } from 'react';
-import { Pressable, StyleSheet, type ViewStyle } from 'react-native';
+import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react';
+import { type LayoutChangeEvent, Pressable, StyleSheet, View, type ViewStyle } from 'react-native';
 import Animated, {
   Easing,
   ReduceMotion,
   interpolateColor,
+  runOnJS,
   useAnimatedStyle,
   useSharedValue,
   withSequence,
@@ -105,24 +107,25 @@ export function SendButton({
     return { opacity: s, transform: [{ rotate: `${-120 * (1 - s)}deg` }, { scale: 0.3 + 0.7 * s }] };
   });
   return (
-    <Animated.View style={[styles.round, styles.send, shell]}>
-      <Pressable
-        accessibilityRole="button"
-        accessibilityLabel={stop ? 'Stop' : 'Send'}
-        disabled={stop ? stopping : !ready}
-        onPress={onPress}
-        onPressIn={() => pressed.set(withSpring(0.9, PRESS))}
-        onPressOut={() => pressed.set(withSpring(1, PRESS))}
-        style={styles.fill}
-      >
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={stop ? 'Stop' : 'Send'}
+      disabled={stop ? stopping : !ready}
+      onPress={onPress}
+      onPressIn={() => pressed.set(withSpring(0.9, PRESS))}
+      onPressOut={() => pressed.set(withSpring(1, PRESS))}
+      style={[styles.control, ready && styles.sendAboveMenu]}
+    >
+      {/* Scale the artwork inside the button so the touch area holds still. */}
+      <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, styles.round, styles.send, shell]}>
         <Animated.View style={[styles.glyph, arrow]}>
           <Glyph ready={ready} />
         </Animated.View>
         <Animated.View style={[styles.glyph, square]}>
           <Stop size={18} color={t.text} />
         </Animated.View>
-      </Pressable>
-    </Animated.View>
+      </Animated.View>
+    </Pressable>
   );
 }
 
@@ -163,7 +166,7 @@ export function PlusButton({ open, onPress }: { open: boolean; onPress: () => vo
   }));
   const turn = useAnimatedStyle(() => ({ transform: [{ rotate: `${45 * opened.get()}deg` }] }));
   return (
-    <Animated.View style={[styles.round, shell]}>
+    <Animated.View style={[styles.control, styles.round, shell]}>
       <Pressable
         accessibilityRole="button"
         accessibilityLabel={open ? 'Close the attach menu' : 'Attach a photo or file'}
@@ -177,6 +180,61 @@ export function PlusButton({ open, onPress }: { open: boolean; onPress: () => vo
           <Plus size={20} color={t.text} weight={2.2} />
         </Animated.View>
       </Pressable>
+    </Animated.View>
+  );
+}
+
+/** How long the chips take to fold away over the field, or come back. */
+const FOLD_MS = 220;
+/** How far they sink as they go. */
+const FOLD_SINK = 8;
+/** No bound: the chips at their own height. */
+const UNBOUND = 100_000;
+
+/** The chips over the field, shown or folded away: as they go, their height
+ * closes to nothing while they fade and sink, so the chat above grows into
+ * the room frame by frame, and they come back the same way. Drawn only while
+ * they show or fold; a tap on chips on their way out does nothing. */
+export function Fold({ shown, children }: { shown: boolean; children: ReactNode }) {
+  const [drawn, setDrawn] = useState(shown);
+  if (shown && !drawn) setDrawn(true);
+  // 1 shown in full, 0 folded away.
+  const open = useSharedValue(shown ? 1 : 0);
+  // Bound to `open` of their height while they fold or come back, and once
+  // folded, until they are gone: let go on the UI thread as the fold ends,
+  // they were back at full height for the frames before the JS thread
+  // took them away — a flash of chips, and the chat jumping with it. Folded
+  // from the start, the same: bound, so their first frame back is closed.
+  const moving = useSharedValue(!shown);
+  const full = useSharedValue(0);
+  const was = useRef(shown);
+  const gone = useCallback(() => setDrawn(false), []);
+  useEffect(() => {
+    if (was.current === shown) return;
+    was.current = shown;
+    moving.set(true);
+    open.set(
+      withTiming(shown ? 1 : 0, timing(FOLD_MS), (done) => {
+        if (!done) return;
+        if (shown) moving.set(false);
+        else runOnJS(gone)();
+      }),
+    );
+  }, [shown, open, moving, gone]);
+  const style = useAnimatedStyle(() =>
+    moving.get()
+      ? {
+          maxHeight: full.get() * open.get(),
+          opacity: open.get(),
+          transform: [{ translateY: (1 - open.get()) * FOLD_SINK }],
+        }
+      : { maxHeight: UNBOUND, opacity: 1, transform: [{ translateY: 0 }] },
+  );
+  const measure = useCallback((e: LayoutChangeEvent) => full.set(e.nativeEvent.layout.height), [full]);
+  if (!drawn) return null;
+  return (
+    <Animated.View pointerEvents={shown ? 'box-none' : 'none'} style={[styles.clip, style]}>
+      <View onLayout={measure}>{children}</View>
     </Animated.View>
   );
 }
@@ -195,9 +253,13 @@ export const plusMenu: ViewStyle = { left: 0, right: 0, maxWidth: 296 };
 export const slashMenu = (plus: boolean): ViewStyle => ({ left: plus ? size.control + 8 : 0, right: size.control + 8 });
 
 const styles = StyleSheet.create({
-  round: { width: size.control, height: size.control, borderRadius: size.control / 2, overflow: 'hidden' },
+  control: { width: size.control, height: size.control },
+  round: { borderRadius: size.control / 2, overflow: 'hidden' },
   send: { backgroundColor: t.selection },
+  // A ready Send can submit the draft while a composer menu is open.
+  sendAboveMenu: { zIndex: 3 },
   fill: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center' },
   glyph: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center' },
   center: { alignItems: 'center', justifyContent: 'center' },
+  clip: { overflow: 'hidden' },
 });

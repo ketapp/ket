@@ -1,11 +1,13 @@
-// Small marks: a project's badge with its glyph, tags and dots.
+// Small marks: a project's badge with its glyph, an agent's tile, tags,
+// chips and dots.
 
 import { type ReactNode } from 'react';
 import { StyleSheet, Text, View, type StyleProp, type TextStyle } from 'react-native';
 import Svg, { Circle, Ellipse, G, Line, Path, Polygon, Polyline, Rect } from 'react-native-svg';
 
 import { GLYPHS, type Glyph, type GlyphPart } from '../../lib/glyphs';
-import { font, size, t, tint } from '../../lib/theme';
+import { font, sessionColor, size, t, tint } from '../../lib/theme';
+import { AgentGlyph, TerminalGlyph } from '../icons';
 
 /** The glyph a project's icon names (`glyph:<name>`, from a desktop at 1.27
  * or later), if this phone has it. A name it does not have draws the letter,
@@ -111,11 +113,90 @@ export function Tag({
   );
 }
 
-export function Dot({ color, size: side = 7 }: { color: string; size?: number }) {
-  return <View style={{ width: side, height: side, borderRadius: side / 2, backgroundColor: color }} />;
+/** A dot in a state's colour. `hollow` is a ring of it: the state is not
+ * there now — a desktop that is offline, or still being reached. */
+export function Dot({ color, size: side = 7, hollow }: { color: string; size?: number; hollow?: boolean }) {
+  return (
+    <View
+      style={[
+        { width: side, height: side, borderRadius: side / 2 },
+        hollow ? { borderWidth: 1.5, borderColor: color } : { backgroundColor: color },
+      ]}
+    />
+  );
+}
+
+/** An agent tile's side: a project badge's on the desk, and a row's mark. */
+export const TILE = 24;
+
+/**
+ * Who works in a row, and how it is going, said once: the agent's logo in a
+ * quiet grey on a raised tile, and its state as a dot on the tile's corner —
+ * none while it is quiet. With no agent, a terminal's prompt stands in. A
+ * session's `/color` (protocol 1.31) fills the tile, as `sessionColor`
+ * gives it. `ring` is the colour round the dot: what the tile stands on.
+ * `faded` is an asleep tab's: kept, not running.
+ */
+export function AgentTile({
+  agent,
+  session,
+  tone,
+  ring = t.card,
+  faded,
+  label,
+}: {
+  agent: string;
+  session?: string;
+  /** The state's colour, for the dot and the logo. */
+  tone?: string;
+  ring?: string;
+  faded?: boolean;
+  /** What a screen reader calls it: the agent and its state. */
+  label?: string;
+}) {
+  const worn = sessionColor(session);
+  // The logo lights in its state's colour; on a session's colour, it keeps
+  // that tile's ink, and the dot says the state.
+  const ink = worn?.ink ?? tone ?? t.dim;
+  return (
+    <View
+      accessible={label !== undefined}
+      accessibilityLabel={label}
+      style={[styles.tile, { backgroundColor: worn?.tile ?? t.elevated }, faded && styles.tileFaded]}
+    >
+      {agent ? <AgentGlyph agent={agent} size={14} color={ink} /> : <TerminalGlyph size={15} color={ink} weight={2} />}
+      {tone ? <View style={[styles.tileDot, { backgroundColor: tone, borderColor: ring }]} /> : null}
+    </View>
+  );
+}
+
+/** A figure on a small capsule of the raised fill, led by a glyph: a pull
+ * request's number, its glyph in its checks' colour. */
+export function Chip({ icon, children, label }: { icon?: ReactNode; children: ReactNode; label?: string }) {
+  return (
+    <View accessible={label !== undefined} accessibilityLabel={label} style={styles.chip}>
+      {icon}
+      <Text style={styles.chipText}>{children}</Text>
+    </View>
+  );
 }
 
 const styles = StyleSheet.create({
+  tile: { width: TILE, height: TILE, borderRadius: size.radius, alignItems: 'center', justifyContent: 'center' },
+  tileFaded: { opacity: 0.5 },
+  // 10 across with a 2 pt ring of the ground, 3 out past the tile's corner.
+  tileDot: { position: 'absolute', right: -5, bottom: -5, width: 14, height: 14, borderRadius: 7, borderWidth: 2 },
+  chip: {
+    height: 24,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingLeft: 7,
+    paddingRight: 8,
+    borderRadius: 12,
+    backgroundColor: t.elevated,
+  },
+  chipText: { fontFamily: font.chromeMedium, fontSize: 12, color: t.dim, fontVariant: ['tabular-nums'] },
   badge: { borderRadius: size.radiusSm, alignItems: 'center', justifyContent: 'center' },
   badgeText: { fontFamily: font.chromeSemibold, fontSize: 11.5 },
   tag: {

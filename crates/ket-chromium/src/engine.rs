@@ -329,9 +329,13 @@ wrap_app! {
         ) {
             // The browser process is the one with no type.
             let browser = process_type.is_none_or(|kind| kind.to_string().is_empty());
-            if let (true, true, Some(command_line)) = (self.dev, browser, command_line) {
+            let (true, Some(command_line)) = (browser, command_line) else {
+                return;
+            };
+            if self.dev {
                 command_line.append_switch(Some(&CefString::from("use-mock-keychain")));
             }
+            crate::privacy::quiet(command_line);
         }
 
         fn browser_process_handler(&self) -> Option<BrowserProcessHandler> {

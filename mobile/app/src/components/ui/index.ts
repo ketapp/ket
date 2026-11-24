@@ -8,4 +8,5 @@ export * from './controls';
 export * from './layout';
 export * from './marks';
 export * from './rows';
+export * from './surface';
 export * from './tabs';

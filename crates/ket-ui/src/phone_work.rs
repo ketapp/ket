@@ -42,6 +42,10 @@ const TERMINAL_OPEN: Duration = Duration::from_secs(15);
 /// How often landing looks again while they open.
 const LANDING_POLL: Duration = Duration::from_millis(100);
 
+/// How long a new shell is given to draw its prompt before an automation's
+/// command is typed into it regardless.
+const SHELL_READY: Duration = Duration::from_secs(10);
+
 /// How long Codex may take to show its input before the prompt is held back.
 const CODEX_START_WAIT: Duration = Duration::from_secs(120);
 
@@ -117,12 +121,57 @@ impl Shell {
         }
     }
 
-    fn start_phone_work(&mut self, work: PhoneWork, cx: &mut Context<Self>) {
+    fn start_phone_work(&mut self, mut work: PhoneWork, cx: &mut Context<Self>) {
+        // An automation's command is run by `ket automation exec`, which runs
+        // the line as saved with the person's own shell and records how it
+        // ended — a command that fails reads Failed, not Done. Without the
+        // ket command beside this build, the line itself is typed.
+        if work.shell
+            && let Some(automation) = &work.automation
+            && !work.prompt.trim().is_empty()
+            && let Some(line) = crate::terminal::cli::path()
+                .and_then(|cli| command_line(&cli, &automation.id, automation.due_ms))
+        {
+            work.prompt = line;
+        }
+        // An automation's prompt always opens an agent: the one it names if
+        // this Mac can run it, else the project's, as a start from the
+        // dialog does — never a tab with no agent to type into.
+        if work.automation.is_some() && !work.shell {
+            let runnable: Vec<String> = self
+                .runnable_agents()
+                .iter()
+                .map(|spec| spec.name.clone())
+                .collect();
+            if !work
+                .agent
+                .as_ref()
+                .is_some_and(|agent| runnable.contains(agent))
+            {
+                let project = ProjectId::from(work.project.as_str());
+                work.agent = Workspace::open()
+                    .ok()
+                    .and_then(|workspace| {
+                        crate::worktree_dialog::preferred_agent(&workspace, &runnable, &project)
+                    })
+                    .or_else(|| runnable.first().cloned());
+            }
+        }
         if let Some(worktree) = work.worktree.as_deref() {
+            if let Some(automation) = &work.automation {
+                expect_run(&ket_core::id::WorktreeId::from(worktree), automation);
+            }
+            // A shell types its prompt as a command only for an automation:
+            // a phone's plain terminal starts empty, as it always has.
+            let prompt = if work.shell && work.automation.is_none() {
+                String::new()
+            } else {
+                work.prompt
+            };
             self.open_phone_session(
                 ket_core::id::WorktreeId::from(worktree),
                 work.agent,
-                work.prompt,
+                prompt,
                 work.model,
                 work.effort,
                 work.shell,
@@ -142,9 +191,10 @@ impl Shell {
             );
             return;
         };
-        let from = match work.from {
-            WorkSource::Phone => "your phone",
-            WorkSource::Cli => "the ket command",
+        let from = match (&work.automation, work.from) {
+            (Some(automation), _) => format!("the automation \u{201c}{}\u{201d}", automation.name),
+            (None, WorkSource::Phone) => "your phone".to_owned(),
+            (None, WorkSource::Cli) => "the ket command".to_owned(),
         };
         self.toast(
             Tone::Info,
@@ -157,11 +207,25 @@ impl Shell {
             self.start_phone_note(&project, note, work.agent, work.from, cx);
             return;
         }
-        let (fallback, origin) = match work.from {
-            WorkSource::Phone => ("phone-task", WorkOrigin::Phone),
-            WorkSource::Cli => ("cli-task", WorkOrigin::Cli),
+        let (fallback, origin) = match (&work.automation, work.from) {
+            (Some(automation), _) => (
+                "automation",
+                WorkOrigin::Automation {
+                    id: automation.id.clone(),
+                    due_ms: automation.due_ms,
+                    name: automation.name.clone(),
+                    command: work.shell,
+                },
+            ),
+            (None, WorkSource::Phone) => ("phone-task", WorkOrigin::Phone),
+            (None, WorkSource::Cli) => ("cli-task", WorkOrigin::Cli),
         };
-        let branch = branch_for(&work.prompt, fallback);
+        // An automation's branch is the one the host found free, so it can
+        // find the worktree again by it.
+        let branch = match &work.automation {
+            Some(automation) => automation.branch.clone(),
+            None => branch_for(&work.prompt, fallback),
+        };
         self.start_work(
             NewWork {
                 project,
@@ -170,7 +234,14 @@ impl Shell {
                 attachments: Vec::new(),
                 agent: work.agent,
                 base: work.base,
-                economy: None,
+                // An automation's own level; anyone else's is Jev's or the
+                // default, as before. A command never goes to Jev: it is no
+                // agent's prompt, and a command line can hold a secret.
+                economy: match &work.automation {
+                    Some(_) if work.shell => Some(ket_core::worktree::default_token_reduction()),
+                    Some(automation) => automation.economy,
+                    None => None,
+                },
                 model: work.model,
                 effort: work.effort,
                 origin,
@@ -287,8 +358,21 @@ impl Shell {
                         shell.backlog_started(&work.project, note, &created, cx);
                     }
                     shell.start_made(&work.project, &work.branch, created.id.clone());
-                    if matches!(work.origin, WorkOrigin::Phone | WorkOrigin::Dialog)
-                        && (agent.is_some() || work.model.is_some() || work.effort.is_some())
+                    if let WorkOrigin::Automation { id, due_ms, .. } = &work.origin {
+                        expect_run_of(&created.id, id, *due_ms);
+                    }
+                    if let WorkOrigin::Automation { command: true, .. } = &work.origin {
+                        // A command: a terminal in the new worktree, with the
+                        // command typed into it.
+                        let id = created.id.clone();
+                        shell.open_phone_session(
+                            created.id, None, work.prompt, None, None, true, cx,
+                        );
+                        shell.remeasure_worktree(id, cx);
+                    } else if matches!(
+                        work.origin,
+                        WorkOrigin::Phone | WorkOrigin::Dialog | WorkOrigin::Automation { .. }
+                    ) && (agent.is_some() || work.model.is_some() || work.effort.is_some())
                     {
                         let id = created.id.clone();
                         shell.open_phone_session(
@@ -302,10 +386,8 @@ impl Shell {
                         );
                         // As the landing does: without it the sidebar shows
                         // the new worktree with no size until the next sweep.
-                        // After the session, whose reload put the worktree
-                        // among the rows measuring looks it up in — one
-                        // reload, not two, each a `git worktree list` per
-                        // project on the window's thread.
+                        // After the session, which put the worktree among
+                        // the rows measuring looks it up in.
                         shell.remeasure_worktree(id, cx);
                     } else {
                         shell.land_work(created.id, agent, work.prompt, work.attachments, cx);
@@ -335,6 +417,29 @@ impl Shell {
                         );
                     }
                     WorkOrigin::Backlog { .. } => shell.backlog_start_failed(error.to_string(), cx),
+                    WorkOrigin::Automation {
+                        id,
+                        due_ms,
+                        name: automation,
+                        ..
+                    } => {
+                        // The host recorded it started: its record says it
+                        // failed, and why, rather than going quiet as done.
+                        let why = error.to_string();
+                        if let Ok(root) = ket_core::paths::automations_dir() {
+                            let failed = ket_core::automation::Outcome::Failed { why: why.clone() };
+                            let _ = ket_core::automation::Runs::update_in(&root, |runs| {
+                                runs.end(id, *due_ms, failed, ket_core::now_ms());
+                            });
+                        }
+                        shell.toast(
+                            Tone::Error,
+                            format!(
+                                "Couldn't start the automation \u{201c}{automation}\u{201d} in {name}: {why}"
+                            ),
+                            cx,
+                        );
+                    }
                 },
             });
         })
@@ -354,9 +459,14 @@ impl Shell {
         shell: bool,
         cx: &mut Context<Self>,
     ) {
-        self.reload(cx);
+        // A full reload only when the row can't be added in place: its
+        // project isn't in the sidebar yet.
+        if !self.add_row(&id, cx) {
+            self.reload(cx);
+        }
         let Some(selection) = self.position_of(&id) else {
             self.toast(Tone::Error, "The phone's worktree is no longer here", cx);
+            undelivered(&id, "its worktree is no longer in the window");
             self.start_done(&id);
             return;
         };
@@ -372,11 +482,15 @@ impl Shell {
         }
         if self.next_terminal == before {
             self.toast(Tone::Error, "Could not open the phone's session", cx);
+            undelivered(&id, "its tab couldn't be opened");
             self.start_done(&id);
             return;
         }
-        if shell || prompt.is_empty() {
+        if prompt.is_empty() {
+            delivered(&id);
             self.start_done(&id);
+        } else if shell {
+            self.type_command_when_ready(id, crate::terminal::TerminalId(before), prompt, cx);
         } else {
             let terminal = crate::terminal::TerminalId(before);
             cx.spawn(async move |shell: WeakEntity<Shell>, cx| {
@@ -398,6 +512,9 @@ impl Shell {
                 let _ = shell.update(cx, |shell, cx| {
                     if ready {
                         shell.submit_startup_prompt(terminal, &prompt, cx);
+                        delivered(&id);
+                    } else {
+                        undelivered(&id, "the agent never showed where to type its prompt");
                     }
                     shell.start_done(&id);
                     cx.notify();
@@ -405,6 +522,50 @@ impl Shell {
             })
             .detach();
         }
+    }
+
+    /// Types `command` and Enter into the shell `terminal` once it has drawn
+    /// something — its prompt — so the line isn't typed ahead of a shell
+    /// still reading its startup files. Typed anyway after [`SHELL_READY`].
+    fn type_command_when_ready(
+        &mut self,
+        id: ket_core::id::WorktreeId,
+        terminal: crate::terminal::TerminalId,
+        command: String,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn(async move |shell: WeakEntity<Shell>, cx| {
+            let mut waited = Duration::ZERO;
+            while waited < TERMINAL_OPEN + SHELL_READY {
+                let drawn = shell
+                    .update(cx, |shell, _| {
+                        shell.terminals.get(&terminal).map(|handle| {
+                            handle.term.with_term(|term| {
+                                ket_core::screen::bottom_rows(term, usize::MAX)
+                                    .iter()
+                                    .any(|row| !row.trim().is_empty())
+                            })
+                        })
+                    })
+                    .ok()
+                    .flatten();
+                if drawn == Some(true) || (drawn.is_some() && waited >= SHELL_READY) {
+                    break;
+                }
+                cx.background_executor().timer(LANDING_POLL).await;
+                waited += LANDING_POLL;
+            }
+            let _ = shell.update(cx, |shell, cx| {
+                if shell.type_into_terminal(terminal, format!("{command}\r").into_bytes(), cx) {
+                    delivered(&id);
+                } else {
+                    undelivered(&id, "its terminal closed before the command was typed");
+                }
+                shell.start_done(&id);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Shows the new worktree, makes sure its agent is running, and types the
@@ -418,7 +579,9 @@ impl Shell {
         attachments: Vec<PathBuf>,
         cx: &mut Context<Self>,
     ) {
-        self.reload(cx);
+        if !self.add_row(&id, cx) {
+            self.reload(cx);
+        }
         self.remeasure_worktree(id.clone(), cx);
         // Landing in it opens its agent's session on this first visit, as a
         // click would.
@@ -475,6 +638,7 @@ impl Shell {
                 }
             };
             let Some(terminal) = terminal else {
+                undelivered(&id, "the new worktree had no agent to give the prompt to");
                 let _ = shell.update(cx, |shell, cx| {
                     shell.start_done(&id);
                     shell.toast(
@@ -486,6 +650,7 @@ impl Shell {
                 return;
             };
             if !wait_for_agent_input(&shell, terminal, &prompt, cx).await {
+                undelivered(&id, "the agent never showed where to type its prompt");
                 let _ = shell.update(cx, |shell, _| shell.start_done(&id));
                 return;
             }
@@ -500,6 +665,7 @@ impl Shell {
             let prompt = with_files(prompt, &left);
             let _ = shell.update(cx, |shell, cx| {
                 shell.submit_startup_prompt(terminal, &prompt, cx);
+                delivered(&id);
                 shell.start_done(&id);
                 cx.notify();
             });
@@ -735,6 +901,73 @@ pub(crate) enum WorkOrigin {
     Backlog {
         note: String,
     },
+    /// An automation's start: an agent, or a command typed into a terminal.
+    Automation {
+        /// The automation's id and its run's due time: which run's record
+        /// to end if the worktree can't be made.
+        id: String,
+        due_ms: u64,
+        name: String,
+        command: bool,
+    },
+}
+
+/// What is typed to run automation `id`'s command for run `due_ms`: the ket
+/// command at `cli`, quoted for any shell, which runs the saved line itself.
+/// `None` for a path no quoting carries whole.
+pub(crate) fn command_line(cli: &std::path::Path, id: &str, due_ms: u64) -> Option<String> {
+    let cli = cli.to_str().filter(|path| !path.contains(['\'', '\n']))?;
+    Some(format!("'{cli}' automation exec {id} {due_ms}"))
+}
+
+/// Automation runs this window is starting, by the worktree each starts
+/// in: the run to end as failed if its prompt never reaches its agent.
+static EXPECTED_RUNS: std::sync::Mutex<Vec<(ket_core::id::WorktreeId, String, u64)>> =
+    std::sync::Mutex::new(Vec::new());
+
+fn expect_run(worktree: &ket_core::id::WorktreeId, start: &ket_core::host::AutomationStart) {
+    expect_run_of(worktree, &start.id, start.due_ms);
+}
+
+fn expect_run_of(worktree: &ket_core::id::WorktreeId, id: &str, due_ms: u64) {
+    if let Ok(mut runs) = EXPECTED_RUNS.lock() {
+        runs.retain(|(held, _, _)| held != worktree);
+        runs.push((worktree.clone(), id.to_owned(), due_ms));
+    }
+}
+
+/// The run starting in `worktree`, no longer waited on.
+fn take_run(worktree: &ket_core::id::WorktreeId) -> Option<(String, u64)> {
+    let mut runs = EXPECTED_RUNS.lock().ok()?;
+    let at = runs.iter().position(|(held, _, _)| held == worktree)?;
+    let (_, id, due_ms) = runs.remove(at);
+    Some((id, due_ms))
+}
+
+/// Its prompt or command reached it: the run goes on, and the host follows it.
+fn delivered(worktree: &ket_core::id::WorktreeId) {
+    let _ = take_run(worktree);
+}
+
+/// It never did: the run ends as failed, `why`, rather than going quiet and
+/// reading as done.
+fn undelivered(worktree: &ket_core::id::WorktreeId, why: &str) {
+    if let Ok(root) = ket_core::paths::automations_dir() {
+        undelivered_in(&root, worktree, why);
+    }
+}
+
+/// [`undelivered`], under an explicit automations directory.
+fn undelivered_in(root: &std::path::Path, worktree: &ket_core::id::WorktreeId, why: &str) {
+    let Some((id, due_ms)) = take_run(worktree) else {
+        return;
+    };
+    let failed = ket_core::automation::Outcome::Failed {
+        why: why.to_owned(),
+    };
+    let _ = ket_core::automation::Runs::update_in(root, |runs| {
+        runs.end(&id, due_ms, failed, ket_core::now_ms());
+    });
 }
 
 /// Who a message about work that `from` asked for says asked for it.
@@ -755,23 +988,9 @@ pub(crate) fn branch_for(prompt: &str, fallback: &str) -> String {
     branch_seeded(prompt, fallback, ket_core::now_ms())
 }
 
-/// The readable part of [`branch_for`]: the prompt's first five words,
-/// lowercased and dashed, cut to 40 characters. Empty when the prompt has
-/// no word in it. The desktop's New worktree dialog uses this alone as the
-/// branch, adding the tag only when a branch of that name already exists.
-pub(crate) fn branch_stem(prompt: &str) -> String {
-    let words: Vec<String> = prompt
-        .split(|c: char| !c.is_ascii_alphanumeric())
-        .filter(|word| !word.is_empty())
-        .take(5)
-        .map(str::to_ascii_lowercase)
-        .collect();
-    let mut stem = words.join("-");
-    stem.truncate(40);
-    let cut = stem.trim_end_matches('-').len();
-    stem.truncate(cut);
-    stem
-}
+/// The readable part of [`branch_for`]. Kept in `ket-core`, where an
+/// automation names its runs' branches by the same rule.
+pub(crate) use ket_core::git::branch_stem;
 
 /// [`branch_for`] with the trailing characters taken from `seed` rather than
 /// the clock, for a caller that shows the name before it makes it and has to
@@ -793,16 +1012,65 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_stem_is_the_prompts_first_words_or_nothing() {
+    fn an_automations_command_reports_its_exit_status() {
+        let cli = std::path::Path::new("/Applications/ket.app/Contents/Resources/bin/ket");
         assert_eq!(
-            branch_stem("Fix the login redirect, please now"),
-            "fix-the-login-redirect-please"
+            command_line(cli, "abc", 1_795_000_000_000).as_deref(),
+            Some(
+                "'/Applications/ket.app/Contents/Resources/bin/ket' automation exec abc 1795000000000"
+            )
         );
-        assert_eq!(branch_stem("  ...  "), "");
         assert_eq!(
-            branch_stem("Internationalisation internationalisation internationalisation x"),
-            "internationalisation-internationalisatio"
+            command_line(std::path::Path::new("/odd'path/ket"), "abc", 1),
+            None
         );
+    }
+
+    #[test]
+    fn a_start_whose_prompt_never_lands_ends_its_run_as_failed() {
+        use ket_core::automation::{Outcome, Run, Runs};
+        let root = std::env::temp_dir().join(format!("ket-undelivered-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let started = |due_ms| Run {
+            automation: "a".to_owned(),
+            due_ms,
+            at_ms: ket_core::now_ms(),
+            outcome: Outcome::Started,
+            worktree: None,
+            branch: None,
+            ended_ms: None,
+            tokens: None,
+            command: None,
+        };
+        Runs::update_in(&root, |runs| {
+            runs.record(started(1));
+            runs.record(started(2));
+        })
+        .unwrap();
+        let lost = ket_core::id::WorktreeId::new("wt-lost");
+        let landed = ket_core::id::WorktreeId::new("wt-landed");
+        expect_run_of(&lost, "a", 1);
+        expect_run_of(&landed, "a", 2);
+        undelivered_in(
+            &root,
+            &lost,
+            "the agent never showed where to type its prompt",
+        );
+        delivered(&landed);
+        undelivered_in(&root, &landed, "too late: it was delivered");
+        let runs = Runs::load_in(&root).unwrap();
+        let outcome = |due| {
+            runs.of("a")
+                .find(|run| run.due_ms == due)
+                .map(|run| run.outcome.label())
+        };
+        assert_eq!(outcome(1), Some("Failed"));
+        assert_eq!(
+            outcome(2),
+            Some("Running"),
+            "a delivered start is left to the host"
+        );
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]

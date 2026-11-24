@@ -69,6 +69,18 @@ test('returning through the floating tabs keeps Worktrees mounted and its view i
     expect(view.getByText('Folded')).toBeTruthy();
     expect(mounted).toHaveBeenCalledTimes(1);
     expect(unmounted).not.toHaveBeenCalled();
+
+    // Usage opened from this tab: Worktrees still opens Worktrees, not the
+    // tab Usage was opened from.
+    await fireEvent.press(view.getByLabelText(label));
+    await fireEvent.press(view.getByLabelText('Usage'));
+    expect(view.getPathname()).toBe('/usage');
+    await fireEvent.press(view.getByLabelText('Worktrees'));
+    expect(view.getPathname()).toBe('/');
+    expect(testRouter.canGoBack()).toBe(false);
+    expect(view.getByText('Folded')).toBeTruthy();
+    expect(mounted).toHaveBeenCalledTimes(1);
+    expect(unmounted).not.toHaveBeenCalled();
   }
 
   // Worktree details still push over the tabs and return to the same view.

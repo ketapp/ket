@@ -11,7 +11,8 @@ import { Dim } from './Tuck';
 import { Check, Send, TerminalWindow } from './icons';
 import { Button, Choice, field, oneLine } from './ui';
 import { type PromptAnswer } from '../lib/connection';
-import { blend, font, size, t } from '../lib/theme';
+import { font, size, t } from '../lib/theme';
+import { tintedSolid } from './ui/surface';
 
 /** A card over the conversation's foot: a question, a plan, a permission,
  * a cold session. */
@@ -24,9 +25,7 @@ export const cardStyles = StyleSheet.create({
     borderRadius: size.radiusCard,
     // Solid: it rides over the conversation with the keyboard, and the
     // conversation must not read through it.
-    backgroundColor: blend(t.backdrop, t.attention, 0.1),
-    borderWidth: 1,
-    borderColor: blend(t.backdrop, t.attention, 0.35),
+    ...tintedSolid(t.attention),
   },
   askTitle: { fontFamily: font.proseSemibold, fontSize: size.body, color: t.text },
   askSubject: { fontFamily: font.code, fontSize: 12.5, lineHeight: 18, color: t.text },

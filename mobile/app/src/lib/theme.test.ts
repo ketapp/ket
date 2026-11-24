@@ -1,6 +1,6 @@
 import { describe, expect, test } from '@jest/globals';
 
-import { sessionColor, t, tint } from './theme';
+import { ramp, sessionColor, t, tint } from './theme';
 
 describe('tint', () => {
   test.each([
@@ -49,4 +49,56 @@ describe('sessionColor', () => {
       expect(contrast(worn.label, t.card)).toBeGreaterThanOrEqual(4.5);
     },
   );
+});
+
+describe('ramp', () => {
+  const luminance = (hex: string) => {
+    const n = parseInt(hex.slice(1), 16);
+    const [r, g, b] = [16, 8, 0].map((shift) => {
+      const c = ((n >> shift) & 255) / 255;
+      return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+    });
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  };
+  const contrast = (a: string, b: string) => {
+    const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
+    return (hi + 0.05) / (lo + 0.05);
+  };
+  // A theme's backdrop, surface and text, as the desktop ships them.
+  const themes: Record<string, [string, string, string]> = {
+    desk: ['#020304', '#0d0f12', '#f4f5f7'],
+    light: ['#e4e7ec', '#fafbfc', '#111418'],
+    'one-dark': ['#181a1f', '#282c34', '#dcdfe4'],
+    'ms-dos': ['#000000', '#0000aa', '#55ffff'],
+  };
+
+  test('draws Desk in the greys that were picked', () => {
+    expect(ramp(...themes.desk)).toEqual({
+      backdrop: '#020304',
+      card: '#121417',
+      sunken: '#232528',
+      elevated: '#232528',
+      hover: '#232528',
+      selection: '#36383b',
+      border: '#46484b',
+      rule: '#232528',
+      faint: '#96989b',
+      dim: '#bcbec0',
+      text: '#f4f5f7',
+    });
+  });
+
+  test.each(Object.keys(themes))('%s: each grey is a step further from the ground, and the inks read', (name) => {
+    const greys = ramp(...themes[name]);
+    const order = [greys.card, greys.sunken, greys.selection, greys.border, greys.faint, greys.dim, greys.text];
+    const fromCard = order.map((grey) => contrast(grey, greys.card));
+    expect(fromCard).toEqual([...fromCard].sort((a, b) => a - b));
+    expect(contrast(greys.faint, greys.card)).toBeGreaterThanOrEqual(4.5);
+    expect(contrast(greys.faint, greys.sunken)).toBeGreaterThanOrEqual(4.5);
+    expect(contrast(greys.dim, greys.selection)).toBeGreaterThanOrEqual(4.5);
+  });
+
+  test('leaves a light theme its surface, whose ground is on the text side of it', () => {
+    expect(ramp(...themes.light).card).toBe('#fafbfc');
+  });
 });

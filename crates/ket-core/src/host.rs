@@ -280,7 +280,9 @@ fn reset_process() {
     }
 }
 
-pub use wire::{DeviceEntry, DeviceRole, HostedRelay, PhoneReviewComment, WorkSource};
+pub use wire::{
+    AutomationStart, DeviceEntry, DeviceRole, HostedRelay, PhoneReviewComment, WorkSource,
+};
 
 /// The phones paired with this data directory's host.
 ///
@@ -619,8 +621,11 @@ pub struct PhoneWork {
     pub effort: Option<String>,
     /// An existing worktree, when opening a fresh tab.
     pub worktree: Option<String>,
-    /// Whether the fresh tab is a plain shell.
+    /// Whether the fresh tab is a plain shell. With a prompt, the prompt is
+    /// the command typed into it.
     pub shell: bool,
+    /// The automation this start is, when it is one.
+    pub automation: Option<AutomationStart>,
 }
 
 /// The work phones have asked this window to start since the last call. The

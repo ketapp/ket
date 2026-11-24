@@ -41,6 +41,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { READABLE_WIDTH } from '../lib/layout';
 import { font, size, t } from '../lib/theme';
+import { surface } from './ui/surface';
 import { KeyboardLift, useLift } from './KeyboardLift';
 import { Check, Close } from './icons';
 
@@ -85,7 +86,15 @@ export interface SheetProps {
   onMeasure?: (measure: SheetMeasure) => void;
 }
 
-export function Sheet({ open, onClose, ...rest }: SheetProps) {
+export function Sheet({
+  open,
+  onClose,
+  onGone,
+  ...rest
+}: SheetProps & {
+  /** The sheet is down and its modal gone: the moment another can rise. */
+  onGone?: () => void;
+}) {
   // Up through its way out: the modal hides once the sheet is down.
   const [was, setWas] = useState(open);
   const [down, setDown] = useState(!open);
@@ -95,7 +104,15 @@ export function Sheet({ open, onClose, ...rest }: SheetProps) {
   }
   return (
     <Modal visible={open || !down} transparent animationType="none" onRequestClose={onClose} statusBarTranslucent>
-      <SheetPanel open={open} onClose={onClose} onGone={() => setDown(true)} {...rest} />
+      <SheetPanel
+        open={open}
+        onClose={onClose}
+        onGone={() => {
+          setDown(true);
+          onGone?.();
+        }}
+        {...rest}
+      />
     </Modal>
   );
 }
@@ -350,12 +367,13 @@ const styles = StyleSheet.create({
   // On a wide screen the sheet rises from the middle of the foot, no wider
   // than reads well, rather than across the whole screen.
   room: { flex: 1, width: '100%', maxWidth: READABLE_WIDTH, alignSelf: 'center', justifyContent: 'flex-end' },
+  // A panel with its hairline along the top only: the rest is off the screen.
   sheet: {
-    backgroundColor: t.card,
+    ...surface.panel,
+    borderWidth: 0,
+    borderTopWidth: 1,
     borderTopLeftRadius: 18,
     borderTopRightRadius: 18,
-    borderTopWidth: 1,
-    borderColor: t.border,
   },
   grabber: { width: 36, height: 5, borderRadius: 3, backgroundColor: t.border, alignSelf: 'center', marginTop: 8, marginBottom: 6 },
   head: {
@@ -364,16 +382,17 @@ const styles = StyleSheet.create({
     gap: 10,
     paddingTop: 4,
     paddingBottom: 14,
-    paddingLeft: SHEET_INSET,
-    paddingRight: SHEET_INSET - 4,
+    // The close button ends where the body's contents do: it has an edge
+    // now, and 4 pt past theirs it read as out of line.
+    paddingHorizontal: SHEET_INSET,
   },
   headText: { flex: 1, minWidth: 0, gap: 1 },
   title: { fontFamily: font.proseSemibold, fontSize: size.value, color: t.text },
   detail: { fontFamily: font.prose, fontSize: 12, color: t.dim },
-  close: { width: 32, height: 32, borderRadius: 16, backgroundColor: t.sunken, alignItems: 'center', justifyContent: 'center' },
+  close: { width: 32, height: 32, borderRadius: 16, ...surface.well, alignItems: 'center', justifyContent: 'center' },
   scroll: { flexShrink: 1 },
   body: { gap: 16, paddingHorizontal: SHEET_INSET, paddingBottom: 4 },
-  list: { borderRadius: 12, backgroundColor: t.sunken, paddingVertical: 2 },
+  list: { borderRadius: 12, ...surface.well, paddingVertical: 2 },
   rule: { height: StyleSheet.hairlineWidth, marginLeft: 14, backgroundColor: t.border },
   // A row grows with its detail line; it never clips it.
   item: { minHeight: size.rowSm, paddingVertical: 8, paddingHorizontal: 14, flexDirection: 'row', alignItems: 'center', gap: 10 },

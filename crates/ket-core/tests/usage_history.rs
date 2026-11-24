@@ -229,7 +229,7 @@ fn reading_from_codex_subtracts_cached_tokens_from_fresh_input() {
     let tokens = serde_json::json!({
         "info": {
             "total_token_usage": { "input_tokens": 1000 },
-            "last_token_usage": { "input_tokens": 300, "cached_input_tokens": 250, "output_tokens": 40 },
+            "last_token_usage": { "input_tokens": 300, "cached_input_tokens": 250, "output_tokens": 40, "total_tokens": 340 },
             "model_context_window": 128_000,
         }
     });
@@ -249,7 +249,10 @@ fn reading_from_codex_subtracts_cached_tokens_from_fresh_input() {
     assert_eq!(reading.last_output_tokens, 40);
     assert_eq!(reading.last_input_tokens, 50, "300 - 250 cached");
     assert_eq!(reading.last_cache_read_tokens, 250);
-    assert_eq!(reading.usage.used, 1000);
+    assert_eq!(
+        reading.usage.used, 340,
+        "the latest request's total_tokens, not the session's"
+    );
     assert_eq!(reading.usage.size, 128_000);
     assert!(reading.usage.cost.is_none(), "Codex reports no cost");
 }

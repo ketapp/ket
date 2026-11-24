@@ -27,14 +27,16 @@
 //! typing filters — and an item's own chord runs it while the menu is open,
 //! so the hint is a promise the menu keeps rather than decoration.
 
+use std::cell::Cell;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    AnchoredPositionMode, Animation, AnimationExt, AnyElement, BoxShadow, ClickEvent, Context,
-    Corner, ElementId, Image, ImageSource, KeyDownEvent, Keystroke, MouseButton, Pixels, Point,
-    Rgba, ScrollHandle, SharedString, Stateful, Styled, anchored, deferred, div, ease_out_quint,
-    img, point, prelude::*, px,
+    AnchoredPositionMode, Animation, AnimationExt, AnyElement, AvailableSpace, Bounds, BoxShadow,
+    ClickEvent, Context, Corner, ElementId, Image, ImageSource, KeyDownEvent, Keystroke,
+    MouseButton, Pixels, Point, Rgba, ScrollHandle, SharedString, Size, Stateful, Styled, anchored,
+    canvas, deferred, div, ease_out_quint, img, point, prelude::*, px,
 };
 use ket_core::keybinding::Chord;
 use ket_core::theme::Theme;
@@ -135,6 +137,8 @@ const ENTRANCE: Duration = Duration::from_millis(190);
 
 /// How far the panel travels on the way in.
 ///
+/// Submenus fade in while staying aligned with their opening row.
+///
 /// It rises into place rather than growing or tilting: gpui gives a div
 /// opacity and layout, and no transform (`with_transformation` is `svg`-only
 /// in this version), so there is no scale or perspective to be had without
@@ -159,12 +163,8 @@ const WINDOW_MARGIN: Pixels = px(8.0);
 /// a long one has to stop somewhere; this is where, and the sliver of the next
 /// row it leaves is the cue that there is more below.
 ///
-/// A menu opened **at a pointer** is not bounded by this at all — see
-/// [`OpenMenu::view_with_footer`]. It can be placed above the pointer as
-/// easily as below, so there is no direction for it to run out of, and a
-/// context menu that scrolls is one whose last rows read as missing rather
-/// than as below. That is not a hypothetical: the tab menu grew to eleven rows
-/// and this cap fell one pixel past the end of Copy Path.
+/// Context menus and submenus fit their full panels to the window, so they
+/// do not use this cap.
 const MAX_ROWS_HEIGHT: Pixels = px(280.0);
 
 /// Draws a dropdown's real trigger and, when open, its panel above the rest
@@ -464,10 +464,8 @@ impl<T: Clone + 'static> OpenMenu<T> {
         self
     }
 
-    /// Lets a menu hung below its opener run to its full length instead of
-    /// scrolling past [`MAX_ROWS_HEIGHT`]. For a short, curated list whose
-    /// length is known — the `+` menu — where a scrolled-off last row reads
-    /// as a row that is not there.
+    /// Shows the full list when a menu, such as the `+` menu or a submenu,
+    /// has room to place its panel without the inline [`MAX_ROWS_HEIGHT`] cap.
     pub(crate) fn uncapped(mut self) -> Self {
         self.uncapped = true;
         self
@@ -560,54 +558,6 @@ impl<T: Clone + 'static> OpenMenu<T> {
     /// How many items the query leaves pickable.
     fn visible_count(&self) -> usize {
         self.sections().iter().map(Vec::len).sum()
-    }
-
-    /// Where the top of one row sits, measured from the panel's own top edge.
-    ///
-    /// For an opener hanging a second level off one of its rows: a submenu has
-    /// to line up with the row that summoned it, and the only thing that knows
-    /// how tall this menu's chrome and rows are is this menu. Deliberately next
-    /// to [`Self::view`] — these are the same numbers, and they have to move
-    /// together.
-    ///
-    /// Measured rather than reported by the layout because gpui hands element
-    /// bounds back during paint, which is a frame too late for a menu that has
-    /// to be positioned as it opens.
-    ///
-    /// A row past the end of the list answers with the panel's top, which is
-    /// where a menu with nothing in it would want its second level anyway.
-    pub(crate) fn row_top(&self, wanted: usize) -> Pixels {
-        let mut top = PANEL_PAD;
-        if self.header.is_some() {
-            top += HEADER_HEIGHT;
-        }
-        if self.placeholder.is_some() {
-            top += ROW_HEIGHT;
-        }
-
-        let mut index = 0usize;
-        for (section_index, section) in self.titled_sections().iter().enumerate() {
-            if section_index > 0 {
-                // The hairline and the air either side of it: `h(1)` with
-                // `my(4)` in `view`.
-                top += px(9.0);
-            }
-            if section.heading.is_some() {
-                top += HEADER_HEIGHT;
-            }
-            for item in &section.items {
-                if index == wanted {
-                    return top;
-                }
-                top += if item.subtitle.is_some() {
-                    TALL_ROW_HEIGHT
-                } else {
-                    ROW_HEIGHT
-                };
-                index += 1;
-            }
-        }
-        PANEL_PAD
     }
 
     /// The action under the keyboard selection, if the query left one.
@@ -710,26 +660,60 @@ impl<T: Clone + 'static> OpenMenu<T> {
         on_run: impl Fn(&mut Shell, &T, &mut Context<Shell>) + Clone + 'static,
         on_dismiss: impl Fn(&mut Shell, &mut Context<Shell>) + Clone + 'static,
     ) -> AnyElement {
-        self.view_with_hover(theme, cx, on_run, on_dismiss, |_, _, _| {})
+        self.position_panel(self.panel(theme, cx, on_run, on_dismiss, |_, _, _| {}, |_| None))
     }
 
-    /// [`OpenMenu::view`], plus a word each time the pointer comes to rest on
-    /// a row.
-    ///
-    /// For an opener with a branch to hang off one of its rows: a native
-    /// submenu opens when the pointer reaches its row and closes when the
-    /// pointer moves on to a sibling, and neither of those is a click. Called
-    /// on entering a row only — leaving one is entering the next, and the
-    /// panel as a whole has no useful "left" — and never for a disabled row,
-    /// which the pointer crosses as if it were chrome. Whether an entry is
-    /// worth a redraw is the opener's call, made inside `on_hover`.
-    pub(crate) fn view_with_hover(
+    /// Renders a context menu and its open submenu against the rendered row.
+    pub(crate) fn view_with_submenu(
         &self,
         theme: &Theme,
         cx: &mut Context<Shell>,
         on_run: impl Fn(&mut Shell, &T, &mut Context<Shell>) + Clone + 'static,
         on_dismiss: impl Fn(&mut Shell, &mut Context<Shell>) + Clone + 'static,
         on_hover: impl Fn(&mut Shell, &T, &mut Context<Shell>) + Clone + 'static,
+        submenu: Option<(T, AnyElement)>,
+    ) -> AnyElement
+    where
+        T: PartialEq,
+    {
+        let row_bounds = RowBounds::default();
+        let parent =
+            self.position_panel(self.panel(theme, cx, on_run, on_dismiss, on_hover, |row| {
+                submenu
+                    .as_ref()
+                    .filter(|(action, _)| action == row)
+                    .map(|_| row_bounds.clone())
+            }));
+        // Both stay out of the shell's flex layout. Prepaint the parent first
+        // so the submenu can read its row after GPUI has fitted it to the window.
+        div()
+            .absolute()
+            .child(parent)
+            .children(submenu.map(|(_, panel)| at_submenu_row(panel, row_bounds)))
+            .into_any_element()
+    }
+
+    /// Builds a panel whose placement is supplied by the parent menu.
+    pub(crate) fn panel_with_hover(
+        &self,
+        theme: &Theme,
+        cx: &mut Context<Shell>,
+        on_run: impl Fn(&mut Shell, &T, &mut Context<Shell>) + Clone + 'static,
+        on_dismiss: impl Fn(&mut Shell, &mut Context<Shell>) + Clone + 'static,
+        on_hover: impl Fn(&mut Shell, &T, &mut Context<Shell>) + Clone + 'static,
+    ) -> AnyElement {
+        self.panel(theme, cx, on_run, on_dismiss, on_hover, |_| None)
+    }
+
+    /// `on_hover` fires when the pointer enters an enabled row.
+    fn panel(
+        &self,
+        theme: &Theme,
+        cx: &mut Context<Shell>,
+        on_run: impl Fn(&mut Shell, &T, &mut Context<Shell>) + Clone + 'static,
+        on_dismiss: impl Fn(&mut Shell, &mut Context<Shell>) + Clone + 'static,
+        on_hover: impl Fn(&mut Shell, &T, &mut Context<Shell>) + Clone + 'static,
+        submenu_anchor: impl Fn(&T) -> Option<RowBounds>,
     ) -> AnyElement {
         let t = theme;
         let selected = self.selected;
@@ -925,6 +909,14 @@ impl<T: Clone + 'static> OpenMenu<T> {
                         .px(ROW_PAD_X)
                         .rounded(ROW_RADIUS)
                         .text_size(LABEL_SIZE)
+                        .when_some(submenu_anchor(&item.action), |el, bounds| {
+                            // The probe fills the row without affecting its layout.
+                            el.child(
+                                canvas(move |row, _, _| bounds.set(Some(row)), |_, _, _, _| {})
+                                    .absolute()
+                                    .inset_0(),
+                            )
+                        })
                         // Hover and the keyboard selection share one fill, so
                         // the pointer and the arrows never disagree about
                         // which row is lit.
@@ -1041,7 +1033,7 @@ impl<T: Clone + 'static> OpenMenu<T> {
                 .child(header)
         });
 
-        let panel = div()
+        div()
             .id("menu")
             .prose()
             // A column that hugs its rows, stated rather than inherited.
@@ -1119,8 +1111,11 @@ impl<T: Clone + 'static> OpenMenu<T> {
                 SharedString::from(format!("menu-entrance-{}", self.origin)),
                 Animation::new(ENTRANCE).with_easing(ease_out_quint()),
                 move |el, delta| el.opacity(delta).mt(ENTRANCE_RISE * (1.0 - delta)),
-            );
+            )
+            .into_any_element()
+    }
 
+    fn position_panel(&self, panel: AnyElement) -> AnyElement {
         match self.at {
             // At the pointer, and above it when there is no room below.
             //
@@ -1150,6 +1145,58 @@ impl<T: Clone + 'static> OpenMenu<T> {
                 .into_any_element(),
         }
     }
+}
+
+type RowBounds = Rc<Cell<Option<Bounds<Pixels>>>>;
+
+fn at_submenu_row(mut panel: AnyElement, row_bounds: RowBounds) -> AnyElement {
+    canvas(
+        move |_, window, cx| {
+            let row = row_bounds.get()?;
+            let size = panel.layout_as_root(AvailableSpace::min_size(), window, cx);
+            panel.prepaint_at(
+                submenu_origin(row, size, window.viewport_size()),
+                window,
+                cx,
+            );
+            Some(panel)
+        },
+        |_, panel, window, cx| {
+            if let Some(mut panel) = panel {
+                panel.paint(window, cx);
+            }
+        },
+    )
+    .absolute()
+    .size_0()
+    .into_any_element()
+}
+
+fn submenu_origin(
+    row: Bounds<Pixels>,
+    panel: Size<Pixels>,
+    viewport: Size<Pixels>,
+) -> Point<Pixels> {
+    // The row is inset, so aligning to its side overlaps the parent panel's edge.
+    let right_space = viewport.width - row.right();
+    let left_space = row.left();
+    let open_left =
+        panel.width > right_space && (panel.width <= left_space || left_space > right_space);
+    let x = if open_left {
+        row.left() - panel.width
+    } else {
+        row.right()
+    };
+    point(
+        x.clamp(
+            Pixels::ZERO,
+            (viewport.width - panel.width).max(Pixels::ZERO),
+        ),
+        row.top().clamp(
+            Pixels::ZERO,
+            (viewport.height - panel.height).max(Pixels::ZERO),
+        ),
+    )
 }
 
 /// Whether an event is exactly this single-keystroke chord.
@@ -1259,7 +1306,37 @@ impl Shell {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{Keystroke, Modifiers};
+    use gpui::{Keystroke, Modifiers, size};
+
+    #[test]
+    fn submenu_aligns_with_the_rendered_row_when_there_is_room() {
+        let row = Bounds::new(point(px(25.0), px(102.0)), size(px(228.0), ROW_HEIGHT));
+        let panel = size(px(280.0), px(232.0));
+        let viewport = size(px(800.0), px(600.0));
+        assert_eq!(submenu_origin(row, panel, viewport), row.top_right());
+    }
+
+    #[test]
+    fn submenu_opens_to_the_left_and_slides_up_at_the_window_edges() {
+        let row = Bounds::new(point(px(450.0), px(450.0)), size(px(228.0), ROW_HEIGHT));
+        let panel = size(px(280.0), px(232.0));
+        let viewport = size(px(800.0), px(600.0));
+        assert_eq!(
+            submenu_origin(row, panel, viewport),
+            point(px(170.0), px(368.0))
+        );
+    }
+
+    #[test]
+    fn submenu_uses_the_roomier_side_when_neither_side_fits() {
+        let row = Bounds::new(point(px(60.0), px(102.0)), size(px(228.0), ROW_HEIGHT));
+        let panel = size(px(280.0), px(232.0));
+        let viewport = size(px(480.0), px(600.0));
+        assert_eq!(
+            submenu_origin(row, panel, viewport),
+            point(px(200.0), px(102.0))
+        );
+    }
 
     /// A menu for the filtering and keyboard tests: two file-ish items, a
     /// section break, one terminal-ish item with a chord.

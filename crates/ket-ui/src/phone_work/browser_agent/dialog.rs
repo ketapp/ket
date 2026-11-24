@@ -87,6 +87,7 @@ pub(super) fn waits(action: &BrowserAction) -> bool {
     !matches!(
         action,
         BrowserAction::Tabs
+            | BrowserAction::Close
             | BrowserAction::Console { .. }
             | BrowserAction::Open { url: None }
             | BrowserAction::RecordStop

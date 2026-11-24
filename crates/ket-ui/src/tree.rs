@@ -22,7 +22,7 @@ use ket_core::workspace::Workspace;
 
 use crate::Shell;
 use crate::paint::{alpha, mix, paint};
-use crate::projects::{default_color, rail_colour};
+use crate::projects::rail_colour;
 use crate::ui::agent::{MARK, mark, provider};
 use crate::ui::button::{button, icon_button};
 use crate::ui::chip::{BADGE, Motion, image_badge, readout, status_dot, tag};
@@ -35,6 +35,8 @@ use ket_core::subagents::{Subagent, SubagentState};
 
 use crate::fonts::Prose;
 use crate::ui::{CAPTION, ICON, ICON_GAP, WELL_XS};
+
+mod load;
 
 /// How often the usage history is written.
 ///
@@ -1592,229 +1594,7 @@ impl Shell {
     }
 }
 
-fn promote_worked_in(
-    workspace: &Workspace,
-    project: &ProjectId,
-    mut managed: Vec<ket_core::worktree::Worktree>,
-    discovered: &mut Vec<ket_core::worktree::DiscoveredWorktree>,
-) -> Vec<ket_core::worktree::Worktree> {
-    let paths: Vec<&std::path::Path> = discovered
-        .iter()
-        .map(|found| found.path.as_path())
-        .collect();
-    if paths.is_empty() {
-        return managed;
-    }
-
-    let worked_in = ket_core::sessions::Sessions::new().scan(&paths);
-    if worked_in.is_empty() {
-        return managed;
-    }
-
-    let mut adopted = Vec::new();
-    discovered.retain(|found| {
-        if !worked_in.contains_key(&found.path) {
-            return true;
-        }
-        match workspace.adopt_worktree(project, &found.path) {
-            Ok(worktree) => {
-                adopted.push(worktree);
-                false
-            }
-            Err(e) => {
-                tracing::debug!(path = %found.path.display(), %e, "not promoting");
-                true
-            }
-        }
-    });
-
-    managed.extend(adopted);
-    managed.sort_by_key(|worktree| std::cmp::Reverse(worktree.created_at_ms));
-    managed
-}
-
 impl Shell {
-    /// Builds the tree from core.
-    pub(crate) fn load_projects(workspace: &Workspace) -> Vec<ProjectNode> {
-        let Ok(projects) = workspace.projects() else {
-            return Vec::new();
-        };
-
-        let mut nodes: Vec<ProjectNode> = projects
-            .into_iter()
-            .map(|project| {
-                let report = workspace.worktree_report(Some(&project.id)).ok();
-                let (managed, mut discovered) = match report {
-                    Some(report) => (report.managed, report.discovered),
-                    None => (Vec::new(), Vec::new()),
-                };
-                let settings = workspace.project_settings(&project.id).unwrap_or_default();
-
-                // A checkout an agent has a conversation in is one you have
-                // worked in, and it belongs in the project rather than in the
-                // list of things git merely knows about. Promoted on load, so
-                // the row you want is where you left it instead of behind a
-                // disclosure you have to open and read through first.
-                //
-                // Gated on the setting, and the order matters: promotion
-                // *writes* to the registry, so running it before the check let
-                // `hide_discovered_worktrees` hide the rows while still
-                // adopting every one of them. Someone who has said they do not
-                // want git's other checkouts in this project has said it about
-                // the record, not just the display.
-                let managed = if settings.hide_discovered_worktrees {
-                    discovered.clear();
-                    managed
-                } else {
-                    promote_worked_in(workspace, &project.id, managed, &mut discovered)
-                };
-
-                let mut node = ProjectNode {
-                    name: settings.name_for(&project).to_owned().into(),
-                    color: settings
-                        .color
-                        .as_deref()
-                        .and_then(|hex| Color::from_hex(hex).ok())
-                        .unwrap_or_else(default_color),
-                    icon: settings
-                        .icon
-                        .as_deref()
-                        .and_then(crate::ui::glyph::drawable)
-                        .map(|icon| SharedString::from(icon.to_owned())),
-                    image: workspace
-                        .project_image_path(&project.id, &settings)
-                        .map(Arc::from),
-                    hide_discovered: settings.hide_discovered_worktrees,
-                    pinned: settings.pinned,
-                    hidden: settings.hidden,
-                    agent_overrides: settings.agents.clone(),
-                    expanded: true,
-                    worktrees: std::iter::once({
-                        // Not in the registry `worktree_status` reads — this
-                        // is the repository's own checkout, not a worktree
-                        // ket created — so its status is read straight off
-                        // the path instead. Skipped when the checkout itself
-                        // is gone: opening a missing repository is the error
-                        // `missing` already exists to report.
-                        let primary_missing = !project.root.is_dir();
-                        let primary_status = (!primary_missing)
-                            .then(|| ket_core::status::of_worktree(&project.root, None).ok())
-                            .flatten();
-
-                        WorktreeNode {
-                            // A stable id derived from the project, so its
-                            // tabs and its terminal survive a reload the same
-                            // way a real worktree's do. Nothing in core ever
-                            // sees it.
-                            id: WorktreeId::new(format!("primary-{}", project.id)),
-                            line_changes: None,
-                            changes: primary_status.as_ref().map(changed_paths).unwrap_or(0),
-                            marks: std::sync::Arc::new(
-                                primary_status
-                                    .as_ref()
-                                    .map(ChangeMarks::of)
-                                    .unwrap_or_default(),
-                            ),
-                            base: None,
-                            branch: project.default_base.clone().into(),
-                            name: None,
-                            agent: None,
-                            dirty: primary_status.as_ref().is_some_and(|s| s.total_changes > 0),
-                            in_progress: primary_status.and_then(|s| s.in_progress),
-                            token_reduction: ket_core::worktree::default_token_reduction(),
-                            pinned: false,
-                            missing: primary_missing,
-                            path: project.root.clone(),
-                            primary: true,
-                            // The base branch is not a thing that gets merged
-                            // away, and a badge on it would say nothing.
-                            merged: false,
-                            pull_request: None,
-                        }
-                    })
-                    .chain(managed.iter().map(|worktree| {
-                        // A status that will not read is not an error worth a
-                        // row saying so — the light simply stays off and the
-                        // operation badge simply does not appear.
-                        let status = workspace.worktree_status(&worktree.id).ok();
-                        let dirty = status.as_ref().is_some_and(|s| s.total_changes > 0);
-                        let changes = status.as_ref().map(changed_paths).unwrap_or(0);
-                        let marks = std::sync::Arc::new(
-                            status.as_ref().map(ChangeMarks::of).unwrap_or_default(),
-                        );
-                        let in_progress = status.and_then(|s| s.in_progress);
-                        let base = worktree.base_rev().map(|rev| {
-                            // A base named `HEAD` resolved to a commit when the
-                            // worktree was cut; the commit is all there is to
-                            // call it by.
-                            let label = if worktree.base != "HEAD" && !worktree.base.is_empty() {
-                                worktree.base.clone()
-                            } else {
-                                rev.chars().take(7).collect()
-                            };
-                            (
-                                SharedString::from(label),
-                                SharedString::from(rev.to_owned()),
-                            )
-                        });
-
-                        WorktreeNode {
-                            id: worktree.id.clone(),
-                            branch: worktree.branch.clone().into(),
-                            name: worktree.name.clone().map(SharedString::from),
-                            line_changes: None,
-                            changes,
-                            marks,
-                            base,
-                            agent: worktree.agent.clone().map(SharedString::from),
-                            dirty,
-                            in_progress,
-                            token_reduction: ket_core::worktree::resolve_level(
-                                worktree.token_reduction,
-                                worktree.token_reduction_id.as_deref(),
-                                worktree.token_reduction_pack_id.as_deref(),
-                            ),
-                            pinned: worktree.pinned,
-                            missing: !worktree.exists(),
-                            path: worktree.path.clone(),
-                            primary: false,
-                            // Carried over by `Shell::reload`, so a reload does
-                            // not blink every badge off until the next sweep.
-                            merged: false,
-                            pull_request: worktree.pull_request.clone(),
-                        }
-                    }))
-                    .collect(),
-                    discovered: discovered
-                        .iter()
-                        .map(|found| DiscoveredNode {
-                            label: found
-                                .branch
-                                .clone()
-                                .unwrap_or_else(|| "detached".to_owned())
-                                .into(),
-                            path: found.path.display().to_string().into(),
-                        })
-                        .collect(),
-                    discovered_expanded: false,
-                    backlog_seen: ket_core::backlog::Backlog::modified(&project.id),
-                    backlog: ket_core::backlog::Backlog::load(&project.id)
-                        .map(|backlog| backlog.open_count())
-                        .unwrap_or(0),
-                    id: project.id,
-                };
-                // Pinned rows lead the project, behind only the repository's own
-                // checkout. Stable, so everything else keeps the order it had.
-                node.worktrees.sort_by_key(|w| (!w.primary, !w.pinned));
-                node
-            })
-            .collect();
-        // Pinned projects lead, as pinned rows lead a project. Stable, so each
-        // side keeps the order it was dragged into.
-        nodes.sort_by_key(|node| !node.pinned);
-        nodes
-    }
-
     /// Whether the sidebar lists a project: every one but the hidden, and a
     /// hidden one too while an agent in it waits on a person, until that is
     /// answered — the phone's rule for its own hidden projects.
@@ -2073,29 +1853,6 @@ impl Shell {
         self.selection = selected.and_then(|id| self.position_of(&id));
     }
 
-    /// Puts a project's rows back in the order a reload gives them — its own
-    /// checkout, then pinned rows, each side in the registry's order — after
-    /// a pin changed in place. Reads the registry and nothing else: no git.
-    pub(crate) fn resort_worktrees(&mut self, project: &ProjectId) {
-        let Ok(order) = Workspace::open().and_then(|workspace| workspace.worktrees(Some(project)))
-        else {
-            return;
-        };
-        let selected = self.selected_id();
-        let Some(node) = self.projects.iter_mut().find(|node| &node.id == project) else {
-            return;
-        };
-        let rank = |id: &WorktreeId| {
-            order
-                .iter()
-                .position(|worktree| &worktree.id == id)
-                .unwrap_or(usize::MAX)
-        };
-        node.worktrees
-            .sort_by_key(|row| (!row.primary, !row.pinned, rank(&row.id)));
-        self.selection = selected.and_then(|id| self.position_of(&id));
-    }
-
     /// Takes a deleted worktree's row out of the sidebar in place, and lets go
     /// of what a reload would have dropped with it. A reload asked git about
     /// every project's worktrees, and read each one's status, to lose a row.
@@ -2123,70 +1880,6 @@ impl Shell {
         self.confirm_remove_worktree
             .as_ref()
             .is_some_and(|confirm| confirm.pending && &confirm.target.id == id)
-    }
-
-    /// Reloads the tree, keeping what the reader had expanded.
-    ///
-    /// Expansion is remembered by project **id**, not by position. Projects are
-    /// ordered by recency, so acting on one reorders the list — keyed by index,
-    /// a refresh would silently collapse the project you were working in and
-    /// expand some other one.
-    pub(crate) fn reload(&mut self, cx: &mut Context<Self>) {
-        let Ok(workspace) = Workspace::open() else {
-            return;
-        };
-
-        let was: Vec<(ProjectId, bool, bool)> = self
-            .projects
-            .iter()
-            .map(|p| (p.id.clone(), p.expanded, p.discovered_expanded))
-            .collect();
-        let selected = self.selected_id();
-
-        // Merged state is swept on its own slow cadence, so a reload that
-        // dropped it would blink every badge off until the next sweep came
-        // round — up to a minute of the sidebar claiming work is unfinished.
-        let merged: Vec<WorktreeId> = self
-            .projects
-            .iter()
-            .flat_map(|project| project.worktrees.iter())
-            .filter(|node| node.merged)
-            .map(|node| node.id.clone())
-            .collect();
-
-        self.projects = Self::load_projects(&workspace);
-
-        for node in &mut self.projects {
-            for worktree in &mut node.worktrees {
-                worktree.merged = merged.contains(&worktree.id);
-            }
-            if let Some((_, expanded, discovered)) = was.iter().find(|(id, _, _)| id == &node.id) {
-                node.expanded = *expanded;
-                node.discovered_expanded = *discovered;
-            }
-        }
-
-        // The selection is re-found by worktree id, not kept by position:
-        // removing a project shifts every index after it, and a selection
-        // kept by index would land on some other project's worktree.
-        self.selection = selected.and_then(|id| self.position_of(&id));
-        if let Some(selection) = self.selection {
-            self.select(selection, cx);
-        }
-        if self
-            .project_menu
-            .as_ref()
-            .is_some_and(|menu| menu.project >= self.projects.len())
-        {
-            self.project_menu = None;
-            self.tucked_menu = None;
-        }
-        // A level just changed, or a worktree came or went: either moves what
-        // the savings rollup lists.
-        self.refresh_savings();
-        // A worktree that went takes its browser tabs and profile with it.
-        #[cfg(feature = "chromium")]
-        self.chromium_registry_changed(&workspace, cx);
     }
 
     /// Starts the hook listener and registers ket with the agents.
@@ -3868,6 +3561,9 @@ impl Shell {
                     );
 
                     if project.expanded || filtering {
+                        let lands = crate::starting::lands(&project.worktrees, |node| {
+                            filter.admits(self.row_signal(node, now))
+                        });
                         rows = rows.children(
                             project
                                 .worktrees
@@ -4185,6 +3881,14 @@ impl Shell {
                                                                     // hundreds of pixels tall and
                                                                     // no name showing.
                                                                     .truncate()
+                                                                    // Unread, as a mail list
+                                                                    // says it: the name in bold
+                                                                    // beside the dot.
+                                                                    .when(unread, |el| {
+                                                                        el.font_weight(
+                                                                            FontWeight::BOLD,
+                                                                        )
+                                                                    })
                                                                     // A record whose checkout is
                                                                     // gone is still a row you
                                                                     // can act on, so it is
@@ -4457,7 +4161,11 @@ impl Shell {
                                                 cx.notify();
                                             }));
 
-                                    let mut out = vec![item.into_any_element()];
+                                    let mut out = match lands == Some(wi) {
+                                        true => self.starting_rows(pi, cx),
+                                        false => Vec::new(),
+                                    };
+                                    out.push(item.into_any_element());
                                     if grouped {
                                         out.push(
                                             self.subagent_rows(
@@ -4468,7 +4176,9 @@ impl Shell {
                                     out
                                 }),
                         );
-                        rows = rows.children(self.starting_rows(pi, cx));
+                        if lands.is_none() {
+                            rows = rows.children(self.starting_rows(pi, cx));
+                        }
 
                         if !project.discovered.is_empty() && !filtering {
                             let count = project.discovered.len();

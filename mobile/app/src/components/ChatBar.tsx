@@ -10,6 +10,7 @@ import { Aside, Changes, Check, Clipboard as ClipboardGlyph, Exclaim, TerminalWi
 import { SessionPill, type SessionPicks } from './SessionPicks';
 import { Bar, Button, IconCluster } from './ui';
 import { font, size, t, tint } from '../lib/theme';
+import { surface } from './ui/surface';
 
 export function ChatBar({
   title,
@@ -17,6 +18,7 @@ export function ChatBar({
   connected,
   busy,
   onWorktree,
+  uncommitted = false,
   onTerminal,
 }: {
   title: string;
@@ -27,6 +29,8 @@ export function ChatBar({
   busy: boolean;
   /** The worktree's screen, when the session is in one. */
   onWorktree?: () => void;
+  /** The worktree has changes not yet committed: its button wears a dot. */
+  uncommitted?: boolean;
   onTerminal: () => void;
 }) {
   return (
@@ -40,7 +44,16 @@ export function ChatBar({
               alone because it changes the session rather than leaving it. */}
           <IconCluster
             actions={[
-              ...(onWorktree ? [{ label: 'The worktree', onPress: onWorktree, icon: <Changes size={18} color={t.text} /> }] : []),
+              ...(onWorktree
+                ? [
+                    {
+                      label: 'The worktree',
+                      onPress: onWorktree,
+                      icon: <Changes size={18} color={t.text} />,
+                      badge: uncommitted ? 'has uncommitted changes' : undefined,
+                    },
+                  ]
+                : []),
               { label: 'Open the terminal', onPress: onTerminal, icon: <TerminalWindow size={18} color={t.text} /> },
             ]}
           />
@@ -115,9 +128,7 @@ const styles = StyleSheet.create({
     paddingLeft: 7,
     paddingRight: 16,
     borderRadius: 20,
-    borderWidth: 1,
-    borderColor: t.border,
-    backgroundColor: t.elevated,
+    ...surface.float,
     shadowColor: '#000',
     shadowOpacity: 0.55,
     shadowRadius: 14,

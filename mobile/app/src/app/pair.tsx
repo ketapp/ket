@@ -15,6 +15,7 @@ import { dropConnection } from '../lib/connection';
 import { phoneKey, saveHost } from '../lib/store';
 import { reasonOf } from '../lib/text';
 import { font, size, t } from '../lib/theme';
+import { surface } from '../components/ui/surface';
 import { versionLabel } from '../lib/version';
 
 const FORM_GAP = 10;
@@ -223,7 +224,7 @@ const styles = StyleSheet.create({
   intro: { paddingHorizontal: 4 },
   finder: {
     height: 290,
-    backgroundColor: t.sunken,
+    ...surface.well,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -246,8 +247,7 @@ const styles = StyleSheet.create({
     fontFamily: font.chrome,
     fontSize: 11,
     color: t.dim,
-    borderWidth: 1,
-    borderColor: t.border,
+    ...surface.outline,
     borderRadius: size.radiusSm,
     overflow: 'hidden',
   },

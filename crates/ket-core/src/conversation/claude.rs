@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use super::{
     Read_, Turn, TurnKind, carried, clip, is_image, push_text, read_with, spoken, tool_line,
-    without_image_marks,
+    without_image_marks, without_paste_marks,
 };
 use crate::{KetError, Result};
 
@@ -86,7 +86,11 @@ pub fn queued(path: &Path) -> Result<Vec<String>> {
     // as the conversation will show it once it is read.
     Ok(waiting
         .into_iter()
-        .map(|text| without_image_marks(&text).trim().to_owned())
+        .map(|text| {
+            without_paste_marks(&without_image_marks(&text))
+                .trim()
+                .to_owned()
+        })
         .filter(|text| !text.is_empty() && !text.starts_with('<'))
         .map(|text| clip(&text))
         .collect())

@@ -11,6 +11,7 @@ import { reachesAway } from '../lib/address-kind';
 import type { ConnectionState, HostConnection } from '../lib/connection';
 import { useHostState } from '../lib/hosts';
 import { font, size, t } from '../lib/theme';
+import { surface } from './ui/surface';
 import { Banner, Button, Prose } from './ui';
 import { sentence } from '../lib/text';
 
@@ -110,7 +111,7 @@ const styles = StyleSheet.create({
     borderRadius: 5,
     overflow: 'hidden',
     textAlign: 'center',
-    backgroundColor: t.sunken,
+    ...surface.well,
     fontFamily: font.chrome,
     fontSize: 11,
     color: t.text,

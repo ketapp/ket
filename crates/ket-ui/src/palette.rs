@@ -334,6 +334,7 @@ impl Shell {
                 Intent::AddProject => self.add_project(cx),
                 Intent::OpenSettings => self.open_preferences(cx),
                 Intent::OpenSetup => self.open_setup(cx),
+                Intent::OpenAutomations => self.open_automations(None, cx),
                 Intent::OpenProjectSettings(id) => {
                     self.open_project_settings(&id, crate::projects::Field::Name, cx);
                 }

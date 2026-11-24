@@ -26,6 +26,7 @@ use crate::fonts::Prose;
 use crate::paint::paint;
 use crate::ui::button::icon_button;
 use crate::ui::cluster::icon_cluster;
+use crate::ui::figure::figure;
 use crate::ui::icon::{Icon, sized_icon};
 use crate::ui::{CAPTION, LABEL};
 
@@ -76,10 +77,6 @@ pub(crate) const TRIGGER_PAD: Pixels = px(8.0);
 /// [`TRIGGER_PAD`] for the compact strip's read-outs.
 pub(crate) const COMPACT_TRIGGER_PAD: Pixels = px(2.0);
 
-/// A value's size: bigger than the chrome around it, since the numbers are
-/// what the strip is for.
-const VALUE: Pixels = px(14.0);
-
 /// How far a card's content stands in from its edge when that content paints
 /// all the way to its own edges — a terminal's background, an editor's.
 ///
@@ -97,32 +94,6 @@ pub(crate) fn card(t: &Theme) -> Div {
         .border_color(paint(t.rule))
         .rounded(CARD_RADIUS)
         .overflow_hidden()
-}
-
-/// One figure: a label in the prose face over a value row in the mono.
-pub(crate) fn stat(label: impl Into<SharedString>, value: impl IntoElement, t: &Theme) -> Div {
-    div()
-        .flex()
-        .flex_none()
-        .flex_col()
-        .gap(px(3.0))
-        .child(
-            div()
-                .prose()
-                .text_size(LABEL)
-                .text_color(paint(t.text.dim))
-                .child(label.into()),
-        )
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(7.0))
-                .text_size(VALUE)
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(paint(t.text.primary))
-                .child(value),
-        )
 }
 
 /// A value's quiet trailing words — "6 files", "1h 45m".
@@ -383,7 +354,7 @@ impl Shell {
             };
             match compact {
                 true => crate::ui::chip::readout(t).child(value),
-                false => stat("Changes", value, t),
+                false => figure("Changes", value, t),
             }
         });
 
@@ -444,7 +415,7 @@ impl Shell {
             });
         let agents = match compact {
             true => crate::ui::chip::readout(t).child(agents_value),
-            false => stat("Agents", agents_value, t),
+            false => figure("Agents", agents_value, t),
         };
 
         let usage = self.usage_stats(compact, window, cx);
@@ -693,7 +664,7 @@ impl Shell {
                 .text_color(paint(ink))
                 .child(sized_icon(Icon::GitMerge, px(13.0), paint(t.text.dim)))
                 .child(count.to_string()),
-            false => stat(
+            false => figure(
                 "Merge",
                 div().text_color(paint(ink)).child(match count {
                     0 => "none".to_owned(),

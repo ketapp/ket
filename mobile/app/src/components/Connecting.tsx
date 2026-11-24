@@ -10,6 +10,7 @@ import { Pressable, StyleSheet, Text, View } from 'react-native';
 import type { HostConnection } from '../lib/connection';
 import { useHostState } from '../lib/hosts';
 import { font, size, t } from '../lib/theme';
+import { surface } from './ui/surface';
 import { hostOf, STUCK_MS, useWaited } from './ConnectionHelp';
 import { Ping } from './Ping';
 import { Button } from './ui';
@@ -80,7 +81,7 @@ const styles = StyleSheet.create({
     gap: 10,
     paddingHorizontal: 12,
     borderRadius: size.radius,
-    backgroundColor: t.sunken,
+    ...surface.well,
   },
   addressText: { flexShrink: 1, fontFamily: font.chrome, fontSize: size.detail, color: t.text },
   change: { fontFamily: font.proseMedium, fontSize: size.detail, color: t.dim },

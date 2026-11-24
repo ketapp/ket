@@ -18,6 +18,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { showBeside, useSplit } from '../../lib/layout';
 import { font, size, t } from '../../lib/theme';
+import { surface } from './surface';
 import { Gauge, Inbox, Sliders, Tree } from '../icons';
 import { shared } from './shared';
 
@@ -218,8 +219,15 @@ export function TabBar({
                   router.push(path);
                   return;
                 }
-                if (active === 'usage' && key === 'worktrees' && router.canGoBack()) {
-                  router.back();
+                // From Usage, down to the tabs under it and on to this one.
+                // Replacing Usage put a second set of tabs on the stack over
+                // the first, which stayed mounted under it, its Worktrees
+                // still drawing every snapshot; another set for each visit.
+                // Worktrees too: going back alone showed whichever tab Usage
+                // was opened from, so Usage opened from Needs you went back
+                // to Needs you.
+                if (active === 'usage') {
+                  router.dismissTo(path);
                   return;
                 }
                 router.replace(path);
@@ -255,7 +263,7 @@ export function tabBarFoot(insetBottom: number): number {
 }
 
 const styles = StyleSheet.create({
-  strip: { backgroundColor: t.sunken, borderRadius: size.radius, overflow: 'hidden' },
+  strip: { ...surface.well, borderRadius: size.radius, overflow: 'hidden' },
   stripRow: { padding: 3, gap: 2 },
   stripTab: {
     height: 34,
@@ -274,13 +282,11 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     gap: 2,
     padding: 5,
-    backgroundColor: t.elevated,
-    borderWidth: 1,
-    borderColor: t.border,
+    ...surface.float,
     borderRadius: 29,
   },
   tab: { width: 64, height: 46, borderRadius: 23, alignItems: 'center', justifyContent: 'center' },
-  tabOn: { backgroundColor: t.selection },
+  tabOn: { ...surface.chosen },
   tabCount: {
     position: 'absolute',
     top: -8,

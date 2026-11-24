@@ -15,6 +15,25 @@ words; no internal names, no commit hashes. ket reads this file
 
 ### New
 
+- A Claude or Codex tab shows a small ring once its conversation fills 80%
+  of the model's context window, orange and then red from 90%. Hover it to
+  see how many tokens are in use. Nothing shows below 80%.
+- Agents can close the browser tab they opened with `ket browser close`,
+  and ket now tells them to once they're done with it, so their tabs stop
+  piling up and holding memory.
+- Automations: work that starts itself. In the New worktree dialog, Start ▾ →
+  Schedule… runs the prompt once at a time you pick, or every day, every
+  weekday, on chosen days or every hour, each time in a new worktree or in
+  one you choose; with no agent picked, the prompt is a command typed into
+  a terminal. ket starts them even with its window closed. A start the Mac
+  slept through runs once when it wakes, if it isn't too late, and one is
+  skipped while the last run is still working. The Automations dialog —
+  from the sidebar's ⋯ menu, the palette, or the status bar's clock, which
+  shows the next start — lists them, shows each one's runs, and edits,
+  pauses, starts or deletes one; a start that didn't happen says so.
+  `ket automation` does the same from a terminal, and on the phone, the
+  Macs sheet's Automations lists a Mac's, to pause one, start it now or
+  delete it.
 - The phone tells you when an agent is waiting on you, finishes or fails,
   or a pull request's checks fail, even with ket closed: your Mac sends
   the notifications you chose in the phone's Settings › Notifications
@@ -35,7 +54,8 @@ words; no internal names, no commit hashes. ket reads this file
 - Mark a worktree as unread to come back to it: Mark as Unread is in its
   right-click menu on the Mac and in the menu you get by holding its row on
   the phone. Its row gets the dot again and shows under the phone's Unread
-  filter until you next go to it, on either.
+  filter until you next go to it, on either. On the Mac, an unread
+  worktree's name is in bold as well.
 - When the phone app hits an error, the screen says so and offers Try
   again instead of closing, and the app keeps a report you can share from
   Settings › About › Error reports. Nothing is sent anywhere unless you
@@ -59,6 +79,51 @@ words; no internal names, no commit hashes. ket reads this file
 
 ### Improved
 
+- On the phone, the Worktrees screen is redrawn to hang together: each
+  project's worktrees share one card under the project's name, each led by
+  its agent's logo in its state's colour, green while it works and blue
+  while it waits on you. All, Active, Unread and Ready are tabs, each with
+  its own icon. Every prompt waiting on you is a row of its own with an
+  Answer button; hold it to allow once. How the phone reaches your Mac
+  shows under its name: Secure · Wi-Fi, Tailscale or Relay.
+- On the phone, Settings shows whether each paired desktop is connected: a
+  green dot when it is, a red ring when it's offline. Pairing another is a
+  small Pair button beside the heading, not a white button under the list.
+- On the phone, what you type in a chat stays there until you send it:
+  leave the chat, close the app, or update it, and the words are back in
+  the field when you return. Each chat keeps its own.
+- On the phone, the `/` button and the reply and snippet chips over a
+  chat's message field fold away while the agent is at work, from the
+  moment you send, so the conversation gets their room. They come back
+  when it's done.
+- On the phone, a worktree whose agent is at work is a row like the rest:
+  the black box around its latest step is gone, and the step is the line
+  under its name.
+- On the phone, every surface shares one look on every screen: cards,
+  menus, sheets, the tab bar, pills, fields, tracks, keys and outlined
+  buttons have the same fills and one quiet hairline, a step lighter than
+  what it surrounds.
+- On the phone, every grey comes from one ramp of eight, drawn from the
+  theme's own surface and text: more contrast between the screen, its cards
+  and what sits on them, brighter secondary text, and no more near-identical
+  greys side by side. The Codex mark and a project with no colour use the
+  same greys.
+- The browser tab's toolbar is calmer. Go is now an arrow inside the
+  address bar that appears once you've typed somewhere new (Return still
+  works), and the camera is labelled Screenshot.
+- The branch field in New worktree shows just the branch icon and name.
+- On the phone, the worktree button in a chat's header wears a small dot
+  while the worktree has changes that aren't committed yet.
+- The phone app opens with ket's mark drawn in characters, the way the
+  Connecting picture draws its planet: it splits into faint copies, snaps
+  back into one, and dissolves as the app comes in.
+- Browser tabs no longer let Chromium contact Google in the background: no
+  install-tracking ping, no downloaded add-ons or AI models, no sync, no
+  Safe Browsing or translation lookups, and Chrome's AI features and the AI
+  APIs it gives pages are off. Pages that need DRM video won't play it.
+- Hold the phone’s Waiting on you banner to approve a single plan or allow
+  a single permission once. When several prompts are waiting, hold to
+  open them in a sheet and answer each right there.
 - The phone app now runs on iOS and Android only. Open Pair a desktop
   to scan the Mac's QR code or paste the pairing code.
 - The phone's chat header is just the worktree's name: the running, waiting
@@ -119,6 +184,37 @@ words; no internal names, no commit hashes. ket reads this file
 
 ### Fixed
 
+- On the phone, swiping a table or a code block in a chat sideways only
+  scrolls it. Before, it could take you out of the chat. A chat now goes
+  back from a swipe at the screen's left edge, not from anywhere.
+- On the phone, the fields in New task run the sheet's full width, in line
+  with the prompt and the button under them, and a sheet's close button
+  lines up with what is in it.
+- On the phone, Worktrees in the floating tabs opens Worktrees from Usage.
+  Before, it went back to whichever tab you'd opened Usage from.
+- On the phone, the first tap after typing works. Before, Send, +, Back
+  and the rest could need a second tap once the app had been open a while.
+- An agent that runs another one from its shell, such as Codex asking
+  `claude -p` for a review, gets its tab back when that run ends. Before,
+  the tab stayed on the finished run, and the agent's own permission prompts
+  after it raised no notice and no change of status, on the Mac or the
+  phone.
+- A long message sent from the phone reaches Claude whole. Past about a
+  thousand characters, only its last few lines arrived. And a message with
+  pasted text in it now shows in the phone's chat as it was sent, instead of
+  going missing or showing Claude's paste marks.
+- The New worktree dialog closes as soon as you press Start. Branch checks
+  and checkout progress appear in the sidebar, and a pending start can no
+  longer close another dialog you open.
+- Codex chats on the phone offer `/clear` in the slash menu to start a fresh
+  conversation in the same chat without opening the terminal.
+- The phone chat uses short model names in its message field, such as “Message qwen”.
+- A browser tab an agent opens in a worktree you aren't looking at no longer
+  keeps drawing as if it were on screen, using CPU and graphics memory until
+  you first show it.
+- On the phone, Usage shows its cards the moment you open it, instead of a
+  note saying no desktop is paired for a moment first. A note that there's
+  nothing to show waits until that's known.
 - Discarding a file's changes and sending feedback close as you click, and
   a notification says how it went; feedback that doesn't go keeps its
   draft. The Merge and Open Pull Request dialogs, and Add Project's folder
@@ -134,6 +230,8 @@ words; no internal names, no commit hashes. ket reads this file
 - ket no longer stops taking keys after a browser tab or the iPhone
   simulator lets go of the keyboard. Every key in a terminal beeped and
   went nowhere until ket was restarted; ket now takes the keyboard back.
+- Desktop right-click submenus stay beside the row that opens them, even
+  when the menu opens above or to the left of the pointer.
 - A Codex task no longer stalls when Codex asks to review new or changed
   hooks before it starts: the phone asks instead, with Trust all and
   continue or Continue without trusting, and the task goes in once it is

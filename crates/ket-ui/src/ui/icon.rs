@@ -197,6 +197,19 @@ pub(crate) enum Icon {
     Play,
     /// Suspend playback.
     Pause,
+    /// A time of day: an automation's start, the time field.
+    Clock,
+    /// A day: the date select.
+    Calendar,
+    /// Again and again: an automation that repeats.
+    Repeat,
+    /// A timer's dial, the part that has counted down: five ticks, from
+    /// twelve o'clock round to four. Drawn over [`Icon::DialRest`] in a
+    /// colour of its own, since one icon is one tint.
+    DialLit,
+    /// The rest of that dial: the seven ticks still to go, faint, and the
+    /// hand at four o'clock.
+    DialRest,
     /// Stop what is running: an agent's turn, a command's job. Filled, like
     /// [`Icon::Pause`].
     Stop,
@@ -415,6 +428,11 @@ impl Icon {
             Icon::UnfoldHorizontal => "icons/unfold-horizontal.svg",
             Icon::Play => "icons/play.svg",
             Icon::Pause => "icons/pause.svg",
+            Icon::Clock => "icons/clock.svg",
+            Icon::Calendar => "icons/calendar.svg",
+            Icon::Repeat => "icons/repeat.svg",
+            Icon::DialLit => "icons/dial-lit.svg",
+            Icon::DialRest => "icons/dial-rest.svg",
             Icon::Stop => "icons/stop.svg",
             Icon::RotateCcw => "icons/rotate-ccw.svg",
             Icon::RotateCw => "icons/rotate-cw.svg",
@@ -506,7 +524,7 @@ pub(crate) fn sized_icon(which: Icon, size: Pixels, colour: Rgba) -> Svg {
 pub(crate) struct Assets;
 
 /// The bytes for every path [`Icon::asset`] can return.
-const FILES: [(&str, &[u8]); 119] = [
+const FILES: [(&str, &[u8]); 124] = [
     (
         "icons/chevron-down.svg",
         include_bytes!("../../assets/icons/chevron-down.svg"),
@@ -726,6 +744,26 @@ const FILES: [(&str, &[u8]); 119] = [
     (
         "icons/play.svg",
         include_bytes!("../../assets/icons/play.svg"),
+    ),
+    (
+        "icons/clock.svg",
+        include_bytes!("../../assets/icons/clock.svg"),
+    ),
+    (
+        "icons/calendar.svg",
+        include_bytes!("../../assets/icons/calendar.svg"),
+    ),
+    (
+        "icons/repeat.svg",
+        include_bytes!("../../assets/icons/repeat.svg"),
+    ),
+    (
+        "icons/dial-lit.svg",
+        include_bytes!("../../assets/icons/dial-lit.svg"),
+    ),
+    (
+        "icons/dial-rest.svg",
+        include_bytes!("../../assets/icons/dial-rest.svg"),
     ),
     (
         "icons/pause.svg",
@@ -1108,6 +1146,11 @@ mod tests {
             Icon::UnfoldHorizontal,
             Icon::Play,
             Icon::Pause,
+            Icon::Clock,
+            Icon::Calendar,
+            Icon::Repeat,
+            Icon::DialLit,
+            Icon::DialRest,
             Icon::Stop,
             Icon::RotateCcw,
             Icon::RotateCw,

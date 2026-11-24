@@ -144,6 +144,12 @@ pub fn backlog_dir() -> Result<PathBuf> {
     Ok(data_dir()?.join("backlog"))
 }
 
+/// Directory holding the automations and what each run of them did — see
+/// [`crate::automation`].
+pub fn automations_dir() -> Result<PathBuf> {
+    Ok(data_dir()?.join("automations"))
+}
+
 /// Directory holding the images projects show on their badges, each
 /// project's in a directory of its own — see [`crate::project_image`].
 pub fn project_images_dir() -> Result<PathBuf> {

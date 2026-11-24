@@ -16,6 +16,7 @@ flate2.workspace = true
 futures.workspace = true
 getrandom.workspace = true
 hpke.workspace = true
+jiff.workspace = true
 rand_core.workspace = true
 glob.workspace = true
 globset.workspace = true

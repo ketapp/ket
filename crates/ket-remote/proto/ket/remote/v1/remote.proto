@@ -121,6 +121,10 @@
 
 // 1.35 adds MarkUnread, the worktree menu's Mark as Unread, and
 // `WorktreeSummary.unread`, set while a worktree is marked.
+//
+// 1.36 adds GetAutomations and EditAutomation: the automations, work that
+// starts itself on a schedule, and pausing, resuming, starting now or
+// deleting one.
 
 syntax = "proto3";
 
@@ -257,6 +261,10 @@ message Envelope {
     UnregisterPush unregister_push = 134;
     // Since 1.35.
     MarkUnread mark_unread = 135;
+    // Since 1.36.
+    GetAutomations get_automations = 136;
+    Automations automations = 137;
+    EditAutomation edit_automation = 138;
   }
 }
 
@@ -1578,4 +1586,52 @@ message Device {
 // phone may revoke itself — that is "forget this Mac". Answered with an Ack.
 message RevokeDevice {
   string id = 1;
+}
+
+// Since 1.36. Every automation in the projects this phone can see: those
+// that will start, soonest first, then the paused, then one-offs that have
+// had their start. Answered with Automations.
+message GetAutomations {}
+
+// Since 1.36.
+message Automations {
+  repeated AutomationSummary automations = 1;
+}
+
+message AutomationSummary {
+  string id = 1;
+  string name = 2;
+  string project_id = 3;
+  // How it repeats, in words: "Weekdays at 9:00 AM".
+  string schedule = 4;
+  // Off when paused.
+  bool enabled = 5;
+  // A one-off that has had its start.
+  bool finished = 6;
+  // When it starts next, milliseconds since the epoch; 0 when it won't.
+  uint64 next_start_ms = 7;
+  // The last run's result in words — "Done", "Skipped" — or empty.
+  string last_result = 8;
+  // When the last run started, or was skipped or missed.
+  uint64 last_run_ms = 9;
+  // The agent it starts; empty for a command.
+  string agent = 10;
+}
+
+// Since 1.36. A change to an automation, as the desktop's Automations dialog
+// makes one. A mutation; answered with Automations, or an Error.
+message EditAutomation {
+  string automation_id = 1;
+  AutomationEdit edit = 2;
+}
+
+enum AutomationEdit {
+  AUTOMATION_EDIT_UNSPECIFIED = 0;
+  AUTOMATION_EDIT_PAUSE = 1;
+  AUTOMATION_EDIT_RESUME = 2;
+  // Start it now, whatever its schedule. Needs the desktop's ket host,
+  // which opens a ket window to take it.
+  AUTOMATION_EDIT_RUN_NOW = 3;
+  // Delete it and its history; the worktrees its runs made are kept.
+  AUTOMATION_EDIT_DELETE = 4;
 }

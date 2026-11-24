@@ -8,7 +8,7 @@ import Svg, { Circle, Path, Polygon, Rect } from 'react-native-svg';
 import type { AddressKind } from '../lib/address-kind';
 import { AGENT_COLORS, agentHarness, font, sessionColor, t } from '../lib/theme';
 
-type IconProps = { size?: number; color?: string; weight?: number };
+type IconProps = { size?: number; color?: string; weight?: number; fill?: string };
 
 /** ket's mark: the bar and chevron from the app icon. `color` stands in for
  * the brand green where the mark also reports a state. */
@@ -35,16 +35,18 @@ const CLAUDE_SPARK =
 export function AgentMark({ agent, size = 14, session, well }: { agent: string; size?: number; session?: string; well?: boolean }) {
   const worn = sessionColor(session);
   const own = AGENT_COLORS[agentHarness(agent)] ?? t.dim;
-  if (!worn && !well) return <Glyph agent={agent} size={size} color={own} />;
+  if (!worn && !well) return <AgentGlyph agent={agent} size={size} color={own} />;
   const side = size + 6;
   return (
     <View style={{ width: side, height: side, borderRadius: size > 14 ? 6 : 5, backgroundColor: worn?.tile, alignItems: 'center', justifyContent: 'center' }}>
-      <Glyph agent={agent} size={size} color={worn?.ink ?? own} />
+      <AgentGlyph agent={agent} size={size} color={worn?.ink ?? own} />
     </View>
   );
 }
 
-function Glyph({ agent, size, color }: { agent: string; size: number; color: string }) {
+/** An agent's logo alone, in one colour: its own, a session's, or a quiet
+ * grey where the logo says only who the agent is. */
+export function AgentGlyph({ agent, size, color }: { agent: string; size: number; color: string }) {
   const name = agentHarness(agent);
   if (name === 'codex') {
     // OpenAI's Blossom, as developers.openai.com/codex draws it.
@@ -92,9 +94,11 @@ function Glyph({ agent, size, color }: { agent: string; size: number; color: str
   );
 }
 
-function Stroke({ size = 18, color = t.dim, weight = 1.8, children }: IconProps & { children: React.ReactNode }) {
+/** A stroke icon. `fill` fills what it outlines, for an icon that is chosen;
+ * an icon of open lines has nothing to fill and leaves it out. */
+function Stroke({ size = 18, color = t.dim, weight = 1.8, fill = 'none', children }: IconProps & { children: React.ReactNode }) {
   return (
-    <Svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth={weight} strokeLinecap="round" strokeLinejoin="round">
+    <Svg width={size} height={size} viewBox="0 0 24 24" fill={fill} stroke={color} strokeWidth={weight} strokeLinecap="round" strokeLinejoin="round">
       {children}
     </Svg>
   );
@@ -138,6 +142,21 @@ export const Desktop = (p: IconProps) => (
   <Stroke {...p}>
     <Rect x={3} y={4} width={18} height={12} rx={1.5} />
     <Path d="M12 16v4M8 20h8" />
+  </Stroke>
+);
+
+/** A time of day: an automation's start. */
+export const Clock = (p: IconProps) => (
+  <Stroke {...p}>
+    <Circle cx={12} cy={12} r={9} />
+    <Path d="M12 7v5l3 2" />
+  </Stroke>
+);
+
+/** Start now: a triangle on its side. */
+export const Play = (p: IconProps) => (
+  <Stroke {...p}>
+    <Path d="M7 4.5v15l12-7.5z" />
   </Stroke>
 );
 
@@ -558,13 +577,24 @@ export const Comment = (p: IconProps) => (
   </Stroke>
 );
 
-/** A conversation: a speech bubble, with `dots` one under way. */
-export const Bubble = ({ dots, ...p }: IconProps & { dots?: boolean }) => (
+/** A conversation: a speech bubble, with `dots` one under way. `dot` puts a
+ * dot on its corner, as an unread row wears, cut out of the bubble by a ring
+ * of `dot`: the colour the icon stands on. */
+export const Bubble = ({ dots, dot, ...p }: IconProps & { dots?: boolean; dot?: string }) => (
   <Stroke {...p}>
     <Path d="M5 5h14a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-8l-4 3.5V17H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2z" />
     {dots
       ? [8.5, 12, 15.5].map((cx) => <Circle key={cx} cx={cx} cy={11} r={1.2} fill={p.color ?? t.dim} stroke="none" />)
       : null}
+    {dot ? <Circle cx={17.5} cy={6.5} r={3.2} fill={p.color ?? t.dim} stroke={dot} strokeWidth={1.6} /> : null}
+  </Stroke>
+);
+
+/** Everything: the shell's `*`, which matches every name. Open lines, so
+ * nothing to fill. */
+export const Wildcard = (p: IconProps) => (
+  <Stroke {...p}>
+    <Path d="M12 4v16M5.1 8l13.8 8M18.9 8 5.1 16" />
   </Stroke>
 );
 

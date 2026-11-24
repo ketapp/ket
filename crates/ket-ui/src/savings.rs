@@ -866,7 +866,7 @@ impl Shell {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        use crate::header::{COMPACT_TRIGGER_PAD, TRIGGER_PAD, stat, trail};
+        use crate::header::{COMPACT_TRIGGER_PAD, TRIGGER_PAD, trail};
 
         let t = &self.theme;
         let savings = &self.savings;
@@ -890,7 +890,7 @@ impl Shell {
 
         let face = match compact {
             true => crate::ui::chip::readout(t).child(div().text_color(ink).child(figure)),
-            false => stat(
+            false => crate::ui::figure::figure(
                 "Economy",
                 div()
                     .flex()

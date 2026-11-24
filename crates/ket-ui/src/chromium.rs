@@ -26,7 +26,7 @@
 //!   have closed, deletes its profile under both roots: see
 //!   [`Shell::chromium_registry_changed`]. ket-core deletes it itself when no
 //!   Chromium holds the root.
-//! - **Screenshot to agent**: the camera in the toolbar takes the page as
+//! - **Screenshot to agent**: Screenshot in the toolbar takes the page as
 //!   Chromium draws it and opens the Quick prompt with it, pointed at the
 //!   tab's worktree — what ⌘S does in a device tab. See
 //!   [`Shell::capture_chromium`].
@@ -152,6 +152,8 @@ pub(crate) struct ChromiumTab {
     pub active: bool,
     /// The JavaScript dialog its page has open, waiting for an answer.
     pub dialog: Option<Dialog>,
+    /// When `ket browser` last used it — see [`Shell::mark_driven`].
+    pub driven: u64,
 }
 
 /// A message a page logged to its console.
@@ -215,8 +217,13 @@ pub(crate) struct PageState {
     /// The JavaScript dialog it has open, which the pane shows in its place
     /// until it is answered.
     pub(crate) dialog: Option<OpenDialog>,
-    /// Whether the pointer is over the toolbar's camera, whose tooltip shows.
+    /// Whether the pointer is over the toolbar's Screenshot, whose tooltip
+    /// shows.
     capture_hovered: bool,
+    /// When `ket browser` last used it, counted in requests; `0` if it never
+    /// has since ket started. `ket browser close` closes the latest of
+    /// these, not whichever tab the person has in front by then.
+    driven: u64,
 }
 
 /// A JavaScript dialog a page has open, and a prompt's field.
@@ -381,12 +388,21 @@ impl Shell {
                         title: page.title.clone(),
                         active: active.contains(&id),
                         dialog: page.dialog.as_ref().map(|open| open.dialog.clone()),
+                        driven: page.driven,
                     })
                 })
             })
             .collect();
         tabs.sort_by_key(|tab| tab.id.0);
         tabs
+    }
+
+    /// Notes that `ket browser` used browser `id` in request `turn`, a count
+    /// that only goes up.
+    pub(crate) fn mark_driven(&mut self, id: BrowserId, turn: u64) {
+        if let Some(browser) = self.browsers.get_mut(&id) {
+            browser.chromium.driven = turn;
+        }
     }
 
     /// Browser `id`'s page, while there is one: from its tab opening until
@@ -684,8 +700,8 @@ impl Shell {
     }
 
     /// Browser `id`'s page closed itself — a popup's `window.close()` — so
-    /// its tab goes too.
-    fn close_chromium_tab(&mut self, id: BrowserId, cx: &mut Context<Self>) {
+    /// its tab goes too; or `ket browser close` closed it.
+    pub(crate) fn close_chromium_tab(&mut self, id: BrowserId, cx: &mut Context<Self>) {
         let kind = TabKind::Browser(id);
         for space in self.spaces.values_mut() {
             if let Some((pane, index)) = space.root.find_tab(&kind) {
@@ -736,10 +752,11 @@ impl Shell {
         };
         match event {
             Event::Created => {
-                // Chromium may give its new page the keyboard; whatever of
-                // ket's had it keeps it until the page is clicked.
                 if let Some(view) = &browser.view {
+                    // Chromium may give its new page the keyboard; whatever
+                    // of ket's had it keeps it until the page is clicked.
                     view.release_keyboard();
+                    view.settle_hidden();
                 }
             }
             Event::Address(url) => {
@@ -1049,7 +1066,9 @@ impl Shell {
         )
     }
 
-    /// The toolbar's camera: a screenshot of the page to an agent.
+    /// The toolbar's Screenshot: the page to an agent. A word beside the
+    /// camera, since it is the one thing ket adds to a browser's toolbar; the
+    /// tooltip says where the picture goes.
     pub(crate) fn chromium_capture_button(
         &self,
         id: BrowserId,
@@ -1064,9 +1083,10 @@ impl Shell {
         // which draws over everything of ket's.
         tooltip(
             ("browser-capture-tip", id.0),
-            icon_button(("browser-capture", id.0), Icon::Camera)
-                .bare()
+            button(("browser-capture", id.0), "Screenshot")
+                .ghost()
                 .small()
+                .leading(Icon::Camera)
                 .render(t)
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.capture_device(DeviceKind::Browser(id), cx);

@@ -6,6 +6,7 @@
 import { type HostSnapshot, type ProviderUsage, type UsageWindow, UsageStatus } from '@ket/remote';
 import { useEffect, useState } from 'react';
 
+import type { ConnectionState } from './connection';
 import { t } from './theme';
 
 /** A quota's colour at `used` percent, or none while it is nothing to note. */
@@ -66,6 +67,16 @@ export function hasReading(provider: ProviderUsage): boolean {
  */
 export function reporting(snapshot: HostSnapshot | null): ProviderUsage[] {
   return (snapshot?.usage ?? []).filter((p) => p.status !== UsageStatus.UNSUPPORTED && p.status !== UsageStatus.UNSPECIFIED);
+}
+
+/**
+ * Whether the desktop has said enough for the Usage screen to say it has no
+ * usage: once its list is here, or once reaching it has failed. Not while the
+ * phone first reaches it, nor between its welcome and that list: the cards
+ * are on the way, and a note before them would only flash.
+ */
+export function heard(hostState: Pick<ConnectionState, 'status' | 'snapshot' | 'attempts'>): boolean {
+  return hostState.snapshot !== null || hostState.status === 'offline' || hostState.attempts > 1;
 }
 
 /** Sessions of this agent running on the desktop now. */

@@ -67,9 +67,21 @@ not an implementation detail.
 
 ## Before committing
 
-`cargo fmt --all --check` and `cargo clippy --workspace --all-targets -- -D
-warnings` have to be clean. The workspace denies `clippy::all` and
-`unsafe_code`, and warns on `missing_docs`.
+When asked to commit, stage the changes and let `git commit` run the checks.
+The pre-commit hook formats each staged Rust file with rustfmt and stages the
+result, so don't run `cargo fmt` yourself first. A staged Rust file that also
+has unstaged changes stops the commit instead: format it, stage it whole, and
+commit again. When the commit includes phone files, the hook lints the staged
+`mobile/app` files and typechecks `mobile/app`, plus `mobile/remote` when it
+changed. If a check fails, fix it, stage the fix, and commit again.
+
+Clippy doesn't run at commit. The pre-push hook runs
+`cargo clippy --workspace --all-targets -- -D warnings` when a push touches
+the Rust build, and CI runs it on every pull request. The workspace denies
+`clippy::all` and `unsafe_code`, and warns on `missing_docs`.
+
+If the hooks are off (`git config core.hooksPath` prints nothing), run
+`cargo fmt --all` and the phone app's lint and typecheck yourself.
 
 There are six documented `unsafe` carve-outs, and the reason for each is in
 the workspace manifest's lint block. Adding a seventh is a maintainer's call,
@@ -112,3 +124,41 @@ maintainer's call.
 What each of those recipes looks like — colours, type, sizes, states — is
 [`design/STYLE-GUIDE.md`](design/STYLE-GUIDE.md), pictured in
 `design/style-guide.html`. Hold new UI to it.
+
+The phone follows the same rule. Every control comes from
+`mobile/app/src/components/ui/` (its `index.ts` lists them), sheets from
+`components/Sheet.tsx` and menus from `components/FloatMenu.tsx`. A screen
+puts them together; it never draws its own button, row, field or menu.
+
+Plan with the recipes, not around them. A plan for new UI names the recipe
+each piece is built from, and lists anything it needs that does not exist yet
+as a question, before any code is written. Once a new shared component is
+agreed, it lands in `ui/` (or `components/ui/`) in a commit of its own, ahead
+of the feature that uses it, so the next feature finds it there.
+
+## Keep every file under 2,000 lines
+
+No file reaches 2,000 lines. Count with `wc -l`, including any tests in the
+same file. Vendored and generated code doesn't count (`vendor/`,
+`mobile/remote/src/gen/`, lockfiles).
+
+- **Split before a change takes a file to 2,000 lines or past it.** Do the
+  split in a commit of its own, along a seam the file already has: a dialog's
+  section, a family of requests, its tests. Then make the change in the new
+  module.
+- **A file already over the line doesn't grow.** New work for it goes in a new
+  module. The few lines that call into that module have to be paid for by
+  moving at least as many lines out in the same change. Shrinking one is
+  always welcome.
+- **Tests move out, never in.** When a file's tests would push it over, they
+  go to a sibling module (`foo/tests.rs`, `foo.test.ts`).
+- **Check before committing.** This lists every file over the line:
+
+  ```sh
+  git ls-files -- '*.rs' '*.ts' '*.tsx' '*.js' '*.swift' '*.kt' '*.proto' '*.sh' \
+    ':!vendor' ':!mobile/remote/src/gen' \
+    | xargs wc -l | awk '$1 >= 2000 && $2 != "total"' | sort -rn
+  ```
+
+  The list may get shorter, but it must never get longer, and no file on it
+  may grow.

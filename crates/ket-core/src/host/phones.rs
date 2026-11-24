@@ -37,6 +37,7 @@ use super::wire::DeviceRole;
 use crate::Result;
 use crate::activity::Tracker;
 
+mod automations;
 mod backlog;
 mod conversation;
 mod keys;

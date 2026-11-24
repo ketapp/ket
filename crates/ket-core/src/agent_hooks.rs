@@ -85,8 +85,8 @@ pub const CLI_NOTE: &str = "You are running inside ket, which manages this proje
      can be acted on with refs like @e3 for `click @e3`, `fill @e3 '<text>'` and `press \
      Enter`, `screenshot` or `console` shows how it went, `dialog accept` or `dismiss` \
      answers an alert or confirm the page opens, and `record start` then `record stop` saves \
-     a video and stills for showing a person what happened; `ket browser --help` lists the \
-     rest.";
+     a video and stills for showing a person what happened. `close` the tab when you're done \
+     with it: it holds its page's memory until closed. `ket browser --help` lists the rest.";
 
 /// The hook contract's version. Bumped when the payload's shape changes.
 pub const HOOK_VERSION: &str = "1";

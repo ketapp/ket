@@ -271,6 +271,47 @@ fn without_image_marks(text: &str) -> String {
     out
 }
 
+/// What Claude Code writes around each paste in a message:
+/// `<pasted_content id="8e80">` on the line before it, and
+/// `</pasted_content id="8e80">` on the line after.
+const PASTE_MARK: &str = "pasted_content id=\"";
+
+/// `text` with Claude Code's marks around each paste taken out — see
+/// [`PASTE_MARK`] — leaving what was pasted, as the message read in the
+/// prompt. Left in, a message that starts with a paste reads as the
+/// harness's own and isn't shown at all.
+fn without_paste_marks(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find(PASTE_MARK) {
+        let past = at + PASTE_MARK.len();
+        let id = rest[past..]
+            .bytes()
+            .take_while(u8::is_ascii_alphanumeric)
+            .count();
+        let tail = rest[past + id..].strip_prefix("\">").filter(|_| id > 0);
+        let before = &rest[..at];
+        match (tail, before.strip_suffix("</"), before.strip_suffix('<')) {
+            // A paste's end, with the new line before it.
+            (Some(tail), Some(before), _) => {
+                out.push_str(before.strip_suffix('\n').unwrap_or(before));
+                rest = tail;
+            }
+            // Its start, with the new line after it.
+            (Some(tail), None, Some(before)) => {
+                out.push_str(before);
+                rest = tail.strip_prefix('\n').unwrap_or(tail);
+            }
+            _ => {
+                out.push_str(&rest[..past]);
+                rest = &rest[past..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// A turn of text, unless it is the harness talking — a reminder, a caveat,
 /// anything else that starts with a tag — or its note that a turn was
 /// interrupted. Some of the harness's records are the person's after all: a
@@ -280,8 +321,9 @@ fn without_image_marks(text: &str) -> String {
 /// a `<bash-stdout>` record of its own.
 fn push_text(turns: &mut Vec<Turn>, kind: TurnKind, text: &str) {
     let unmarked;
-    let text = if kind == TurnKind::User && text.contains("[Image ") {
-        unmarked = without_image_marks(text);
+    let marked = text.contains("[Image ") || text.contains(PASTE_MARK);
+    let text = if kind == TurnKind::User && marked {
+        unmarked = without_paste_marks(&without_image_marks(text));
         unmarked.trim()
     } else {
         text.trim()

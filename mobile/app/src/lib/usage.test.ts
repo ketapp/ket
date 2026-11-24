@@ -12,6 +12,7 @@ import { describe, expect, jest, test } from '@jest/globals';
 import {
   compactDuration,
   hasReading,
+  heard,
   metadata,
   pressure,
   reporting,
@@ -89,6 +90,20 @@ describe('snapshot usage', () => {
     [UsageStatus.UNSUPPORTED, false],
   ])('recognizes readable status %s', (status, expected) => {
     expect(hasReading(provider(status))).toBe(expected);
+  });
+
+  test('says there is no usage only once the desktop has been heard from, or could not be reached', () => {
+    const at = (status: 'connecting' | 'connected' | 'offline', snapshot: HostSnapshot | null, attempts = 1) =>
+      heard({ status, snapshot, attempts });
+    // First reaching it, and between its welcome and its list: the cards are on the way.
+    expect(at('connecting', null)).toBe(false);
+    expect(at('connected', null)).toBe(false);
+    // Its list is here, whatever it says.
+    expect(at('connected', { usage: [] } as unknown as HostSnapshot)).toBe(true);
+    expect(at('connecting', { usage: [] } as unknown as HostSnapshot, 3)).toBe(true);
+    // It could not be reached, and is still being tried.
+    expect(at('offline', null)).toBe(true);
+    expect(at('connecting', null, 2)).toBe(true);
   });
 
   test('reports supported statuses, including unavailable reads', () => {

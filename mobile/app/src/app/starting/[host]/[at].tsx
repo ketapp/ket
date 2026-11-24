@@ -33,7 +33,8 @@ import { STARTING_FOR_MS } from '../../../lib/connection';
 import { useHost, useHostState } from '../../../lib/hosts';
 import { type Seed, elapsed, firstLine, progressOf, segments, stageText } from '../../../lib/starting';
 import { Chat } from '../../session/[host]/[terminal]';
-import { agentLabel, font, size, t } from '../../../lib/theme';
+import { font, messagePlaceholder, size, t } from '../../../lib/theme';
+import { surface } from '../../../components/ui/surface';
 
 export default function StartingTask() {
   const { host: hostId, at, terminal: opened } = useLocalSearchParams<{ host: string; at: string; terminal?: string }>();
@@ -184,7 +185,7 @@ export default function StartingTask() {
               <TextInput
                 value={draft}
                 onChangeText={setDraft}
-                placeholder={`Message ${agent ? agentLabel(agent) : 'the agent'}`}
+                placeholder={messagePlaceholder(agent)}
                 placeholderTextColor={t.faint}
                 accessibilityLabel="A message for the agent, once it is running"
                 multiline
@@ -216,7 +217,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: size.gutter,
     paddingTop: 8,
   },
-  field: { flex: 1, minWidth: 0, minHeight: size.control, borderRadius: size.control / 2, backgroundColor: t.sunken },
+  field: { flex: 1, minWidth: 0, minHeight: size.control, borderRadius: size.control / 2, ...surface.well },
   input: {
     flex: 1,
     minWidth: 0,

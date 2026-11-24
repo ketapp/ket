@@ -59,6 +59,11 @@ const UNPLACED: &str = "worktree:";
 /// seconds at the least.
 pub(crate) const PROMPT_SIBLINGS_MS: u64 = 2_000;
 
+/// The most sessions a pane keeps to hand back to — see
+/// [`PaneAgentStatus::holds`]. Runs nest a level or two; this only bounds a
+/// pane whose runs keep being killed before they say they ended.
+const NESTED_MAX: usize = 8;
+
 /// Who decided a turn was cancelled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -164,6 +169,15 @@ pub struct PaneAgentStatus {
     /// [`crate::codex_subagent_prompt`]. The host's own; never sent on.
     #[serde(skip)]
     pub(crate) codex_asker: Option<crate::codex_subagent_prompt::Asker>,
+    /// The sessions this pane was lent away from, each to a run started
+    /// inside its turn: oldest first, each with its agent — see
+    /// [`Self::holds`]. The host's own; never sent on.
+    #[serde(skip)]
+    pub(crate) displaced: Vec<(String, String)>,
+    /// Whether the session holding the pane has said it ended, so that the
+    /// next one to start in it displaces nothing.
+    #[serde(skip)]
+    pub(crate) ended: bool,
     pub(crate) roster: Roster,
 }
 
@@ -219,6 +233,8 @@ impl PaneAgentStatus {
             compacting: false,
             unread: false,
             codex_asker: None,
+            displaced: Vec::new(),
+            ended: false,
             roster: Roster::default(),
         }
     }
@@ -293,6 +309,115 @@ impl PaneAgentStatus {
         // running in the background that survived comes back with its next
         // event.
         self.roster.clear();
+    }
+
+    /// Whether a lead's `report` is from the session holding this pane,
+    /// once the pane has moved to whichever session the report says should
+    /// hold it. A report that is gives the pane its agent and session.
+    ///
+    /// Only a new session's `SessionStart` moves an occupied pane to it. An
+    /// initial prompt still establishes an empty pane, but every agent ket
+    /// installs hooks for announces its session start; accepting a prompt as
+    /// a later handoff would let a delayed prompt from the old session take
+    /// the pane back. Anything else from another session is the old one
+    /// still talking after a `/clear`, a resume or a new agent, and would
+    /// overwrite the new one.
+    ///
+    /// Not so for a run started inside the holder's turn: an agent that the
+    /// tab's agent ran from its shell — Codex asking `claude -p` for a
+    /// review — inherits the tab's environment, and so names its pane. Its
+    /// `SessionStart` moved the tab for good, and every prompt the tab's own
+    /// agent raised after it was dropped as the old session's, with no
+    /// notice and no change of status. So a session that starts while the
+    /// holder is mid-turn is lent the pane, the holder is kept in
+    /// [`Self::displaced`], and the run's `SessionEnd` hands the pane back.
+    /// One that starts after the holder ended or between its turns — a
+    /// `/clear`, a resume, the next agent in a tab whose last one quit —
+    /// displaces nothing. A run killed before its `SessionEnd` keeps the
+    /// pane until it no longer stands: then the next report from the
+    /// session it took the pane from takes it back.
+    fn holds(&mut self, report: &HookReport) -> bool {
+        let held = self.session.clone().filter(|id| !id.is_empty());
+        let from = report.session.as_deref().filter(|id| !id.is_empty());
+        let Some((held, from)) = held.zip(from) else {
+            self.take(report);
+            return true;
+        };
+        if held == from {
+            match report.event {
+                HookEvent::SessionStart => self.ended = false,
+                HookEvent::SessionEnd => match self.displaced.pop() {
+                    Some((session, agent)) => {
+                        tracing::info!(
+                            pane = %self.pane,
+                            ended = from,
+                            back = %session,
+                            "the session lent a pane ended: it goes back"
+                        );
+                        // The end itself still applies: the run is over,
+                        // and the next word from the session it goes back
+                        // to says what that one is doing.
+                        self.session = Some(session);
+                        self.agent = agent;
+                        return true;
+                    }
+                    None => self.ended = true,
+                },
+                _ => {}
+            }
+            self.take(report);
+            return true;
+        }
+        if report.event == HookEvent::SessionStart {
+            self.displaced.retain(|(id, _)| id != from);
+            if !self.ended
+                && (working(self.state) || self.state == AgentState::AwaitingPermission)
+                && self.displaced.len() < NESTED_MAX
+            {
+                tracing::info!(
+                    pane = %self.pane,
+                    held = %held,
+                    started = from,
+                    "a session started inside the holder's turn: the pane is lent to it"
+                );
+                self.displaced.push((held, self.agent.clone()));
+            }
+            self.ended = false;
+            self.take(report);
+            return true;
+        }
+        let Some(at) = self.displaced.iter().position(|(id, _)| id == from) else {
+            return false;
+        };
+        // A session the pane was taken from has ended under the run that
+        // holds it: one of two runs side by side, or the tab's own agent
+        // quitting while its run carries on. Nothing to hand back to.
+        if report.event == HookEvent::SessionEnd {
+            self.displaced.remove(at);
+            return false;
+        }
+        if self.stands_at(report.at_ms) {
+            return false;
+        }
+        tracing::info!(
+            pane = %self.pane,
+            held = %held,
+            back = from,
+            "the session lent a pane went quiet mid-turn: it goes back"
+        );
+        self.displaced.truncate(at);
+        // A verdict on the run's turn, not this one's.
+        self.cancel = None;
+        self.take(report);
+        true
+    }
+
+    /// Gives the pane the agent and session `report` is from.
+    fn take(&mut self, report: &HookReport) {
+        self.agent.clone_from(&report.agent);
+        if report.session.is_some() {
+            self.session.clone_from(&report.session);
+        }
     }
 }
 
@@ -616,7 +741,7 @@ impl StatusStore {
             );
             return false;
         }
-        if superseded(entry, report) {
+        if !entry.holds(report) {
             dropped(
                 &entry.pane,
                 report,
@@ -625,10 +750,6 @@ impl StatusStore {
             return false;
         }
         entry.worktree = worktree;
-        entry.agent.clone_from(&report.agent);
-        if report.session.is_some() {
-            entry.session.clone_from(&report.session);
-        }
         entry.roster.lead(report);
         // Whatever the lead says next, the compaction is over.
         entry.compacting = report.event == HookEvent::PreCompact;
@@ -1198,22 +1319,6 @@ fn dropped(pane: &str, report: &HookReport, why: &'static str) {
     } else {
         tracing::debug!(pane, agent = %report.agent, event = ?report.event, why, "report dropped");
     }
-}
-
-/// Whether a lead's report comes from a session older than the one its pane
-/// has moved on to — a `/clear`, a resume, a new agent — and arrived late.
-///
-/// Only a new session's `SessionStart` moves an occupied pane to it. An
-/// initial prompt still establishes an empty pane, but every agent ket
-/// installs hooks for announces its session start; accepting a prompt as a
-/// later handoff would let a delayed prompt from the old session take the
-/// pane back. Anything else from another session is the old one still
-/// talking, and would overwrite the new one.
-fn superseded(entry: &PaneAgentStatus, report: &HookReport) -> bool {
-    let held = entry.session.as_deref().filter(|id| !id.is_empty());
-    let from = report.session.as_deref().filter(|id| !id.is_empty());
-    held.zip(from).is_some_and(|(held, from)| held != from)
-        && report.event != HookEvent::SessionStart
 }
 
 /// Whether a report is from an agent other than the one a tab was opened

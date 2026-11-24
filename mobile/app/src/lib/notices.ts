@@ -251,17 +251,26 @@ async function post(notice: Notice): Promise<void> {
   }).catch(() => {});
 }
 
-/** Takes in a desktop's snapshot: posts the news, takes back the answered. */
-async function look(conn: HostConnection, named: boolean): Promise<void> {
+/** Takes in a desktop's snapshot: posts the news, takes back the answered.
+ * Called for every snapshot as it comes, not only those drawn: screens draw
+ * a run of them as one (see `drawSnapshot` in lib/connection), and an agent
+ * that worked and went quiet between two draws still finished. */
+async function take(conn: HostConnection, named: boolean): Promise<void> {
   const { fresh, answered } = compare(conn.state.host, conn.state.snapshot, named);
-  void syncPush(conn, wanted());
-  void clearPushed(conn);
   for (const id of answered) void Notifications.dismissNotificationAsync(id).catch(() => {});
   const { config, refused } = state;
   if (!config.on || refused) return;
   if (AppState.currentState !== 'active') {
     for (const notice of fresh) if (config[notice.kind]) await post(notice);
   }
+}
+
+/** `take`, and what needs doing only as often as the connection changes:
+ * telling the desktop what to push, taking back what it pushed, the badge. */
+async function look(conn: HostConnection, named: boolean): Promise<void> {
+  void syncPush(conn, wanted());
+  void clearPushed(conn);
+  await take(conn, named);
   await refreshBadge();
 }
 
@@ -393,7 +402,12 @@ export function useNoticeFollowing(ready: boolean): void {
           const conns = hosts.map((host) => connection(host));
           followed = conns;
           const named = conns.length > 1;
-          offs = conns.map((c) => c.onChange(() => void look(c, named)));
+          offs = conns.flatMap((c) => [
+            c.onChange(() => void look(c, named)),
+            c.onMessage((message) => {
+              if (message.payload.case === 'snapshot') void take(c, named);
+            }),
+          ]);
           conns.forEach((c) => void look(c, named));
         })
         .catch(() => {

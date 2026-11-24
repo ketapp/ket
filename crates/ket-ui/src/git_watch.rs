@@ -73,6 +73,11 @@ pub(crate) struct GitWatch {
     selected_read_at: Option<Instant>,
     /// A read booked for when [`SELECTED_MIN_GAP`] has passed.
     retry: Option<Task<()>>,
+    /// A full read asked for by [`Shell::sweep_git_status`], not yet begun.
+    sweep_asked: bool,
+    /// Counts [`Shell::load_discovered`] calls, so only the latest one's
+    /// answer is used.
+    pub(crate) discovered_read: u64,
 }
 
 /// A watch on one worktree's files.
@@ -128,6 +133,14 @@ impl Shell {
         }
     }
 
+    /// Reads every row's status now, as the safety sweep would, off the
+    /// window's thread: what [`Shell::reload`] used to read on it. With a
+    /// read already running, the sweep follows as soon as it lands.
+    pub(crate) fn sweep_git_status(&mut self, cx: &mut Context<Self>) {
+        self.git_watch.sweep_asked = true;
+        self.read_git_status(cx);
+    }
+
     /// Reads git status for every worktree that has a reason to be read —
     /// see the module docs — off the window's thread.
     ///
@@ -141,10 +154,11 @@ impl Shell {
             return;
         }
 
-        let sweep = self
-            .git_watch
-            .swept_at
-            .is_none_or(|at| at.elapsed() >= SWEEP_EVERY);
+        let sweep = self.git_watch.sweep_asked
+            || self
+                .git_watch
+                .swept_at
+                .is_none_or(|at| at.elapsed() >= SWEEP_EVERY);
         let selected = self.git_watch.watched.as_ref().map(|w| w.id.clone());
 
         let mut selected_due = self.git_watch.selected_changed;
@@ -195,6 +209,9 @@ impl Shell {
         }
         if selected_due {
             self.git_watch.selected_changed = false;
+        }
+        if sweep {
+            self.git_watch.sweep_asked = false;
         }
 
         self.reading_git_status = true;
@@ -264,8 +281,9 @@ impl Shell {
                     shell.refresh_git_panel(cx);
                     shell.refresh_open_diff(cx);
                 }
-                // Changes that arrived while this was reading.
-                if shell.git_watch.selected_changed {
+                // Changes that arrived while this was reading, or a sweep
+                // asked for meanwhile.
+                if shell.git_watch.selected_changed || shell.git_watch.sweep_asked {
                     shell.read_git_status(cx);
                 }
                 if changed {

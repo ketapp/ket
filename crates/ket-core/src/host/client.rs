@@ -759,6 +759,7 @@ fn route(conn: &Arc<Connection>, reply: Reply) {
             effort,
             worktree,
             shell,
+            automation,
         } => {
             lock(&PHONE_WORK).push(super::PhoneWork {
                 project,
@@ -771,6 +772,7 @@ fn route(conn: &Arc<Connection>, reply: Reply) {
                 effort,
                 worktree,
                 shell,
+                automation,
             });
             ask_window();
         }
@@ -1143,6 +1145,7 @@ mod tests {
                 effort: None,
                 worktree: None,
                 shell: false,
+                automation: None,
             },
         );
         assert!(super::super::take_phone_asked());

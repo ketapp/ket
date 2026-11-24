@@ -20,6 +20,7 @@ pub mod agent_view;
 pub mod agents;
 pub mod app_icon;
 pub mod attachments;
+pub mod automation;
 pub mod backlog;
 pub mod branch_cleanup;
 pub mod buffer;

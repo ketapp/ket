@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, jest, test } from '@jest/globals';
 import { Answer_Choice } from '@ket/remote';
-import { act, fireEvent, render, userEvent, waitFor } from '@testing-library/react-native';
+import { act, fireEvent, render, userEvent, waitFor, within } from '@testing-library/react-native';
 import { useEffect as mockUseEffect } from 'react';
 import { Alert, Linking } from 'react-native';
 import Needs from './app/(tabs)/needs';
@@ -211,7 +211,8 @@ describe('top-level screens', () => {
     second.host.name = 'Other Mac';
     mockConns = [first, second];
     const view = await render(<Worktrees />);
-    expect(view.getByText('1 waiting on you')).toBeTruthy();
+    // What waits on you leads the list, a row for the prompt.
+    expect(view.getByText('Approve')).toBeTruthy();
     expect(view.getByText('helper 1')).toBeTruthy();
     expect(view.getByText('+1 more')).toBeTruthy();
     await fireEvent.press(view.getByLabelText('Start a task'));
@@ -234,8 +235,9 @@ describe('top-level screens', () => {
     expect(mockRouter.navigate).toHaveBeenCalledWith('/session/host/9');
     expect(conn.answer).not.toHaveBeenCalled();
 
+    // Held, the row allows it once, and stays on the list.
     mockRouter.navigate.mockClear();
-    await userEvent.setup().longPress(view.getByText('Hold to allow once'));
+    await userEvent.setup().longPress(view.getByText('Run the tests'));
     expect(conn.answer).toHaveBeenCalledWith(question, Answer_Choice.ALLOW_ONCE);
     expect(mockRouter.navigate).not.toHaveBeenCalled();
   });
@@ -249,11 +251,10 @@ describe('top-level screens', () => {
     const alert = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
     try {
       const view = await render(<Worktrees />);
-      const banner = view.getByRole('button', { name: /1 waiting on you/ });
-      await fireEvent(banner, 'accessibilityAction', { nativeEvent: { actionName: 'answerWaiting' } });
+      await fireEvent(view.getByText('Test plan'), 'accessibilityAction', { nativeEvent: { actionName: 'answerWaiting' } });
       expect(respond).toHaveBeenCalledWith(question, { approve: true });
       expect(alert).toHaveBeenCalledWith('Couldn’t answer the prompt', 'Desktop is busy.');
-      await fireEvent(view.getByText('Hold to approve'), 'longPress');
+      await fireEvent(view.getByText('Test plan'), 'longPress');
       expect(respond).toHaveBeenCalledTimes(2);
       expect(conn.answer).not.toHaveBeenCalled();
     } finally {
@@ -270,14 +271,13 @@ describe('top-level screens', () => {
       const conn = connection([project([tree('waiting', 4, { questions })])]);
       mockConns = [conn];
       const view = await render(<Worktrees />);
-      expect(view.queryByText('Hold to allow once')).toBeNull();
-      await fireEvent(view.getByText('Answer'), 'longPress');
+      await fireEvent(view.getByText('Run the tests'), 'longPress');
       expect(conn.answer).not.toHaveBeenCalled();
       await view.unmount();
     }
   });
 
-  test('Worktrees holds several waiting prompts open and answers each one in place', async () => {
+  test('Worktrees lists each waiting prompt as a row and answers each one in place', async () => {
     const permission = { id: 8n, terminalId: 9n, tool: 'Bash', subject: 'Run the tests', answerable: true };
     const plan = { id: 10n, terminalId: 11n, tool: 'ExitPlanMode', subject: 'Test plan', answerable: true };
     const other = { ...permission, id: 12n, terminalId: 13n, subject: 'Run the linter' };
@@ -288,25 +288,31 @@ describe('top-level screens', () => {
     mockConns = [conn];
     const view = await render(<Worktrees />);
 
-    expect(view.getByText('3 waiting on you')).toBeTruthy();
-    await fireEvent(view.getByText('Hold to choose a prompt'), 'longPress');
+    // A row for each prompt, the first worktree's two among them.
+    expect(view.getByText('Run the tests')).toBeTruthy();
+    expect(view.getByText('Test plan')).toBeTruthy();
+    expect(view.getByText('Run the linter')).toBeTruthy();
+    // A tap opens the prompt's own chat and answers nothing.
+    await fireEvent.press(view.getByText('Test plan'));
+    expect(mockRouter.navigate).toHaveBeenCalledWith('/session/host/11');
     expect(conn.answer).not.toHaveBeenCalled();
     expect(conn.respond).not.toHaveBeenCalled();
-    expect(view.getByText('Run the tests')).toBeTruthy();
-    expect(view.getByText('Run the linter')).toBeTruthy();
-    await fireEvent.press(view.getByText('Approve'));
-    expect(conn.respond).toHaveBeenCalledWith(plan, { approve: true });
-    expect(conn.answer).not.toHaveBeenCalled();
 
-    conn.snapshot = { projects: [project([{ ...firstTree, questions: [permission] }])] };
-    await view.rerender(<Worktrees />);
-    await fireEvent.press(view.getByText('Allow once'));
-    expect(conn.answer).toHaveBeenCalledWith(permission, Answer_Choice.ALLOW_ONCE);
+    // Held, each answers its own: the plan approved, the permission allowed once.
+    mockRouter.navigate.mockClear();
+    await fireEvent(view.getByText('Test plan'), 'longPress');
+    expect(conn.respond).toHaveBeenCalledWith(plan, { approve: true });
+    await fireEvent(view.getByText('Run the linter'), 'longPress');
+    expect(conn.answer).toHaveBeenCalledWith(other, Answer_Choice.ALLOW_ONCE);
+    expect(conn.answer).not.toHaveBeenCalledWith(permission, expect.anything());
     expect(mockRouter.navigate).not.toHaveBeenCalled();
 
-    conn.snapshot = { projects: [project([tree('first', 0)])] };
+    // Answered, a prompt's row goes; the rest stay.
+    conn.snapshot = { projects: [project([{ ...firstTree, questions: [permission] }])] };
     await view.rerender(<Worktrees />);
-    await waitFor(() => expect(view.queryByRole('button', { name: 'Close' })).toBeNull());
+    expect(view.queryByText('Test plan')).toBeNull();
+    expect(view.queryByText('Run the linter')).toBeNull();
+    expect(view.getByText('Run the tests')).toBeTruthy();
   });
 
   test('Worktrees holds a project for work in it, its backlog, a pin and hiding it; the hidden wait under the cards', async () => {
@@ -406,10 +412,10 @@ describe('top-level screens', () => {
     // request end the row.
     expect(view.getByText('Editing src/main.rs')).toBeTruthy();
     expect(view.queryByText(/`src\/main.rs`/)).toBeNull();
-    expect(view.getByText('#21')).toBeTruthy();
+    expect(view.getByLabelText(/^Pull request 21/)).toBeTruthy();
 
-    // The badge says how the line is kept, and marks the way it runs.
-    expect(view.getByText('VPN')).toBeTruthy();
+    // The line under the desktop's name says how the phone reaches it.
+    expect(view.getByText('Secure · Tailscale')).toBeTruthy();
     await fireEvent.press(view.getByLabelText('Secure: end-to-end encrypted, Over Tailscale'));
     expect(alert).toHaveBeenLastCalledWith('End-to-end encrypted', expect.stringContaining('Studio Mac'));
     expect(alert).toHaveBeenLastCalledWith('End-to-end encrypted', expect.stringContaining('Over Tailscale.'));
@@ -446,9 +452,10 @@ describe('top-level screens', () => {
     await holdAt('main');
     expect(view.queryByText('Open pull request…')).toBeNull();
 
-    // The tab bar: Worktrees, Usage, Needs you, Settings.
+    // The filters, with their counts, then the tab bar: Worktrees, Usage,
+    // Needs you, Settings.
     const tabs = view.getAllByRole('tab').map((tab) => tab.props.accessibilityLabel);
-    expect(tabs).toEqual(['Worktrees', 'Usage', 'Needs you', 'Settings']);
+    expect(tabs).toEqual(['All, 3', 'Active, 1', 'Unread, 0', 'Ready, 1', 'Worktrees', 'Usage', 'Needs you', 'Settings']);
     alert.mockRestore();
     await view.unmount();
   });
@@ -1160,8 +1167,9 @@ describe('work screens', () => {
   test('a worktree row wears its pull request in its checks’ colour', async () => {
     mockConns = [connection([project([tree('pr', 1, { pullRequest })])])];
     const view = await render(<WorktreeList />);
-    await waitFor(() => expect(view.getByText('#17')).toBeTruthy());
-    expect(view.getByText('#17')).toHaveStyle({ color: '#ef6a74' });
+    // Its number on a chip, which names the checks for a screen reader.
+    await waitFor(() => expect(view.getByLabelText('Pull request 17, checks failed')).toBeTruthy());
+    expect(within(view.getByLabelText('Pull request 17, checks failed')).getByText('17')).toBeTruthy();
     await view.unmount();
   });
 

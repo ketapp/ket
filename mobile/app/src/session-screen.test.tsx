@@ -303,7 +303,8 @@ describe('Session', () => {
     await fireEvent.press(view.getByLabelText('Codex is working: Running checks. Show details'));
     expect(view.getByText('Running checks')).toBeTruthy();
     expect(view.getByText('const ok = true;')).toBeTruthy();
-    expect(view.getByText('Ship')).toBeTruthy();
+    // The chips fold away while the agent works.
+    expect(view.queryByText('Ship')).toBeNull();
     expect(view.queryByText('Blank')).toBeNull();
     await fireEvent.press(view.getByText('https://example.com'));
     expect(open).toHaveBeenCalledWith('https://example.com');
@@ -562,9 +563,10 @@ describe('Session', () => {
     const view = await render(<Session />);
     expect(view.getByText('Wants to use Bash')).toBeTruthy();
     expect(view.queryByText('Continue')).toBeNull();
-    // The snapshot drops the question: the card slides away rather than
-    // vanishing, and the chips come back only once it has gone.
-    mockConn.snapshot = connection(tree({ activity: 2 })).snapshot;
+    // The snapshot drops the question and the agent is back at its prompt:
+    // the card slides away rather than vanishing, and the chips come back
+    // only once it has gone.
+    mockConn.snapshot = connection(tree({ activity: 0 })).snapshot;
     await view.rerender(<Session />);
     expect(view.getByText('Wants to use Bash')).toBeTruthy();
     expect(view.queryByText('Continue')).toBeNull();
@@ -916,8 +918,9 @@ describe('Session', () => {
     await fireEvent.press(view.getByText('Photos'));
     await waitFor(() => expect(view.getByLabelText('Remove IMG_1.jpg')).toBeTruthy());
     expect(mockFromPhotos).toHaveBeenCalledWith(10);
-    // The chips send at once, so not while a photo waits for the message.
-    expect(view.queryByText('Continue')).toBeNull();
+    // The chips send at once, so not while a photo waits for the message:
+    // they fold away.
+    await waitFor(() => expect(view.queryByText('Continue')).toBeNull());
 
     await fireEvent.changeText(view.getByPlaceholderText('Message Codex'), 'the tab bar');
     await fireEvent.press(view.getByLabelText('Send'));

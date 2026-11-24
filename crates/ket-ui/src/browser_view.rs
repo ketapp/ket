@@ -306,6 +306,7 @@ impl NativeBrowser {
     /// display's rate and kept an on-screen page's graphics memory for as
     /// long as nobody looked at it. Shown and hidden again in one turn,
     /// parked off the window, it never draws.
+    #[cfg(feature = "chromium")]
     pub(crate) fn settle_hidden(&self) {
         if !self.shown.get() {
             self.slot.setHidden(false);

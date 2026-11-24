@@ -35,7 +35,7 @@ import {
   Value,
 } from './ui';
 
-const mockRouter = { canGoBack: jest.fn(() => true), back: jest.fn(), push: jest.fn(), replace: jest.fn(), canDismiss: jest.fn(() => false), dismissAll: jest.fn() };
+const mockRouter = { canGoBack: jest.fn(() => true), back: jest.fn(), push: jest.fn(), replace: jest.fn(), canDismiss: jest.fn(() => false), dismissAll: jest.fn(), dismissTo: jest.fn() };
 
 jest.mock('expo-router', () => ({
   router: {
@@ -45,6 +45,7 @@ jest.mock('expo-router', () => ({
     replace: (path: string) => mockRouter.replace(path),
     canDismiss: () => mockRouter.canDismiss(),
     dismissAll: () => mockRouter.dismissAll(),
+    dismissTo: (path: string) => mockRouter.dismissTo(path),
   },
 }));
 jest.mock('react-native-safe-area-context', () => ({ useSafeAreaInsets: () => ({ top: 12, bottom: 24 }) }));
@@ -194,9 +195,10 @@ describe('shared UI controls', () => {
     expect(mockRouter.replace).toHaveBeenCalledWith('/');
     await view.unmount();
 
+    // From Usage, down to the tabs under it rather than a second set on top.
     const usage = await render(<TabBar active="usage" needs={0} />);
     await fireEvent.press(usage.getByLabelText('Worktrees'));
-    expect(mockRouter.back).toHaveBeenCalled();
+    expect(mockRouter.dismissTo).toHaveBeenCalledWith('/');
     await usage.unmount();
   });
 

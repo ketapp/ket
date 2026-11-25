@@ -1036,6 +1036,7 @@ pub(super) const ARGV: &[&[&str]] = &[
     &["ket", "browser", "dialog", "accept"],
     &["ket", "browser", "dialog", "accept", "--text", "Sam"],
     &["ket", "browser", "dialog", "dismiss", "-w", "wt-2"],
+    &["ket", "browser", "close"],
 ];
 
 #[cfg(test)]

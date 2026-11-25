@@ -184,6 +184,8 @@ words; no internal names, no commit hashes. ket reads this file
 
 ### Fixed
 
+- A long link in a terminal is underlined all the way to its last
+  character. Before, the underline could stop a character short.
 - On the phone, swiping a table or a code block in a chat sideways only
   scrolls it. Before, it could take you out of the chat. A chat now goes
   back from a swipe at the screen's left edge, not from anywhere.

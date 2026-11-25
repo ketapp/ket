@@ -253,6 +253,13 @@ struct TextLayout {
     cell: Cell,
     /// The shaped glyphs.
     line: ShapedLine,
+    /// How far the run's underline and strikethrough reach: the cells it
+    /// covers when its glyphs are pinned to the cell width, the shaped width
+    /// otherwise. Not `line.width` for a pinned run: pinning moves the glyphs
+    /// but leaves that width at the font's own advances, and the cell width
+    /// is rounded to a device pixel, so a long link's underline would stop
+    /// short of its last character.
+    width: Pixels,
     /// The colour every glyph in the run is drawn in.
     color: Hsla,
     /// The run's underline, if it has one.
@@ -582,15 +589,23 @@ impl RunSpec {
             underline: self.style.underline,
             strikethrough: self.style.strikethrough,
         };
+        // A pinned run is plain ASCII, one byte to a cell.
+        let cells = self.text.len();
         let line = window.text_system().shape_line(
             self.text.into(),
             font_size,
             &[run],
             self.force_width.then_some(cell_width),
         );
+        let width = if self.force_width {
+            cell_width * cells as f32
+        } else {
+            line.width
+        };
         Some(TextLayout {
             cell: self.cell,
             line,
+            width,
             color: self.style.color,
             underline: self.style.underline,
             strikethrough: self.style.strikethrough,
@@ -634,7 +649,7 @@ fn paint_run(run: &TextLayout, origin: Point<Pixels>, line_height: Pixels, windo
             ..*underline
         };
         let at = point(origin.x, baseline + layout.descent * 0.618);
-        window.paint_underline(at, layout.width, &style);
+        window.paint_underline(at, run.width, &style);
     }
     if let Some(strikethrough) = &run.strikethrough {
         let style = StrikethroughStyle {
@@ -645,7 +660,7 @@ fn paint_run(run: &TextLayout, origin: Point<Pixels>, line_height: Pixels, windo
             origin.x,
             origin.y + (layout.ascent * 0.5 + padding_top + layout.ascent) * 0.5,
         );
-        window.paint_strikethrough(at, layout.width, &style);
+        window.paint_strikethrough(at, run.width, &style);
     }
 }
 

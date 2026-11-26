@@ -39,6 +39,7 @@ use crate::activity::Tracker;
 
 mod automations;
 mod backlog;
+mod blackout;
 mod conversation;
 mod keys;
 mod notices;
@@ -50,6 +51,7 @@ mod relay;
 mod requests;
 mod session;
 mod snapshot;
+mod switch;
 #[cfg(test)]
 mod tests;
 mod typing;
@@ -435,6 +437,8 @@ pub(super) struct Phones {
     /// What the snapshots have said, for telling what's news to a phone
     /// that isn't connected — see [`notices`].
     notices: Mutex<notices::Notices>,
+    /// The blackout hours, as last read — see [`blackout`].
+    blackout: Mutex<blackout::Watch>,
 }
 
 /// A phone waiting for a person to approve its pairing.
@@ -474,6 +478,9 @@ impl Phones {
     /// since the last one, and every registered phone that isn't connected
     /// what's news in it — see [`notices`]. With neither, builds nothing.
     fn tick(self: &Arc<Self>, host: &Host) {
+        // First, so a blackout beginning ends its sessions before they are
+        // counted below.
+        let shut = self.watch_blackout();
         let (feeds, connected): (Vec<mpsc::Sender<Event>>, Vec<Vec<u8>>) = {
             let live = lock(&self.live);
             (
@@ -499,26 +506,40 @@ impl Phones {
         }
         // A connected phone's snapshot serves the notices too; without one,
         // the notices' own, which reads no git figures or session files.
-        let snapshot = if feeds.is_empty() {
+        // In a blackout a phone's snapshot is empty, so the notices read
+        // their own then as well.
+        let snapshot = if feeds.is_empty() || shut.is_some() {
             snapshot::notice_snapshot(host, self)
         } else {
             snapshot(host, self)
         };
         if pushing {
-            let due =
-                lock(&self.notices).look(&snapshot, Instant::now(), settings.after, &connected);
-            // Someone using the Mac sees it there, in the sidebar: the phone
-            // is told only once they've stepped away, and only what's still
-            // so by then.
-            if !due.is_empty() && at_the_mac() {
+            // A phone connected in a blackout has been shown none of it.
+            let heard: &[Vec<u8>] = if shut.is_some() { &[] } else { &connected };
+            let due = lock(&self.notices).look(&snapshot, Instant::now(), settings.after, heard);
+            if due.is_empty() {
+                // Nothing to send.
+            } else if let Some(shut) = shut.as_ref().filter(|shut| shut.hold) {
+                // Held for the blackout: looked at again as it ends, and
+                // sent then only if still so.
+                lock(&self.notices).hold(due, Self::held_until(shut));
+            } else if at_the_mac() {
+                // Someone using the Mac sees it there, in the sidebar: the
+                // phone is told only once they've stepped away, and only
+                // what's still so by then.
                 lock(&self.notices).hold(due, Instant::now() + HOLD_RECHECK);
-            } else if !due.is_empty() {
-                self.push(&due, &settings);
+            } else {
+                self.push(&due, &settings, shut.is_some());
             }
         }
         if feeds.is_empty() {
             return;
         }
+        let snapshot = if shut.is_some() {
+            snapshot::snapshot(host, self)
+        } else {
+            snapshot
+        };
         let encoded = snapshot.encode_to_vec();
         {
             let mut last = lock(&self.last_snapshot);
@@ -792,7 +813,14 @@ impl Phones {
     /// Seals each of `notices` for every registered phone that asked for its
     /// kind and isn't connected — a connected one shows its own — and posts
     /// them on a thread of their own, so the tick never waits on the network.
-    fn push(self: &Arc<Self>, notices: &[notices::Notice], settings: &push::Settings) {
+    /// `connected_too` is a blackout that still sends them: a phone connected
+    /// in one is shown nothing, so it is sent them like any other.
+    fn push(
+        self: &Arc<Self>,
+        notices: &[notices::Notice],
+        settings: &push::Settings,
+        connected_too: bool,
+    ) {
         let host = lock(&self.identity).id;
         // Copied out before `live` is taken: `devices` takes the two the
         // other way round.
@@ -804,7 +832,7 @@ impl Phones {
             let live = lock(&self.live);
             registered
                 .into_iter()
-                .filter(|(device, _)| live.get(device).is_none_or(Vec::is_empty))
+                .filter(|(device, _)| connected_too || live.get(device).is_none_or(Vec::is_empty))
                 .collect()
         };
         let mut deliveries = Vec::new();
@@ -915,6 +943,7 @@ pub(super) fn start(host: Arc<Host>, relay: Relay) -> Result<Arc<Phones>> {
         pushes: Mutex::new(pushes),
         push_settings: Mutex::new(push::Settings::from_config(&config.phones)),
         notices: Mutex::new(notices::Notices::default()),
+        blackout: Mutex::new(blackout::Watch::load()),
     });
     let own = Target {
         url: phones.relay.dial(),

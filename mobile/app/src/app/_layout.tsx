@@ -2,16 +2,19 @@ import '../lib/polyfills';
 
 import { FiraCode_400Regular, FiraCode_600SemiBold, useFonts } from '@expo-google-fonts/fira-code';
 import { Geist_400Regular, Geist_500Medium, Geist_600SemiBold, Geist_900Black } from '@expo-google-fonts/geist';
-import { DarkTheme, DefaultTheme, Stack, type Theme, ThemeProvider, usePathname } from 'expo-router';
+import { DarkTheme, DefaultTheme, Stack, type Theme, ThemeProvider, router, usePathname } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
 import { StatusBar } from 'expo-status-bar';
 import * as SystemUI from 'expo-system-ui';
+import { useEffect } from 'react';
 import { View } from 'react-native';
 import { KeyboardProvider } from 'react-native-keyboard-controller';
 
+import { BlackoutGate } from '../components/Blackout';
 import { LockGate } from '../components/Lock';
 import { Splash } from '../components/Splash';
 import { WorktreeList } from '../components/WorktreeList';
+import { startBlackout, useBlackout, useBlackoutFollowing } from '../lib/blackout';
 import { useDesktopPalette, useHosts } from '../lib/hosts';
 import { SIDEBAR_WIDTH, SplitContext, useWide } from '../lib/layout';
 import { startLock, useLock } from '../lib/lock';
@@ -31,6 +34,7 @@ SplashScreen.preventAutoHideAsync();
 // has drawn the same frame over the app by then, and plays from it.
 SplashScreen.setOptions({ duration: 0, fade: false });
 startLock();
+startBlackout();
 startNotices();
 
 // What shows between and behind screens — a screen sliding in, a sheet
@@ -45,6 +49,10 @@ const navigation: Theme = {
 };
 void SystemUI.setBackgroundColorAsync(t.backdrop);
 
+/** The screens that are native modals — New task, Rename, the PIN — and so
+ * are drawn over anything this layout draws, a blackout's cover included. */
+const OVER_THE_COVER = /^\/(new|rename)\/|^\/pin$/;
+
 export default function Layout() {
   const [loaded] = useFonts({
     Geist_400Regular,
@@ -57,6 +65,10 @@ export default function Layout() {
   const lock = useLock();
   // The desktop's theme, followed: a new one reloads the app to draw in it.
   useDesktopPalette();
+  // And its blackout hours, which cover every screen while one is on — see
+  // lib/blackout.ts.
+  useBlackoutFollowing();
+  const blackout = useBlackout();
   // News from the desktops, as banners while ket is not in front — see
   // lib/notices.ts. A tap opens its screen once the stack is drawn.
   useNoticeFollowing(loaded);
@@ -66,11 +78,19 @@ export default function Layout() {
   const path = usePathname();
   const paired = (useHosts(path)?.length ?? 0) > 0;
   const split = useWide() && paired;
+  // One of the modal screens open as a blackout begins would stand on the
+  // cover, so it is closed. Only those: a chat under the cover stays open,
+  // to come back to.
+  const shut = blackout.shut !== null;
+  useEffect(() => {
+    if (shut && OVER_THE_COVER.test(path) && router.canGoBack()) router.back();
+  }, [shut, path]);
   // Until the fonts are in, the native splash stays up; components/Splash
   // takes over from it.
   if (!loaded) return null;
-  // Behind the lock screen, the app is out of a screen reader's reach too.
-  const hidden = !lock.ready || lock.locked || lock.confirming !== null;
+  // Behind the lock screen or a blackout's cover, the app is out of a screen
+  // reader's reach too.
+  const hidden = !lock.ready || lock.locked || lock.confirming !== null || !blackout.ready || shut;
 
   // Every screen draws its own bar. The four top-level tabs stay mounted
   // inside one stack screen, so returning keeps their layout and scroll.
@@ -82,7 +102,7 @@ export default function Layout() {
       <StatusBar style={light ? 'dark' : 'light'} />
       {/* The launch splash plays over all of it, and holds until the lock
           knows whether to show. */}
-      <Splash ready={lock.ready}>
+      <Splash ready={lock.ready && blackout.ready}>
       <SplitContext.Provider value={split}>
       <View
         style={{ flex: 1, flexDirection: 'row', backgroundColor: t.backdrop }}
@@ -123,6 +143,7 @@ export default function Layout() {
       </View>
       </View>
       </SplitContext.Provider>
+      <BlackoutGate />
       <LockGate />
       </Splash>
       </ThemeProvider>

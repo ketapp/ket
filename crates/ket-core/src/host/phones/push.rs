@@ -74,6 +74,11 @@ impl Registration {
             Kind::Waiting => self.kinds.waiting,
             Kind::Finished | Kind::Failed => self.kinds.finished,
             Kind::Checks => self.kinds.checks,
+            // A task stopped by its limit is a task that stopped: a phone
+            // from before limits had a switch hears of it as it hears of a
+            // failure, in place of the "finished" this notice stands in for.
+            Kind::Limit => self.kinds.limits || self.kinds.finished,
+            Kind::Reset => self.kinds.limits,
         }
     }
 }
@@ -112,6 +117,10 @@ pub(in crate::host) fn prepare(
             Kind::Finished => "finished",
             Kind::Failed => "failed",
             Kind::Checks => "checks",
+            // "limit" is a word only a phone that asked for limits knows.
+            Kind::Limit if registration.kinds.limits => "limit",
+            Kind::Limit => "failed",
+            Kind::Reset => "reset",
         },
         "title": notice.title,
         "body": notice.body,

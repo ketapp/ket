@@ -114,7 +114,7 @@ const styles = StyleSheet.create({
   // Each project 18 under the one above, as the list spaces them.
   list: { gap: 18 },
   // The project heading's: 56 tall on the desk, in 4 from the card's edge.
-  project: { height: 36, flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 4 },
+  project: { height: 40, flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 4 },
   badge: { width: 20, height: 20, borderRadius: size.radiusSm, backgroundColor: t.selection },
   card: { marginTop: 6 },
   // A ruled row's: its height, insets and columns.

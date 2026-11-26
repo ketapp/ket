@@ -7,9 +7,11 @@ use std::path::PathBuf;
 use ket_core::agent_hooks::{HookEvent, HookReport, PermissionQuestion, Prompt};
 use ket_core::agent_status::{AgentStatusSnapshot, CancelSource, StatusStore};
 use ket_core::event::AgentState;
+use ket_core::limits::Failure;
 
 fn report(event: HookEvent, pane: &str, worktree: &str, session: &str, at_ms: u64) -> HookReport {
     HookReport {
+        failure: None,
         agent: "claude".to_owned(),
         event,
         worktree: Some(worktree.to_owned()),
@@ -1051,4 +1053,91 @@ fn marking_a_worktree_is_a_new_revision() {
     let before = store.snapshot();
     store.mark_unread("w1", true);
     assert!(store.snapshot().supersedes(Some(&before)));
+}
+
+// ---- turn ends ---------------------------------------------------------------
+
+#[test]
+fn each_way_a_turn_ends_is_noted_once_with_what_names_the_turn() {
+    let mut store = StatusStore::new(1);
+    store.report(
+        &report(HookEvent::UserPrompt, "p1", "w1", "s1", 100),
+        known_any,
+    );
+    store.report(
+        &report(HookEvent::PreTool, "p1", "w1", "s1", 150),
+        known_any,
+    );
+    assert!(
+        store.take_ended().is_empty(),
+        "a turn at work has not ended"
+    );
+
+    store.report(&report(HookEvent::Stop, "p1", "w1", "s1", 200), known_any);
+    let mut failed = report(HookEvent::StopFailure, "p1", "w1", "s1", 300);
+    failed.failure = Some(Box::new(Failure::coded("rate_limit", "No more today")));
+    store.report(&failed, known_any);
+    store.report(
+        &report(HookEvent::UserPrompt, "p1", "w1", "s1", 350),
+        known_any,
+    );
+    store.report(
+        &report(HookEvent::Interrupt, "p1", "w1", "s1", 400),
+        known_any,
+    );
+
+    let ended = store.take_ended();
+    assert_eq!(
+        ended
+            .iter()
+            .map(|end| (end.event, end.at_ms))
+            .collect::<Vec<_>>(),
+        vec![
+            (HookEvent::Stop, 200),
+            (HookEvent::StopFailure, 300),
+            (HookEvent::Interrupt, 400),
+        ]
+    );
+    for end in &ended {
+        assert_eq!(
+            (end.pane.as_str(), end.worktree.as_str(), end.agent.as_str()),
+            ("p1", "w1", "claude")
+        );
+        assert_eq!(end.session.as_deref(), Some("s1"));
+    }
+    assert_eq!(ended[0].failure, None);
+    assert_eq!(
+        ended[1].failure,
+        Some(Failure::coded("rate_limit", "No more today"))
+    );
+    // The end's time is the status's own, so a later look can tell whether
+    // the pane is still where this turn left it.
+    assert_eq!(store.get("p1").unwrap().at_ms, 400);
+    assert!(store.take_ended().is_empty(), "taken once");
+}
+
+#[test]
+fn a_subagents_stop_and_a_dropped_report_end_no_turn() {
+    let mut store = StatusStore::new(1);
+    store.report(
+        &report(HookEvent::UserPrompt, "p1", "w1", "s1", 100),
+        known_any,
+    );
+    let mut subagent = report(HookEvent::Stop, "p1", "w1", "s1", 200);
+    subagent.subagent = Some("a1".to_owned());
+    store.report(&subagent, known_any);
+    // From a session the pane has moved on from: dropped, so not an end.
+    store.report(&report(HookEvent::Stop, "p1", "w1", "s0", 250), known_any);
+    assert!(store.take_ended().is_empty());
+}
+
+#[test]
+fn turn_ends_nobody_takes_do_not_pile_up() {
+    let mut store = StatusStore::new(1);
+    for at_ms in 0..200 {
+        store.report(&report(HookEvent::Stop, "p1", "w1", "s1", at_ms), known_any);
+    }
+    let ended = store.take_ended();
+    assert_eq!(ended.len(), 64);
+    assert_eq!(ended.last().unwrap().at_ms, 199, "the newest are kept");
 }

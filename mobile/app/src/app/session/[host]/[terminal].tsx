@@ -13,6 +13,7 @@ import {
   type ColdCache,
   type Conversation,
   type Question,
+  SessionLimit_Scope,
   type Turn,
   Turn_Kind,
 } from '@ket/remote';
@@ -32,13 +33,13 @@ import {
 } from 'react';
 import {
   AppState,
-  Pressable,
   ScrollView,
   type ScrollViewProps,
   StyleSheet,
   Text,
   TextInput,
   type TextInputInstance,
+  TouchableOpacity,
   View,
 } from 'react-native';
 import { KeyboardChatScrollView, type KeyboardChatScrollViewRef } from 'react-native-keyboard-controller';
@@ -49,7 +50,9 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { attachSections, type Source, Tray } from '../../../components/Attachments';
 import { AgentViewList, terminalAt } from '../../../components/AgentView';
 import { CantFind, Compacting, Outgoing, type OutgoingStatus, Status, Working } from '../../../components/ChatRows';
-import { ChatBar, ChatNote, type Tone } from '../../../components/ChatBar';
+import { ChatStart } from '../../../components/ChatStart';
+import { ChatBar, ChatJobs, ChatNote, type Tone } from '../../../components/ChatBar';
+import { JobsSheet } from '../../../components/JobsSheet';
 import { Asking, cardStyles } from '../../../components/ChatCards';
 import { Tools, TurnView } from '../../../components/ChatTurns';
 import { commandRow } from '../../../components/Commands';
@@ -57,6 +60,7 @@ import { COMPOSER_GAP, Fold, PlusButton, SendButton, composerRest, plusMenu, sla
 import { FloatMenu } from '../../../components/FloatMenu';
 import { KeyboardLift } from '../../../components/KeyboardLift';
 import { KeyCommands } from '../../../components/KeyCommands';
+import { type HandOver, LimitBar, LimitSheet, useLimitSheet, useStopped } from '../../../components/LimitSheet';
 import { MicButton } from '../../../components/Mic';
 import { RiskBadge } from '../../../components/Risk';
 import { SessionPickers, useSessionPicks } from '../../../components/SessionPicks';
@@ -71,6 +75,7 @@ import {
 } from '../../../components/icons';
 import { Bar, Button, Prose, Screen } from '../../../components/ui';
 import { detail, everyWorktree, programBusy, promptKind } from '../../../lib/activity';
+import { clockOf, minutesUntil, useBlackout } from '../../../lib/blackout';
 import { useReadOnArrival } from '../../../lib/arrival';
 import {
   type Attachment,
@@ -87,13 +92,14 @@ import { type Command, commandsFor, matching } from '../../../lib/commands';
 import { DesktopBusy, type HostConnection, type PromptAnswer, STARTING_FOR_MS } from '../../../lib/connection';
 import { useHost, useHostState } from '../../../lib/hosts';
 import { carries, fits, grouped, join, type Pending, type Said, saidIn } from '../../../lib/chat';
+import { handChoices, limitKey, pickAgent } from '../../../lib/limits';
 import { type Seed, reconcileTask, taskForTerminal } from '../../../lib/starting';
 import { useDictation } from '../../../lib/dictation';
 import { draftFor, keepDraft } from '../../../lib/drafts';
 import { confirmIdentity } from '../../../lib/lock';
 import { Refused } from '../../../lib/refused';
 import { agentLabel, font, messagePlaceholder, size, t, tint } from '../../../lib/theme';
-import { surface } from '../../../components/ui/surface';
+import { PRESSED, surface } from '../../../components/ui/surface';
 import { canDictate } from '../../../lib/voice';
 import { reasonOf, sentence } from '../../../lib/text';
 
@@ -347,6 +353,8 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
     }
   }
   const [queued, setQueued] = useState<string[]>([]);
+  // When the session began, over its first message; zero when not known.
+  const [startedAt, setStartedAt] = useState(0);
   const [now, setNow] = useState(() => Date.now());
   // When a message sent from here reached the conversation before the
   // desktop said the agent was at work, and what the last draw saw of it.
@@ -506,6 +514,25 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
     coldAnswered.add(coldKey);
     setColdTick((n) => n + 1);
   };
+  // A session its plan stopped (1.38): the composer gives way to a line
+  // saying so, and a sheet over the chat — once a stop — says when it
+  // resets and offers the agent ket would hand the task to.
+  const stopped = useStopped(!background && (hostState?.hostMinor ?? 0) >= 38 ? located?.terminal?.limit : undefined);
+  const limitSheet = useLimitSheet(stopped ? limitKey(hostId, terminalId, stopped) : '');
+  const stoppedAgent = located?.terminal?.agent ?? '';
+  // What its agent left running on the Mac (1.40): a capsule under the bar
+  // while any of it runs, opening a sheet of it with each one's Stop.
+  const jobs = !background && (hostState?.hostMinor ?? 0) >= 40 ? (located?.terminal?.jobs ?? []) : [];
+  const runningJobs = jobs.filter((job) => !job.ended).length;
+  const [jobsOpen, setJobsOpen] = useState(false);
+  const handTo = stopped ? pickAgent(hostState?.snapshot ?? null, stoppedAgent) : undefined;
+  // A stop that names no reset is never over here, and one model's limit is
+  // lifted by changing model: the composer stays under its line, to try
+  // again once the plan is topped up or the model changed.
+  const composing = !stopped || !stopped.resetsAtMs || stopped.scope === SessionLimit_Scope.MODEL;
+  // Handing the task over (1.39): the brief previewed, then sent with the
+  // lease, and the chat follows the new agent's terminal.
+  const canHand = !background && (hostState?.hostMinor ?? 0) >= 39;
   // The card over the conversation's foot while one of those waits on you.
   const card = ((): WaitingCard | undefined => {
     if (waiting) return { key: 'background', kind: 'background' };
@@ -573,6 +600,7 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
           if (!atEnd.current) setFresh(true);
         }
         setQueued(reply.queued);
+        if (restart || Number(reply.startedAtMs) > 0) setStartedAt(Number(reply.startedAtMs));
         // A message that has reached the conversation is no longer pending.
         // After a fresh read, only the newest few can be one just sent. One
         // with photos keeps them, now it is delivered.
@@ -903,6 +931,15 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
     if (failed) setNote(failure);
     else if (note === failure) setNote('');
   }
+  // A blackout about to shut ket off on this phone: said once, ten minutes
+  // ahead or as the chat opens inside them — see lib/blackout.ts.
+  const blackout = useBlackout();
+  const soon = blackout.soon;
+  const [warned, setWarned] = useState(0);
+  if (soon && soon.at !== warned) {
+    setWarned(soon.at);
+    setNote(`ket shuts off at ${clockOf(soon.at)}, in ${minutesUntil(soon.at, blackout.now)}.`, 'info');
+  }
   // Under the composer at rest: clear of the home indicator rather than the
   // whole safe area. With the keyboard up the composer rides on it, 6pt
   // above, so it and the conversation are lifted by the keyboard less this.
@@ -971,6 +1008,41 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
     if (draftWhere.current !== undefined) keepDraft(keptKey, draftWhere.current, '');
     router.replace(`/session/${hostId}/${started}`);
   };
+  const hand: HandOver | undefined =
+    stopped && canHand && conn
+      ? {
+          choices: handChoices(hostState?.snapshot ?? null, stoppedAgent),
+          preview: (to, depth) => conn.previewSwitch(terminalId, to, depth),
+          send: async (to, text, beside, session) => {
+            let failed: string | undefined;
+            let opened: bigint | undefined;
+            await controlled(
+              async () => {
+                const outcome = await conn.switchAgent(terminalId, to, text, beside, session);
+                if (outcome === false) return false;
+                if ('why' in outcome) throw new Error(outcome.why);
+                opened = outcome.terminalId;
+                return true;
+              },
+              (why) => why,
+              (said) => {
+                failed = said;
+              },
+            );
+            if (opened === undefined) return failed ?? 'It wasn’t handed over.';
+            limitSheet.close();
+            await conn.awaitTerminal(opened);
+            if (!onScreen.current) return undefined;
+            // What was typed or attached here, and not sent, goes along as
+            // the new chat's unsent draft — not as part of the brief.
+            await dictation.finish();
+            if (!onScreen.current) return undefined;
+            carried.set(`${hostId}:${opened.toString()}`, { draft: draft.current, files: filesNow.current });
+            router.replace(`/session/${hostId}/${opened.toString()}`);
+            return undefined;
+          },
+        }
+      : undefined;
   const drawCard = (c: WaitingCard) => {
     if (c.kind === 'cold') {
       return (
@@ -1086,7 +1158,9 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
   const picks = useSessionPicks({
     conn,
     terminalId,
-    reported: background ? undefined : located?.terminal?.modes,
+    // Not OpenCode's: the desktop tells its agent (Build, Plan) but not its
+    // model, so its pill said "Build" where the others say their model.
+    reported: background || /^opencode/i.test(located?.terminal?.agent ?? '') ? undefined : located?.terminal?.modes,
     told: background ? undefined : located?.terminal?.settings,
     busy,
     controlled,
@@ -1212,7 +1286,14 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
           uncommitted={(worktree?.filesChanged ?? 0) > 0}
           onTerminal={openTerminal}
         />
-        <ChatNote text={note} tone={notice.tone} toSettings={toSettings} onDismiss={() => setNote('')} onCopy={copy} />
+        <ChatNote
+          text={note}
+          tone={notice.tone}
+          toSettings={toSettings}
+          onDismiss={() => setNote('')}
+          onCopy={copy}
+          jobs={runningJobs > 0 ? <ChatJobs count={runningJobs} onPress={() => setJobsOpen(true)} /> : undefined}
+        />
         <ChatScrollContext.Provider value={scrollContext}>
           <FlashList
             ref={list}
@@ -1267,6 +1348,8 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
               <Status text="Nothing in this session yet. What you and the agent say shows here." onCopy={copy} />
               <Button title="Open the terminal" onPress={openTerminal} />
             </View>
+          ) : startedAt > 0 && turns.length > 0 ? (
+            <ChatStart at={startedAt} now={now} />
           ) : null}
             ListHeaderComponentStyle={missing ? styles.pageFill : undefined}
             renderItem={({ item }) =>
@@ -1332,7 +1415,7 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
           <FadingEdge shown={away} />
           {away ? (
             <View pointerEvents="box-none" style={styles.jumpDock}>
-              <Pressable
+              <TouchableOpacity
                 accessibilityRole="button"
                 accessibilityLabel={fresh ? 'Jump to the newest — new messages' : 'Jump to the newest'}
                 onPress={() => {
@@ -1341,11 +1424,12 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
                   setFresh(false);
                   toEnd(true);
                 }}
-                style={({ pressed }) => [styles.jump, pressed && { backgroundColor: t.selection }]}
+                activeOpacity={PRESSED}
+                style={styles.jump}
               >
                 <ChevronDown size={18} color={t.text} weight={2.2} />
                 {fresh ? <View style={styles.jumpDot} /> : null}
-              </Pressable>
+              </TouchableOpacity>
             </View>
           ) : null}
 
@@ -1368,7 +1452,7 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
             at work, from Send on: they fold away, and the chat has their
             room. Under a menu they stay where they are: the menu floats
             over them. */}
-        <Fold shown={!tooOld && !quiet && !message && files.length === 0 && !hearing && !isBusy && !handingOver}>
+        <Fold shown={!tooOld && !quiet && !stopped && !message && files.length === 0 && !hearing && !isBusy && !handingOver}>
           <ScrollView
             horizontal
             showsHorizontalScrollIndicator={false}
@@ -1377,7 +1461,7 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
             contentContainerStyle={styles.repliesInner}
           >
             {commands.length > 0 ? (
-              <Pressable
+              <TouchableOpacity
                 accessibilityRole="button"
                 accessibilityLabel="Commands"
                 accessibilityState={{ expanded: listing }}
@@ -1385,13 +1469,14 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
                   setAttaching(false);
                   setListing(!listing);
                 }}
-                style={({ pressed }) => [styles.reply, styles.slash, (listing || pressed) && { backgroundColor: t.selection }]}
+                activeOpacity={PRESSED}
+                style={[styles.reply, styles.slash, listing && { backgroundColor: t.selection }]}
               >
                 <Text style={styles.slashText}>/</Text>
-              </Pressable>
+              </TouchableOpacity>
             ) : null}
             {snippets.map((snippet, index) => (
-              <Pressable
+              <TouchableOpacity
                 key={`s${index}`}
                 accessibilityRole="button"
                 accessibilityLabel={`Send ${snippet.name}`}
@@ -1401,101 +1486,134 @@ export function Chat({ started }: { started?: { host: string; terminal: string; 
                   write(snippet.body);
                   input.current?.focus();
                 }}
-                style={({ pressed }) => [styles.reply, styles.snippet, pressed && { backgroundColor: t.selection }]}
+                activeOpacity={PRESSED}
+                style={[styles.reply, styles.snippet]}
               >
                 <Bookmark size={13} color={t.brand} weight={2.2} />
                 <Text style={styles.replyText} numberOfLines={1}>
                   {snippet.name}
                 </Text>
-              </Pressable>
+              </TouchableOpacity>
             ))}
             {REPLIES.map((text) => (
-              <Pressable
+              <TouchableOpacity
                 key={text}
                 accessibilityRole="button"
                 accessibilityLabel={`Send ${text}`}
                 onPress={() => void send(text)}
-                style={({ pressed }) => [styles.reply, pressed && { backgroundColor: t.selection }]}
+                activeOpacity={PRESSED}
+                style={styles.reply}
               >
                 <Text style={styles.replyText}>{text}</Text>
-              </Pressable>
+              </TouchableOpacity>
             ))}
           </ScrollView>
         </Fold>
-        <KeyCommands title="Send" onSend={() => void send()} style={[styles.composer, { paddingBottom: rest }]}>
-          {/* The + and / menus: floats hung from the composer's top edge,
-              over the chat and the chips, which stay put under them. */}
-          <FloatMenu
-            inline={plusMenu}
-            open={attaching}
-            onClose={() => setAttaching(false)}
-            label="Attach"
-            sections={attachSections({
-              older: canAttach ? undefined : (hostState?.host.name ?? 'your Mac'),
-              pasteable,
-              onPick: (source) => void attach(source),
-            })}
-          />
-          <FloatMenu
-            inline={slashMenu(!tooOld && !background)}
-            open={!attaching && menu.length > 0}
-            onClose={() => setListing(false)}
-            label="Commands"
-            sections={[{ items: menu.map((command) => ({ ...commandRow(command), onPress: () => void pick(command) })) }]}
-          />
-          {!tooOld && !background ? <PlusButton open={attaching} onPress={openAttach} /> : null}
-          <View style={[styles.field, files.length > 0 && styles.fieldTray, hearing && styles.fieldHearing]}>
-            {files.length > 0 ? (
-              <Tray files={files} onRemove={(key) => setFiles((before) => before.filter((file) => file.key !== key))} />
-            ) : null}
-            <View style={styles.fieldRow}>
-              <TextInput
-                ref={input}
-                value={message}
-                onChangeText={(text) => {
-                  if (settling.current) {
-                    input.current?.clear();
-                    return;
-                  }
-                  dictation.letGo();
-                  write(text);
-                }}
-                onSelectionChange={(e) => {
-                  selection.current = e.nativeEvent.selection;
-                }}
-                placeholder={messagePlaceholder(agent)}
-                placeholderTextColor={t.faint}
-                multiline
-                style={[styles.input, !canDictate && styles.inputAlone, files.length > 0 && styles.inputUnderTray]}
-              />
-              {canDictate ? <MicButton
-                  listening={hearing !== null}
-                  level={dictation.level}
-                  onPress={() => {
-                    setAttaching(false);
-                    setListing(false);
-                    void dictation.toggle();
-                  }}
-                /> : null}
-            </View>
+        {stopped ? (
+          <View style={{ paddingBottom: composing ? 0 : rest }}>
+            <LimitBar
+              limit={stopped}
+              onOpen={limitSheet.reopen}
+              use={canHand ? handTo : undefined}
+              onUse={canHand && handTo ? () => limitSheet.handTo(handTo) : undefined}
+            />
           </View>
-          {/* Working, with nothing to send: the same button stops the turn. */}
-          <SendButton
-            ready={ready}
-            stop={working && !ready}
-            stopping={stopping}
-            launches={launches}
-            onPress={
-              working && !ready
-                ? background
-                  ? () => setNote('A background session stops in agent view on your Mac. Open the terminal to stop it.', 'info')
-                  : stop
-                : () => void send()
-            }
-          />
-        </KeyCommands>
+        ) : null}
+        {composing ? (
+          <KeyCommands title="Send" onSend={() => void send()} style={[styles.composer, { paddingBottom: rest }]}>
+            {/* The + and / menus: floats hung from the composer's top edge,
+                over the chat and the chips, which stay put under them. */}
+            <FloatMenu
+              inline={plusMenu}
+              open={attaching}
+              onClose={() => setAttaching(false)}
+              label="Attach"
+              sections={attachSections({
+                older: canAttach ? undefined : (hostState?.host.name ?? 'your Mac'),
+                pasteable,
+                onPick: (source) => void attach(source),
+              })}
+            />
+            <FloatMenu
+              inline={slashMenu(!tooOld && !background)}
+              open={!attaching && menu.length > 0}
+              onClose={() => setListing(false)}
+              label="Commands"
+              sections={[{ items: menu.map((command) => ({ ...commandRow(command), onPress: () => void pick(command) })) }]}
+            />
+            {!tooOld && !background ? <PlusButton open={attaching} onPress={openAttach} /> : null}
+            <View style={[styles.field, files.length > 0 && styles.fieldTray, hearing && styles.fieldHearing]}>
+              {files.length > 0 ? (
+                <Tray files={files} onRemove={(key) => setFiles((before) => before.filter((file) => file.key !== key))} />
+              ) : null}
+              <View style={styles.fieldRow}>
+                <TextInput
+                  ref={input}
+                  value={message}
+                  onChangeText={(text) => {
+                    if (settling.current) {
+                      input.current?.clear();
+                      return;
+                    }
+                    dictation.letGo();
+                    write(text);
+                  }}
+                  onSelectionChange={(e) => {
+                    selection.current = e.nativeEvent.selection;
+                  }}
+                  placeholder={messagePlaceholder(agent)}
+                  placeholderTextColor={t.faint}
+                  multiline
+                  style={[styles.input, !canDictate && styles.inputAlone, files.length > 0 && styles.inputUnderTray]}
+                />
+                {canDictate ? <MicButton
+                    listening={hearing !== null}
+                    level={dictation.level}
+                    onPress={() => {
+                      setAttaching(false);
+                      setListing(false);
+                      void dictation.toggle();
+                    }}
+                  /> : null}
+              </View>
+            </View>
+            {/* Working, with nothing to send: the same button stops the turn. */}
+            <SendButton
+              ready={ready}
+              stop={working && !ready}
+              stopping={stopping}
+              launches={launches}
+              onPress={
+                working && !ready
+                  ? background
+                    ? () => setNote('A background session stops in agent view on your Mac. Open the terminal to stop it.', 'info')
+                    : stop
+                  : () => void send()
+              }
+            />
+          </KeyCommands>
+        ) : null}
         </KeyboardLift>
         <SessionPickers picks={picks} agent={agent ? agentLabel(agent) : 'Agent'} busy={isBusy} />
+        <JobsSheet
+          open={jobsOpen}
+          onClose={() => setJobsOpen(false)}
+          agent={located?.terminal?.agent ?? ''}
+          jobs={jobs}
+          stop={(job) => (conn ? conn.stopJob(terminalId, job.pid, job.startedAtMs) : Promise.resolve('Not connected to your Mac.'))}
+        />
+        {stopped ? (
+          <LimitSheet
+            open={limitSheet.open}
+            onClose={limitSheet.close}
+            agent={stoppedAgent}
+            limit={stopped}
+            use={handTo}
+            hand={hand}
+            to={limitSheet.to}
+            onTo={limitSheet.handTo}
+          />
+        ) : null}
       </View>
     </Screen>
   );

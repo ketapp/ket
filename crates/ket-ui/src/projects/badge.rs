@@ -14,8 +14,9 @@ use crate::ui::chip::{caption, swatch};
 use crate::ui::glyph::{self, Glyph};
 use crate::ui::icon::Icon;
 
-/// The gap between swatches.
-pub(super) const SWATCH_GAP: Pixels = px(8.0);
+/// The gap between swatches: nine 24pt swatches and eight of these fill the
+/// 300pt column, so the last in a row ends at the column's edge.
+pub(super) const SWATCH_GAP: Pixels = px(10.5);
 
 /// The hex field's width: `#rrggbb` in the mono, and the field's padding.
 pub(super) const HEX_W: Pixels = px(96.0);
@@ -169,14 +170,14 @@ pub(super) fn matching_glyphs(query: &str) -> impl Iterator<Item = Glyph> + '_ {
 }
 
 /// What the colour is called: a swatch's name, "Custom" for any other hex,
-/// and "Not a colour" for what will not parse.
+/// and "Not a color" for what will not parse.
 pub(super) fn colour_name(colour: Option<Color>) -> &'static str {
     match colour {
         Some(colour) => PROJECT_COLORS
             .iter()
             .find(|(_, hex)| Color::from_hex(hex).ok() == Some(colour))
             .map_or("Custom", |(name, _)| *name),
-        None => "Not a colour",
+        None => "Not a color",
     }
 }
 
@@ -246,6 +247,6 @@ mod tests {
         assert_eq!(colour_name(Some(violet)), "Violet");
         let other = Color::from_hex("#123456").expect("parses");
         assert_eq!(colour_name(Some(other)), "Custom");
-        assert_eq!(colour_name(None), "Not a colour");
+        assert_eq!(colour_name(None), "Not a color");
     }
 }

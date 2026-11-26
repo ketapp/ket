@@ -22,24 +22,14 @@ import {
 } from '@ket/remote';
 import { router, useIsFocused, useLocalSearchParams, useNavigation } from 'expo-router';
 import { useEffect, useRef, useState } from 'react';
-import { Alert, Linking, Pressable, ScrollView, StyleSheet, Text, View, type ViewInstance } from 'react-native';
+import { Alert, Linking, ScrollView, StyleSheet, Text, TouchableOpacity, View, type ViewInstance } from 'react-native';
 
 import { ConnectionHelp } from '../../../components/ConnectionHelp';
 import { FloatMenu, type MenuSection, type Place, placeOf } from '../../../components/FloatMenu';
 import { RiskBadge } from '../../../components/Risk';
 import { worktreeMenu } from '../../../components/WorktreeMenu';
-import {
-  AgentMark,
-  CheckCircle,
-  Close,
-  Comment,
-  External,
-  Merge,
-  More,
-  Plus,
-  PullRequestGlyph,
-  TerminalWindow,
-} from '../../../components/icons';
+import { short } from '../../../components/WorktreeRow';
+import { AgentMark, CheckCircle, Close, Comment, Merge, More, Plus, TerminalWindow } from '../../../components/icons';
 import {
   Banner,
   Bar,
@@ -74,7 +64,7 @@ import { confirmIdentity } from '../../../lib/lock';
 import { askMerge, prActions } from '../../../lib/pr-actions';
 import { commentsSaid, review, sendReview, useReview } from '../../../lib/review';
 import { agentLabel, font, size, t } from '../../../lib/theme';
-import { surface } from '../../../components/ui/surface';
+import { PRESSED, surface } from '../../../components/ui/surface';
 import { useNow } from '../../../lib/usage';
 
 /** What the desktop sends for a time it doesn't have. Out here because the
@@ -280,7 +270,6 @@ export default function Worktree() {
         ) : null}
         <Button
           title={lead ? 'GitHub' : 'Open on GitHub'}
-          icon={<External size={16} color={t.text} />}
           style={lead ? undefined : styles.grow}
           onPress={() => void Linking.openURL(pr.url)}
         />
@@ -291,6 +280,7 @@ export default function Worktree() {
     // dialog offers it. Not before 1.16, which opens them, and not for a
     // branch already open as one and closed: the menu offers reopening.
     const opens = hostState !== null && hostState.hostMinor >= 16 && !pr;
+    inFoot.push('merge-here');
     if (opens) inFoot.push('open-pr');
     foot = (
       <View style={styles.foot}>
@@ -305,8 +295,8 @@ export default function Worktree() {
         {opens ? (
           <Button
             title="Pull request…"
-            icon={<PullRequestGlyph size={16} color={t.text} />}
             disabled={merging}
+            style={styles.grow}
             onPress={() => router.push(`/pull-request/${hostId}/${encodeURIComponent(id)}`)}
           />
         ) : null}
@@ -421,11 +411,14 @@ export default function Worktree() {
             {worktree.base ? `Changes since ${worktree.base}` : 'Changes'}
           </Heading>
           {changes && !clean && worktree.base ? (
-            <Text style={styles.figures}>
-              <Text style={{ color: t.added }}>+{added}</Text>{' '}
-              <Text style={{ color: t.removed }}>−{removed}</Text>
-              {` · ${ahead} ahead of ${worktree.base}`}
-            </Text>
+            <>
+              <View style={styles.sum} accessible accessibilityLabel={`${added} lines added, ${removed} removed`}>
+                <Text style={[styles.sumLines, { color: t.added }]}>+{added}</Text>
+                <Text style={[styles.sumLines, { color: t.removed }]}>−{removed}</Text>
+                <Blocks added={added} removed={removed} count={10} big />
+              </View>
+              <Text style={styles.figures}>{`${ahead} ahead of ${worktree.base}`}</Text>
+            </>
           ) : null}
           {changes?.error ? <Prose style={styles.changesNote}>{changes.error}</Prose> : null}
           {mergeWhy ? (
@@ -443,18 +436,23 @@ export default function Worktree() {
               title={file.path.split('/').pop() ?? file.path}
               detail={file.path.includes('/') ? file.path.slice(0, file.path.lastIndexOf('/')) : undefined}
               meta={
-                <Text style={styles.fileLines}>
+                <View style={styles.fileLines}>
                   {file.binary ? (
-                    <Text style={{ color: t.dim }}>binary</Text>
+                    <Text style={styles.fileWord}>binary</Text>
                   ) : (
                     <>
-                      <Text style={{ color: t.added }}>+{file.added}</Text>{' '}
-                      <Text style={{ color: t.removed }}>−{file.removed}</Text>
+                      <Text
+                        style={styles.fileTotal}
+                        accessibilityLabel={`${file.added} lines added, ${file.removed} removed`}
+                      >
+                        {short(file.added + file.removed)}
+                      </Text>
+                      <Blocks added={file.added} removed={file.removed} count={5} />
                     </>
                   )}
-                  {file.status === FileChange_Status.ADDED ? <Text style={{ color: t.dim }}> new</Text> : null}
-                  {file.status === FileChange_Status.DELETED ? <Text style={{ color: t.dim }}> gone</Text> : null}
-                </Text>
+                  {file.status === FileChange_Status.ADDED ? <Text style={styles.fileWord}>new</Text> : null}
+                  {file.status === FileChange_Status.DELETED ? <Text style={styles.fileWord}>gone</Text> : null}
+                </View>
               }
               chevron
               onPress={() =>
@@ -556,18 +554,49 @@ function Tabs({
         />
       ))}
       {adds ? (
-        <Pressable
+        <TouchableOpacity
           accessibilityRole="button"
           onPress={() => router.push(`/new/${hostId}?worktree=${encodeURIComponent(worktree.id)}`)}
-          style={({ pressed }) => [styles.add, pressed && { backgroundColor: t.selection }]}
+          activeOpacity={PRESSED}
+          style={styles.add}
         >
           <View style={styles.addMark}>
             <Plus size={16} color={t.dim} />
           </View>
           <Text style={styles.addText}>New session or shell</Text>
-        </Pressable>
+        </TouchableOpacity>
       ) : null}
     </Card>
+  );
+}
+
+/** How a change is split, as GitHub draws it: `count` blocks shared out
+ * between the lines added and the lines removed, green then red, grey for
+ * the rest. Under `count` lines, each block is one line. */
+function Blocks({ added, removed, count, big }: { added: number; removed: number; count: number; big?: boolean }) {
+  const total = added + removed;
+  let green = added;
+  let red = removed;
+  if (total >= count) {
+    green = Math.round((added / total) * count);
+    // Each side with lines keeps a block of its own.
+    if (added > 0 && green === 0) green = 1;
+    if (removed > 0 && green === count) green = count - 1;
+    red = count - green;
+  }
+  return (
+    <View style={[styles.blocks, big && styles.blocksBig]}>
+      {Array.from({ length: count }, (_, at) => (
+        <View
+          key={at}
+          style={[
+            styles.block,
+            big && styles.blockBig,
+            { backgroundColor: at < green ? t.added : at < green + red ? t.removed : t.selection },
+          ]}
+        />
+      ))}
+    </View>
   );
 }
 
@@ -662,15 +691,16 @@ function PullRequest({ pr, said }: { pr: PullRequestSummary; said: { text: strin
         />
       ))}
       {folded.length > 0 ? (
-        <Pressable
+        <TouchableOpacity
           accessibilityRole="button"
           onPress={() => setEveryCheck(true)}
-          style={({ pressed }) => [styles.more, pressed && { backgroundColor: t.selection }]}
+          activeOpacity={PRESSED}
+          style={styles.more}
         >
           <Text style={styles.moreText}>
             {folded.length === 1 ? 'Show 1 more check' : `Show ${folded.length} more checks`}
           </Text>
-        </Pressable>
+        </TouchableOpacity>
       ) : null}
       {said ? (
         <Prose color={said.failed ? t.failed : undefined} style={styles.changesNote}>
@@ -793,7 +823,13 @@ const styles = StyleSheet.create({
   wellText: { fontFamily: font.chrome, fontSize: 13, lineHeight: 20, color: t.text },
   list: { padding: 8, gap: 2 },
   // Under the heading, on its left edge: the lines, and the commits ahead.
-  figures: { fontFamily: font.chrome, fontSize: size.detail, color: t.dim, paddingHorizontal: 6, paddingBottom: 6 },
+  sum: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 6, paddingTop: 2, paddingBottom: 4 },
+  sumLines: { fontFamily: font.chromeSemibold, fontSize: size.value },
+  figures: { fontFamily: font.chrome, fontSize: size.detail, color: t.faint, paddingHorizontal: 6, paddingBottom: 6 },
+  blocks: { flexDirection: 'row', gap: 2 },
+  blocksBig: { gap: 2.5, marginLeft: 4 },
+  block: { width: 7, height: 7, borderRadius: 1.5 },
+  blockBig: { width: 9, height: 9, borderRadius: 2 },
   actions: { flexDirection: 'row', gap: 8, padding: 4, paddingTop: 8 },
   // Docked under the list, clear of the home indicator.
   foot: { flexDirection: 'row', gap: 8, paddingHorizontal: size.gutter, paddingTop: size.gutter, paddingBottom: 34 },
@@ -814,5 +850,7 @@ const styles = StyleSheet.create({
   },
   addMark: { width: MARK_SLOT, alignItems: 'center' },
   addText: { fontFamily: font.prose, fontSize: size.body, color: t.dim },
-  fileLines: { fontFamily: font.chrome, fontSize: 12, marginLeft: 8 },
+  fileLines: { flexDirection: 'row', alignItems: 'center', gap: 8, marginLeft: 8 },
+  fileTotal: { fontFamily: font.chrome, fontSize: 12, color: t.faint, minWidth: 20, textAlign: 'right', fontVariant: ['tabular-nums'] },
+  fileWord: { fontFamily: font.chrome, fontSize: 12, color: t.dim },
 });

@@ -9,6 +9,8 @@ export const shared = StyleSheet.create({
   count: { fontFamily: font.chrome, fontSize: 12, color: t.faint },
   rowText: { flex: 1, minWidth: 0, gap: 3 },
   detail: { fontFamily: font.prose, fontSize: size.detail, color: t.dim },
+  /** The quiet line under a head's large title. */
+  headLine: { fontFamily: font.chrome, fontSize: size.label, lineHeight: 18, color: t.faint },
   segmentOn: { ...surface.chosen },
   readout: {
     height: 24,

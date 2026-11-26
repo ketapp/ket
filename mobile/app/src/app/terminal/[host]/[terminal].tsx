@@ -18,6 +18,7 @@ import {
   Text,
   TextInput,
   type TextInputInstance,
+  TouchableOpacity,
   View,
 } from 'react-native';
 import { KeyboardAvoidingView, useReanimatedKeyboardAnimation } from 'react-native-keyboard-controller';
@@ -34,7 +35,7 @@ import { useReadOnArrival } from '../../../lib/arrival';
 import { type Command, commandsFor, matching } from '../../../lib/commands';
 import { useHost, useHostState } from '../../../lib/hosts';
 import { font, size, t, tint } from '../../../lib/theme';
-import { surface } from '../../../components/ui/surface';
+import { PRESSED, surface } from '../../../components/ui/surface';
 
 /** The pause between a message and its Enter — see `send`. */
 const ENTER_AFTER_MS = 80;
@@ -562,18 +563,15 @@ function Key({
   name?: string;
 }) {
   return (
-    <Pressable
+    <TouchableOpacity
       accessibilityRole="button"
       accessibilityLabel={name ?? label}
       onPress={onPress}
-      style={({ pressed }) => [
-        styles.key,
-        danger && { backgroundColor: tint(t.failed, 0.1) },
-        (pressed || active) && { backgroundColor: t.selection },
-      ]}
+      activeOpacity={PRESSED}
+      style={[styles.key, danger && { backgroundColor: tint(t.failed, 0.1) }, active && { backgroundColor: t.selection }]}
     >
       <Text style={[styles.keyText, active && { color: t.text }, danger && { color: t.failed }]}>{label}</Text>
-    </Pressable>
+    </TouchableOpacity>
   );
 }
 

@@ -10,7 +10,7 @@
 
 use std::sync::{Arc, Mutex, PoisonError};
 
-use gpui::{AnyElement, Context, Div, div, prelude::*, px};
+use gpui::{AnyElement, Context, div, prelude::*, px};
 use ket_core::id::{ProjectId, WorktreeId};
 use ket_core::theme::Theme;
 use ket_core::workspace::CreateStep;
@@ -18,8 +18,9 @@ use ket_core::workspace::CreateStep;
 use crate::Shell;
 use crate::fonts::Prose;
 use crate::paint::{alpha, paint};
+use crate::tree::state::{RowState, with_dot};
 use crate::ui::agent::{MARK, agent_label, provider};
-use crate::ui::chip::{BADGE, Motion, status_dot};
+use crate::ui::chip::{BADGE, Motion};
 use crate::ui::icon::{Icon, sized_icon};
 use crate::ui::row::block_row_with_rail;
 use crate::ui::{CAPTION, ICON_GAP};
@@ -115,21 +116,13 @@ impl Start {
         }
     }
 
-    /// "starting", breathing in the running green, or "failed".
-    fn state(&self, t: &Theme) -> Div {
-        let (word, colour, motion) = match self.failed {
-            Some(_) => ("failed", t.status.failed, Motion::Still),
-            None => ("starting", t.status.running, Motion::Travel),
-        };
-        div()
-            .flex()
-            .flex_none()
-            .items_center()
-            .gap(px(6.0))
-            .text_size(px(11.5))
-            .text_color(paint(colour))
-            .child(status_dot(paint(colour), motion, px(6.0)))
-            .child(word)
+    /// The dot on its mark: breathing in the running green while it starts,
+    /// still in red once it has failed. The second line says which.
+    fn state(&self, t: &Theme) -> RowState {
+        match self.failed {
+            Some(_) => RowState::dot(paint(t.status.failed), Motion::Still),
+            None => RowState::dot(paint(t.status.running), Motion::Travel),
+        }
     }
 }
 
@@ -279,7 +272,13 @@ impl Shell {
                             .items_center()
                             .justify_center()
                             .w(BADGE)
-                            .child(start.mark(MARK, t)),
+                            .child(with_dot(
+                                start.mark(MARK, t),
+                                Some(&start.state(t)),
+                                false,
+                                paint(t.panel),
+                                None,
+                            )),
                     )
                     .child(
                         div()
@@ -290,7 +289,7 @@ impl Shell {
                             .child(
                                 div()
                                     .min_w_0()
-                                    .text_size(px(11.5))
+                                    .text_size(crate::fonts::row_text(px(11.5)))
                                     .truncate()
                                     .child(start.draft.branch.clone()),
                             )
@@ -298,13 +297,12 @@ impl Shell {
                                 div()
                                     .prose()
                                     .mt(px(1.0))
-                                    .text_size(CAPTION)
+                                    .text_size(crate::fonts::row_text(CAPTION))
                                     .text_color(ink)
                                     .truncate()
                                     .child(start.words()),
                             ),
                     )
-                    .child(start.state(t))
                     // A failed one: the dialog back, holding what it was given.
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.edit_start(key, cx);
@@ -315,8 +313,11 @@ impl Shell {
             .collect()
     }
 
-    /// The row's detail, ink and state for a made worktree still starting.
-    pub(crate) fn start_row_parts(&self, id: &WorktreeId) -> Option<(String, Div, AnyElement)> {
+    /// The row's detail, state and mark for a made worktree still starting.
+    pub(crate) fn start_row_parts(
+        &self,
+        id: &WorktreeId,
+    ) -> Option<(String, RowState, AnyElement)> {
         let start = self.start_for(id)?;
         let t = &self.theme;
         Some((start.words(), start.state(t), start.mark(MARK, t)))

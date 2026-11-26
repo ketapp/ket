@@ -191,7 +191,9 @@ impl Shell {
 
         if !confirm {
             self.confirm_merge_worktree = None;
-            self.merge_worktree_confirmed(false, cx);
+            // This row's id, not the selection's: the row's menu asks for a
+            // row that need not be the selected one.
+            self.merge_worktree_now(target.id, false, cx);
             return;
         }
 

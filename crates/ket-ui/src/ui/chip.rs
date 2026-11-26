@@ -17,7 +17,7 @@ use ket_core::theme::{Color, Theme, contrast_ratio};
 
 use super::{CAPTION, RADIUS_SM};
 use crate::fonts::Prose;
-use crate::paint::{alpha, paint};
+use crate::paint::{alpha, mix, paint};
 
 /// A key or chord, drawn as something you press.
 ///
@@ -204,22 +204,45 @@ pub(crate) enum Motion {
 /// is at the same point of its cycle as a result, which is what a column of
 /// them should look like: one system running, not eight loading spinners.
 pub(crate) fn status_dot(colour: Rgba, motion: Motion, size: Pixels) -> Div {
-    let ink = match motion {
-        Motion::Still => colour,
-        Motion::Travel | Motion::Pulse => {
-            let delta = crate::motion::phase(DOT_CYCLE);
-            // A cosine rather than a triangle: a linear fade in and out reads
-            // as a blink with a pause at each end.
-            let lift = 0.5 + (delta * std::f32::consts::TAU).cos() * 0.5;
-            let floor = match motion {
-                Motion::Pulse => DOT_FLOOR,
-                _ => BREATH_FLOOR,
-            };
-            alpha(colour, floor + (1.0 - floor) * lift)
-        }
-    };
+    let ink = alpha(colour, strength(motion, BREATH_FLOOR, DOT_FLOOR));
     div().flex_none().size(size).rounded_full().bg(ink)
 }
+
+/// [`status_dot`] drawn over something, on a `ground` it covers: it fades
+/// towards the ground rather than out, so it stays solid. A dot that went
+/// see-through let what it sits on — an agent's mark — show through it at
+/// the bottom of every beat.
+pub(crate) fn status_dot_on(colour: Rgba, ground: Rgba, motion: Motion, size: Pixels) -> Div {
+    let ink = mix(
+        ground,
+        colour,
+        strength(motion, SOLID_BREATH_FLOOR, SOLID_DOT_FLOOR),
+    );
+    div().flex_none().size(size).rounded_full().bg(ink)
+}
+
+/// How much of its colour a dot moving as `motion` shows right now, given
+/// how much a breath and a beat keep at their lowest.
+fn strength(motion: Motion, breath: f32, beat: f32) -> f32 {
+    let floor = match motion {
+        Motion::Still => return 1.0,
+        Motion::Travel => breath,
+        Motion::Pulse => beat,
+    };
+    let delta = crate::motion::phase(DOT_CYCLE);
+    // A cosine rather than a triangle: a linear fade in and out reads as a
+    // blink with a pause at each end.
+    let lift = 0.5 + (delta * std::f32::consts::TAU).cos() * 0.5;
+    floor + (1.0 - floor) * lift
+}
+
+/// What a solid dot keeps of its colour at the bottom of a breath, and of a
+/// beat: deeper than a see-through one's, since sinking into the row it
+/// stands on reads softer than fading out.
+const SOLID_BREATH_FLOOR: f32 = 0.4;
+
+/// See [`SOLID_BREATH_FLOOR`].
+const SOLID_DOT_FLOOR: f32 = 0.15;
 
 /// The selected row's rail: a short bar at the row's leading edge, inset from
 /// its top and bottom — the theme's amber, or a worktree's project colour

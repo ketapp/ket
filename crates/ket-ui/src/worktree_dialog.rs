@@ -1501,7 +1501,7 @@ impl Shell {
         };
         let project_select = dialog.choose_project.then(|| {
             let project_menu = dialog.project_menu.as_ref().map(|menu| {
-                menu.view(
+                menu.dropdown_view(
                     t,
                     cx,
                     |shell, project, cx| {
@@ -1619,7 +1619,7 @@ impl Shell {
             });
 
         let agent_menu = dialog.agent_menu.as_ref().map(|menu| {
-            menu.view(
+            menu.dropdown_view(
                 t,
                 cx,
                 |shell, agent, cx| {
@@ -1655,7 +1655,7 @@ impl Shell {
         // Model and Effort: the agent's default until picked, and a dash
         // with nothing to pick — no agent, or one ket cannot switch.
         let model_menu = dialog.model_menu.as_ref().map(|menu| {
-            menu.view(
+            menu.dropdown_view(
                 t,
                 cx,
                 |shell, index, cx| {
@@ -1702,7 +1702,7 @@ impl Shell {
             }),
         );
         let effort_menu = dialog.effort_menu.as_ref().map(|menu| {
-            menu.view(
+            menu.dropdown_view(
                 t,
                 cx,
                 |shell, index, cx| {
@@ -1760,7 +1760,7 @@ impl Shell {
             format!("Economy · {}", token_reduction_label(level)).into()
         };
         let token_reduction_menu = dialog.token_reduction_menu.as_ref().map(|menu| {
-            menu.view(
+            menu.dropdown_view(
                 t,
                 cx,
                 |shell, level, cx| {

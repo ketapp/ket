@@ -110,7 +110,10 @@ describe('secure mobile storage', () => {
 
     expect(await getNotify()).toEqual(DEFAULT_NOTIFY);
     await saveNotify({ ...DEFAULT_NOTIFY, on: true, checks: false });
-    expect(await getNotify()).toEqual({ on: true, waiting: true, finished: true, checks: false });
+    expect(await getNotify()).toEqual({ on: true, waiting: true, finished: true, checks: false, limits: true });
+    // One saved before limits had a switch gets it, on.
+    await saveNotify({ on: true, waiting: false, finished: true, checks: true } as never);
+    expect((await getNotify()).limits).toBe(true);
 
     const lock: LockConfig = { salt: 's', hash: 'h', afterMs: 60, failures: 2, waitUntil: 3 };
     expect(await getLock()).toBeNull();

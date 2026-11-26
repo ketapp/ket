@@ -4,7 +4,7 @@
 
 import { router } from 'expo-router';
 import { type ReactNode, useEffect, useRef, useState } from 'react';
-import { Alert, AppState, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Alert, AppState, Pressable, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import {
@@ -18,7 +18,7 @@ import {
   waitMs,
 } from '../lib/lock';
 import { font, size, t } from '../lib/theme';
-import { surface } from './ui/surface';
+import { PRESSED, surface } from './ui/surface';
 import { BrandMark, Erase, FaceScan, Fingerprint } from './icons';
 
 /** The icon for a way of unlocking, by its name from `biometry()`. */
@@ -109,20 +109,16 @@ function Key({
   children: ReactNode;
 }) {
   return (
-    <Pressable
+    <TouchableOpacity
       accessibilityRole="button"
       accessibilityLabel={label}
       onPress={onPress}
       disabled={disabled}
-      style={({ pressed }) => [
-        styles.key,
-        well && surface.well,
-        pressed && { backgroundColor: t.selection },
-        disabled && { opacity: 0.4 },
-      ]}
+      activeOpacity={PRESSED}
+      style={[styles.key, well && surface.well, disabled && { opacity: 0.4 }]}
     >
       {children}
-    </Pressable>
+    </TouchableOpacity>
   );
 }
 
@@ -230,14 +226,15 @@ export function LockGate() {
         disabled={wait > 0}
         extra={
           kind ? (
-            <Pressable
+            <TouchableOpacity
               accessibilityRole="button"
               accessibilityLabel={`Use ${kind}`}
               onPress={() => void unlockWithBiometrics()}
-              style={({ pressed }) => [styles.key, pressed && { backgroundColor: t.selection }]}
+              activeOpacity={PRESSED}
+              style={styles.key}
             >
               {biometricIcon(kind, t.text)}
-            </Pressable>
+            </TouchableOpacity>
           ) : null
         }
         onComplete={(pin) => void submit(pin)}

@@ -414,7 +414,7 @@ impl Shell {
             .and_then(|capture| capture.menu.as_ref())
             .filter(|menu| menu.opened_by(origin))
             .map(|menu| {
-                menu.view(
+                menu.dropdown_view(
                     t,
                     cx,
                     |shell, pick, cx| {

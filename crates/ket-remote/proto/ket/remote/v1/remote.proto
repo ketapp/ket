@@ -125,6 +125,23 @@
 // 1.36 adds GetAutomations and EditAutomation: the automations, work that
 // starts itself on a schedule, and pausing, resuming, starting now or
 // deleting one.
+//
+// 1.37 adds blackout hours (`HostSnapshot.blackout`): hours set on the
+// desktop when ket is shut off on every paired device. During one a phone is
+// sent a snapshot with nothing in it but the blackout, and whatever it asks
+// for is refused with `ErrorCode.BLACKOUT`. Only the desktop lifts it.
+
+// 1.38 adds a session stopped because its plan ran out
+// (`TerminalSummary.limit`, `AsleepTerminal.limit`), and PUSH_KIND_LIMITS,
+// for hearing of one and of its limit resetting.
+
+// 1.39 adds PreviewSwitch and SwitchAgent: a terminal's task handed to
+// another agent, with a brief of its conversation the phone shows before it
+// is sent, answered with SwitchPreview and AgentSwitched.
+
+// 1.40 adds what a terminal's agent left running in the background — a
+// build, a test run, a dev server — and what of that ended a moment ago
+// (`TerminalSummary.jobs`), and StopJob, which ends one.
 
 syntax = "proto3";
 
@@ -265,6 +282,13 @@ message Envelope {
     GetAutomations get_automations = 136;
     Automations automations = 137;
     EditAutomation edit_automation = 138;
+    // Since 1.39.
+    PreviewSwitch preview_switch = 139;
+    SwitchPreview switch_preview = 140;
+    SwitchAgent switch_agent = 141;
+    AgentSwitched agent_switched = 142;
+    // Since 1.40.
+    StopJob stop_job = 143;
   }
 }
 
@@ -315,6 +339,10 @@ enum ErrorCode {
   // Since 1.20. An unforced DeleteWorktree that would lose work — git
   // refused it, saying what. Asking again with `force` deletes it anyway.
   WOULD_LOSE_WORK = 8;
+  // Since 1.37. The desktop is in its blackout hours, and serves a phone
+  // nothing until they end or the desktop lets it in: `HostSnapshot.blackout`
+  // says when.
+  BLACKOUT = 9;
 }
 
 message Error {
@@ -347,6 +375,38 @@ message HostSnapshot {
   Palette palette = 4;
   // Since 1.17. LAN first, then Tailscale when this host listens on it.
   repeated string addresses = 5;
+  // Since 1.37. The desktop's blackout hours; unset when it has none. While
+  // `blackout.until_ms` is set, every other field here but `addresses` is
+  // empty: a phone in a blackout is told nothing else.
+  Blackout blackout = 6;
+}
+
+// Since 1.37. Blackout hours, set in the desktop's Settings › Devices: when
+// ket is shut off on every paired device, and only the desktop lets one back
+// in. The host enforces it; a phone is told so it can cover its screens on
+// time, with a connection or without one.
+message Blackout {
+  // Set while this phone is shut out: when the blackout ends, in Unix
+  // milliseconds. Zero when it is not.
+  uint64 until_ms = 1;
+  // The blackouts that have not ended, soonest first — the one now, if any,
+  // then those to come, about two weeks of them — as moments, so a phone
+  // needs none of the desktop's clock or calendar. A phone keeps them, and
+  // covers itself during one it cannot reach its desktop in.
+  repeated BlackoutWindow windows = 2;
+  // The days a blackout starts on, in words: "Every day", "Every weekday",
+  // "Mon, Wed and Fri".
+  string repeat = 3;
+  // Set while the desktop has let devices in during a blackout: until when,
+  // in Unix milliseconds. Zero when it has not.
+  uint64 let_in_until_ms = 4;
+}
+
+// One blackout: from `start_ms` up to, not including, `end_ms`, in Unix
+// milliseconds.
+message BlackoutWindow {
+  uint64 start_ms = 1;
+  uint64 end_ms = 2;
 }
 
 // The desktop's theme, as the colours a phone draws with. Each is
@@ -669,6 +729,38 @@ message AsleepTerminal {
   // How much memory stopping it freed, as the desktop measured it; 0 when
   // it did not.
   uint64 freed_bytes = 5;
+  // Since 1.38. Set when the session the tab holds is stopped at a limit.
+  SessionLimit limit = 6;
+}
+
+// Since 1.38. A session whose last turn was refused because its plan, or
+// one model's share of it, ran out. Set from then until the session gets
+// going again — not until the limit resets: whether it has is `resets_at_ms`
+// against the clock, so a chat can say "it's back" as well as "it's out".
+message SessionLimit {
+  enum Scope {
+    SCOPE_UNSPECIFIED = 0;
+    // The plan: no model of this agent's answers until it resets.
+    SCOPE_PLAN = 1;
+    // One model's allowance: the same agent goes on with another model.
+    SCOPE_MODEL = 2;
+  }
+  enum Window {
+    WINDOW_UNSPECIFIED = 0;
+    // The short rolling window: Claude's five hours.
+    WINDOW_SESSION = 1;
+    WINDOW_WEEKLY = 2;
+  }
+  Scope scope = 1;
+  // Which of the plan's windows, when the agent said.
+  Window window = 2;
+  // When the session was first refused, in milliseconds since the epoch. A
+  // retry refused again does not move it.
+  uint64 since_ms = 3;
+  // When the window resets; 0 when nothing has said.
+  uint64 resets_at_ms = 4;
+  // The agent's own words for it.
+  string said = 5;
 }
 
 // Since 1.23. Wakes an asleep tab: the desktop starts its agent again in
@@ -728,6 +820,63 @@ message TerminalSummary {
   // someone looks at it: on the desktop by showing its tab, on a phone with
   // MarkSeen. A prompt sent to it leaves it set.
   bool unread = 14;
+  // Since 1.38. Set when the terminal's session is stopped at a limit.
+  SessionLimit limit = 15;
+  // Since 1.40. What the terminal's agent left running in the background,
+  // running first, then what ended in the last few minutes, each oldest
+  // first. Only in a full snapshot.
+  repeated Job jobs = 16;
+}
+
+// Since 1.40. A command a terminal's agent left running in the background,
+// or one that ended a moment ago. The desktop finds them in the agent's
+// process tree, so every agent has them; Claude also says what each is for.
+message Job {
+  // The process that runs it, and when it started in epoch milliseconds:
+  // what StopJob names it by. A pid of 0 is a command the agent says it ran
+  // and finished between two of the desktop's looks, never seen running.
+  int32 pid = 1;
+  uint64 started_at_ms = 2;
+  // What it runs, without the redirections at its end.
+  string command = 3;
+  // What the agent said it was for; empty when it said nothing.
+  string description = 4;
+  // The TCP ports it serves on, lowest first: a dev server's. On the
+  // desktop's own localhost, so not one a phone can open.
+  repeated uint32 ports = 5;
+  // Set once it has ended.
+  JobEnded ended = 6;
+}
+
+// Since 1.40. How a Job ended.
+message JobEnded {
+  enum Outcome {
+    OUTCOME_UNSPECIFIED = 0;
+    // It ran to the end and exited 0.
+    COMPLETED = 1;
+    // It exited with anything else.
+    FAILED = 2;
+    // Something stopped it: a person, from the desktop or a phone, or its
+    // agent.
+    STOPPED = 3;
+    // It is no longer running, and nothing said how it ended.
+    GONE = 4;
+  }
+  // When it was seen to have ended, in epoch milliseconds.
+  uint64 at_ms = 1;
+  Outcome outcome = 2;
+  // Its exit code, where the agent said.
+  optional sint32 exit = 3;
+}
+
+// Since 1.40. Ends a job the terminal's summary lists as running: it and
+// everything it started. Acknowledged once the job has been signalled; its
+// end shows in the terminal's summary. Needs a controller's role, and no
+// lease: it is the job's, not the terminal's.
+message StopJob {
+  uint64 terminal_id = 1;
+  int32 pid = 2;
+  uint64 started_at_ms = 3;
 }
 
 // Since 1.32. The phone is showing the terminal's conversation: what its
@@ -788,6 +937,8 @@ enum PushKind {
   PUSH_KIND_FINISHED = 2;
   // A check on a worktree's pull request failed.
   PUSH_KIND_CHECKS = 3;
+  // Since 1.38. An agent's plan ran out mid-task, or its limit has reset.
+  PUSH_KIND_LIMITS = 4;
 }
 
 // Since 1.28. A session whose prompt cache has gone cold: its next prompt
@@ -825,6 +976,65 @@ message StartFresh {
 // Since 1.28. The terminal the fresh session is in: the one StartFresh
 // named, or, from a host before ket 0.3, a new one beside it.
 message FreshStarted {
+  uint64 terminal_id = 1;
+}
+
+// Since 1.39. How much of a terminal's conversation a switch hands over.
+enum SwitchDepth {
+  SWITCH_DEPTH_UNSPECIFIED = 0;
+  // The task as it was first asked.
+  SWITCH_DEPTH_TASK = 1;
+  // The task and the last few things said either way. The default.
+  SWITCH_DEPTH_RECENT = 2;
+  // Everything the desktop can read of the conversation, to about 24 KB.
+  SWITCH_DEPTH_FULL = 3;
+}
+
+// Since 1.39. What the terminal's agent would hand to `agent` if its task
+// moved there, for the phone to show before anything is sent: answered with
+// SwitchPreview. Needs no lease; it reads the conversation as
+// GetConversation does.
+message PreviewSwitch {
+  uint64 terminal_id = 1;
+  // The agent to hand to, one of `HostSnapshot.agents`.
+  string agent = 2;
+  SwitchDepth depth = 3;
+}
+
+// Since 1.39. The brief, word for word as it would be typed.
+message SwitchPreview {
+  uint64 terminal_id = 1;
+  string text = 2;
+  // How many of the conversation's turns it quotes, the task included.
+  uint32 turns = 3;
+  // About how many tokens the new agent reads it as.
+  uint32 approx_tokens = 4;
+  // The session it was read from, for SwitchAgent to name.
+  string session = 5;
+}
+
+// Since 1.39. Moves the terminal's task to another agent, `text` — the
+// brief the phone showed, as it showed it — its first message. In a new tab
+// beside the terminal, or in its place: the old agent's tab closes, and its
+// session stays in its own history to resume. Needs the lease, and an open
+// ket window. Answered with AgentSwitched once the new agent has the text,
+// or an error saying why not.
+message SwitchAgent {
+  uint64 terminal_id = 1;
+  string agent = 2;
+  // Empty for the agent's own default.
+  string model = 3;
+  string effort = 4;
+  string text = 5;
+  // In a new tab beside the old one, rather than in its place.
+  bool beside = 6;
+  // The session `text` was read from, as SwitchPreview named it: a terminal
+  // that has moved on to another session since is not switched.
+  string session = 7;
+}
+
+// Since 1.39. The terminal the new agent runs in.
+message AgentSwitched {
   uint64 terminal_id = 1;
 }
 
@@ -1104,6 +1314,9 @@ message Conversation {
   // it was working, waiting until it takes them in. The whole list each
   // time, not only what is new.
   repeated string queued = 8;
+  // Since 1.41. When the session began, Unix milliseconds: its transcript's
+  // creation. Zero when the desktop can't tell, as for OpenCode's.
+  uint64 started_at_ms = 9;
 }
 
 message Turn {

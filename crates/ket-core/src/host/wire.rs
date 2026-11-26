@@ -262,6 +262,16 @@ pub enum Request {
         /// Why there is none, as the desktop would say it.
         error: Option<String>,
     },
+    /// The answer to [`Reply::SwitchAgent`]: the key of the tab the new
+    /// agent runs in, sent once the brief has gone into it, or why not.
+    SwitchResult {
+        /// The request named in [`Reply::SwitchAgent`].
+        req: u64,
+        /// The new agent's pane key.
+        key: Option<String>,
+        /// Why there is none, as the desktop would say it.
+        error: Option<String>,
+    },
     /// The result of handing a phone's failed checks to an agent. The host
     /// waits for this before answering the phone.
     FixChecksResult {
@@ -312,6 +322,18 @@ pub enum Request {
     Seen {
         /// The terminal's pane key.
         pane: String,
+    },
+    /// A command an agent left running in the background, to be ended — see
+    /// [`crate::jobs::stop`]. Only a job the pane's status lists as running
+    /// is.
+    StopJob {
+        /// The terminal's pane key.
+        pane: String,
+        /// The job's pid, as its status gives it.
+        pid: i32,
+        /// When it started, as its status gives it: what tells it from a later
+        /// process given the same pid.
+        started_at_ms: u64,
     },
     /// A worktree marked unread from a window's worktree menu, or the mark
     /// taken off as someone comes to it — see
@@ -906,6 +928,30 @@ pub enum Reply {
         /// When that session's last request was, which the window checks it
         /// has made none since.
         since_ms: u64,
+    },
+    /// A phone asked for a terminal's task to move to another agent — see
+    /// `crate::handoff`. Sent to the window showing that terminal, which
+    /// opens the agent, types `text` into it and answers with
+    /// [`Request::SwitchResult`].
+    SwitchAgent {
+        /// Names the request in the answer.
+        req: u64,
+        /// The old agent's pane key.
+        key: String,
+        /// The agent to open.
+        agent: String,
+        /// The model to open it on; `None` for its own default.
+        model: Option<String>,
+        /// The effort to open it on; `None` for its own default.
+        effort: Option<String>,
+        /// The brief, its first message.
+        text: String,
+        /// In a new tab beside the old one, rather than in its place.
+        beside: bool,
+        /// The session the old tab held as the phone asked: nothing is
+        /// switched once it holds another.
+        #[serde(default)]
+        session: Option<String>,
     },
     /// A phone asked for a worktree to be merged, as ket's Merge does. Sent to
     /// one window, which runs its own merge on it.

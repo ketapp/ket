@@ -88,6 +88,9 @@ pub(crate) static PHONE_DELETES: Mutex<Vec<super::PhoneDelete>> = Mutex::new(Vec
 /// Terminals phones asked this window to start fresh in place — see
 /// [`super::take_phone_fresh`].
 pub(crate) static PHONE_FRESHES: Mutex<Vec<super::PhoneFresh>> = Mutex::new(Vec::new());
+/// The switches phones asked of this window, oldest first — see
+/// [`super::take_phone_switch`].
+pub(crate) static PHONE_SWITCHES: Mutex<Vec<super::PhoneSwitch>> = Mutex::new(Vec::new());
 /// Asleep tabs phones asked this window to wake, each with the host's
 /// request number — see [`super::take_phone_wake`].
 pub(crate) static PHONE_WAKES: Mutex<Vec<(u64, String)>> = Mutex::new(Vec::new());
@@ -791,6 +794,28 @@ fn route(conn: &Arc<Connection>, reply: Reply) {
                 key,
                 session,
                 since_ms,
+            });
+            ask_window();
+        }
+        Reply::SwitchAgent {
+            req,
+            key,
+            agent,
+            model,
+            effort,
+            text,
+            beside,
+            session,
+        } => {
+            lock(&PHONE_SWITCHES).push(super::PhoneSwitch {
+                req,
+                key,
+                agent,
+                model,
+                effort,
+                text,
+                beside,
+                session,
             });
             ask_window();
         }

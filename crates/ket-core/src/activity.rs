@@ -932,6 +932,25 @@ impl Tracker {
         })
     }
 
+    /// The harnesses — `claude`, `codex` — of agents whose sessions are
+    /// stopped at a limit that hasn't reset, as their panes last reported,
+    /// each with what ran out.
+    pub fn limited_harnesses(&self, now_ms: u64) -> Vec<(String, crate::limits::Scope)> {
+        self.local
+            .entries()
+            .chain(
+                self.hosted
+                    .iter()
+                    .flat_map(|snapshot| snapshot.panes.iter()),
+            )
+            .filter_map(|pane| {
+                let limit = pane.limit.as_ref().filter(|limit| !limit.over(now_ms))?;
+                let harness = crate::agents::harness(&pane.agent).to_ascii_lowercase();
+                Some((harness, limit.scope))
+            })
+            .collect()
+    }
+
     /// What one pane's agent is doing and the signal it earns, while its own
     /// report stands. `None` for a pane no agent has reported from.
     pub fn pane(&self, pane: &str, now_ms: u64) -> Option<(Activity, Signal)> {
@@ -1014,6 +1033,18 @@ impl Tracker {
             .flat_map(PaneAgentStatus::subagents)
             .collect();
         rows.sort_by(|a, b| (a.started_at_ms, &a.id).cmp(&(b.started_at_ms, &b.id)));
+        rows
+    }
+
+    /// What the agents in `worktree`'s panes left running in the background,
+    /// and what of that ended a moment ago, each with the pane it is in:
+    /// running first, then ended, each oldest first.
+    pub fn jobs(&self, worktree: &WorktreeId, now_ms: u64) -> Vec<(String, crate::jobs::Job)> {
+        let mut rows: Vec<(String, crate::jobs::Job)> = self
+            .panes_in(worktree, now_ms)
+            .flat_map(|pane| pane.jobs.iter().map(|job| (pane.pane.clone(), job.clone())))
+            .collect();
+        rows.sort_by_key(|(_, job)| (job.ended.is_some(), job.started_at_ms, job.pid));
         rows
     }
 

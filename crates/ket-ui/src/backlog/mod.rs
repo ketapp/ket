@@ -56,7 +56,7 @@ use crate::ui::button::pressable;
 use crate::ui::chip::{caption, image_badge, key_hint, signal_tag};
 use crate::ui::dialog::{card, centered};
 use crate::ui::icon::{Icon, sized_icon};
-use crate::ui::menu::{MenuEntry, MenuItem, MenuKey, OpenMenu, dropdown};
+use crate::ui::menu::{DropdownPanel, MenuEntry, MenuItem, MenuKey, OpenMenu, dropdown};
 use crate::ui::select::select;
 use crate::ui::toast::Tone;
 
@@ -1263,7 +1263,7 @@ impl Shell {
             .and_then(|dialog| dialog.menu.as_ref())
             .filter(|menu| menu.opened_by(origin))
             .map(|menu| {
-                menu.view(
+                menu.dropdown_view(
                     t,
                     cx,
                     |shell, pick, cx| {
@@ -1289,14 +1289,14 @@ impl Shell {
     }
 
     /// The open ⋯ menu's panel, for the row it was opened on to hang.
-    fn backlog_row_menu_panel(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn backlog_row_menu_panel(&self, cx: &mut Context<Self>) -> Option<DropdownPanel> {
         let menu = self
             .backlog
             .as_ref()?
             .menu
             .as_ref()
             .filter(|menu| menu.opened_by(ROW_MENU))?;
-        Some(menu.view(
+        Some(menu.dropdown_view(
             &self.theme,
             cx,
             |shell, pick, cx| {

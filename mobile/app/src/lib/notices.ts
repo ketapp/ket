@@ -26,12 +26,13 @@ import { AppState, Linking, Platform } from 'react-native';
 import { agentOf, agentTerminal, everyWorktree } from './activity';
 import { connection, type HostConnection } from './connection';
 import { showOverWorktrees } from './layout';
+import { isOver, limitWords, resetWords, stoppedAt } from './limits';
 import { type Pushed, forgetToken, pushable, pushedOf, pushedPath, syncPush } from './push';
 import { DEFAULT_NOTIFY, type NotifyConfig, getNotify, listHosts, saveNotify } from './store';
 import { agentLabel } from './theme';
 
-/** The three kinds of notice, each with its own switch. */
-export type Kind = 'waiting' | 'finished' | 'checks';
+/** The kinds of notice, each with its own switch. */
+export type Kind = 'waiting' | 'finished' | 'checks' | 'limits';
 
 /** What Settings sees. */
 export interface NoticeState {
@@ -124,6 +125,9 @@ interface Seen {
   /** The agent it had then, for a notice after it has gone quiet. */
   agent: string;
   checksFailed: boolean;
+  /** The limit it was stopped at: when it stopped, and whether that limit
+   * had reset. Another time is another stop. */
+  stopped?: { since: bigint; over: boolean };
 }
 
 /** Per desktop: what its worktrees were doing, once a snapshot has been seen. */
@@ -156,6 +160,7 @@ export function compare(
   host: { id: string; name: string },
   snapshot: HostSnapshot | null,
   named: boolean,
+  clock: number = Date.now(),
 ): { fresh: Notice[]; answered: string[] } {
   const fresh: Notice[] = [];
   const answered: string[] = [];
@@ -165,7 +170,9 @@ export function compare(
     const key = keyOf(host.id, worktree.id);
     const agent = agentOf(worktree) || before?.get(key)?.agent || '';
     const failed = checksFailed(worktree);
-    now.set(key, { activity: worktree.activity, agent, checksFailed: failed });
+    const stop = stoppedAt(worktree);
+    const stopped = stop && { since: stop.limit.sinceMs, over: isOver(stop.limit, clock) };
+    now.set(key, { activity: worktree.activity, agent, checksFailed: failed, stopped });
     const was = before?.get(key);
     if (!before) continue;
     const title = `${project.name} · ${worktree.name}`;
@@ -205,6 +212,36 @@ export function compare(
         body: `Checks failed on #${worktree.pullRequest?.number.toString() ?? '?'}: ${names.join(', ')}`,
         path: `/pull-request/${host.id}/${encodeURIComponent(worktree.id)}`,
       });
+    }
+    // After the rest: "ran out" takes the place of the "finished" the same
+    // stop looks like, by wearing its id.
+    if (stop && stopped) {
+      const whose = stop.agent ? agentLabel(stop.agent) : 'An agent';
+      const at = stop.terminal
+        ? `/session/${host.id}/${stop.terminal.toString()}`
+        : `/worktree/${host.id}/${encodeURIComponent(worktree.id)}`;
+      const same = was?.stopped?.since === stopped.since;
+      if (!stopped.over && !same) {
+        fresh.push({
+          kind: 'limits',
+          id: `${key}/finished`,
+          title,
+          subtitle,
+          body: limitWords(whose, stop.limit, clock),
+          path: at,
+        });
+      } else if (stopped.over && same && was?.stopped?.over === false) {
+        // One for an agent, not one for each worktree it was stopped in.
+        const harness = (stop.agent.split(':')[0] ?? '').toLowerCase();
+        fresh.push({
+          kind: 'limits',
+          id: `${host.id}/reset/${harness}`,
+          title,
+          subtitle,
+          body: resetWords(whose),
+          path: at,
+        });
+      }
     }
   }
   // A worktree gone from the desktop takes its prompt with it.
@@ -309,6 +346,15 @@ function stillSo(pushed: Pushed, snapshot: HostSnapshot): boolean {
       return worktree.activity === Activity.FAILED;
     case 'checks':
       return checksFailed(worktree);
+    // Still stopped there: carried on with, there is nothing to say.
+    case 'limit': {
+      const stop = stoppedAt(worktree);
+      return stop !== undefined && !isOver(stop.limit, Date.now());
+    }
+    case 'reset': {
+      const stop = stoppedAt(worktree);
+      return stop !== undefined && isOver(stop.limit, Date.now());
+    }
   }
 }
 

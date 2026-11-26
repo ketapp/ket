@@ -148,6 +148,19 @@ pub(super) fn handle(
 ) -> Option<proto::Envelope> {
     let id = request.request_id;
     let payload = request.payload.as_ref()?;
+    // In a blackout a phone is answered nothing but where to send its
+    // notifications, which it registers as it connects — see `blackout`.
+    if !matches!(
+        payload,
+        Payload::RegisterPush(_) | Payload::UnregisterPush(_)
+    ) && phone.phones.shut()
+    {
+        return Some(error(
+            id,
+            proto::ErrorCode::Blackout,
+            "ket is shut off on this device during blackout hours. Only the desktop can let it in.",
+        ));
+    }
     let mutation = matches!(
         payload,
         Payload::Input(_)
@@ -180,6 +193,7 @@ pub(super) fn handle(
             | Payload::SetMode(_)
             | Payload::SetModel(_)
             | Payload::StartFresh(_)
+            | Payload::SwitchAgent(_)
     );
     let key = request.idempotency_key.as_str();
     if mutation {
@@ -247,6 +261,7 @@ pub(super) fn handle(
             | Payload::DeleteWorktree(_)
             | Payload::WakeTerminal(_)
             | Payload::StartFresh(_)
+            | Payload::SwitchAgent(_)
     );
     if mutation && succeeded && kept_here {
         lock(&phone.phones.devices)
@@ -292,6 +307,10 @@ fn expensive_cost(payload: &Payload) -> Option<u32> {
         Payload::WakeTerminal(_) => Some(5),
         // Ends a session on the desktop and starts another.
         Payload::StartFresh(_) => Some(5),
+        // Starts another agent, and reads a conversation to tell it.
+        Payload::SwitchAgent(_) => Some(5),
+        // Reads a whole conversation.
+        Payload::PreviewSwitch(_) => Some(2),
         // Keys pressed into an agent, each waited on.
         Payload::SetMode(_) => Some(2),
         // Commands typed into an agent, each confirmed.
@@ -334,7 +353,10 @@ fn payload_name(payload: &Payload) -> &'static str {
         Payload::SetMode(_) => "set_mode",
         Payload::SetModel(_) => "set_model",
         Payload::StartFresh(_) => "start_fresh",
+        Payload::PreviewSwitch(_) => "preview_switch",
+        Payload::SwitchAgent(_) => "switch_agent",
         Payload::MarkSeen(_) => "mark_seen",
+        Payload::StopJob(_) => "stop_job",
         Payload::MarkUnread(_) => "mark_unread",
         Payload::RegisterPush(_) => "register_push",
         Payload::UnregisterPush(_) => "unregister_push",
@@ -360,6 +382,8 @@ fn apply(
         // Opening a pull request pushes the branch, as a merge lands it.
         Payload::StartWork(_)
         | Payload::StartSession(_)
+        // A switch opens a new agent session, as starting one does.
+        | Payload::SwitchAgent(_)
         | Payload::MergeWorktree(_)
         | Payload::StartNote(_)
         | Payload::OpenPullRequest(_)
@@ -391,7 +415,9 @@ fn apply(
         | Payload::Answer(_)
         | Payload::EditBacklog(_)
         | Payload::FixChecks(_)
-        | Payload::SendReview(_) => DeviceRole::Controller,
+        | Payload::SendReview(_)
+        // As ending the terminal's program with a signal is.
+        | Payload::StopJob(_) => DeviceRole::Controller,
         _ => DeviceRole::Viewer,
     };
     if !phone.role.allows(required) {
@@ -476,6 +502,17 @@ fn apply(
                     _ => {}
                 }
                 let _ = terminal.send_input(input.bytes.clone());
+            } else if host
+                .key(input.terminal_id)
+                .is_some_and(|key| host.replacing(&key))
+            {
+                // Its terminal closes once the new agent has the task: keys
+                // held for it would be acknowledged and never typed.
+                return Some(error(
+                    id,
+                    proto::ErrorCode::Unspecified,
+                    "ket is handing this tab's task to another agent: type into the new one once it opens",
+                ));
             } else {
                 let rows =
                     || terminal.with_term(|term| crate::screen::bottom_rows(term, usize::MAX));
@@ -629,6 +666,19 @@ fn apply(
         Payload::MarkSeen(seen) => {
             host.seen_terminal(seen.terminal_id);
             ack(id)
+        }
+        // No lease: the job is not the terminal, and the desktop stops one
+        // without taking the terminal from anybody either.
+        Payload::StopJob(stop) => {
+            if host.stop_job_in(stop.terminal_id, stop.pid, stop.started_at_ms) {
+                ack(id)
+            } else {
+                Some(error(
+                    id,
+                    proto::ErrorCode::NotFound,
+                    "that job is no longer running",
+                ))
+            }
         }
         Payload::MarkUnread(mark) => {
             // Only a worktree this desktop has: the host keeps a mark until it
@@ -839,6 +889,10 @@ fn apply(
         // see `crate::agent_model`. Only while it is idle: a command typed
         // mid-turn waits behind the turn, or lands in a prompt.
         Payload::StartFresh(fresh) => fresh_from_phone(host, phone, request, feed, id, fresh),
+        Payload::PreviewSwitch(ask) => super::switch::preview_from_phone(host, id, ask),
+        Payload::SwitchAgent(switch) => {
+            super::switch::switch_from_phone(host, phone, request, feed, id, switch)
+        }
         Payload::SetModel(set) => {
             if !host.controls(set.terminal_id, holder) {
                 return no_control();

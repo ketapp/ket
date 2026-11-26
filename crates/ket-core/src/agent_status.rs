@@ -165,6 +165,18 @@ pub struct PaneAgentStatus {
     /// a phone shows the pane. A prompt sent to it leaves this alone.
     #[serde(default)]
     pub unread: bool,
+    /// The limit this pane's session is stopped at: its last turn was
+    /// refused because the plan, or one model's share of it, ran out. Set
+    /// from the host's ledger — see [`crate::limits::Ledger`] — rather than
+    /// by any report, and still set after the window has reset: whether the
+    /// session can go on is read from the limit's own reset time.
+    #[serde(default)]
+    pub limit: Option<crate::limits::Limit>,
+    /// What the lead left running in the background, and what of that ended
+    /// a moment ago. Set by the host from the pane's process tree — see
+    /// [`crate::jobs`] — rather than by any report.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub jobs: Vec<crate::jobs::Job>,
     /// A Codex subagent's prompt standing as this pane's — see
     /// [`crate::codex_subagent_prompt`]. The host's own; never sent on.
     #[serde(skip)]
@@ -228,6 +240,8 @@ impl PaneAgentStatus {
             last_tool: None,
             question: None,
             answered: None,
+            limit: None,
+            jobs: Vec::new(),
             covered: None,
             covered_idle: false,
             compacting: false,
@@ -478,6 +492,50 @@ pub struct StatusStore {
     threads: HashMap<String, String>,
     /// See [`Self::mark_unread`].
     marked: BTreeSet<String>,
+    /// See [`Self::take_ended`].
+    ended: Vec<TurnEnd>,
+}
+
+/// The most turn ends kept for [`StatusStore::take_ended`]. A store nobody
+/// drains — a window's own, with the host doing the reading — forgets the
+/// oldest rather than growing.
+const ENDED_MAX: usize = 64;
+
+/// A turn of a pane's agent that has just ended — see
+/// [`StatusStore::take_ended`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnEnd {
+    /// The pane it ended in.
+    pub pane: String,
+    /// That pane's worktree.
+    pub worktree: String,
+    /// The agent whose turn it was.
+    pub agent: String,
+    /// The agent's session, when it has said.
+    pub session: Option<String>,
+    /// When the report of it arrived. With the session, this names the turn:
+    /// whatever is worked out about it afterwards applies only while the
+    /// pane's status still carries both.
+    pub at_ms: u64,
+    /// How it ended: `Stop`, `StopFailure` or `Interrupt`.
+    pub event: HookEvent,
+    /// What a `StopFailure` said went wrong, when it said.
+    pub failure: Option<crate::limits::Failure>,
+}
+
+impl TurnEnd {
+    /// The end `report` brought to the turn `entry` was in.
+    fn of(entry: &PaneAgentStatus, report: &HookReport) -> Self {
+        Self {
+            pane: entry.pane.clone(),
+            worktree: entry.worktree.clone(),
+            agent: entry.agent.clone(),
+            session: entry.session.clone(),
+            at_ms: report.at_ms,
+            event: report.event,
+            failure: report.failure.as_deref().cloned(),
+        }
+    }
 }
 
 impl StatusStore {
@@ -762,6 +820,8 @@ impl StatusStore {
         if report.event == HookEvent::Interrupt {
             tracing::debug!(pane = %entry.pane, agent = %entry.agent, "turn cancelled: provider");
             entry.cancel_now(CancelSource::Provider, at_ms);
+            let ended = TurnEnd::of(entry, report);
+            self.ended(ended);
             return true;
         }
 
@@ -967,7 +1027,58 @@ impl StatusStore {
         entry.note.clone_from(&report.note);
         entry.mutating_git = report.mutating_git;
         entry.at_ms = at_ms;
+        if matches!(report.event, HookEvent::Stop | HookEvent::StopFailure) {
+            let ended = TurnEnd::of(entry, report);
+            self.ended(ended);
+        }
         true
+    }
+
+    /// Keeps `ended` for [`Self::take_ended`].
+    fn ended(&mut self, ended: TurnEnd) {
+        if self.ended.len() >= ENDED_MAX {
+            self.ended.remove(0);
+        }
+        self.ended.push(ended);
+    }
+
+    /// The turns that have ended since this was last asked, oldest first.
+    ///
+    /// Why a turn ended is sometimes only in the agent's own files, and
+    /// reading those has no place under the lock a report is applied with.
+    /// So the store only notes that a turn ended; whoever holds it takes the
+    /// notes with the lock and does the reading without it. A subagent's stop
+    /// is not one of these: the lead's turn goes on.
+    pub fn take_ended(&mut self) -> Vec<TurnEnd> {
+        std::mem::take(&mut self.ended)
+    }
+
+    /// Says what limit pane `pane`'s session is stopped at, or that it is
+    /// stopped at none. Returns whether that changed anything; a pane that
+    /// is not there changes nothing.
+    pub fn set_limit(&mut self, pane: &str, limit: Option<crate::limits::Limit>) -> bool {
+        match self.panes.get_mut(pane) {
+            Some(entry) if entry.limit != limit => {
+                entry.limit = limit;
+                self.revision += 1;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Says what pane `pane`'s lead has running in the background. Returns
+    /// whether that changed anything; a pane that is not there changes
+    /// nothing.
+    pub fn set_jobs(&mut self, pane: &str, jobs: Vec<crate::jobs::Job>) -> bool {
+        match self.panes.get_mut(pane) {
+            Some(entry) if entry.jobs != jobs => {
+                entry.jobs = jobs;
+                self.revision += 1;
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Marks `worktree` unread, as its row's menu does, or takes the mark

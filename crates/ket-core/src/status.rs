@@ -110,9 +110,9 @@ pub enum GitOperation {
 impl GitOperation {
     /// What to call it in a sentence — the noun, not the participle.
     ///
-    /// "in the middle of a rebase", not "rebasing". The tag the sidebar draws
-    /// wants the other grammar and keeps its own spelling; see
-    /// `ket_ui::tree::git_operation_label`.
+    /// "in the middle of a rebase", not "rebasing". The word a sidebar row
+    /// leads with wants the other grammar and keeps its own spelling; see
+    /// `ket_ui::tree::state::operation_word`.
     pub fn label(self) -> &'static str {
         match self {
             Self::Merge => "merge",

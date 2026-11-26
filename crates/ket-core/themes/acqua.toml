@@ -41,6 +41,7 @@ running = "#34e08c"
 attention = "#8c98ff"
 failed = "#ff5566"
 merging = "#e08cff"
+unread = "#ff6fae"
 
 [quota]
 warm = "#ffe45c"

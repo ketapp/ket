@@ -14,6 +14,7 @@ mod common;
 use common::Sandbox;
 
 mod codex;
+mod ended;
 mod grok;
 mod opencode;
 

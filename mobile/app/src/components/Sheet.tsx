@@ -23,6 +23,7 @@ import {
   Pressable,
   StyleSheet,
   Text,
+  TouchableOpacity,
   View,
 } from 'react-native';
 import Animated, {
@@ -39,9 +40,10 @@ import Animated, {
 } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { useCovered } from '../lib/blackout';
 import { READABLE_WIDTH } from '../lib/layout';
-import { font, size, t } from '../lib/theme';
-import { surface } from './ui/surface';
+import { blend, font, size, t } from '../lib/theme';
+import { PRESSED, surface } from './ui/surface';
 import { KeyboardLift, useLift } from './KeyboardLift';
 import { Check, Close } from './icons';
 
@@ -83,6 +85,9 @@ export interface SheetProps {
   children: ReactNode;
   /** Drawn in the sheet's room over the sheet — a menu opened from it. */
   overlay?: ReactNode;
+  /** `warn`: a sheet about something that has stopped — an agent out of
+   * usage — drawn warm, in the quota's colour, with its title in it. */
+  tone?: 'warn';
   onMeasure?: (measure: SheetMeasure) => void;
 }
 
@@ -102,8 +107,26 @@ export function Sheet({
     setWas(open);
     if (open) setDown(false);
   }
+  // A blackout's cover is drawn in the app, and a modal is over the app: a
+  // sheet up as one begins would stand on the cover. Its modal hides at
+  // once and it asks to be closed. Its way out is finished once the cover
+  // lifts — the panel, mounted again already shut, says it is gone — so
+  // whatever waits on `onGone` still hears it.
+  const covered = useCovered();
+  const taken = useEffectEvent(() => {
+    if (open) onClose();
+  });
+  useEffect(() => {
+    if (covered) taken();
+  }, [covered, open]);
   return (
-    <Modal visible={open || !down} transparent animationType="none" onRequestClose={onClose} statusBarTranslucent>
+    <Modal
+      visible={(open || !down) && !covered}
+      transparent
+      animationType="none"
+      onRequestClose={onClose}
+      statusBarTranslucent
+    >
       <SheetPanel
         open={open}
         onClose={onClose}
@@ -127,6 +150,7 @@ export function SheetPanel({
   children,
   overlay,
   onMeasure,
+  tone,
 }: SheetProps & {
   /** The sheet is down and the dimming gone. */
   onGone?: () => void;
@@ -238,6 +262,7 @@ export function SheetPanel({
             <Animated.View
               style={[
                 styles.sheet,
+                tone === 'warn' && warm.sheet,
                 {
                   paddingBottom: foot,
                   maxHeight: room.height ? (typing ? Math.max(300, room.height * 0.58) : room.height - insets.top - 8) : undefined,
@@ -246,20 +271,26 @@ export function SheetPanel({
               ]}
               onLayout={(e) => arrive(e.nativeEvent.layout.height)}
             >
-              <View style={styles.grabber} />
+              <View style={[styles.grabber, tone === 'warn' && warm.grabber]} />
               <View style={styles.head}>
                 <View style={styles.headText}>
-                  <Text style={styles.title} numberOfLines={1}>
+                  <Text style={[styles.title, tone === 'warn' && warm.title]} numberOfLines={1}>
                     {title}
                   </Text>
                   {detail ? (
-                    <Text style={styles.detail} numberOfLines={1}>
+                    <Text style={[styles.detail, tone === 'warn' && warm.detail]} numberOfLines={1}>
                       {detail}
                     </Text>
                   ) : null}
                 </View>
-                <Pressable accessibilityRole="button" accessibilityLabel="Close" onPress={onClose} hitSlop={8} style={styles.close}>
-                  <Close size={16} color={t.dim} weight={2} />
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Close"
+                  onPress={onClose}
+                  hitSlop={8}
+                  style={[styles.close, tone === 'warn' && warm.close]}
+                >
+                  <Close size={16} color={tone === 'warn' ? WARM_DIM : t.dim} weight={2} />
                 </Pressable>
               </View>
               <Animated.ScrollView
@@ -280,6 +311,23 @@ export function SheetPanel({
     </View>
   );
 }
+
+/** The dim ink of a warm sheet. */
+const WARM_DIM = blend(t.dim, t.quotaHot, 0.3);
+
+/** A `warn` sheet's own colours: the card warmed by the quota's colour, so
+ * the dimming behind it and the sheet's edge read as a stop, not a menu. */
+export const warm = StyleSheet.create({
+  sheet: { backgroundColor: blend(t.backdrop, t.quotaHot, 0.09), borderColor: blend(t.backdrop, t.quotaHot, 0.42) },
+  grabber: { backgroundColor: blend(t.backdrop, t.quotaHot, 0.33) },
+  title: { color: blend(t.quotaHot, t.text, 0.3) },
+  detail: { color: WARM_DIM },
+  close: { backgroundColor: blend(t.backdrop, t.quotaHot, 0.15) },
+  /** A well set into a warm sheet. */
+  well: { backgroundColor: blend(t.backdrop, t.quotaHot, 0.2) },
+  /** An edge on a warm sheet: a secondary button's, a track's. */
+  edge: { borderColor: blend(t.backdrop, t.quotaHot, 0.33) },
+});
 
 /** A well of rows in a sheet, a hairline between each. */
 export function SheetList({ children }: { children: ReactNode }) {
@@ -329,13 +377,14 @@ export function SheetItem({
 }) {
   const off = held && !on;
   return (
-    <Pressable
+    <TouchableOpacity
       accessibilityRole={role}
       accessibilityLabel={label}
       accessibilityState={role === 'radio' ? { checked: on === true, disabled: held === true } : { selected: on, disabled: held }}
       disabled={held || on}
       onPress={onPress}
-      style={({ pressed }) => [styles.item, pressed && { backgroundColor: t.selection }]}
+      activeOpacity={PRESSED}
+      style={styles.item}
     >
       {mark}
       <View style={styles.words}>
@@ -352,7 +401,7 @@ export function SheetItem({
         ) : null}
       </View>
       {icon ?? (on ? <Check size={17} color={t.brand} weight={2.6} /> : null)}
-    </Pressable>
+    </TouchableOpacity>
   );
 }
 

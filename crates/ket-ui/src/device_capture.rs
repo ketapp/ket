@@ -37,6 +37,9 @@ use crate::ui::{CAPTION, LABEL};
 /// The strip's height: the style guide's strip.
 const STRIP_H: Pixels = px(44.0);
 
+/// One line of the device's name, OS and state: what the strip keeps.
+const LINE_H: Pixels = px(20.0);
+
 /// How long the emulator is given to answer for a screenshot.
 const ANDROID_SHOT: Duration = Duration::from_secs(10);
 
@@ -83,24 +86,43 @@ pub(crate) fn device_strip(
         .pr(px(10.0))
         .border_b_1()
         .border_color(paint(t.rule))
+        // Whatever doesn't fit beside the buttons wraps onto a second line,
+        // clipped away: "booted" goes first, then the OS, and only then does
+        // the name shorten. Before, the name went first and the rest ran on
+        // under the buttons.
         .child(
             div()
                 .flex()
+                .flex_1()
+                .flex_wrap()
                 .items_center()
                 .gap(px(8.0))
                 .min_w_0()
-                .child(sized_icon(Icon::Smartphone, px(14.0), paint(t.text.dim)))
+                .h(LINE_H)
+                .overflow_hidden()
                 .child(
                     div()
-                        .text_size(LABEL)
-                        .text_color(paint(t.text.primary))
-                        .truncate()
-                        .child(line.name),
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .min_w_0()
+                        .h(LINE_H)
+                        .child(sized_icon(Icon::Smartphone, px(14.0), paint(t.text.dim)))
+                        .child(
+                            div()
+                                .text_size(LABEL)
+                                .text_color(paint(t.text.primary))
+                                .truncate()
+                                .child(line.name),
+                        ),
                 )
                 .children(line.os.map(|os| {
                     div()
                         .prose()
+                        .flex()
                         .flex_none()
+                        .items_center()
+                        .h(LINE_H)
                         .text_size(LABEL)
                         .text_color(paint(t.text.dim))
                         .child(os)
@@ -110,6 +132,7 @@ pub(crate) fn device_strip(
                         .flex()
                         .flex_none()
                         .items_center()
+                        .h(LINE_H)
                         .gap(px(6.0))
                         .ml(px(4.0))
                         .text_size(CAPTION)
@@ -123,7 +146,6 @@ pub(crate) fn device_strip(
                         .child("booted"),
                 ),
         )
-        .child(div().flex_grow())
         .children(controls)
         .child(vertical_rule(t).h(px(16.0)).mx(px(6.0)))
         .child(capture)

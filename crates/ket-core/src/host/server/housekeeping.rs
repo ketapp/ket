@@ -101,15 +101,19 @@ pub(super) fn forward_hooks(host: &Host, listener: &Listener) {
         let lines = listener.drain_statuslines();
         if !reports.is_empty() {
             let known = host.pane_keys();
-            let changed = {
+            let (changed, ended) = {
                 let mut status = lock(&host.status);
-                reports.iter().fold(false, |changed, report| {
+                let changed = reports.iter().fold(false, |changed, report| {
                     status.report(report, |pane| known.contains(pane)) | changed
-                })
+                });
+                (changed, status.take_ended())
             };
             if changed {
                 host.broadcast_status();
             }
+            host.limits.heard(ended, &lines);
+        } else if !lines.is_empty() {
+            host.limits.heard(Vec::new(), &lines);
         }
         // Every tick, reports or not: a held hook whose script has gone —
         // its session ended, or its prompt was dismissed — is let go of as

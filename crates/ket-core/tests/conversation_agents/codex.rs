@@ -133,3 +133,29 @@ fn a_missing_rollout_is_an_error() {
     let sandbox = Sandbox::new("codex-missing");
     assert!(read_codex(&sandbox.path("nope.jsonl"), 0).is_err());
 }
+
+#[test]
+fn a_long_rollouts_first_ask_is_read_from_its_start() {
+    let sandbox = Sandbox::new("codex-first-ask");
+    let path = sandbox.path("rollout.jsonl");
+    let filler = "x".repeat(4_000);
+    let mut records = vec![
+        json!({"type": "session_meta", "payload": {"id": "abc"}}),
+        codex_words("UserMessage", "Port the poller to tokio"),
+    ];
+    // Past what a first read keeps of the recent end.
+    records.extend((0..700).map(|_| codex_words("AgentMessage", &filler)));
+    records.push(codex_words("UserMessage", "Now the tests"));
+    jsonl(&path, &records);
+
+    let transcript = ket_core::conversation::Transcript::Codex(path.clone());
+    let tail = read_codex(&path, 0).unwrap();
+    assert!(
+        !tail
+            .turns
+            .iter()
+            .any(|turn| turn.text == "Port the poller to tokio")
+    );
+    let first = transcript.first_ask().unwrap();
+    assert_eq!(shape(&[first]), [user("Port the poller to tokio")]);
+}

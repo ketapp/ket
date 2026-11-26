@@ -2,7 +2,7 @@
 // its mark, words and chevron, on the shared mark column.
 
 import { Fragment, type ReactNode } from 'react';
-import { Pressable, StyleSheet, Text, TouchableOpacity, View, type StyleProp, type TextStyle } from 'react-native';
+import { StyleSheet, Text, TouchableOpacity, View, type StyleProp, type TextStyle } from 'react-native';
 
 import { caption, type Run } from '../../lib/markdown';
 import { font, size, t, tint } from '../../lib/theme';
@@ -10,6 +10,7 @@ import { Chevron, ChevronDown, Pin } from '../icons';
 import { Fade, Wipe } from '../Swap';
 import { Badge, Dot, TILE } from './marks';
 import { shared } from './shared';
+import { PRESSED } from './surface';
 
 /**
  * A project's heading, on the desk over its card: its badge and its name.
@@ -24,6 +25,9 @@ export function ProjectHeading({
   name,
   color,
   icon,
+  mark,
+  detail,
+  end,
   collapsed,
   pinned,
   waiting,
@@ -31,18 +35,24 @@ export function ProjectHeading({
   onHold,
 }: {
   name: string;
-  color: string;
+  color?: string;
   icon?: string;
+  /** What stands in the badge's place: an agent's tile, over its plan. */
+  mark?: ReactNode;
+  /** A quiet line after the name, taking the room it leaves: the plan. */
+  detail?: string;
+  /** What the heading ends in, before any chevron: what is running. */
+  end?: ReactNode;
   collapsed?: boolean;
   pinned?: boolean;
   waiting?: boolean;
   onToggle?: () => void;
   onHold?: () => void;
 }) {
-  // Pressed, it dims: on the desk, a fill would be a box round it.
+  // Pressed, it dims, as everything pressed does.
   return (
     <TouchableOpacity
-      activeOpacity={0.6}
+      activeOpacity={PRESSED}
       onPress={onToggle}
       onLongPress={onHold}
       disabled={!onToggle && !onHold}
@@ -51,7 +61,7 @@ export function ProjectHeading({
       accessibilityHint={onHold ? 'Hold for more' : undefined}
       style={styles.project}
     >
-      <Badge name={name} color={color} icon={icon} size={20} />
+      {mark ?? <Badge name={name} color={color ?? t.faint} icon={icon} size={20} />}
       <View style={styles.projectLine}>
         <Text style={styles.projectName} numberOfLines={1}>
           {name}
@@ -62,7 +72,14 @@ export function ProjectHeading({
           </View>
         ) : null}
       </View>
-      <View style={styles.projectRest} />
+      {detail ? (
+        <Text style={styles.projectDetail} numberOfLines={1}>
+          {detail}
+        </Text>
+      ) : (
+        <View style={styles.projectRest} />
+      )}
+      {end}
       {collapsed && waiting ? <Dot color={t.attention} size={6} /> : null}
       {onToggle ? (
         collapsed ? (
@@ -75,12 +92,12 @@ export function ProjectHeading({
   );
 }
 
-/** A section's label on the desk, over its card: a dot in its signal's
- * colour and its name — "Waiting on you". */
-export function SectionLabel({ children, color }: { children: string; color: string }) {
+/** A section's label on the desk, over its card: its name, after a dot in
+ * its signal's colour when it has one — "Waiting on you". */
+export function SectionLabel({ children, color }: { children: string; color?: string }) {
   return (
-    <View accessibilityRole="header" style={styles.section}>
-      <Dot color={color} size={7} />
+    <View accessible accessibilityRole="header" style={styles.section}>
+      {color ? <Dot color={color} size={7} /> : null}
       <Text style={styles.sectionText}>{children}</Text>
     </View>
   );
@@ -106,6 +123,7 @@ export function Row({
   titleColor,
   detail,
   detailColor,
+  lead,
   markdown,
   state,
   meta,
@@ -116,6 +134,7 @@ export function Row({
   live,
   prompt,
   ruled,
+  wrap,
   actions,
   onPress,
   onLongPress,
@@ -128,6 +147,10 @@ export function Row({
   titleColor?: string;
   detail?: string;
   detailColor?: string;
+  /** A word leading the detail in its own colour, semibold, as the desktop's
+   * sidebar leads a row's second line: "Unread". The detail follows in its
+   * own ink, or is left out when empty. */
+  lead?: { word: string; color: string };
   /** The detail is an agent's one-line report: paired backticks, `**strong**`
    * and `*emphasis*` draw, rather than as marks. */
   markdown?: boolean;
@@ -149,6 +172,9 @@ export function Row({
    * card's edges and the rules between rows; a 24 pt tile for its mark, 12
    * from its words; its name in medium and its line a step larger. */
   ruled?: boolean;
+  /** Its line runs on to as many lines as it needs, the row growing round
+   * it from the top, for a setting whose line says what it does. */
+  wrap?: boolean;
   /** What a screen reader offers on it beyond a tap: what holding it does. */
   actions?: { name: string; label: string; run: () => void }[];
   onPress?: () => void;
@@ -156,13 +182,24 @@ export function Row({
   onLongPress?: () => void;
   children?: ReactNode;
 }) {
-  const detailText = (text: string, color?: string, style?: StyleProp<TextStyle>) =>
+  const words = (text: string, color?: string, style?: StyleProp<TextStyle>) =>
     markdown ? (
       <Caption text={text} color={color} style={[ruled && styles.ruledDetail, style]} />
     ) : (
-      <Text style={[shared.detail, ruled && styles.ruledDetail, color ? { color } : null, style]} numberOfLines={1}>
+      <Text style={[shared.detail, ruled && styles.ruledDetail, color ? { color } : null, style]} numberOfLines={wrap ? undefined : 1}>
         {text}
       </Text>
+    );
+  const detailText = (text: string, color?: string, style?: StyleProp<TextStyle>, led = lead) =>
+    led ? (
+      <View style={styles.leadLine}>
+        <Text style={[shared.detail, ruled && styles.ruledDetail, styles.lead, { color: led.color }]} numberOfLines={1}>
+          {led.word}
+        </Text>
+        {text ? <View style={styles.afterLead}>{words(text, color, style)}</View> : null}
+      </View>
+    ) : (
+      words(text, color, style)
     );
   const stateMark = (s: RowState) => (
     <>
@@ -188,10 +225,10 @@ export function Row({
         >
           {title}
         </Text>
-        {detail && live ? (
+        {(detail || lead) && live ? (
           <Wipe
-            token={`${prompt ?? ''} ${detail}`}
-            item={{ detail, detailColor, prompt }}
+            token={`${prompt ?? ''} ${lead?.word ?? ''} ${detail ?? ''}`}
+            item={{ detail: detail ?? '', detailColor, prompt, lead }}
             fill={marker ? t.hover : t.card}
             style={[styles.detailLine, prompt ? styles.promptLine : null]}
           >
@@ -203,12 +240,12 @@ export function Row({
                   <View style={[styles.cursor, ruled && styles.ruledCursor]} />
                 </>
               ) : (
-                detailText(it.detail, it.detailColor)
+                detailText(it.detail, it.detailColor, undefined, it.lead)
               )
             }
           </Wipe>
-        ) : detail ? (
-          detailText(detail, detailColor)
+        ) : detail || lead ? (
+          detailText(detail ?? '', detailColor)
         ) : null}
       </View>
       {meta}
@@ -227,7 +264,7 @@ export function Row({
     </>
   );
   return (
-    <Pressable
+    <TouchableOpacity
       onPress={onPress}
       onLongPress={onLongPress}
       disabled={!onPress && !onLongPress}
@@ -235,19 +272,34 @@ export function Row({
       onAccessibilityAction={
         actions ? (event) => actions.find((a) => a.name === event.nativeEvent.actionName)?.run() : undefined
       }
-      style={({ pressed }) => [
+      activeOpacity={PRESSED}
+      style={[
         styles.row,
         ruled && styles.ruledRow,
+        wrap && styles.wrapRow,
         children ? styles.rowWithTree : null,
         small && { minHeight: size.rowSm },
         marker && { backgroundColor: t.hover },
-        pressed && { backgroundColor: t.selection },
       ]}
     >
       {marker ? <View style={styles.marker} /> : null}
       {children ? <View style={[styles.rowMain, ruled && styles.ruledRow]}>{main}</View> : main}
       {children}
-    </Pressable>
+    </TouchableOpacity>
+  );
+}
+
+/** Code inside a line of words, on its fill. On iOS the fill is a rounded
+ * chip the height of its letters, one for each line the code wraps onto
+ * (modules/ket-text). A sliver of space at each end, which a line cannot
+ * break at, gives the letters room inside it. */
+export function InlineCode({ style, children }: { style: StyleProp<TextStyle>; children: string }) {
+  return (
+    <Text style={style}>
+      <Text style={styles.codeRoom}>{' '}</Text>
+      {children}
+      <Text style={styles.codeRoom}>{' '}</Text>
+    </Text>
   );
 }
 
@@ -280,9 +332,9 @@ function CaptionRuns({ runs, ink }: { runs: Run[]; ink: string }) {
             return <Fragment key={at}>{piece.text}</Fragment>;
           case 'code':
             return (
-              <Text key={at} style={[styles.captionCode, { backgroundColor: tint(ink, 0.12) }]}>
+              <InlineCode key={at} style={[styles.captionCode, { backgroundColor: tint(ink, 0.12) }]}>
                 {piece.text}
-              </Text>
+              </InlineCode>
             );
           case 'strong':
           case 'em':
@@ -320,7 +372,7 @@ const CHEVRON_RIGHT = 8.1 / 24;
 const styles = StyleSheet.create({
   // On the desk, in 4 from the card's edge under it.
   project: {
-    height: 36,
+    height: 40,
     flexDirection: 'row',
     alignItems: 'center',
     gap: 10,
@@ -330,6 +382,7 @@ const styles = StyleSheet.create({
   projectLine: { flexShrink: 1, flexDirection: 'row', alignItems: 'center', gap: 6 },
   projectName: { flexShrink: 1, fontFamily: font.proseSemibold, fontSize: size.title, lineHeight: 20, color: t.text },
   projectRest: { flex: 1 },
+  projectDetail: { flex: 1, minWidth: 0, fontFamily: font.chrome, fontSize: size.label, color: t.faint },
   section: { height: 28, flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 4 },
   sectionText: { fontFamily: font.proseSemibold, fontSize: size.label, color: t.dim },
   row: {
@@ -346,6 +399,7 @@ const styles = StyleSheet.create({
   rowWithTree: { flexDirection: 'column', alignItems: 'stretch', gap: 3 },
   rowMain: { flexDirection: 'row', alignItems: 'center', gap: MARK_GAP },
   ruledRow: { gap: TILE_GAP, borderRadius: 0 },
+  wrapRow: { alignItems: 'flex-start', paddingVertical: 14 },
   tileSlot: { width: TILE, alignItems: 'center' },
   fadedRuled: { opacity: 0.5 },
   ruledName: { fontFamily: font.chromeMedium, lineHeight: 18 },
@@ -357,10 +411,17 @@ const styles = StyleSheet.create({
   faded: { opacity: 0.55 },
   name: { fontFamily: font.chrome, fontSize: size.name, color: t.text },
   captionCode: { fontFamily: font.code },
+  // 3 pt: a monospaced face's space is six tenths of its size.
+  codeRoom: { fontSize: 5 },
   captionStrong: { fontFamily: font.proseMedium },
   captionEm: { fontStyle: 'italic' },
   // Only as wide as its words, so the wipe starts at the text's end.
   detailLine: { alignSelf: 'flex-start', maxWidth: '100%' },
+  // The desktop's 4 pt between the lead word and the agent's own: the change
+  // of colour and weight already separates them.
+  leadLine: { flexDirection: 'row', alignItems: 'center', gap: 4, maxWidth: '100%' },
+  lead: { fontFamily: font.proseSemibold, flexShrink: 0 },
+  afterLead: { flexShrink: 1, minWidth: 0 },
   // A terminal's line: the prompt, the words, the cursor, 6 apart. The words
   // give way first, so the cursor stays on the line however long they run.
   promptLine: { gap: 6 },

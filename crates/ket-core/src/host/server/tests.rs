@@ -670,6 +670,7 @@ fn same_program_recognises_its_own_process() {
 /// A hook report from pane `key` of worktree `wt`, asking nothing yet.
 fn prompt_report(key: &str) -> agent_hooks::HookReport {
     agent_hooks::HookReport {
+        failure: None,
         agent: "claude".to_owned(),
         event: agent_hooks::HookEvent::PermissionRequest,
         worktree: Some("wt".to_owned()),
@@ -696,7 +697,7 @@ fn prompt_report(key: &str) -> agent_hooks::HookReport {
 }
 
 /// A greeted window, past its welcome and first status snapshot.
-fn window(host: &Arc<Host>) -> (Arc<Out>, UnixStream) {
+pub(super) fn window(host: &Arc<Host>) -> (Arc<Out>, UnixStream) {
     let (out, mut reader) = out_pair();
     lock(&host.outs).push((1, out.clone()));
     assert!(handle(
@@ -717,4 +718,4 @@ fn window(host: &Arc<Host>) -> (Arc<Out>, UnixStream) {
 }
 
 mod automations;
-mod handoffs;
+pub(super) mod handoffs;

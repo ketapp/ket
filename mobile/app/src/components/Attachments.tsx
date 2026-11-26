@@ -3,13 +3,13 @@
 // yours. See lib/attach.ts for picking them.
 
 import { useEffect } from 'react';
-import { Image, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Image, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import Animated, { Easing, FadeInDown, useAnimatedStyle, useSharedValue, withRepeat, withTiming } from 'react-native-reanimated';
 import Svg, { Circle } from 'react-native-svg';
 
 import { type Attachment, bytesLabel } from '../lib/attach';
 import { font, size, t, tint } from '../lib/theme';
-import { surface } from './ui/surface';
+import { PRESSED, surface } from './ui/surface';
 import type { MenuItem, MenuSection } from './FloatMenu';
 import { Camera, Clipboard, Close, FileGlyph, Info, Picture } from './icons';
 
@@ -106,15 +106,16 @@ export function Tray({ files, onRemove }: { files: Attachment[]; onRemove: (key:
               </View>
             </View>
           )}
-          <Pressable
+          <TouchableOpacity
             accessibilityRole="button"
             accessibilityLabel={`Remove ${file.name}`}
             hitSlop={8}
             onPress={() => onRemove(file.key)}
-            style={({ pressed }) => [styles.remove, pressed && { backgroundColor: t.border }]}
+            activeOpacity={PRESSED}
+            style={styles.remove}
           >
             <Close size={10} color={t.text} weight={3.2} />
-          </Pressable>
+          </TouchableOpacity>
         </Animated.View>
       ))}
     </ScrollView>

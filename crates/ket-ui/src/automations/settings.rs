@@ -443,7 +443,7 @@ impl Shell {
             .find(|(minutes, _)| *minutes == edit.catch_up)
             .map_or("As its repeat suggests", |(_, label)| label);
         let catch_menu = edit.catch_up_menu.as_ref().map(|menu| {
-            menu.view(
+            menu.dropdown_view(
                 t,
                 cx,
                 |shell, minutes, cx| {

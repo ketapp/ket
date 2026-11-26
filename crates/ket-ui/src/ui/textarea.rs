@@ -49,6 +49,7 @@ pub(crate) struct TextArea {
     height: Pixels,
     inset: (Pixels, Pixels),
     active: bool,
+    read_only: bool,
     placeholder: Option<(SharedString, Pixels)>,
     footer: Option<AnyElement>,
     aside: Option<(AnyElement, Pixels)>,
@@ -62,6 +63,7 @@ pub(crate) fn textarea(id: impl Into<ElementId>, body: AnyElement, height: Pixel
         height,
         inset: (PAD_TOP, PAD_LEFT),
         active: false,
+        read_only: false,
         placeholder: None,
         footer: None,
         aside: None,
@@ -80,6 +82,14 @@ impl TextArea {
     /// Whether the draft has the keyboard: the edge takes the focus ring.
     pub(crate) fn active(mut self, active: bool) -> Self {
         self.active = active;
+        self
+    }
+
+    /// A well that only shows what is in it — a brief about to be sent,
+    /// to read before sending — so its edge does not answer the pointer as
+    /// one to type in does.
+    pub(crate) fn read_only(mut self) -> Self {
+        self.read_only = true;
         self
     }
 
@@ -124,7 +134,7 @@ impl TextArea {
             .bg(paint(t.sunken))
             .border_1()
             .border_color(paint(if self.active { t.focus_ring } else { t.sunken }))
-            .when(!self.active, |el| {
+            .when(!self.active && !self.read_only, |el| {
                 el.hover(|style| style.border_color(crate::paint::alpha(paint(t.text.dim), 0.28)))
             })
             .child(

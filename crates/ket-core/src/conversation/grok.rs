@@ -67,7 +67,7 @@ pub(super) fn read(path: &Path, after: u64) -> Result<Read_> {
 /// `updates.jsonl`, unless the session has moved on since — a prompt, the
 /// agent's words or thinking, or a tool started after it. `None` for a turn
 /// that ended cleanly or was cancelled.
-fn ended_on(updates: &Path) -> Option<String> {
+pub(super) fn ended_on(updates: &Path) -> Option<String> {
     let mut file = std::fs::File::open(updates).ok()?;
     let length = file.metadata().ok()?.len();
     let start = length.saturating_sub(UPDATES_READ_BYTES);
@@ -124,7 +124,7 @@ fn ended_on(updates: &Path) -> Option<String> {
 /// user records too, without one. The agent's words are its `content`, and
 /// each of its `tool_calls` is a tool, named and keyed the way Grok's hooks
 /// are before [`crate::agent_hooks`] renames them to Claude's.
-fn turns_of(record: &serde_json::Value, turns: &mut Vec<Turn>) {
+pub(super) fn turns_of(record: &serde_json::Value, turns: &mut Vec<Turn>) {
     match record.get("type").and_then(|t| t.as_str()) {
         Some("user") if record.get("prompt_index").is_some() => {
             let images = match record.get("content") {

@@ -5,6 +5,7 @@
 //!
 //! - an agent starting to wait on you;
 //! - one that was at work going quiet: finished; or one failing;
+//! - one stopped because its plan ran out, and later that limit resetting;
 //! - a pull request's checks starting to fail.
 //!
 //! The first look only learns what is already so. Nothing is sent at once:
@@ -33,6 +34,12 @@ pub(in crate::host) enum Kind {
     /// covers both.
     Failed,
     Checks,
+    /// An agent's turn was refused because its plan ran out. Said in place
+    /// of "finished", which is all that would otherwise be said of it.
+    Limit,
+    /// The limit an agent was stopped at has reset, and nobody has carried
+    /// on since.
+    Reset,
 }
 
 /// Where a tap on the notification goes on the phone.
@@ -73,6 +80,17 @@ struct Seen {
     activity: Activity,
     agent: String,
     checks_failed: bool,
+    stopped: Option<Stopped>,
+}
+
+/// A worktree's session stopped at a limit, as much as tells one look from
+/// the next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Stopped {
+    /// When it was stopped: another time is another stop.
+    since_ms: u64,
+    /// Whether the limit has reset since.
+    over: bool,
 }
 
 /// What the last look saw, and what is waiting out its delay.
@@ -103,16 +121,27 @@ impl Notices {
     ) -> Vec<Notice> {
         let before = self.seen.take();
         let mut seen = HashMap::new();
+        let now_ms = crate::now_ms();
         for project in &snapshot.projects {
             for worktree in &project.worktrees {
                 let activity = activity_of(worktree);
+                let stopped = stopped_at(worktree).map(|at| Stopped {
+                    since_ms: at.limit.since_ms,
+                    over: over(at.limit, now_ms),
+                });
                 let was = before.as_ref().and_then(|before| before.get(&worktree.id));
                 let agent = agent_of(worktree)
                     .or_else(|| was.map(|was| was.agent.clone()))
                     .unwrap_or_default();
                 let checks_failed = checks_failed(worktree);
                 if before.is_some() {
-                    for notice in news(project, worktree, activity, was, &agent, checks_failed) {
+                    let limits = limit_news(project, worktree, was, stopped, now_ms);
+                    for notice in news(project, worktree, activity, was, &agent, checks_failed)
+                        .into_iter()
+                        // After the rest: "ran out" takes the place of the
+                        // "finished" the same stop looks like.
+                        .chain(limits)
+                    {
                         self.pending.retain(|(_, waiting)| waiting.id != notice.id);
                         self.pending.push((now + after, notice));
                     }
@@ -123,6 +152,7 @@ impl Notices {
                         activity,
                         agent,
                         checks_failed,
+                        stopped,
                     },
                 );
             }
@@ -247,6 +277,141 @@ fn news(
     news
 }
 
+/// Where a worktree is stopped at a limit: the session's limit, the agent
+/// whose it is, and its chat when its tab is open.
+struct StoppedAt<'a> {
+    limit: &'a proto::SessionLimit,
+    agent: &'a str,
+    chat: Option<u64>,
+}
+
+/// The limit one of `worktree`'s sessions is stopped at — the newest stop,
+/// in an open tab or an asleep one.
+fn stopped_at(worktree: &proto::WorktreeSummary) -> Option<StoppedAt<'_>> {
+    let open = worktree
+        .terminals
+        .iter()
+        .filter(|terminal| !terminal.closed)
+        .filter_map(|terminal| {
+            terminal.limit.as_ref().map(|limit| StoppedAt {
+                limit,
+                agent: &terminal.agent,
+                chat: Some(terminal.id),
+            })
+        });
+    let asleep = worktree.asleep.iter().filter_map(|tab| {
+        tab.limit.as_ref().map(|limit| StoppedAt {
+            limit,
+            agent: &tab.agent,
+            chat: None,
+        })
+    });
+    open.chain(asleep).max_by_key(|at| at.limit.since_ms)
+}
+
+/// Whether `limit` has reset by `now_ms`. One with no reset named never has.
+fn over(limit: &proto::SessionLimit, now_ms: u64) -> bool {
+    limit.resets_at_ms != 0 && limit.resets_at_ms <= now_ms
+}
+
+/// What has happened to the limit `worktree` is stopped at since it was
+/// `was`: stopped at one, or the one it was stopped at resetting.
+fn limit_news(
+    project: &proto::ProjectSummary,
+    worktree: &proto::WorktreeSummary,
+    was: Option<&Seen>,
+    stopped: Option<Stopped>,
+    now_ms: u64,
+) -> Option<Notice> {
+    let (at, stopped) = stopped_at(worktree).zip(stopped)?;
+    let before = was.and_then(|was| was.stopped);
+    let hit = !stopped.over && before.is_none_or(|before| before.since_ms != stopped.since_ms);
+    let reset = stopped.over
+        && before.is_some_and(|before| !before.over && before.since_ms == stopped.since_ms);
+    if !hit && !reset {
+        return None;
+    }
+    let name = if worktree.name.is_empty() {
+        &worktree.branch
+    } else {
+        &worktree.name
+    };
+    let who = if at.agent.is_empty() {
+        "An agent".to_owned()
+    } else {
+        agent_label(at.agent)
+    };
+    let (kind, id, body) = if hit {
+        (
+            Kind::Limit,
+            format!("{}/finished", worktree.id),
+            limit_words(&who, at.limit, now_ms),
+        )
+    } else {
+        (
+            Kind::Reset,
+            // One for an agent, not one for each worktree it was stopped
+            // in: they all reset in the same moment.
+            format!(
+                "reset/{}",
+                crate::agents::harness(at.agent).to_ascii_lowercase()
+            ),
+            format!("{who}\u{2019}s limit has reset. It can carry on."),
+        )
+    };
+    Some(Notice {
+        kind,
+        id,
+        project: project.id.clone(),
+        worktree: worktree.id.clone(),
+        title: cut(&format!("{} \u{b7} {name}", project.name), MOST_TITLE),
+        body: cut(&body, MOST_BODY),
+        opens: at.chat.map_or(Opens::Worktree, Opens::Chat),
+        heard: Vec::new(),
+        prompt: None,
+        who,
+    })
+}
+
+/// What a stop at `limit` says — the phone's `limitWords`.
+fn limit_words(who: &str, limit: &proto::SessionLimit, now_ms: u64) -> String {
+    use proto::session_limit::Scope;
+    let what = if limit.scope == Scope::Model as i32 {
+        format!("{who} has reached its limit for this model")
+    } else {
+        format!("{who} has reached its usage limit")
+    };
+    match limit
+        .resets_at_ms
+        .checked_sub(now_ms)
+        .filter(|left| *left > 0)
+    {
+        Some(left) => format!("{what} and resets in about {}.", about(left)),
+        None => format!("{what}."),
+    }
+}
+
+/// A wait of `ms`, to the nearest unit a person plans by — the phone's
+/// `aboutDuration`.
+fn about(ms: u64) -> String {
+    const MINUTE: u64 = 60_000;
+    let minutes = ms.div_ceil(MINUTE).max(1);
+    let plural = |count: u64, unit: &str| {
+        if count == 1 {
+            format!("1 {unit}")
+        } else {
+            format!("{count} {unit}s")
+        }
+    };
+    if minutes < 90 {
+        plural(minutes, "minute")
+    } else if minutes < 36 * 60 {
+        plural((minutes + 30) / 60, "hour")
+    } else {
+        plural((minutes + 12 * 60) / (24 * 60), "day")
+    }
+}
+
 /// What a wait says, and the prompt it names: the newest, when ket knows it.
 fn waiting(who: &str, worktree: &proto::WorktreeSummary) -> (String, Option<u64>) {
     let question = worktree.question.as_ref();
@@ -302,6 +467,9 @@ fn still(notice: &mut Notice, snapshot: &proto::HostSnapshot) -> bool {
         }
         Kind::Failed => activity == Activity::Failed,
         Kind::Checks => checks_failed(worktree),
+        // Still stopped there: carried on with, there is nothing to say.
+        Kind::Limit => stopped_at(worktree).is_some_and(|at| !over(at.limit, crate::now_ms())),
+        Kind::Reset => stopped_at(worktree).is_some_and(|at| over(at.limit, crate::now_ms())),
     }
 }
 
@@ -413,3 +581,6 @@ fn cut(text: &str, most: usize) -> String {
     cut.push('\u{2026}');
     cut
 }
+
+#[cfg(test)]
+mod tests;

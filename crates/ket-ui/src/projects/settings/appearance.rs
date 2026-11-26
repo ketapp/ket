@@ -117,7 +117,7 @@ impl Shell {
             .gap(SWATCH_GAP)
             .children(self.swatch_rows(colour, cx));
         let colour =
-            stacked(self.item_label("Colour", Tip::Colour, shown, cx), swatches).child(named);
+            stacked(self.item_label("Color", Tip::Colour, shown, cx), swatches).child(named);
 
         div()
             .flex()

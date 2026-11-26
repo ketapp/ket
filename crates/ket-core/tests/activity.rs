@@ -14,6 +14,7 @@ use ket_core::subagents::{Subagent, SubagentState};
 
 fn hook_report(event: HookEvent, pane: &str, worktree: &str, at_ms: u64) -> HookReport {
     HookReport {
+        failure: None,
         agent: "claude".to_owned(),
         event,
         worktree: Some(worktree.to_owned()),

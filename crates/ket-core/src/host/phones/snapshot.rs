@@ -152,6 +152,49 @@ fn cold_cache(session: &str, floor: Option<&crate::cold::Floor>) -> Option<proto
     })
 }
 
+/// A limit a session is stopped at, as a phone is told of it.
+fn session_limit(limit: &crate::limits::Limit) -> proto::SessionLimit {
+    use crate::limits::{Scope, Window};
+    use proto::session_limit as wire;
+    proto::SessionLimit {
+        scope: match limit.scope {
+            Scope::Plan => wire::Scope::Plan,
+            Scope::Model => wire::Scope::Model,
+        } as i32,
+        window: match limit.window {
+            Window::Session => wire::Window::Session,
+            Window::Weekly => wire::Window::Weekly,
+            Window::Unknown => wire::Window::Unspecified,
+        } as i32,
+        since_ms: limit.since_ms,
+        resets_at_ms: limit.resets_at_ms.unwrap_or(0),
+        said: limit.said.clone(),
+    }
+}
+
+/// A background job as a phone is told of it.
+fn job_summary(job: &crate::jobs::Job) -> proto::Job {
+    use crate::jobs::Outcome;
+    use proto::job_ended::Outcome as Wire;
+    proto::Job {
+        pid: job.pid,
+        started_at_ms: job.started_at_ms,
+        command: job.command.clone(),
+        description: job.description.clone().unwrap_or_default(),
+        ports: job.ports.iter().copied().map(u32::from).collect(),
+        ended: job.ended.map(|ended| proto::JobEnded {
+            at_ms: ended.at_ms,
+            outcome: match ended.outcome {
+                Outcome::Completed => Wire::Completed,
+                Outcome::Failed => Wire::Failed,
+                Outcome::Stopped => Wire::Stopped,
+                Outcome::Gone => Wire::Gone,
+            } as i32,
+            exit: ended.exit,
+        }),
+    }
+}
+
 /// How much a snapshot says.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Detail {
@@ -166,7 +209,22 @@ enum Detail {
 
 /// The host as a connected phone sees it.
 pub(super) fn snapshot(host: &Host, phones: &Phones) -> proto::HostSnapshot {
-    build(host, phones, Detail::Full)
+    let blackout = phones.blackout_message();
+    // Shut out, a phone is told the blackout and how to reach this Mac, and
+    // nothing else: not a project's name.
+    if blackout
+        .as_ref()
+        .is_some_and(|blackout| blackout.until_ms != 0)
+    {
+        return proto::HostSnapshot {
+            addresses: phones.addresses(),
+            blackout,
+            ..Default::default()
+        };
+    }
+    let mut snapshot = build(host, phones, Detail::Full);
+    snapshot.blackout = blackout;
+    snapshot
 }
 
 /// What [`super::notices`] reads, and nothing it doesn't — see
@@ -335,6 +393,21 @@ fn build(host: &Host, phones: &Phones, detail: Detail) -> proto::HostSnapshot {
         let unread = key
             .as_deref()
             .is_some_and(|key| panes.iter().any(|pane| pane.pane == key && pane.unread));
+        // The limit its session is stopped at, from the host's ledger.
+        let limit = key.as_deref().and_then(|key| {
+            panes
+                .iter()
+                .find(|pane| pane.pane == key)
+                .and_then(|pane| pane.limit.as_ref())
+                .map(session_limit)
+        });
+        // What its agent left running in the background — see `crate::jobs`.
+        let jobs = key
+            .as_deref()
+            .filter(|_| full)
+            .and_then(|key| panes.iter().find(|pane| pane.pane == key))
+            .map(|pane| pane.jobs.iter().map(job_summary).collect())
+            .unwrap_or_default();
         // Its `/color`, for the phone to wear where the desktop does.
         let color = session
             .as_deref()
@@ -361,6 +434,8 @@ fn build(host: &Host, phones: &Phones, detail: Detail) -> proto::HostSnapshot {
             compacting,
             color,
             unread,
+            limit,
+            jobs,
             ..Default::default()
         };
         match worktrees.iter_mut().find(|w| w.id == worktree) {
@@ -396,6 +471,7 @@ fn build(host: &Host, phones: &Phones, detail: Detail) -> proto::HostSnapshot {
             agent: tab.agent.clone(),
             since_ms: tab.since_ms,
             freed_bytes: tab.freed_bytes,
+            limit: host.limit_in(&tab.key).as_ref().map(session_limit),
         };
         match worktrees.iter_mut().find(|w| w.id == tab.worktree) {
             Some(existing) => existing.asleep.push(summary),
@@ -603,6 +679,8 @@ fn build(host: &Host, phones: &Phones, detail: Detail) -> proto::HostSnapshot {
         usage: host.usage().iter().map(provider_usage).collect(),
         agents: host.agents(),
         addresses: phones.addresses(),
+        // Said by `snapshot`, which also decides whether any of this is.
+        blackout: None,
     }
 }
 

@@ -23,6 +23,7 @@ const collapsedEntry = (host: string) => `ket.collapsed.${host}`;
 const lastWorkEntry = (host: string) => `ket.lastwork.${host}`;
 const hiddenEntry = (host: string) => `ket.hidden.${host}`;
 const pinnedEntry = (host: string) => `ket.pinned.${host}`;
+const blackoutEntry = (host: string) => `ket.blackout.${host}`;
 /** Set once every entry has been moved to `KEYCHAIN`'s class. */
 const UPGRADED = 'ket.keychain';
 /** The theme's entries — see lib/theme.ts. */
@@ -159,6 +160,7 @@ export async function forgetHost(id: string): Promise<void> {
   await del(lastWorkEntry(id));
   await del(hiddenEntry(id));
   await del(pinnedEntry(id));
+  await del(blackoutEntry(id));
   const ids: string[] = JSON.parse((await get(HOSTS)) ?? '[]');
   await set(HOSTS, JSON.stringify(ids.filter((i) => i !== id)));
 }
@@ -229,6 +231,44 @@ export async function getLastWork(host: string): Promise<LastWork | null> {
   return stored ? (JSON.parse(stored) as LastWork) : null;
 }
 
+/** A desktop's blackout hours as it last said them — see lib/blackout.ts. */
+export interface SavedBlackout {
+  /** The blackouts that had not ended, soonest first: when each starts and
+   * ends, in Unix milliseconds. */
+  windows: [number, number][];
+  /** The desktop let devices in until then; zero for not. */
+  letInUntil: number;
+  /** The days they start on, in the desktop's words: "Every day". */
+  repeat: string;
+}
+
+/** Keeps `hours` as what `host` last said, or forgets them when `null`. */
+export async function saveBlackout(host: string, hours: SavedBlackout | null): Promise<void> {
+  if (hours) await set(blackoutEntry(host), JSON.stringify(hours));
+  else await del(blackoutEntry(host));
+}
+
+/** What `host` last said its blackout hours were; `null` for none, or for
+ * an entry that does not read as hours. */
+export async function getBlackout(host: string): Promise<SavedBlackout | null> {
+  const stored = await get(blackoutEntry(host));
+  if (!stored) return null;
+  try {
+    const read = JSON.parse(stored) as Partial<SavedBlackout>;
+    const windows = (Array.isArray(read.windows) ? read.windows : []).filter(
+      (window): window is [number, number] =>
+        Array.isArray(window) && window.length === 2 && window.every((at) => Number.isFinite(at)),
+    );
+    return {
+      windows,
+      letInUntil: Number.isFinite(read.letInUntil) ? Number(read.letInUntil) : 0,
+      repeat: typeof read.repeat === 'string' ? read.repeat : '',
+    };
+  } catch {
+    return null;
+  }
+}
+
 /** Which notices the phone posts — see lib/notices.ts. */
 export interface NotifyConfig {
   /** The switch over all of them. */
@@ -239,10 +279,18 @@ export interface NotifyConfig {
   finished: boolean;
   /** A check failed on a worktree's pull request. */
   checks: boolean;
+  /** An agent's plan ran out mid-task, or its limit has reset. */
+  limits: boolean;
 }
 
 /** Off until it is turned on: that is when the phone asks to show them. */
-export const DEFAULT_NOTIFY: NotifyConfig = { on: false, waiting: true, finished: true, checks: true };
+export const DEFAULT_NOTIFY: NotifyConfig = {
+  on: false,
+  waiting: true,
+  finished: true,
+  checks: true,
+  limits: true,
+};
 
 export async function getNotify(): Promise<NotifyConfig> {
   const stored = await get(NOTIFY);

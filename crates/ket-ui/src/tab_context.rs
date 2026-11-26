@@ -41,25 +41,29 @@ const RING: Pixels = px(12.0);
 const STROKE: Pixels = px(1.7);
 
 impl Shell {
-    /// The mark for one tab in `worktree`'s strip, when it is a terminal
-    /// whose agent is past the line: what the tab strip calls. An asleep tab
-    /// has no agent running to be full.
-    pub(crate) fn tab_context_mark(
+    /// The marks after one tab's label in `worktree`'s strip, when it is a
+    /// terminal: what its agent left running in the background (see
+    /// `tree::jobs`), then this ring once its agent is past the line. What the
+    /// tab strip calls. An asleep tab has no agent running to show either.
+    pub(crate) fn tab_marks(
         &self,
         worktree: Option<&WorktreeId>,
         kind: &TabKind,
         now_ms: u64,
         t: &Theme,
         cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
+    ) -> Vec<AnyElement> {
         let TabKind::Terminal(terminal) = kind else {
-            return None;
+            return Vec::new();
         };
         if self.asleep_terminals.contains_key(terminal) {
-            return None;
+            return Vec::new();
         }
-        let usage = self.tab_context(worktree?, *terminal, now_ms)?;
-        self.context_mark(*terminal, usage, t, cx)
+        let jobs = self.tab_jobs_mark(*terminal, t, cx);
+        let context = worktree
+            .and_then(|worktree| self.tab_context(worktree, *terminal, now_ms))
+            .and_then(|usage| self.context_mark(*terminal, usage, t, cx));
+        jobs.into_iter().chain(context).collect()
     }
 
     /// What `terminal`'s agent last said about its context window, while that

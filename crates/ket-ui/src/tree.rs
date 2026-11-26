@@ -23,9 +23,9 @@ use ket_core::workspace::Workspace;
 use crate::Shell;
 use crate::paint::{alpha, mix, paint};
 use crate::projects::rail_colour;
-use crate::ui::agent::{MARK, mark, provider};
+use crate::ui::agent::MARK;
 use crate::ui::button::{button, icon_button};
-use crate::ui::chip::{BADGE, Motion, image_badge, readout, status_dot, tag};
+use crate::ui::chip::{BADGE, image_badge, readout};
 use crate::ui::group::{button_group, segment};
 use crate::ui::icon::{Icon, icon, sized_icon};
 use crate::ui::row::{BLOCK_LEAD, block_row, block_row_with_rail, heading_row, row};
@@ -33,10 +33,16 @@ use ket_core::activity::{Activity, Foreground, Signal};
 use ket_core::agent_hooks::{self, Listener};
 use ket_core::subagents::{Subagent, SubagentState};
 
-use crate::fonts::Prose;
+use crate::fonts::{Prose, row_text};
 use crate::ui::{CAPTION, ICON, ICON_GAP, WELL_XS};
 
+mod branch;
+mod jobs;
 mod load;
+mod meta;
+pub(crate) mod state;
+
+use branch::branch;
 
 /// How often the usage history is written.
 ///
@@ -115,8 +121,7 @@ const INDENT: Pixels = px(8.0);
 /// rather than as a division of the panel.
 const COLUMN_INSET: Pixels = px(4.0);
 
-/// How far a washed project group's ground reaches past its rows on each
-/// side, taken out of [`COLUMN_INSET`] so the rows do not move.
+/// How far a washed project group's ground reaches above and below its rows.
 const OVERRIDE_PAD: Pixels = px(4.0);
 
 /// How far a mark's well reaches past the mark's column on each side: a
@@ -134,8 +139,8 @@ const MARK_WELL_BLEED: Pixels = px(2.0);
 const GLOW_BLEED: Pixels = px(4.0);
 
 /// The filter strip's padding, and so where its button group starts — which
-/// is also how far in from the sidebar's edges a pinned project's glow stops,
-/// so the glow's edge lines up with the group's above it.
+/// is also how far in from the sidebar's edges a pinned project's glow and a
+/// washed project's ground stop, so their edges line up with the group's.
 const STRIP_PAD: Pixels = px(6.0);
 
 /// How far a pinned project's glow reaches from its centre, the badge: most
@@ -688,6 +693,10 @@ pub struct WorktreeNode {
     /// False until a sweep says otherwise, and swept on its own slow cadence
     /// rather than with the git status tick: see [`Shell::refresh_merged`].
     pub(crate) merged: bool,
+    /// Whether the branch has commits its base does not have yet: the row's
+    /// work mark, fainter than for uncommitted changes. Swept with
+    /// [`Self::merged`], and false until then, so no row claims it unswept.
+    pub(crate) unlanded: bool,
     /// The pull request its branch is open as, once ket has opened or found
     /// one — see [`ket_core::worktree::Worktree::pull_request`]. The row
     /// wears it as a mark that opens the page.
@@ -775,144 +784,16 @@ pub struct Selection {
     pub(crate) worktree: usize,
 }
 
-/// Takes every discovered worktree that has an agent session into the project.
-///
-/// The rule is "have you worked here", and an agent transcript is the only
-/// durable evidence of that ket has — a directory's timestamps say when files
-/// changed, not whether you were the one changing them. Anything promoted is
-/// removed from `discovered`, so a worktree never appears twice.
-///
-/// Failures are left alone rather than reported: a detached checkout has no
-/// branch to register and legitimately stays where it is, and a project whose
-/// repository has gone missing has larger problems than this list.
-/// A worktree's state as its row says it: a dot and a word in the state's
-/// hue, right-aligned in the chrome's mono. `None` for a row with nothing to
-/// report, which is most of them at rest — "idle" on every quiet row would be
-/// a column of the same word.
-///
-/// Replaces the state rail that ran down each row's leading edge: that edge
-/// now belongs to the selection marker, and a word is what the eye can read
-/// at a glance down a list without learning a colour code first.
-pub(crate) fn state_word(
-    node: &WorktreeNode,
-    signal: Signal,
-    unread: bool,
-    t: &Theme,
-) -> Option<Div> {
-    let (word, colour, motion): (&str, Color, Option<Motion>) = match node.in_progress {
-        Some(op) => (
-            git_operation_label(op),
-            t.status.merging,
-            Some(match signal {
-                Signal::Working => Motion::Travel,
-                Signal::Blocked => Motion::Pulse,
-                _ => Motion::Still,
-            }),
-        ),
-        None => match signal {
-            Signal::Working => ("running", t.status.running, Some(Motion::Travel)),
-            Signal::Blocked => ("waiting", t.status.attention, Some(Motion::Pulse)),
-            Signal::Failed => ("failed", t.status.failed, Some(Motion::Still)),
-            Signal::Merging => ("merging", t.status.merging, Some(Motion::Travel)),
-            // Something is running that is not known to be an agent making
-            // progress: worth a word, not a colour or a beat.
-            Signal::Running => ("busy", t.text.dim, None),
-            // At rest with an answer nobody has looked at: a dot and no
-            // word, gone once its tab has been in front.
-            Signal::Quiet if unread => {
-                return Some(div().flex().flex_none().items_center().child(status_dot(
-                    paint(t.accent),
-                    Motion::Still,
-                    UNREAD_DOT,
-                )));
-            }
-            Signal::Quiet => return None,
-        },
-    };
-    Some(
-        div()
-            .flex()
-            .flex_none()
-            .items_center()
-            .gap(px(6.0))
-            .text_size(px(11.5))
-            .text_color(paint(colour))
-            .children(motion.map(|motion| status_dot(paint(colour), motion, px(6.0))))
-            .child(word),
-    )
-}
-
-/// The dot a row ends in while its agent's answer is unread.
-const UNREAD_DOT: Pixels = px(7.0);
-
-/// The mark at the head of a worktree row.
-///
-/// This is the slot the state light used to occupy, and moving the state to
-/// the rail is what paid for it. A row can now say *who* as well as *what*
-/// without being selected first — which matters exactly when it is hard, with
-/// four worktrees running and one of them wanting something.
-///
-/// A worktree with no agent of any kind gets the branch glyph rather than the
-/// terminal one: a terminal mark on a row where no terminal is running says
-/// something that is not true.
-pub(crate) fn row_mark(activity: &Activity, dirty: bool, missing: bool, t: &Theme) -> AnyElement {
-    match activity {
-        // A conversation on disk with nothing running. The agent's own mark,
-        // most of the way out: enough to say this worktree remembers a
-        // session, not enough to compete with the rows that are live.
-        Activity::Recorded { agent, .. } => {
-            let (which, tint) = provider(agent, t);
-            sized_icon(which, MARK, alpha(tint, 0.35)).into_any_element()
-        }
-        Activity::Session { agent, .. }
-        | Activity::Observed { agent, .. }
-        | Activity::Ended { agent, .. } => mark(agent, t).into_any_element(),
-        // A program ket watched start rather than one it launched, so there is
-        // no agent name recorded to look up — but the command *is* one, and
-        // `provider` matches on exactly that. It answers with the terminal
-        // glyph for anything it does not recognise, so an unknown build still
-        // draws what it drew before, and a `claude` the catalogue never
-        // matched stops being a terminal on a row that plainly says claude.
-        // Git changing the worktree's history gets its own glyph in the
-        // merging colour — the same hue the rail beside it is carrying, and
-        // deliberately not the running green, which on this row would claim
-        // an agent is working. Anything else busy falls back to `provider`,
-        // which has no mark for a build or a test run and answers with the
-        // honest dim terminal glyph.
-        Activity::Busy { mutating: true, .. } => {
-            sized_icon(Icon::GitBranch, MARK, paint(t.status.merging)).into_any_element()
-        }
-        Activity::Busy { command, .. } => {
-            let (which, tint) = provider(command, t);
-            sized_icon(which, MARK, tint).into_any_element()
-        }
-        Activity::Idle => {
-            // Dirty is the one quiet state worth a brighter glyph: the rail
-            // beside it is white and still, and the two together are what say
-            // *there is something here to read*.
-            let ink = if dirty {
-                alpha(paint(t.text.primary), 0.62)
-            } else if missing {
-                alpha(paint(t.text.dim), 0.30)
-            } else {
-                alpha(paint(t.text.dim), 0.34)
-            };
-            sized_icon(Icon::GitBranch, MARK, ink).into_any_element()
-        }
-    }
-}
-
 impl Shell {
     fn worktree_row_mark(
         &self,
-        id: &WorktreeId,
+        node: &WorktreeNode,
         activity: &Activity,
         color: Option<ket_core::agent_color::SessionColor>,
-        dirty: bool,
-        missing: bool,
+        lit: Option<gpui::Rgba>,
         t: &Theme,
     ) -> AnyElement {
-        let asleep = self.spaces.get(id).is_some_and(|space| {
+        let asleep = self.spaces.get(&node.id).is_some_and(|space| {
             space
                 .terminal_ids()
                 .iter()
@@ -921,23 +802,8 @@ impl Shell {
         if asleep {
             sized_icon(Icon::Moon, MARK, paint(t.text.dim)).into_any_element()
         } else {
-            crate::session_color::row_mark(activity, color, dirty, missing, t)
+            crate::session_color::row_mark(activity, color, lit, node.dirty, node.missing, t)
         }
-    }
-}
-
-/// The tag text for a git operation caught mid-flight.
-///
-/// Present tense and lower case, to read the same as `primary`/`missing`
-/// beside it rather than announcing itself as a different kind of label.
-fn git_operation_label(op: ket_core::status::GitOperation) -> &'static str {
-    use ket_core::status::GitOperation;
-    match op {
-        GitOperation::Merge => "merging",
-        GitOperation::Rebase => "rebasing",
-        GitOperation::CherryPick => "cherry-picking",
-        GitOperation::Revert => "reverting",
-        GitOperation::Bisect => "bisecting",
     }
 }
 
@@ -1205,230 +1071,6 @@ pub(crate) fn worktree_row_group(project: usize, worktree: usize) -> SharedStrin
 }
 
 impl Shell {
-    /// The trailing facts and actions shared by both worktree list views.
-    ///
-    /// `leading` is reserved for structure owned by one view, currently the
-    /// grouped view's subagent fold. Everything after it describes or acts on
-    /// the worktree itself and must therefore be identical wherever that
-    /// worktree is listed.
-    pub(crate) fn worktree_meta(
-        &self,
-        node: &WorktreeNode,
-        project: usize,
-        worktree: usize,
-        leading: Option<AnyElement>,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let t = &self.theme;
-        let row = project * 1000 + worktree;
-        let can_merge = !node.primary && !node.missing && node.dirty;
-        let merging = self.merging.as_ref() == Some(&node.id);
-        let mid_operation = node.in_progress.is_some();
-        let merge_button = can_merge.then(|| {
-            let idle = !merging && !mid_operation;
-            let hovered = self.hovered_merge.as_ref() == Some(&node.id);
-            let node_id = node.id.clone();
-            // A button while a merge can start; the glyph alone, with the
-            // tooltip still saying why, while one cannot.
-            let mark = match idle {
-                true => icon_button(("worktree-merge-button", row), Icon::GitMerge)
-                    .bare()
-                    .dense()
-                    .render(t)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.request_merge_worktree(project, worktree, cx);
-                        cx.stop_propagation();
-                        cx.notify();
-                    }))
-                    .into_any_element(),
-                false => div()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .size(crate::ui::WELL_XS)
-                    .child(sized_icon(Icon::GitMerge, px(12.0), paint(t.text.dim)))
-                    .into_any_element(),
-            };
-            let label = if merging {
-                "merging\u{2026}"
-            } else if mid_operation {
-                "busy"
-            } else {
-                "commit and merge"
-            };
-
-            crate::ui::tooltip::tooltip(
-                ("worktree-merge", row),
-                mark,
-                label,
-                crate::ui::tooltip::Side::Top,
-                hovered,
-                t,
-            )
-            .flex_none()
-            .on_hover(cx.listener(move |this, is_hovered, _, cx| {
-                if *is_hovered {
-                    this.hovered_merge = Some(node_id.clone());
-                } else if this.hovered_merge.as_ref() == Some(&node_id) {
-                    this.hovered_merge = None;
-                }
-                cx.notify();
-            }))
-        });
-
-        // The pull request the branch is open as, when there is one: a mark
-        // that opens its page, where the rest of its state lives. Its checks
-        // tint it — failed when one failed, running ink when they all
-        // passed — and while they run it keeps its own ink, as a row at rest
-        // does. Read from GitHub when it has been; else the one ket opened.
-        let live = self.pull_requests.of(&node.id);
-        let link = live
-            .map(ket_core::github::PullRequestStatus::link)
-            .or_else(|| node.pull_request.clone());
-        let pull_request = link.map(|open| {
-            use ket_core::github::CheckState;
-            let url = open.url.clone();
-            let hovered = self.hovered_pull_request.as_ref() == Some(&node.id);
-            let node_id = node.id.clone();
-            let mark = icon_button(("worktree-pull-request-button", row), Icon::GitHub)
-                .bare()
-                .dense();
-            let mark = match live.and_then(ket_core::github::PullRequestStatus::checks_state) {
-                Some(CheckState::Failed) => mark.tint(paint(t.status.failed)),
-                Some(CheckState::Passed) => mark.tint(paint(t.status.running)),
-                _ => mark,
-            };
-            let mark = mark
-                .render(t)
-                .on_click(move |_, _, cx| {
-                    cx.open_url(&url);
-                    cx.stop_propagation();
-                })
-                .into_any_element();
-            let checks = live
-                .map(ket_core::github::PullRequestStatus::checks_summary)
-                .unwrap_or_default();
-            let words = {
-                use ket_core::github::PullRequestState;
-                let mut parts = vec![format!("#{} on GitHub", open.number)];
-                if let Some(live) = live {
-                    match live.state {
-                        PullRequestState::Closed => parts.push("closed".to_owned()),
-                        PullRequestState::Merged => parts.push("merged".to_owned()),
-                        PullRequestState::Open if live.draft => parts.push("draft".to_owned()),
-                        PullRequestState::Open => {}
-                    }
-                    if live.behind {
-                        parts.push("behind".to_owned());
-                    }
-                }
-                if !checks.is_empty() {
-                    parts.push(checks);
-                }
-                parts.join(" \u{b7} ")
-            };
-            crate::ui::tooltip::tooltip(
-                ("worktree-pull-request", row),
-                mark,
-                words,
-                crate::ui::tooltip::Side::Top,
-                hovered,
-                t,
-            )
-            .flex_none()
-            .on_hover(cx.listener(move |this, is_hovered, _, cx| {
-                if *is_hovered {
-                    this.hovered_pull_request = Some(node_id.clone());
-                } else if this.hovered_pull_request.as_ref() == Some(&node_id) {
-                    this.hovered_pull_request = None;
-                }
-                cx.notify();
-            }))
-        });
-
-        div()
-            .flex()
-            .flex_none()
-            .items_center()
-            .gap(px(6.0))
-            .children(leading)
-            .children(pull_request)
-            .children(merge_button)
-            // The row's facts — what it weighs on disk — show only while the
-            // pointer is on the row. At rest every row ends in one mark, the
-            // ring, and the trailing column stops reading as three unrelated
-            // things that happen to share a right edge. Absent rather than
-            // hidden: a hidden figure still held its width, and every row sat
-            // its state word in front of a blank the size of a number it was
-            // not showing. The state word steps aside when the figure comes.
-            //
-            // What stays visible is state rather than fact: a missing
-            // checkout, an operation under way. Those are things the row is
-            // telling you, not things you came to ask it.
-            .children(
-                (self.hovered_worktree.as_ref() == Some(&node.id) && !node.missing)
-                    .then_some(())
-                    .and_then(|()| {
-                        let footprint = self
-                            .footprint(&node.id)
-                            .filter(|footprint| footprint.total >= crate::storage::SHOWN_FROM)?;
-                        let size = div()
-                            .flex_none()
-                            .text_size(px(10.5))
-                            .text_color(paint(t.text.dim))
-                            .child(ket_core::storage::format_bytes(footprint.total))
-                            .into_any_element();
-                        // The figure is only here because it is large, so
-                        // its tooltip says what can be done about it —
-                        // and points at the menu that does it, when there
-                        // is build output to clear.
-                        let tip = match footprint.build {
-                            0 => "On disk, none of it build output".to_owned(),
-                            build => format!(
-                                "{} is build output \u{2014} right-click \u{203a} Clear build output",
-                                ket_core::storage::format_bytes(build)
-                            ),
-                        };
-                        let node_id = node.id.clone();
-                        Some(
-                            crate::ui::tooltip::tooltip(
-                                ("worktree-footprint", row),
-                                size,
-                                tip,
-                                crate::ui::tooltip::Side::Top,
-                                self.hovered_footprint.as_ref() == Some(&node.id),
-                                t,
-                            )
-                            .flex_none()
-                            .on_hover(cx.listener(move |this, is_hovered, _, cx| {
-                                if *is_hovered {
-                                    this.hovered_footprint = Some(node_id.clone());
-                                } else if this.hovered_footprint.as_ref() == Some(&node_id) {
-                                    this.hovered_footprint = None;
-                                }
-                                cx.notify();
-                            })),
-                        )
-                    }),
-            )
-            .when(node.missing, |el| {
-                el.child(tag("missing", t).text_size(px(8.5)))
-            })
-            .when(self.deleting(&node.id), |el| {
-                el.child(tag("deleting", t).text_size(px(8.5)))
-            })
-            // Only a level someone chose earns a mark: the default is what
-            // every worktree has, and a ring on every row says nothing. Left
-            // out rather than hidden, so the rest of the row ends flush with
-            // the right edge.
-            .when(
-                node.token_reduction != ket_core::worktree::default_token_reduction(),
-                |el| el.child(self.token_reduction_ring(node, row, window, cx)),
-            )
-            .into_any_element()
-    }
-
     /// The rows under a worktree for the subagents its agent has running.
     ///
     /// A tree rather than a list beside one: the guide leaves from under the
@@ -1442,30 +1084,34 @@ impl Shell {
     /// going, nothing to dismiss. A click still goes to the pane its lead runs
     /// in, but the rows do not dress as buttons for it: when that pane is
     /// already the one in front, which is most of the time, nothing happens.
+    ///
+    /// The background jobs its agents left running hang from the same tree,
+    /// after the subagents — see `jobs`.
+    #[allow(clippy::too_many_arguments)]
     fn subagent_rows(
         &self,
         pi: usize,
         wi: usize,
         worktree: &WorktreeId,
         subagents: &[Subagent],
+        jobs: &[(String, ket_core::jobs::Job)],
         now: u64,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let t = &self.theme;
         let axis = mark_axis();
-        let line = guide(t);
-        let last = subagents.len().saturating_sub(1);
+        let last = (subagents.len() + jobs.len()).saturating_sub(1);
         // Where the worktree's branch name starts, and so where every label
         // does: half the mark's column and the row's gap past the axis.
         let label_x = axis + BADGE / 2.0 + ICON_GAP;
         let node_x = axis + ELBOW_RUN;
-        // Where the worktree's state word ends, and so where every figure
-        // does: past the row's own end padding, its trailing column and the
+        // Where the worktree's trailing column begins, and so where every
+        // figure ends: past the row's own end padding, that column and the
         // gap before it. The fold alone until that column has been measured.
         let trailing = self.meta_widths.get(worktree).copied().unwrap_or(WELL_XS);
         let end = px(10.0) + trailing + ICON_GAP;
 
-        let rows: Vec<_> = subagents
+        let mut rows: Vec<AnyElement> = subagents
             .iter()
             .enumerate()
             .map(|(i, sub)| {
@@ -1489,46 +1135,7 @@ impl Shell {
                 let age = now.saturating_sub(sub.started_at_ms);
                 let pane = sub.pane.clone();
 
-                div()
-                    .id(ElementId::from(key.clone()))
-                    .relative()
-                    .flex()
-                    .items_center()
-                    .h(SUBAGENT_ROW_H)
-                    .pl(node_x)
-                    .pr(end)
-                    .text_size(px(11.0))
-                    // No hover and no pointer: a click here lands where a
-                    // click on the worktree above would, so a row that lit up
-                    // promised something of its own and then did not do it.
-                    // ╰ from the guide into this row, turning into the dot.
-                    .child(
-                        div()
-                            .absolute()
-                            .left(axis - px(0.5))
-                            .top_0()
-                            .h(SUBAGENT_ROW_H / 2.0 + px(0.5))
-                            .w(ELBOW_RUN + px(0.5))
-                            .border_l_1()
-                            .border_b_1()
-                            .border_color(line)
-                            .rounded_bl(ELBOW_RADIUS),
-                    )
-                    // │ on to the next sibling, starting where the elbow
-                    // begins to curve away from the vertical. Starting at
-                    // the dot's centre leaves a break above every junction.
-                    // Not under the last, which is where the tree ends.
-                    .when(i < last, |el| {
-                        el.child(
-                            div()
-                                .absolute()
-                                .left(axis - px(0.5))
-                                .top(SUBAGENT_ROW_H / 2.0 - ELBOW_RADIUS)
-                                .bottom_0()
-                                .w(px(1.0))
-                                .bg(line),
-                        )
-                    })
+                branch(ElementId::from(key.clone()), i, last, end, t)
                     .child(
                         node.flex_none()
                             .size(NODE)
@@ -1581,8 +1188,10 @@ impl Shell {
                         this.focus_agent_pane(pane.as_deref());
                         cx.notify();
                     }))
+                    .into_any_element()
             })
             .collect();
+        rows.extend(self.job_rows(pi, wi, worktree, jobs, subagents.len(), last, end, now, cx));
 
         div()
             .flex_none()
@@ -2708,12 +2317,14 @@ impl Shell {
                     // own passes vacuously, so every worktree wore the badge
                     // from the moment it was created. The commit the branch
                     // was cut at is what tells those two apart.
-                    let merged = ket_core::branch_cleanup::branch_has_landed(
+                    // And in the same look, whether it holds commits not
+                    // yet merged, for the row's work mark.
+                    let standing = ket_core::branch_cleanup::branch_standing(
                         &ket_core::git::Git::new(root),
                         &worktree.branch,
                         worktree.base_commit.as_deref(),
                     );
-                    Some((worktree.id, merged))
+                    Some((worktree.id, standing))
                 })
                 .collect::<Vec<_>>()
         });
@@ -2724,7 +2335,7 @@ impl Shell {
                 shell.reading_merged = false;
                 // By id, not by position, for the reason the status sweep
                 // writes back that way too.
-                for (id, merged) in rows {
+                for (id, (merged, unlanded)) in rows {
                     for node in shell
                         .projects
                         .iter_mut()
@@ -2732,6 +2343,7 @@ impl Shell {
                         .filter(|node| node.id == id)
                     {
                         node.merged = merged;
+                        node.unlanded = unlanded;
                     }
                 }
                 cx.notify();
@@ -3164,7 +2776,11 @@ impl Shell {
             .flex_none()
             .flex_col()
             .gap(px(6.0))
-            .p(STRIP_PAD)
+            // The content card's inset over a line as tall as its tab strip,
+            // so the filter and the tabs share a centre across the gutter.
+            .pt(crate::header::CARD_INSET)
+            .px(STRIP_PAD)
+            .pb(STRIP_PAD)
             .child(
                 div()
                     .relative()
@@ -3174,9 +2790,10 @@ impl Shell {
                             .flex_wrap()
                             .items_center()
                             .gap(px(4.0))
-                            // As tall as the field that covers it, so opening
-                            // the search moves nothing below.
-                            .min_h(crate::ui::FIELD_H)
+                            // The search field that covers it is taller, and
+                            // hangs into the padding below rather than moving
+                            // anything.
+                            .min_h(TOP_STRIP)
                             // Kept in the layout while the field is up, for
                             // the height it holds; hidden, it paints nothing
                             // and takes no clicks.
@@ -3295,9 +2912,10 @@ impl Shell {
                     // drawn as one washed group, heading and rows together on
                     // a faint tint of their own, so which sessions run
                     // differently is plain from across the room without an
-                    // edge to draw the eye. The wash's inset is taken out of
-                    // the column's rather than added to it: every row stays at
-                    // the x it has in an unwashed project. The glyph beside
+                    // edge to draw the eye. The wash's sides stop at
+                    // [`STRIP_PAD`], in line with the filter group above and a
+                    // pinned project's glow, and its rows fill it across so a
+                    // selected one never reaches past it. The glyph beside
                     // the name says what is different — see
                     // `crate::agent_override`.
                     let launches = project.override_summary();
@@ -3309,8 +2927,8 @@ impl Shell {
                         .gap(ROW_GAP)
                         .when(launches.is_none(), |el| el.px(COLUMN_INSET))
                         .when(launches.is_some(), |el| {
-                            el.mx(COLUMN_INSET - OVERRIDE_PAD)
-                                .p(OVERRIDE_PAD)
+                            el.mx(STRIP_PAD)
+                                .py(OVERRIDE_PAD)
                                 .rounded(crate::ui::RADIUS_MD)
                                 .bg(alpha(tint, 0.055))
                         })
@@ -3419,7 +3037,7 @@ impl Shell {
                             // The same size as the branch names under it: the
                             // badge is what marks this row as the heading, not
                             // a larger word.
-                            .text_size(NAME)
+                            .text_size(row_text(NAME))
                             .cursor(CursorStyle::OpenHand)
                             // Projects reorder by dragging their headings, the way
                             // worktree rows do. `on_drag` starts only once the
@@ -3564,489 +3182,491 @@ impl Shell {
                         let lands = crate::starting::lands(&project.worktrees, |node| {
                             filter.admits(self.row_signal(node, now))
                         });
-                        rows = rows.children(
-                            project
-                                .worktrees
-                                .iter()
-                                .enumerate()
-                                .filter(|(_, node)| filter.admits(self.row_signal(node, now)))
-                                .flat_map(|(wi, node)| {
-                                    let is_selected = selection
-                                        == Some(Selection {
-                                            project: pi,
-                                            worktree: wi,
+                        rows =
+                            rows.children(
+                                project
+                                    .worktrees
+                                    .iter()
+                                    .enumerate()
+                                    .filter(|(_, node)| filter.admits(self.row_signal(node, now)))
+                                    .flat_map(|(wi, node)| {
+                                        let is_selected = selection
+                                            == Some(Selection {
+                                                project: pi,
+                                                worktree: wi,
+                                            });
+
+                                        // The row's shape: a state light, the branch, and —
+                                        // only where it means something — the `primary`
+                                        // pill. No trailing labels: a change count and a
+                                        // divergence arrow are things you go and look at,
+                                        // not things worth carrying on every row of a list
+                                        // you scan. The light says what the worktree is
+                                        // doing, not what is in it: working, blocked on a
+                                        // person, or finished badly. Uncommitted changes
+                                        // only colour it when nothing is running, since
+                                        // files changed on disk are the least urgent thing
+                                        // a row can report.
+                                        let activity = self.activity.activity(&node.id, now);
+                                        // The row's `/color`: its mark on a tile of
+                                        // it, and its name in it — see
+                                        // `Shell::row_color`.
+                                        let session_color =
+                                            self.row_color(&node.id, &activity, now);
+                                        let name_ink = session_color.map(|color| {
+                                            paint(crate::session_color::label(color, t))
+                                        });
+                                        let overridden = activity
+                                            .agent()
+                                            .or(node.agent.as_ref().map(SharedString::as_ref))
+                                            .is_some_and(|agent| {
+                                                project.agent_overrides.contains_key(agent)
+                                            });
+                                        // The override's well, except behind a session's
+                                        // tile, which would wear it as an uneven ring.
+                                        let welled = overridden && session_color.is_none();
+                                        let reported = activity.signal();
+                                        let subagents = self.activity.subagents(&node.id, now);
+                                        // What its agents left running hangs from the same
+                                        // tree, and folds with it.
+                                        let jobs = self.activity.jobs(&node.id, now);
+                                        let hanging = subagents.len() + jobs.len();
+                                        let folded = self.collapsed_subagents.contains(&node.id);
+                                        // Whether this row heads a visible subagent tree,
+                                        // which changes the row as well as what follows it.
+                                        // Not while a row is being dragged: the drop targets
+                                        // are worktree rows, and a gap under one full of
+                                        // subagents is a gap that says nothing about where
+                                        // it would land.
+                                        let grouped =
+                                            !folded && hanging > 0 && !cx.has_active_drag();
+
+                                        // The row's state, on its mark and at the head of
+                                        // its second line — see `state::row_state`. The
+                                        // subagents roll up into it: one waiting on a person
+                                        // is the worktree waiting on one.
+                                        let unread = self.activity.unread(&node.id);
+                                        // A worktree just made says it is starting until its
+                                        // agent has the prompt — see `crate::starting`.
+                                        //
+                                        // Otherwise, what it is doing, without the agent's
+                                        // name in it: the provider's own mark is drawn beside
+                                        // this, and "claude · thinking" next to Claude's logo
+                                        // says the same thing twice.
+                                        let (detail, state, starting_mark) =
+                                            match self.start_row_parts(&node.id) {
+                                                Some((words, state, mark)) => {
+                                                    (words, Some(state), Some(mark))
+                                                }
+                                                None => {
+                                                    let state = state::row_state(
+                                                        node,
+                                                        ket_core::activity::roll_up(
+                                                            reported, &subagents,
+                                                        ),
+                                                        unread,
+                                                        t,
+                                                    );
+                                                    let detail = state::after_lead(
+                                                        state.as_ref(),
+                                                        activity.detail(),
+                                                    );
+                                                    (detail, state, None)
+                                                }
+                                            };
+
+                                        // What state looks like on a selected row: nothing
+                                        // extra. The rail beside the branch name is already
+                                        // the hue, and `block_row`'s wash is already "here" —
+                                        // a tinted hairline and a halo on top of both was the
+                                        // row saying the same two things three times. What
+                                        // that cost was a selected row that changed shape as
+                                        // an agent started and stopped.
+                                        // Everything that trails the name lives in one column
+                                        // at the row's right edge, centred against both of the
+                                        // row's lines rather than riding the branch's. Two
+                                        // things follow from that: a status line coming or
+                                        // going never shifts the marks beside it, and a long
+                                        // branch name is cut by the column rather than pushing
+                                        // it off the row.
+                                        //
+                                        // Whether there is anything to put in it, asked before
+                                        // it is built: the row spaces its children with a gap,
+                                        // and an empty column still takes one — every plain row
+                                        // would pay nine pixels of branch name for a column
+                                        // holding nothing.
+                                        //
+                                        // The row's own group, so the ring round its mark's
+                                        // dot can follow the row's fill under the pointer
+                                        // without a `hovered_*` field on the shell.
+                                        let row_group = worktree_row_group(pi, wi);
+                                        // The ring round the mark's dot is the row's own fill,
+                                        // under the pointer too.
+                                        let ground =
+                                            paint(if is_selected { t.hover } else { t.panel });
+                                        let hover_ground = (!is_selected).then(|| {
+                                            (
+                                                row_group.clone(),
+                                                mix(paint(t.panel), paint(t.hover), 0.55),
+                                            )
                                         });
 
-                                    // The row's shape: a state light, the branch, and —
-                                    // only where it means something — the `primary`
-                                    // pill. No trailing labels: a change count and a
-                                    // divergence arrow are things you go and look at,
-                                    // not things worth carrying on every row of a list
-                                    // you scan. The light says what the worktree is
-                                    // doing, not what is in it: working, blocked on a
-                                    // person, or finished badly. Uncommitted changes
-                                    // only colour it when nothing is running, since
-                                    // files changed on disk are the least urgent thing
-                                    // a row can report.
-                                    let activity = self.activity.activity(&node.id, now);
-                                    // The row's `/color`: its mark on a tile of
-                                    // it, and its name in it — see
-                                    // `Shell::row_color`.
-                                    let session_color = self.row_color(&node.id, &activity, now);
-                                    let name_ink = session_color
-                                        .map(|color| paint(crate::session_color::label(color, t)));
-                                    let overridden = activity
-                                        .agent()
-                                        .or(node.agent.as_ref().map(SharedString::as_ref))
-                                        .is_some_and(|agent| {
-                                            project.agent_overrides.contains_key(agent)
+                                        // Folds the subagent rows away, as a tag after the
+                                        // name. Only while there are any: a chevron on every
+                                        // row would be a control for nothing.
+                                        let row_index = pi * 1000 + wi;
+                                        let fold = (hanging > 0).then(|| {
+                                            self.subagent_fold(node, row_index, folded, hanging, cx)
                                         });
-                                    // The override's well, except behind a session's
-                                    // tile, which would wear it as an uneven ring.
-                                    let welled = overridden && session_color.is_none();
-                                    let reported = activity.signal();
-                                    let subagents = self.activity.subagents(&node.id, now);
-                                    let folded = self.collapsed_subagents.contains(&node.id);
-                                    // Whether this row heads a visible subagent tree,
-                                    // which changes the row as well as what follows it.
-                                    // Not while a row is being dragged: the drop targets
-                                    // are worktree rows, and a gap under one full of
-                                    // subagents is a gap that says nothing about where
-                                    // it would land.
-                                    let grouped =
-                                        !folded && !subagents.is_empty() && !cx.has_active_drag();
+                                        let size = self.size_tag(node, row_index, cx);
 
-                                    // The row's state in words at its far end, in the
-                                    // state's own hue — see `state_word`. The subagents
-                                    // roll up into it: one waiting on a person is the
-                                    // worktree waiting on one.
-                                    let unread = self.activity.unread(&node.id);
-                                    // A worktree just made says it is starting until its
-                                    // agent has the prompt — see `crate::starting`.
-                                    //
-                                    // Otherwise, what it is doing, without the agent's
-                                    // name in it: the provider's own mark is drawn beside
-                                    // this, and "claude · thinking" next to Claude's logo
-                                    // says the same thing twice.
-                                    let (detail, state, starting_mark) = match self
-                                        .start_row_parts(&node.id)
-                                    {
-                                        Some((words, state, mark)) => {
-                                            (words, Some(state), Some(mark))
-                                        }
-                                        None => (
-                                            activity.detail(),
-                                            state_word(
-                                                node,
-                                                ket_core::activity::roll_up(reported, &subagents),
-                                                unread,
-                                                t,
-                                            ),
-                                            None,
-                                        ),
-                                    };
-
-                                    // What state looks like on a selected row: nothing
-                                    // extra. The rail beside the branch name is already
-                                    // the hue, and `block_row`'s wash is already "here" —
-                                    // a tinted hairline and a halo on top of both was the
-                                    // row saying the same two things three times. What
-                                    // that cost was a selected row that changed shape as
-                                    // an agent started and stopped.
-                                    // Everything that trails the name lives in one column
-                                    // at the row's right edge, centred against both of the
-                                    // row's lines rather than riding the branch's. Two
-                                    // things follow from that: a status line coming or
-                                    // going never shifts the marks beside it, and a long
-                                    // branch name is cut by the column rather than pushing
-                                    // it off the row.
-                                    //
-                                    // Whether there is anything to put in it, asked before
-                                    // it is built: the row spaces its children with a gap,
-                                    // and an empty column still takes one — every plain row
-                                    // would pay nine pixels of branch name for a column
-                                    // holding nothing.
-                                    //
-                                    // The row's own group, so the merge mark can come up
-                                    // under the pointer without a `hovered_*` field of its
-                                    // own on the shell.
-                                    let row_group = worktree_row_group(pi, wi);
-
-                                    // Folds the subagent rows away, and says how many
-                                    // it is hiding while it does. Only while there are
-                                    // any: a chevron on every row would be a control
-                                    // for nothing.
-                                    let fold = (!subagents.is_empty()).then(|| {
-                                        let node_id = node.id.clone();
-                                        let button = icon_button(
-                                            ("subagent-fold", pi * 1000 + wi),
-                                            if folded {
-                                                Icon::ChevronRight
-                                            } else {
-                                                Icon::ChevronDown
-                                            },
-                                        )
-                                        .bare()
-                                        .dense();
-                                        match folded {
-                                            true => button.count(format!("+{}", subagents.len())),
-                                            false => button,
-                                        }
-                                        .render(t)
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            if !this.collapsed_subagents.remove(&node_id) {
-                                                this.collapsed_subagents.insert(node_id.clone());
-                                            }
-                                            // The row selects on click too.
-                                            cx.stop_propagation();
-                                            cx.notify();
-                                        }))
-                                        .into_any_element()
-                                    });
-
-                                    let meta = self.worktree_meta(node, pi, wi, fold, window, cx);
-                                    // Heading a tree, the column is measured for the
-                                    // subagent rows below, which end their figures
-                                    // under the state word — see `meta_widths`. Asks
-                                    // for another frame only when the width moved.
-                                    let meta = if grouped {
-                                        let shell = cx.entity();
-                                        let node_id = node.id.clone();
-                                        let probe = gpui::canvas(
-                                            move |bounds, _, cx| {
-                                                shell.update(cx, |this, cx| {
-                                                    let width = bounds.size.width;
-                                                    if this.meta_widths.get(&node_id)
-                                                        != Some(&width)
-                                                    {
-                                                        this.meta_widths
-                                                            .insert(node_id.clone(), width);
-                                                        cx.notify();
-                                                    }
-                                                });
-                                            },
-                                            |_, _: (), _, _| {},
-                                        )
-                                        .absolute()
-                                        .size_full();
-                                        div()
-                                            .relative()
-                                            .flex()
-                                            .flex_none()
-                                            .child(meta)
-                                            .child(probe)
-                                            .into_any_element()
-                                    } else {
-                                        meta
-                                    };
-                                    // The primary checkout says so beside its name, the
-                                    // way a pinned row does: which row is the repository
-                                    // itself is worth knowing at a glance, not on hover.
-                                    let primary_mark = node.primary.then(|| {
-                                        let hovered =
-                                            self.hovered_primary.as_ref() == Some(&node.id);
-                                        let node_id = node.id.clone();
-                                        crate::ui::tooltip::tooltip(
-                                            ("primary-mark", pi * 1000 + wi),
-                                            sized_icon(Icon::Primary, px(10.0), paint(t.text.dim))
+                                        let meta = self.worktree_meta(node, pi, wi, window, cx);
+                                        // Heading a tree, the column is measured for the
+                                        // subagent rows below, which end their figures
+                                        // just short of it — see `meta_widths`. Asks
+                                        // for another frame only when the width moved.
+                                        let meta = if grouped {
+                                            let shell = cx.entity();
+                                            let node_id = node.id.clone();
+                                            let probe = gpui::canvas(
+                                                move |bounds, _, cx| {
+                                                    shell.update(cx, |this, cx| {
+                                                        let width = bounds.size.width;
+                                                        if this.meta_widths.get(&node_id)
+                                                            != Some(&width)
+                                                        {
+                                                            this.meta_widths
+                                                                .insert(node_id.clone(), width);
+                                                            cx.notify();
+                                                        }
+                                                    });
+                                                },
+                                                |_, _: (), _, _| {},
+                                            )
+                                            .absolute()
+                                            .size_full();
+                                            div()
+                                                .relative()
+                                                .flex()
+                                                .flex_none()
+                                                .child(meta)
+                                                .child(probe)
+                                                .into_any_element()
+                                        } else {
+                                            meta
+                                        };
+                                        // The primary checkout says so beside its name, the
+                                        // way a pinned row does: which row is the repository
+                                        // itself is worth knowing at a glance, not on hover.
+                                        let primary_mark = node.primary.then(|| {
+                                            let hovered =
+                                                self.hovered_primary.as_ref() == Some(&node.id);
+                                            let node_id = node.id.clone();
+                                            crate::ui::tooltip::tooltip(
+                                                ("primary-mark", pi * 1000 + wi),
+                                                sized_icon(
+                                                    Icon::Primary,
+                                                    px(10.0),
+                                                    paint(t.text.dim),
+                                                )
                                                 .flex_none()
                                                 .into_any_element(),
-                                            "primary",
-                                            crate::ui::tooltip::Side::Top,
-                                            hovered,
+                                                "primary",
+                                                crate::ui::tooltip::Side::Top,
+                                                hovered,
+                                                t,
+                                            )
+                                            .on_hover(
+                                                cx.listener(move |this, is_hovered, _, cx| {
+                                                    if *is_hovered {
+                                                        this.hovered_primary =
+                                                            Some(node_id.clone());
+                                                    } else if this.hovered_primary.as_ref()
+                                                        == Some(&node_id)
+                                                    {
+                                                        this.hovered_primary = None;
+                                                    }
+                                                    cx.notify();
+                                                }),
+                                            )
+                                        });
+
+                                        let last = project.worktrees.len().saturating_sub(1);
+                                        // The selected row's rail wears the project's colour.
+                                        let row_id = ("worktree", pi * 1000 + wi);
+                                        let project_rail = rail_colour(project.color, t);
+
+                                        let item = block_row_with_rail(
+                                            row_id,
+                                            is_selected,
+                                            project_rail,
                                             t,
                                         )
-                                        .on_hover(
-                                            cx.listener(move |this, is_hovered, _, cx| {
-                                                if *is_hovered {
-                                                    this.hovered_primary = Some(node_id.clone());
-                                                } else if this.hovered_primary.as_ref()
-                                                    == Some(&node_id)
-                                                {
-                                                    this.hovered_primary = None;
-                                                }
-                                                cx.notify();
-                                            }),
-                                        )
-                                    });
-
-                                    let last = project.worktrees.len().saturating_sub(1);
-                                    // The selected row's rail wears the project's colour.
-                                    let row_id = ("worktree", pi * 1000 + wi);
-                                    let project_rail = rail_colour(project.color, t);
-
-                                    let item =
-                                        block_row_with_rail(row_id, is_selected, project_rail, t)
-                                            .group(row_group.clone())
-                                            .relative()
-                                            // The rail stands in the row's own leading
-                                            // padding, so the bar itself costs no width — and
-                                            // what it frees is the slot the light used to
-                                            // hold, which now carries the agent's own mark on
-                                            // every row rather than only on the selected one.
-                                            .flex_row()
-                                            .items_center()
-                                            .gap(ICON_GAP)
-                                            // Heading a tree, the row keeps its hairline's
-                                            // pixel but not its ink — the line belongs at the
-                                            // foot of the group — and grows the guide the
-                                            // subagents hang from out of its own mark.
-                                            .when(grouped, |el| {
-                                                el.border_color(gpui::transparent_black())
-                                                    .child(trunk_head(t))
-                                            })
-                                            // The mark stands in a column of its own, exactly
-                                            // as wide as it draws. Every branch name then
-                                            // starts at the same x whichever mark the row turns
-                                            // out to wear, and the status line beneath it needs
-                                            // no indent of its own to sit under the name — it
-                                            // is a sibling of the mark, not a thing tucked in
-                                            // behind it.
-                                            .child(
-                                                div()
-                                                    .relative()
-                                                    .flex()
-                                                    .flex_none()
-                                                    .items_center()
-                                                    .justify_center()
-                                                    // As wide as the badge
-                                                    // heading the column, so
-                                                    // the two share a centre.
-                                                    .w(BADGE)
-                                                    // An agent this project
-                                                    // launches with its own
-                                                    // command sits in a quiet
-                                                    // well. Drawn behind the
-                                                    // mark and outside its
-                                                    // column, so the name beside
-                                                    // it does not move.
-                                                    .when(welled, |el| {
-                                                        el.child(
-                                                            div()
-                                                                .absolute()
-                                                                .top(-MARK_WELL_BLEED)
-                                                                .bottom(-MARK_WELL_BLEED)
-                                                                .left(-MARK_WELL_BLEED)
-                                                                .right(-MARK_WELL_BLEED)
-                                                                .rounded(crate::ui::RADIUS_SM)
-                                                                .bg(paint(t.hover)),
-                                                        )
-                                                    })
-                                                    .child(starting_mark.unwrap_or_else(|| {
+                                        .group(row_group.clone())
+                                        .relative()
+                                        // The rail stands in the row's own leading
+                                        // padding, so the bar itself costs no width — and
+                                        // what it frees is the slot the light used to
+                                        // hold, which now carries the agent's own mark on
+                                        // every row rather than only on the selected one.
+                                        .flex_row()
+                                        .items_center()
+                                        .gap(ICON_GAP)
+                                        // Heading a tree, the row keeps its hairline's
+                                        // pixel but not its ink — the line belongs at the
+                                        // foot of the group — and grows the guide the
+                                        // subagents hang from out of its own mark.
+                                        .when(grouped, |el| {
+                                            el.border_color(gpui::transparent_black())
+                                                .child(trunk_head(t))
+                                        })
+                                        // The mark stands in a column of its own, exactly
+                                        // as wide as it draws. Every branch name then
+                                        // starts at the same x whichever mark the row turns
+                                        // out to wear, and the status line beneath it needs
+                                        // no indent of its own to sit under the name — it
+                                        // is a sibling of the mark, not a thing tucked in
+                                        // behind it.
+                                        .child(
+                                            div()
+                                                .relative()
+                                                .flex()
+                                                .flex_none()
+                                                .items_center()
+                                                .justify_center()
+                                                // As wide as the badge
+                                                // heading the column, so
+                                                // the two share a centre.
+                                                .w(BADGE)
+                                                // An agent this project
+                                                // launches with its own
+                                                // command sits in a quiet
+                                                // well. Drawn behind the
+                                                // mark and outside its
+                                                // column, so the name beside
+                                                // it does not move.
+                                                .when(welled, |el| {
+                                                    el.child(
+                                                        div()
+                                                            .absolute()
+                                                            .top(-MARK_WELL_BLEED)
+                                                            .bottom(-MARK_WELL_BLEED)
+                                                            .left(-MARK_WELL_BLEED)
+                                                            .right(-MARK_WELL_BLEED)
+                                                            .rounded(crate::ui::RADIUS_SM)
+                                                            .bg(paint(t.hover)),
+                                                    )
+                                                })
+                                                .child(state::with_dot(
+                                                    starting_mark.unwrap_or_else(|| {
                                                         self.worktree_row_mark(
-                                                            &node.id,
+                                                            node,
                                                             &activity,
                                                             session_color,
-                                                            node.dirty,
-                                                            node.missing,
+                                                            state::lit(state.as_ref()),
                                                             t,
                                                         )
-                                                    })),
-                                            )
-                                            .child(
-                                                div()
-                                                    .flex()
-                                                    .flex_col()
-                                                    .flex_1()
-                                                    .min_w_0()
-                                                    .gap(px(0.0))
-                                                    .child(
-                                                        div()
-                                                            .flex()
-                                                            .items_center()
-                                                            .min_w_0()
-                                                            // The branch takes the room that is
-                                                            // left and gives it back when the
-                                                            // row needs it: without a min width
-                                                            // of zero a flex child refuses to
-                                                            // shrink.
-                                                            //
-                                                            // Not `flex_1`, so a pinned row's
-                                                            // pin sits against the end of the
-                                                            // name rather than out at the row's
-                                                            // far edge, where the meta already
-                                                            // is.
-                                                            .gap(px(4.0))
-                                                            .child(
-                                                                div()
-                                                                    .min_w_0()
-                                                                    .text_size(px(11.5))
-                                                                    // One line, cut short with an
-                                                                    // ellipsis. Without `flex_1`
-                                                                    // a name that may shrink is
-                                                                    // sized by its narrowest
-                                                                    // wrap, and a wrapping one
-                                                                    // collapsed to a column of
-                                                                    // single letters: every row
-                                                                    // hundreds of pixels tall and
-                                                                    // no name showing.
-                                                                    .truncate()
-                                                                    // Unread, as a mail list
-                                                                    // says it: the name in bold
-                                                                    // beside the dot.
-                                                                    .when(unread, |el| {
-                                                                        el.font_weight(
-                                                                            FontWeight::BOLD,
-                                                                        )
-                                                                    })
-                                                                    // A record whose checkout is
-                                                                    // gone is still a row you
-                                                                    // can act on, so it is
-                                                                    // dimmed rather than hidden
-                                                                    // — but it must not look
-                                                                    // like somewhere you can go.
-                                                                    .when_some(
-                                                                        name_ink,
-                                                                        |el, ink| {
-                                                                            el.text_color(ink)
-                                                                        },
-                                                                    )
-                                                                    .when(
-                                                                        node.missing
-                                                                            || self
-                                                                                .deleting(&node.id),
-                                                                        |el| {
-                                                                            el.text_color(paint(
-                                                                                t.text.dim,
-                                                                            ))
-                                                                        },
-                                                                    )
-                                                                    .child(node.label()),
-                                                            )
-                                                            .children(primary_mark)
-                                                            // Pinned rows lead their project,
-                                                            // and this says why one is up
-                                                            // there. Beside the name rather
-                                                            // than among the meta, whose
-                                                            // column is for what the row is
-                                                            // doing, not where it is kept.
-                                                            .when(node.pinned, |el| {
-                                                                el.child(
-                                                                    sized_icon(
-                                                                        Icon::Pin,
-                                                                        px(10.0),
-                                                                        paint(t.text.dim),
-                                                                    )
-                                                                    .flex_none(),
-                                                                )
-                                                            }),
-                                                    )
-                                                    // What it is doing, spelled out — on every
-                                                    // row that has something to say, selected
-                                                    // or not. Selecting a row is not allowed
-                                                    // to change anything but colour: it must
-                                                    // never be what makes a label appear.
-                                                    //
-                                                    // Drawn on every row regardless, and
-                                                    // hidden with `invisible` rather than left
-                                                    // out when there is nothing to show — an
-                                                    // absent element and a hidden one take the
-                                                    // same width, but only the hidden one
-                                                    // keeps its height, so a row with nothing
-                                                    // to say can never be shorter than one
-                                                    // that does and shove everything beneath
-                                                    // it up and down as rows come and go.
-                                                    .child({
-                                                        let show = !detail.is_empty();
-                                                        div()
-                                                            .flex()
-                                                            .items_center()
-                                                            // No indent of its own: the mark
-                                                            // sits in a column beside both
-                                                            // lines, so this one starts where
-                                                            // the branch does for free. It is
-                                                            // not drawn a second time here —
-                                                            // twice is how a sidebar comes to
-                                                            // look unconsidered.
-                                                            //
-                                                            // `CAPTION`, a step and a half
-                                                            // under the branch line, to sit
-                                                            // beneath it rather than beside it.
-                                                            //
-                                                            // And prose, where the branch name
-                                                            // above it is not. This line is the
-                                                            // reason the chrome is paired at
-                                                            // all: "Claude Code · needs you" is
-                                                            // words, and 9.5px is where a mono
-                                                            // costs the most — widest way to
-                                                            // set the one line that has least
-                                                            // room, in the one place a reader
-                                                            // skims rather than compares.
-                                                            .prose()
-                                                            .mt(px(1.0))
-                                                            .text_size(CAPTION)
-                                                            .when(!show, |el| el.invisible())
-                                                            .child(if !show {
-                                                                div()
-                                                                    .child("\u{200b}")
-                                                                    .into_any_element()
-                                                            } else {
-                                                                let ink = paint(match reported {
-                                                                    Signal::Blocked => {
-                                                                        t.status.attention
-                                                                    }
-                                                                    Signal::Failed => {
-                                                                        t.status.failed
-                                                                    }
-                                                                    // A theme may give it a hue.
-                                                                    _ => t
-                                                                        .text
-                                                                        .note
-                                                                        .unwrap_or(t.text.dim),
-                                                                });
-                                                                div()
-                                                                    .flex_1()
-                                                                    .min_w_0()
-                                                                    // Long titles are the norm
-                                                                    // here — a recorded session
-                                                                    // is named after whatever
-                                                                    // was asked of it — so the
-                                                                    // line is cut at the
-                                                                    // sidebar's edge rather than
-                                                                    // wrapped into a second one.
-                                                                    .truncate()
-                                                                    // The agent's own state,
-                                                                    // not the rail's: under a
-                                                                    // purple merge rail these
-                                                                    // words are still "waiting
-                                                                    // on you", and yellow is
-                                                                    // what makes them read as
-                                                                    // that rather than as a
-                                                                    // caption.
-                                                                    .text_color(ink)
-                                                                    .child(detail_text(detail, ink))
-                                                                    .into_any_element()
-                                                            })
                                                     }),
-                                            )
-                                            .children(state)
-                                            .child(meta)
-                                            // Rows reorder by dragging, and only within their
-                                            // own project. The repository's own checkout is
-                                            // left out of every part of it: it is not a
-                                            // worktree, there is nothing in the store to record
-                                            // a position for it, and it heads the group because
-                                            // that is what it is. Nothing may be dropped above
-                                            // it either, which is why it takes no target — the
-                                            // sidebar clears the gap and this row never claims
-                                            // one back.
-                                            //
-                                            // `on_drag` starts only once the pointer moves
-                                            // with the button down, so a row that is clicked
-                                            // is still a row that is selected.
-                                            .when(!node.primary, |el| {
-                                                let drag = WorktreeDrag {
-                                                    project: pi,
-                                                    worktree: wi,
-                                                    branch: node.label(),
-                                                    theme: *t,
-                                                    // Filled in by the listener below, which is
-                                                    // where gpui says how far into the row the
-                                                    // pointer was.
-                                                    grab: point(px(0.0), px(0.0)),
-                                                    sidebar: self.sidebar_width,
-                                                };
-                                                el.cursor(CursorStyle::OpenHand)
+                                                    state.as_ref(),
+                                                    session_color.is_some(),
+                                                    ground,
+                                                    hover_ground,
+                                                )),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .flex_col()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .gap(px(0.0))
+                                                .child(
+                                                    div()
+                                                        .flex()
+                                                        .items_center()
+                                                        .min_w_0()
+                                                        // The branch takes the room that is
+                                                        // left and gives it back when the
+                                                        // row needs it: without a min width
+                                                        // of zero a flex child refuses to
+                                                        // shrink.
+                                                        //
+                                                        // Not `flex_1`, so a pinned row's
+                                                        // pin sits against the end of the
+                                                        // name rather than out at the row's
+                                                        // far edge, where the meta already
+                                                        // is.
+                                                        .gap(px(4.0))
+                                                        .child(
+                                                            div()
+                                                                .min_w_0()
+                                                                .text_size(row_text(px(11.5)))
+                                                                // One line, cut short with an
+                                                                // ellipsis. Without `flex_1`
+                                                                // a name that may shrink is
+                                                                // sized by its narrowest
+                                                                // wrap, and a wrapping one
+                                                                // collapsed to a column of
+                                                                // single letters: every row
+                                                                // hundreds of pixels tall and
+                                                                // no name showing.
+                                                                .truncate()
+                                                                // Unread, as a mail list
+                                                                // says it: the name in bold
+                                                                // beside the dot.
+                                                                .when(unread, |el| {
+                                                                    el.font_weight(FontWeight::BOLD)
+                                                                })
+                                                                // A record whose checkout is
+                                                                // gone is still a row you
+                                                                // can act on, so it is
+                                                                // dimmed rather than hidden
+                                                                // — but it must not look
+                                                                // like somewhere you can go.
+                                                                .when_some(name_ink, |el, ink| {
+                                                                    el.text_color(ink)
+                                                                })
+                                                                .when(
+                                                                    node.missing
+                                                                        || self.deleting(&node.id),
+                                                                    |el| {
+                                                                        el.text_color(paint(
+                                                                            t.text.dim,
+                                                                        ))
+                                                                    },
+                                                                )
+                                                                .child(node.label()),
+                                                        )
+                                                        .children(primary_mark)
+                                                        // Pinned rows lead their project,
+                                                        // and this says why one is up
+                                                        // there. Beside the name rather
+                                                        // than among the meta, whose
+                                                        // column is for what the row is
+                                                        // doing, not where it is kept.
+                                                        .when(node.pinned, |el| {
+                                                            el.child(
+                                                                sized_icon(
+                                                                    Icon::Pin,
+                                                                    px(10.0),
+                                                                    paint(t.text.dim),
+                                                                )
+                                                                .flex_none(),
+                                                            )
+                                                        })
+                                                        .children(fold)
+                                                        .children(size),
+                                                )
+                                                // What it is doing, spelled out — on every
+                                                // row that has something to say, selected
+                                                // or not. Selecting a row is not allowed
+                                                // to change anything but colour: it must
+                                                // never be what makes a label appear.
+                                                //
+                                                // Drawn on every row regardless, and
+                                                // hidden with `invisible` rather than left
+                                                // out when there is nothing to show — an
+                                                // absent element and a hidden one take the
+                                                // same width, but only the hidden one
+                                                // keeps its height, so a row with nothing
+                                                // to say can never be shorter than one
+                                                // that does and shove everything beneath
+                                                // it up and down as rows come and go.
+                                                .child({
+                                                    let lead = state::checkout_lead(
+                                                        node.missing,
+                                                        self.deleting(&node.id),
+                                                        t,
+                                                    );
+                                                    let lead = lead.or_else(|| {
+                                                        state::lead_word(state.as_ref())
+                                                    });
+                                                    let show = !detail.is_empty() || lead.is_some();
+                                                    div()
+                                                        .flex()
+                                                        .items_center()
+                                                        // No indent of its own: the mark
+                                                        // sits in a column beside both
+                                                        // lines, so this one starts where
+                                                        // the branch does for free. It is
+                                                        // not drawn a second time here —
+                                                        // twice is how a sidebar comes to
+                                                        // look unconsidered.
+                                                        //
+                                                        // `CAPTION`, a step and a half
+                                                        // under the branch line, to sit
+                                                        // beneath it rather than beside it.
+                                                        //
+                                                        // And prose, where the branch name
+                                                        // above it is not. This line is the
+                                                        // reason the chrome is paired at
+                                                        // all: "Claude Code · needs you" is
+                                                        // words, and 9.5px is where a mono
+                                                        // costs the most — widest way to
+                                                        // set the one line that has least
+                                                        // room, in the one place a reader
+                                                        // skims rather than compares.
+                                                        .prose()
+                                                        .mt(px(1.0))
+                                                        .text_size(row_text(CAPTION))
+                                                        .gap(state::LEAD_GAP)
+                                                        .when(!show, |el| el.invisible())
+                                                        // The state's word, in its colour,
+                                                        // then the agent's own in grey.
+                                                        .children(lead)
+                                                        .child(if !show {
+                                                            div()
+                                                                .child("\u{200b}")
+                                                                .into_any_element()
+                                                        } else {
+                                                            // A theme may give it a hue.
+                                                            let ink = paint(
+                                                                t.text.note.unwrap_or(t.text.dim),
+                                                            );
+                                                            div()
+                                                                .flex_1()
+                                                                .min_w_0()
+                                                                // Long titles are the norm
+                                                                // here — a recorded session
+                                                                // is named after whatever
+                                                                // was asked of it — so the
+                                                                // line is cut at the
+                                                                // sidebar's edge rather than
+                                                                // wrapped into a second one.
+                                                                .truncate()
+                                                                .text_color(ink)
+                                                                .child(detail_text(detail, ink))
+                                                                .into_any_element()
+                                                        })
+                                                }),
+                                        )
+                                        .child(meta)
+                                        // Rows reorder by dragging, and only within their
+                                        // own project. The repository's own checkout is
+                                        // left out of every part of it: it is not a
+                                        // worktree, there is nothing in the store to record
+                                        // a position for it, and it heads the group because
+                                        // that is what it is. Nothing may be dropped above
+                                        // it either, which is why it takes no target — the
+                                        // sidebar clears the gap and this row never claims
+                                        // one back.
+                                        //
+                                        // `on_drag` starts only once the pointer moves
+                                        // with the button down, so a row that is clicked
+                                        // is still a row that is selected.
+                                        .when(!node.primary, |el| {
+                                            let drag = WorktreeDrag {
+                                                project: pi,
+                                                worktree: wi,
+                                                branch: node.label(),
+                                                theme: *t,
+                                                // Filled in by the listener below, which is
+                                                // where gpui says how far into the row the
+                                                // pointer was.
+                                                grab: point(px(0.0), px(0.0)),
+                                                sidebar: self.sidebar_width,
+                                            };
+                                            el.cursor(CursorStyle::OpenHand)
                                     .on_drag(drag, |drag, grab, _, cx| {
                                         let mut drag = drag.clone();
                                         drag.grab = grab;
@@ -4075,107 +3695,98 @@ impl Shell {
                                             }
                                         },
                                     ))
-                                            })
-                                            // The gap the dragged row would land in, drawn
-                                            // above this one — and below it as well when it is
-                                            // the last row, which is the one gap no row's top
-                                            // edge can stand for.
-                                            .when(
-                                                drop == Some(DropTarget::Worktree {
-                                                    project: pi,
-                                                    before: wi,
-                                                }),
-                                                |el| {
-                                                    el.child(insertion_line(
-                                                        false, ROW_GAP, RAIL_INSET, t,
-                                                    ))
+                                        })
+                                        // The gap the dragged row would land in, drawn
+                                        // above this one — and below it as well when it is
+                                        // the last row, which is the one gap no row's top
+                                        // edge can stand for.
+                                        .when(
+                                            drop == Some(DropTarget::Worktree {
+                                                project: pi,
+                                                before: wi,
+                                            }),
+                                            |el| {
+                                                el.child(insertion_line(
+                                                    false, ROW_GAP, RAIL_INSET, t,
+                                                ))
+                                            },
+                                        )
+                                        .when(
+                                            wi == last
+                                                && drop
+                                                    == Some(DropTarget::Worktree {
+                                                        project: pi,
+                                                        before: wi + 1,
+                                                    }),
+                                            |el| {
+                                                el.child(insertion_line(
+                                                    true, ROW_GAP, RAIL_INSET, t,
+                                                ))
+                                            },
+                                        )
+                                        // Right-click opens the row's context menu at the
+                                        // pointer. `on_mouse_down` rather than a click:
+                                        // a menu that waits for the button to come back up
+                                        // feels late next to every other one on the
+                                        // platform.
+                                        .on_mouse_down(
+                                            MouseButton::Right,
+                                            cx.listener(
+                                                move |this, event: &MouseDownEvent, _, cx| {
+                                                    this.open_worktree_menu(pi, wi, event.position);
+                                                    cx.stop_propagation();
+                                                    cx.notify();
                                                 },
-                                            )
-                                            .when(
-                                                wi == last
-                                                    && drop
-                                                        == Some(DropTarget::Worktree {
-                                                            project: pi,
-                                                            before: wi + 1,
-                                                        }),
-                                                |el| {
-                                                    el.child(insertion_line(
-                                                        true, ROW_GAP, RAIL_INSET, t,
-                                                    ))
-                                                },
-                                            )
-                                            // Right-click opens the row's context menu at the
-                                            // pointer. `on_mouse_down` rather than a click:
-                                            // a menu that waits for the button to come back up
-                                            // feels late next to every other one on the
-                                            // platform.
-                                            .on_mouse_down(
-                                                MouseButton::Right,
-                                                cx.listener(
-                                                    move |this, event: &MouseDownEvent, _, cx| {
-                                                        this.open_worktree_menu(
-                                                            pi,
-                                                            wi,
-                                                            event.position,
-                                                        );
-                                                        cx.stop_propagation();
-                                                        cx.notify();
-                                                    },
-                                                ),
-                                            )
-                                            // Which row the pointer is on, for the facts
-                                            // `worktree_meta` shows only then.
-                                            .on_hover({
-                                                let node_id = node.id.clone();
-                                                cx.listener(
-                                                    move |this, is_hovered: &bool, _, cx| {
-                                                        if *is_hovered {
-                                                            this.hovered_worktree =
-                                                                Some(node_id.clone());
-                                                        } else if this.hovered_worktree.as_ref()
-                                                            == Some(&node_id)
-                                                        {
-                                                            this.hovered_worktree = None;
-                                                        }
-                                                        cx.notify();
-                                                    },
-                                                )
-                                            })
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                let target = Selection {
-                                                    project: pi,
-                                                    worktree: wi,
-                                                };
-                                                // Clicking the row you are already in used to do
-                                                // nothing at all. It means "back to the
-                                                // worktree", so it goes back to its shell —
-                                                // whatever you had opened over the top of it.
-                                                // Only for that row: arriving from somewhere
-                                                // else still hands back the arrangement the
-                                                // worktree was left in.
-                                                let reselected = this.selection == Some(target);
-                                                this.select(target, cx);
-                                                if reselected {
-                                                    this.focus_main_tab();
+                                            ),
+                                        )
+                                        // Which row the pointer is on, for the facts
+                                        // `worktree_meta` shows only then.
+                                        .on_hover({
+                                            let node_id = node.id.clone();
+                                            cx.listener(move |this, is_hovered: &bool, _, cx| {
+                                                if *is_hovered {
+                                                    this.hovered_worktree = Some(node_id.clone());
+                                                } else if this.hovered_worktree.as_ref()
+                                                    == Some(&node_id)
+                                                {
+                                                    this.hovered_worktree = None;
                                                 }
                                                 cx.notify();
-                                            }));
+                                            })
+                                        })
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            let target = Selection {
+                                                project: pi,
+                                                worktree: wi,
+                                            };
+                                            // Clicking the row you are already in used to do
+                                            // nothing at all. It means "back to the
+                                            // worktree", so it goes back to its shell —
+                                            // whatever you had opened over the top of it.
+                                            // Only for that row: arriving from somewhere
+                                            // else still hands back the arrangement the
+                                            // worktree was left in.
+                                            let reselected = this.selection == Some(target);
+                                            this.select(target, cx);
+                                            if reselected {
+                                                this.focus_main_tab();
+                                            }
+                                            cx.notify();
+                                        }));
 
-                                    let mut out = match lands == Some(wi) {
-                                        true => self.starting_rows(pi, cx),
-                                        false => Vec::new(),
-                                    };
-                                    out.push(item.into_any_element());
-                                    if grouped {
-                                        out.push(
-                                            self.subagent_rows(
-                                                pi, wi, &node.id, &subagents, now, cx,
-                                            ),
-                                        );
-                                    }
-                                    out
-                                }),
-                        );
+                                        let mut out = match lands == Some(wi) {
+                                            true => self.starting_rows(pi, cx),
+                                            false => Vec::new(),
+                                        };
+                                        out.push(item.into_any_element());
+                                        if grouped {
+                                            out.push(self.subagent_rows(
+                                                pi, wi, &node.id, &subagents, &jobs, now, cx,
+                                            ));
+                                        }
+                                        out
+                                    }),
+                            );
                         if lands.is_none() {
                             rows = rows.children(self.starting_rows(pi, cx));
                         }
@@ -4190,7 +3801,7 @@ impl Shell {
                                     // one more row of the group rather than a
                                     // footnote under it.
                                     .pl(LEAD + (BADGE - ICON) / 2.0)
-                                    .text_size(px(10.0))
+                                    .text_size(row_text(px(10.0)))
                                     .text_color(paint(t.text.dim))
                                     .child(icon(
                                         if project.discovered_expanded {
@@ -4218,7 +3829,7 @@ impl Shell {
                                     |(di, found)| {
                                         block_row(("discovered", pi * 1000 + di), false, t)
                                             .ml(INDENT * 2.0)
-                                            .text_size(px(11.0))
+                                            .text_size(row_text(px(11.0)))
                                             .text_color(paint(t.text.dim))
                                             // Clicking takes it into the project
                                             // and opens it. It used to only reveal
@@ -4234,7 +3845,7 @@ impl Shell {
                                             .child(found.label.clone())
                                             .child(
                                                 div()
-                                                    .text_size(px(10.0))
+                                                    .text_size(row_text(px(10.0)))
                                                     .text_color(paint(t.text.dim))
                                                     .child(found.path.clone()),
                                             )
@@ -4329,7 +3940,7 @@ impl Shell {
     /// worktree) indices — what the header's Merge figure counts and lists.
     /// See `crate::header`.
     ///
-    /// The gate is `can_merge`'s — not the repository's own checkout, still
+    /// The gate is Commit and merge's — not the repository's own checkout, still
     /// on disk, and dirty — plus the agent being done: a worktree whose agent
     /// or subagents are still working, or waiting on a person, has changes in
     /// it that are not finished yet. That gate's cost is worth repeating here,
@@ -4455,23 +4066,4 @@ pub(crate) fn install_claude_hooks_in_background() {
 }
 
 #[cfg(test)]
-mod resize_tests {
-    use super::*;
-
-    #[test]
-    fn sidebar_resizing_keeps_both_the_tree_and_content_reachable() {
-        assert_eq!(
-            clamped_sidebar_width(px(10.0), px(1200.0)),
-            Some(MIN_SIDEBAR_SIZE)
-        );
-        // Past the widest the window allows: all of it but the content's
-        // least and the divider.
-        let widest = px(700.0) - MIN_CONTENT_SIZE - SIDEBAR_DIVIDER_SIZE;
-        assert_eq!(clamped_sidebar_width(px(900.0), px(700.0)), Some(widest));
-    }
-
-    #[test]
-    fn a_window_too_narrow_for_both_sides_keeps_the_previous_width() {
-        assert_eq!(clamped_sidebar_width(px(200.0), px(400.0)), None);
-    }
-}
+mod resize_tests;

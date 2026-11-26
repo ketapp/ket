@@ -4,10 +4,10 @@
 // is the one marked, the rest wait, and the foot says so — then how it went.
 
 import type { AgentChoice, AgentModes, AgentSettings } from '@ket/remote';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 
 import { font, t } from '../lib/theme';
-import { surface } from './ui/surface';
+import { PRESSED, surface } from './ui/surface';
 import { Sheet, SheetItem, SheetList, SheetNote } from './Sheet';
 
 /** A row of choices, the current one raised, as the desktop's segmented
@@ -33,18 +33,15 @@ function Segments({
         const on = choice.id === current && !moving;
         const going = moving && pending === choice.label;
         return (
-          <Pressable
+          <TouchableOpacity
             key={choice.id}
             accessibilityRole="radio"
             accessibilityState={{ checked: on || going, disabled }}
             accessibilityLabel={choice.label}
             disabled={disabled || on}
             onPress={() => onPick(choice)}
-            style={({ pressed }) => [
-              styles.segment,
-              (on || going) && styles.segmentOn,
-              pressed && { backgroundColor: t.selection },
-            ]}
+            activeOpacity={PRESSED}
+            style={[styles.segment, (on || going) && styles.segmentOn]}
           >
             <Text
               style={[styles.segmentText, (on || going) && styles.segmentTextOn, disabled && !on && !going && { color: t.faint }]}
@@ -54,7 +51,7 @@ function Segments({
             >
               {going ? `${choice.label}…` : choice.label}
             </Text>
-          </Pressable>
+          </TouchableOpacity>
         );
       })}
     </View>

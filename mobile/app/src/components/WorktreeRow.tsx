@@ -14,7 +14,7 @@ import { checksColor, checksState } from '../lib/checks';
 import { agentLabel, font, sessionColor, size, t } from '../lib/theme';
 
 /** A state's colour on this screen: an agent at work is ket's one green, the
- * colour of Start and of lines added. */
+ * colour of Start. */
 export function toneOf(activity: Activity): string | undefined {
   return activity === Activity.WORKING ? t.brand : stateOf(activity)?.color;
 }
@@ -40,8 +40,11 @@ export function WorktreeRow({
   const agent = agentOf(worktree);
   const session = colorOf(worktree);
   const state = stateOf(worktree.activity);
-  const tone = toneOf(worktree.activity);
   const working = filterOf(worktree.activity) === 'running';
+  // An answer nobody has opened, as the desktop's sidebar says it: the logo
+  // and its corner dot in the unread pink, and the line led by "Unread".
+  const unread = !working && isUnread(worktree);
+  const tone = unread ? t.unread : toneOf(worktree.activity);
   const waking = woken && !working;
   // Asleep: nothing runs, but the agent's session is there to wake.
   const asleep = !working && worktree.asleep.length > 0 && !worktree.terminals.some((x) => !x.closed);
@@ -58,19 +61,19 @@ export function WorktreeRow({
           session={session}
           tone={waking ? t.faint : tone}
           ring={marker ? t.hover : t.card}
-          label={state ? `${who}, ${state.word}` : asleep ? `${who}, asleep` : who}
+          label={unread ? `${who}, unread` : state ? `${who}, ${state.word}` : asleep ? `${who}, asleep` : who}
         />
       }
       title={worktree.name || 'Other terminals'}
       titleColor={sessionColor(session)?.label}
-      detail={waking ? 'Waking on your Mac…' : detail(worktree)}
+      detail={waking ? 'Waking on your Mac…' : unread ? afterUnread(detail(worktree)) : detail(worktree)}
+      lead={unread && !waking ? { word: 'Unread', color: t.unread } : undefined}
       detailColor={working ? undefined : quiet || waking ? t.faint : detailColor(worktree.activity)}
       markdown
       live
       prompt={working ? (tone ?? t.dim) : undefined}
       meta={
         <>
-          {!working && isUnread(worktree) ? <UnreadMark /> : null}
           {worktree.pinned ? <PinMark /> : null}
           <RowMeta worktree={worktree} />
         </>
@@ -83,13 +86,10 @@ export function WorktreeRow({
   );
 }
 
-/** The dot on a row whose agent has answered and nobody has opened it since. */
-function UnreadMark() {
-  return (
-    <View accessible accessibilityLabel="Unread">
-      <Dot color={t.text} size={8} />
-    </View>
-  );
+/** The agent's words after "Unread", less one that only said it was done,
+ * as the desktop drops "ready" after its lead word. */
+function afterUnread(words: string): string {
+  return /^(ready|done|nothing running)$/i.test(words) ? '' : words;
 }
 
 /** A pinned worktree's mark: it stays at the top of its project. */
@@ -120,13 +120,22 @@ function RowMeta({ worktree }: { worktree: WorktreeSummary }) {
         </Chip>
       ) : null}
       {lines ? (
-        <Text style={styles.lines}>
-          <Text style={{ color: t.brand }}>+{worktree.linesAdded}</Text>{' '}
-          <Text style={{ color: t.removed }}>−{worktree.linesRemoved}</Text>
+        <Text
+          style={styles.lines}
+          accessibilityLabel={`${worktree.linesAdded} lines added, ${worktree.linesRemoved} removed`}
+        >
+          +{short(worktree.linesAdded)} −{short(worktree.linesRemoved)}
         </Text>
       ) : null}
     </View>
   );
+}
+
+/** A line count as the row says it: thousands to one place, `1.3k`. */
+export function short(n: number): string {
+  if (n < 1000) return `${n}`;
+  const k = n / 1000;
+  return `${k < 10 ? k.toFixed(1).replace(/\.0$/, '') : Math.round(k)}k`;
 }
 
 /** Most subagents listed under a row; the rest are counted. */
@@ -187,5 +196,6 @@ const styles = StyleSheet.create({
   subagentState: { fontFamily: font.chrome, fontSize: size.caption },
   subagentMore: { paddingLeft: TILE + TILE_GAP, fontFamily: font.chrome, fontSize: size.caption, color: t.faint },
   meta: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  lines: { fontFamily: font.chromeMedium, fontSize: 12, fontVariant: ['tabular-nums'] },
+  // Quiet, as a row's quiet line is: no colour, the caption's size.
+  lines: { fontFamily: font.chrome, fontSize: size.caption, color: t.faint, fontVariant: ['tabular-nums'] },
 });

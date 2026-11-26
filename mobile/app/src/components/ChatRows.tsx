@@ -6,7 +6,7 @@
 
 import { useIsFocused } from 'expo-router';
 import { useEffect, useId, useState } from 'react';
-import { Pressable, type StyleProp, StyleSheet, Text, TextInput, useWindowDimensions, View, type TextInputProps, type TextStyle, type ViewStyle } from 'react-native';
+import { Pressable, type StyleProp, StyleSheet, Text, TextInput, type TextInputProps, type TextStyle, TouchableOpacity, useWindowDimensions, View, type ViewStyle } from 'react-native';
 import Animated, {
   cancelAnimation,
   Easing,
@@ -25,7 +25,7 @@ import Svg, { Circle, Defs, LinearGradient, Path, Rect, Stop, Text as SvgText } 
 
 import { fileName, type Attachment } from '../lib/attach';
 import { agentLabel, blend, font, size, t, tint } from '../lib/theme';
-import { surface } from './ui/surface';
+import { PRESSED, surface } from './ui/surface';
 import { FileChip, SentFiles } from './Attachments';
 import { AgentMark, Bubble, Retry, TerminalWindow } from './icons';
 import { Slide } from './Swap';
@@ -562,14 +562,15 @@ export function CantFind({ agent, onRetry, onTerminal }: { agent: string; onRetr
           </Animated.View>
           <Text style={styles.retryText}>{looking ? 'Looking…' : 'Try again'}</Text>
         </Pressable>
-        <Pressable
+        <TouchableOpacity
           accessibilityRole="button"
           onPress={onTerminal}
-          style={({ pressed }) => [styles.lostAction, styles.terminal, pressed && { backgroundColor: t.selection }]}
+          activeOpacity={PRESSED}
+          style={[styles.lostAction, styles.terminal]}
         >
           <TerminalWindow size={17} color={t.dim} weight={2} />
           <Text style={styles.terminalText}>Open terminal</Text>
-        </Pressable>
+        </TouchableOpacity>
       </View>
     </View>
   );

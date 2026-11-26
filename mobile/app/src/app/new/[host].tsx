@@ -10,7 +10,7 @@
 import { router, useLocalSearchParams } from 'expo-router';
 import type { StartOptions } from '@ket/remote';
 import { type ReactNode, useEffect, useRef, useState } from 'react';
-import { Keyboard, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Keyboard, Pressable, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { type MenuItem, type MenuSection, SheetMenu } from '../../components/FloatMenu';
@@ -23,7 +23,7 @@ import { useHost, useHostState } from '../../lib/hosts';
 import { showBeside, useSplit } from '../../lib/layout';
 import { getLastWork, saveLastWork } from '../../lib/store';
 import { agentLabel, font, size, t } from '../../lib/theme';
-import { surface } from '../../components/ui/surface';
+import { PRESSED, surface } from '../../components/ui/surface';
 
 /** Which dropdown is open. */
 type Which = 'project' | 'target' | 'agent' | 'base' | 'model' | 'effort' | 'kind';
@@ -432,14 +432,15 @@ function Field({
   onLayout: (e: { nativeEvent: { layout: { x: number; y: number; width: number } } }) => void;
 }) {
   return (
-    <Pressable
+    <TouchableOpacity
       accessibilityRole="button"
       accessibilityLabel={`${label}: ${value}`}
       accessibilityState={{ expanded: open, disabled }}
       disabled={disabled}
       onPress={onPress}
       onLayout={onLayout}
-      style={({ pressed }) => [styles.field, (open || pressed) && styles.fieldOpen, disabled && { opacity: 0.55 }]}
+      activeOpacity={PRESSED}
+      style={[styles.field, open && styles.fieldOpen, disabled && { opacity: 0.55 }]}
     >
       <Text style={styles.fieldLabel}>{label}</Text>
       <View style={styles.fieldValue}>
@@ -449,7 +450,7 @@ function Field({
         </Text>
         <ChevronDown size={15} color={t.dim} weight={2.2} />
       </View>
-    </Pressable>
+    </TouchableOpacity>
   );
 }
 

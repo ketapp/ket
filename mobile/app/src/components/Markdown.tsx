@@ -4,12 +4,13 @@
 // than shown as marks, and links that open.
 
 import { Fragment, type ReactNode } from 'react';
-import { Linking, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Linking, Pressable, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 
 import { Check } from './icons';
 import { type Block, type Run, markdown } from '../lib/markdown';
 import { font, size, t } from '../lib/theme';
-import { surface } from './ui/surface';
+import { InlineCode } from './ui/rows';
+import { PRESSED, surface } from './ui/surface';
 
 /** An agent's words, read as markdown — see lib/markdown.ts: fenced code as
  * a block of its own, tables sideways, the rest as prose with its headings,
@@ -55,15 +56,16 @@ function Code({ code, onHold, onCopy }: { code: string; onHold: () => void; onCo
           <Text style={styles.codeText}>{code}</Text>
         </Pressable>
       </ScrollView>
-      <Pressable
+      <TouchableOpacity
         accessibilityRole="button"
         accessibilityLabel="Copy code"
         hitSlop={6}
         onPress={() => onCopy(code)}
-        style={({ pressed }) => [styles.codeCopy, pressed && { backgroundColor: t.selection }]}
+        activeOpacity={PRESSED}
+        style={styles.codeCopy}
       >
         <Text style={styles.codeCopyText}>Copy</Text>
-      </Pressable>
+      </TouchableOpacity>
     </View>
   );
 }
@@ -150,9 +152,9 @@ function Runs({ runs, flat }: { runs: Run[]; flat?: boolean }) {
             return <Fragment key={at}>{flat ? piece.text.replace(/\n/g, ' ') : piece.text}</Fragment>;
           case 'code':
             return (
-              <Text key={at} style={styles.inlineCode}>
+              <InlineCode key={at} style={styles.inlineCode}>
                 {piece.text}
-              </Text>
+              </InlineCode>
             );
           case 'strong':
           case 'em':
@@ -214,7 +216,8 @@ export function Linked({ text }: { text: string }) {
 }
 
 /** A table, column by column so each column takes its widest cell, and
- * sideways to scroll when it is wider than the phone. Cells stay on one line,
+ * sideways to scroll when it is wider than the phone. A narrower one stretches
+ * its columns to fill the frame. Cells stay on one line,
  * which keeps the rows of every column level with each other.
  *
  * The frame and its rounded clip are on a view around the scroller, not on the
@@ -231,7 +234,7 @@ export function Linked({ text }: { text: string }) {
 function Table({ table, onHold }: { table: Extract<Block, { kind: 'table' }>; onHold: () => void }) {
   return (
     <View style={styles.table}>
-    <ScrollView horizontal>
+    <ScrollView horizontal contentContainerStyle={styles.tableFill}>
       <Pressable accessibilityHint="Hold to copy" delayLongPress={350} onLongPress={onHold} style={styles.tableInner}>
       {table.head.map((title, col) => {
         const align = { textAlign: table.align[col] ?? 'left' };
@@ -297,8 +300,9 @@ const styles = StyleSheet.create({
   inlineCode: { fontFamily: font.code, fontSize: size.label, color: t.text, backgroundColor: t.sunken },
   codeBlock: { ...surface.well, borderRadius: size.radius },
   table: { borderWidth: 1, borderColor: t.border, borderRadius: size.radius, overflow: 'hidden' },
-  tableInner: { flexDirection: 'row' },
-  tableColumn: { minWidth: 56 },
+  tableFill: { flexGrow: 1 },
+  tableInner: { flexGrow: 1, flexDirection: 'row' },
+  tableColumn: { flexGrow: 1, minWidth: 56 },
   tableColumnRule: { borderLeftWidth: 1, borderLeftColor: t.rule },
   tableCell: { height: 34, justifyContent: 'center', paddingHorizontal: 10 },
   tableHead: { backgroundColor: t.sunken },

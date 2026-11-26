@@ -40,6 +40,7 @@ mod browser;
 mod browser_snapshot;
 #[cfg(target_os = "macos")]
 mod browser_view;
+mod caret;
 mod checks;
 #[cfg(feature = "chromium")]
 mod chromium;
@@ -48,7 +49,6 @@ mod chromium;
 #[cfg(all(feature = "chromium", not(target_os = "macos")))]
 compile_error!("the `chromium` feature is macOS only");
 mod clear_build;
-mod cold_resume;
 mod commands;
 mod device_capture;
 mod diagnostics;
@@ -97,6 +97,7 @@ mod review;
 mod savings;
 mod schedule_fields;
 mod search;
+mod session_asks;
 mod session_color;
 mod setup;
 mod shortcuts;
@@ -134,6 +135,7 @@ use gpui::{
     prelude::*, px, relative, size,
 };
 
+use caret::Caret;
 use ket_core::activity::Tracker;
 use ket_core::agent_hooks::Listener;
 use ket_core::command::Registry;
@@ -770,9 +772,9 @@ struct Shell {
     /// Debounced against [`crate::tree::MERGED_SWEEP_INTERVAL`] the same way
     /// the usage history is against its own, rather than given a second timer.
     pub(crate) merged_swept_at_ms: u64,
-    /// The worktree whose merge mark is under the pointer, if any. Its own
+    /// The worktree whose work mark is under the pointer, if any. Its own
     /// field for the same reason `hovered_primary` is.
-    pub(crate) hovered_merge: Option<WorktreeId>,
+    pub(crate) hovered_work: Option<WorktreeId>,
     /// The terminal whose tab context ring is under the pointer, if any — see
     /// [`crate::tab_context`].
     pub(crate) hovered_context: Option<TerminalId>,
@@ -785,6 +787,9 @@ struct Shell {
     /// The worktree whose size on disk is under the pointer, for its
     /// tooltip.
     pub(crate) hovered_footprint: Option<WorktreeId>,
+    /// The background job row or tab count under the pointer, by its key,
+    /// and which of the row's buttons, for their tooltips — see `tree::jobs`.
+    pub(crate) hovered_job: Option<(SharedString, Option<&'static str>)>,
     /// The worktree row under the pointer, for the facts its trailing
     /// column shows only then.
     pub(crate) hovered_worktree: Option<WorktreeId>,
@@ -792,8 +797,8 @@ struct Shell {
     /// not persisted: a subagent is gone long before a restart.
     pub(crate) collapsed_subagents: std::collections::HashSet<WorktreeId>,
     /// How wide each worktree row's trailing column was last drawn — the
-    /// fold, merge and footprint after the state word — so its subagent rows
-    /// can end their figures under that word rather than out past the fold.
+    /// ring, pull request and work mark at its end — so its subagent rows
+    /// can end their figures short of that column rather than out past it.
     pub(crate) meta_widths: std::collections::HashMap<WorktreeId, Pixels>,
     /// The open "clear build output?" question, if there is one.
     pub(crate) confirm_clear_build: Option<crate::clear_build::ClearBuildConfirm>,
@@ -906,9 +911,9 @@ struct Shell {
     /// The close-tab confirmation for a terminal running a CLI agent session,
     /// while it is up. See `crate::tabs::CloseSessionConfirm`.
     pub(crate) confirm_close_session: Option<crate::tabs::CloseSessionConfirm>,
-    /// Whether to pick up a session whose prompt cache went cold — see
-    /// `crate::cold_resume`.
-    pub(crate) cold_resume: crate::cold_resume::ColdResumeState,
+    /// The questions asked as a session is opened: out of usage, gone cold
+    /// — see `crate::session_asks`.
+    pub(crate) asks: crate::session_asks::SessionAsks,
     /// The sessions' `/color` — see `crate::session_color`.
     pub(crate) session_colors: crate::session_color::SessionColors,
     /// Open editor tabs' buffers and UI state, keyed by absolute path. See
@@ -1058,22 +1063,6 @@ struct Shell {
     /// of step the moment a second field appeared. See [`Shell::caret_blink`].
     pub(crate) caret: Caret,
 }
-
-/// The blink behind every text caret in the shell.
-///
-/// A caret that does not blink reads as a rule drawn between two characters
-/// rather than as an insertion point.
-#[derive(Default)]
-pub(crate) struct Caret {
-    /// Whether the caret is in its visible phase.
-    pub(crate) visible: bool,
-    /// The timer flipping the phase. `None` while no field has the keyboard.
-    task: Option<gpui::Task<()>>,
-}
-
-/// How long each phase of the caret's blink lasts: macOS's own interval, and
-/// the one the terminal cursor already blinks at.
-const CARET_BLINK: std::time::Duration = std::time::Duration::from_millis(530);
 
 impl Focusable for Shell {
     fn focus_handle(&self, _: &App) -> FocusHandle {
@@ -1440,11 +1429,11 @@ impl Shell {
                     updates: Default::default(),
                     override_hover: Default::default(),
                     hovered_primary: None,
-                    hovered_merge: None,
                     hovered_context: None,
                     hovered_diff_control: None,
                     hovered_pull_request: None,
                     hovered_footprint: None,
+                    hovered_job: None,
                     hovered_worktree: None,
                     collapsed_subagents: std::collections::HashSet::new(),
                     meta_widths: std::collections::HashMap::new(),
@@ -1476,6 +1465,7 @@ impl Shell {
                     local_queue: Default::default(),
                     reading_merged: false,
                     merged_swept_at_ms: 0,
+                    hovered_work: None,
                     drop_target: None,
                     owed_terminals: HashMap::new(),
                     owed_restores: HashMap::new(),
@@ -1487,7 +1477,7 @@ impl Shell {
                     tab_dragging: false,
                     confirm_remove_worktree: None,
                     confirm_close_session: None,
-                    cold_resume: Default::default(),
+                    asks: Default::default(),
                     session_colors: Default::default(),
                     editors: HashMap::new(),
                     window_bounds: None,
@@ -1633,11 +1623,11 @@ impl Shell {
             updates: Default::default(),
             override_hover: Default::default(),
             hovered_primary: None,
-            hovered_merge: None,
             hovered_context: None,
             hovered_diff_control: None,
             hovered_pull_request: None,
             hovered_footprint: None,
+            hovered_job: None,
             hovered_worktree: None,
             collapsed_subagents: std::collections::HashSet::new(),
             meta_widths: std::collections::HashMap::new(),
@@ -1669,6 +1659,7 @@ impl Shell {
             local_queue: Default::default(),
             reading_merged: false,
             merged_swept_at_ms: 0,
+            hovered_work: None,
             drop_target: None,
             owed_terminals: HashMap::new(),
             owed_restores: HashMap::new(),
@@ -1680,7 +1671,7 @@ impl Shell {
             tab_dragging: false,
             confirm_remove_worktree: None,
             confirm_close_session: None,
-            cold_resume: Default::default(),
+            asks: Default::default(),
             session_colors: Default::default(),
             editors: HashMap::new(),
             window_bounds: None,
@@ -1823,45 +1814,6 @@ impl Shell {
     }
 }
 
-impl Shell {
-    /// Starts or stops the blink to match.
-    fn caret_blink(&mut self, on: bool, cx: &mut Context<Self>) {
-        match (on, self.caret.task.is_some()) {
-            (true, false) => {
-                self.caret.visible = true;
-                self.caret.task = Some(cx.spawn(async move |this: gpui::WeakEntity<Shell>, cx| {
-                    loop {
-                        cx.background_executor().timer(CARET_BLINK).await;
-                        let alive = this.update(cx, |shell, cx| {
-                            shell.caret.visible = !shell.caret.visible;
-                            cx.notify();
-                        });
-                        if alive.is_err() {
-                            break;
-                        }
-                    }
-                }));
-            }
-            (false, true) => {
-                self.caret.task = None;
-                self.caret.visible = true;
-            }
-            _ => {}
-        }
-    }
-
-    /// Shows the caret and starts its phase over — what typing does to a caret
-    /// everywhere else, so a character never lands during the half of the
-    /// blink where the caret is not drawn.
-    pub(crate) fn caret_wake(&mut self, cx: &mut Context<Self>) {
-        self.caret.visible = true;
-        if self.caret.task.is_some() {
-            self.caret.task = None;
-            self.caret_blink(true, cx);
-        }
-    }
-}
-
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let modal_open = self.modal_open();
@@ -1895,7 +1847,7 @@ impl Render for Shell {
         #[cfg(target_os = "macos")]
         self.sync_ios_simulator_visibility(cx);
         self.sync_terminal_views(cx);
-        self.check_cold_resume(window, cx);
+        self.check_session_asks(window, cx);
         self.see_front_tab(window, cx);
         self.read_arrived_worktree(window, cx);
         // Pictures whose tabs have closed since the last frame, while the
@@ -2014,7 +1966,7 @@ impl Render for Shell {
         let automations = self.automations_view(window, cx);
         let quick_capture = self.quick_capture_view(window, cx);
         let close_session = self.close_session_view(cx);
-        let cold_resume = self.cold_resume_view(cx);
+        let session_ask = self.session_ask_view(cx);
         // One at a time: two modals stacked is a state with no way back.
         let modal = storage_dialog
             .or(release_dialog)
@@ -2035,7 +1987,7 @@ impl Render for Shell {
             .or(automations)
             .or(quick_capture)
             .or(close_session)
-            .or(cold_resume);
+            .or(session_ask);
         let header = {
             let _span = crate::frametrace::span("build:header");
             self.window_header(window, cx)
@@ -3006,7 +2958,7 @@ impl Render for Shell {
                         stop_unless_text(event, cx);
                         return;
                     }
-                    if this.cold_resume_key(event, cx) {
+                    if this.session_ask_key(event, cx) {
                         cx.notify();
                         stop_unless_text(event, cx);
                         return;
@@ -3639,263 +3591,4 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use gpui::{Action as _, MenuItem};
-
-    #[test]
-    fn the_app_menu_offers_quit() {
-        // A menu bar without a Quit item is the bug: macOS resolves Cmd-Q
-        // against the menu's key equivalents, so no Quit item means no way to
-        // quit from the keyboard. The item's equivalent comes from the
-        // QUIT_CHORD binding, which is asserted separately below.
-        let menus = app_menus(&crate::app_menu::MenuState {
-            status_bar_open: true,
-            ..Default::default()
-        });
-        let app_menu = menus
-            .iter()
-            .find(|menu| menu.name.as_ref() == "ket")
-            .expect("the app menu exists");
-
-        assert!(
-            app_menu.items.iter().any(|item| match item {
-                MenuItem::Action { action, .. } => action.name() == Quit.name(),
-                _ => false,
-            }),
-            "the app menu has a Quit item"
-        );
-    }
-
-    #[test]
-    fn the_view_menu_offers_zoom() {
-        // The chords are bound in `main`; the items are how someone finds
-        // out they exist, and how a native view that took the chord — a web
-        // page — still hands it on.
-        let menus = app_menus(&crate::app_menu::MenuState {
-            status_bar_open: true,
-            ..Default::default()
-        });
-        let view = menus
-            .iter()
-            .find(|menu| menu.name.as_ref() == "View")
-            .expect("the View menu exists");
-        for wanted in [ZoomIn.name(), ZoomOut.name(), ActualSize.name()] {
-            assert!(
-                view.items.iter().any(|item| match item {
-                    MenuItem::Action { action, .. } => action.name() == wanted,
-                    _ => false,
-                }),
-                "the View menu has {wanted}"
-            );
-        }
-    }
-
-    #[test]
-    fn switch_worktree_actions_keep_ids_when_rows_reorder() {
-        use crate::app_menu::{MenuState, MenuWorktree, SwitchWorktree};
-        let first = WorktreeId::new("first");
-        let second = WorktreeId::new("second");
-        let menu_for = |ids: &[WorktreeId]| {
-            let state = MenuState {
-                selected_worktree: Some(second.clone()),
-                worktrees: ids
-                    .iter()
-                    .map(|id| MenuWorktree {
-                        id: id.clone(),
-                        name: id.to_string(),
-                    })
-                    .collect(),
-                ..Default::default()
-            };
-            app_menus(&state)
-                .into_iter()
-                .find(|menu| menu.name.as_ref() == "Worktree")
-                .unwrap()
-                .items
-                .into_iter()
-                .find_map(|item| match item {
-                    MenuItem::Submenu(menu) if menu.name.as_ref() == "Switch Worktree" => {
-                        Some(menu.items)
-                    }
-                    _ => None,
-                })
-                .unwrap()
-                .into_iter()
-                .map(|item| match item {
-                    MenuItem::Action {
-                        action, checked, ..
-                    } => (
-                        action
-                            .as_any()
-                            .downcast_ref::<SwitchWorktree>()
-                            .unwrap()
-                            .id
-                            .clone(),
-                        checked,
-                    ),
-                    _ => panic!("expected worktree action"),
-                })
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(
-            menu_for(&[first.clone(), second.clone()]),
-            vec![(first.clone(), false), (second.clone(), true)]
-        );
-        assert_eq!(
-            menu_for(&[second.clone(), first.clone()]),
-            vec![(second, true), (first, false)]
-        );
-    }
-
-    #[test]
-    fn agent_menu_shortcuts_follow_runnable_order() {
-        let state = crate::app_menu::MenuState {
-            agents: vec!["claude".into(), "codex".into()],
-            ..Default::default()
-        };
-        let file = app_menus(&state)
-            .into_iter()
-            .find(|menu| menu.name.as_ref() == "File")
-            .unwrap();
-        let agent_items = file
-            .items
-            .into_iter()
-            .find_map(|item| match item {
-                MenuItem::Submenu(menu) if menu.name.as_ref() == "New Agent Session" => {
-                    Some(menu.items)
-                }
-                _ => None,
-            })
-            .unwrap();
-        for (index, item) in agent_items.into_iter().enumerate() {
-            let MenuItem::Action { key_equivalent, .. } = item else {
-                panic!("expected agent action");
-            };
-            assert_eq!(key_equivalent, crate::shortcuts::agent_session_chord(index));
-        }
-    }
-
-    #[test]
-    fn modal_disables_commands_behind_its_fields() {
-        fn find_action<'a>(items: &'a [MenuItem], wanted: &str) -> Option<&'a MenuItem> {
-            items.iter().find_map(|item| match item {
-                MenuItem::Action { name, .. } if name.as_ref() == wanted => Some(item),
-                MenuItem::Submenu(menu) => find_action(&menu.items, wanted),
-                _ => None,
-            })
-        }
-
-        let state = crate::app_menu::MenuState {
-            modal_open: true,
-            selected_project: Some(ProjectId::new("project")),
-            selected_worktree: Some(WorktreeId::new("worktree")),
-            projects: vec![crate::app_menu::MenuProject {
-                id: ProjectId::new("project"),
-                name: "Project A".into(),
-            }],
-            worktrees: vec![crate::app_menu::MenuWorktree {
-                id: WorktreeId::new("worktree"),
-                name: "Worktree A".into(),
-            }],
-            economy_levels: vec![crate::app_menu::MenuEconomyLevel {
-                level: 1,
-                name: "Economy Level".into(),
-            }],
-            has_tab: true,
-            has_multiple_panes: true,
-            can_new_worktree: true,
-            ..Default::default()
-        };
-        let menus = app_menus(&state);
-        for wanted in [
-            "Change Tab Title…",
-            "Split Pane Right",
-            "Close Pane",
-            "Close Other Tabs",
-            "Pin/Unpin Tab",
-            "New Worktree…",
-            "Project A",
-            "Worktree A",
-            "Economy Level",
-        ] {
-            assert!(
-                menus.iter().any(|menu| matches!(
-                    find_action(&menu.items, wanted),
-                    Some(MenuItem::Action { enabled: false, .. })
-                )),
-                "{wanted} remains enabled behind a modal"
-            );
-        }
-        #[cfg(target_os = "macos")]
-        assert!(menus.iter().any(|menu| matches!(
-            find_action(&menu.items, "Paste"),
-            Some(MenuItem::Action { enabled: true, .. })
-        )));
-        for wanted in ["Minimize", "Zoom", "Enter Full Screen"] {
-            assert!(
-                menus.iter().any(|menu| matches!(
-                    find_action(&menu.items, wanted),
-                    Some(MenuItem::Action { enabled: true, .. })
-                )),
-                "{wanted} is disabled by a modal"
-            );
-        }
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn unsupported_edit_history_is_disabled() {
-        let state = crate::app_menu::MenuState::default();
-        let edit = app_menus(&state)
-            .into_iter()
-            .find(|menu| menu.name.as_ref() == "Edit")
-            .unwrap();
-        for name in ["Undo", "Redo", "Cut"] {
-            assert!(edit.items.iter().any(|item| matches!(item,
-                MenuItem::Action { name: item_name, enabled: false, .. } if item_name == name
-            )));
-        }
-    }
-
-    #[test]
-    fn the_quit_chord_is_the_platforms_own() {
-        if cfg!(target_os = "macos") {
-            assert_eq!(QUIT_CHORD, "cmd-q");
-        } else {
-            assert_eq!(QUIT_CHORD, "alt-f4");
-        }
-    }
-
-    #[test]
-    fn no_overlay_defers_itself() {
-        // `render` above defers every overlay exactly once. A view that also
-        // defers itself nests a deferred draw inside a deferred draw, and gpui
-        // does not merely misdraw that — it aborts the process the moment the
-        // overlay opens ("cannot call defer_draw during deferred drawing").
-        // That shipped once, in the project menu, so it is worth a tripwire:
-        // these files supply overlays, and none of them may call `deferred`.
-        // If you need a deferred element in one of them for something that is
-        // *not* an overlay, this test is the place to say so.
-        let sources = [
-            ("projects.rs", include_str!("projects.rs")),
-            ("palette.rs", include_str!("palette.rs")),
-            ("explorer.rs", include_str!("explorer.rs")),
-            ("worktree_menu.rs", include_str!("worktree_menu.rs")),
-            ("worktree_dialog.rs", include_str!("worktree_dialog.rs")),
-        ];
-
-        for (name, source) in sources {
-            // Skip the prose: the doc comments here explain the rule.
-            let code = source
-                .lines()
-                .filter(|line| !line.trim_start().starts_with("//"))
-                .collect::<Vec<_>>()
-                .join("\n");
-            assert!(
-                !code.contains("deferred("),
-                "{name} defers an element itself; the shell defers overlays"
-            );
-        }
-    }
-}
+mod tests;

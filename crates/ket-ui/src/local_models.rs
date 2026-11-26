@@ -691,7 +691,7 @@ impl Shell {
             .and_then(|view| view.local_models.menu.as_ref())
             .filter(|(owner, _)| owner == tag);
         let panel = open.map(|(_, menu)| {
-            menu.view(
+            menu.dropdown_view(
                 t,
                 cx,
                 |this, action, cx| {
@@ -1052,6 +1052,29 @@ impl Shell {
         self.local_queue.released_at = Some(Instant::now());
         self.submit_to_terminal(terminal, prompt, cx);
         false
+    }
+
+    /// [`Shell::submit_to_terminal_then`] into local-model terminal
+    /// `terminal`, for a prompt that can't wait in the queue: typed now while
+    /// the model is free and nothing waits for it, else `Err` saying what
+    /// has it. A hand-over's tab closes once the new agent has the brief,
+    /// and a queued one would go with it.
+    pub(crate) fn submit_local_now_then(
+        &mut self,
+        terminal: TerminalId,
+        prompt: &str,
+        cx: &mut Context<Self>,
+        done: impl FnOnce(&mut Shell, bool, &mut Context<Shell>) + 'static,
+    ) -> Result<(), String> {
+        if let Some(label) = self.local_model_busy() {
+            return Err(format!("the local model is busy with {label}"));
+        }
+        if !self.local_queue.waiting.is_empty() {
+            return Err("other tasks are waiting for the local model".to_owned());
+        }
+        self.local_queue.released_at = Some(Instant::now());
+        self.submit_to_terminal_then(terminal, prompt, cx, done);
+        Ok(())
     }
 
     /// Lets the next queued prompt go once the local model is free. On the

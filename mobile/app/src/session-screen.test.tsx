@@ -20,6 +20,8 @@ jest.mock('@ket/remote', () => ({
   Activity: { QUIET: 0, RUNNING: 1, WORKING: 2, MERGING: 3, BLOCKED: 4, FAILED: 5 },
   Answer_Choice: { ALLOW_ONCE: 1, ALLOW_ALWAYS: 2, DENY: 3 },
   BackgroundSession_State: { STATE_UNSPECIFIED: 0, DONE: 1, WORKING: 2, NEEDS_YOU: 3 },
+  SessionLimit_Scope: { SCOPE_UNSPECIFIED: 0, PLAN: 1, MODEL: 2 },
+  SwitchDepth: { SWITCH_DEPTH_UNSPECIFIED: 0, TASK: 1, RECENT: 2, FULL: 3 },
   Turn_Kind: { USER: 1, ASSISTANT: 2, TOOL: 3 },
 }));
 jest.mock('./lib/hosts', () => ({ useHost: () => mockConn, useHostState: (conn: unknown) => conn }));
@@ -92,7 +94,19 @@ const connection = (worktree = tree(), fields: object = {}) => ({
   ...fields,
 });
 
+// What was typed and not sent is kept per chat across screens; each test
+// starts with none, or one test's draft hides the next one's chips.
+let mockDrafts: Record<string, { text: string; where: string }> = {};
+jest.mock('./lib/drafts', () => ({
+  draftFor: (key: string, where: string) => (mockDrafts[key]?.where === where ? mockDrafts[key].text : ''),
+  keepDraft: (key: string, where: string, text: string) => {
+    if (text.trim()) mockDrafts[key] = { text, where };
+    else delete mockDrafts[key];
+  },
+}));
+
 beforeEach(() => {
+  mockDrafts = {};
   jest.clearAllMocks();
   mockConfirmIdentity.mockResolvedValue(true);
   mockConn = connection();
@@ -412,6 +426,161 @@ describe('Session', () => {
     await fireEvent.press(send);
     await waitFor(() => expect(mockConn.type.mock.calls).toEqual([[7n, '/status'], [7n, '\r']]));
     expect(view.queryByLabelText('Close menu')).toBeNull();
+    await view.unmount();
+  });
+
+  test('a session its plan stopped puts up the warm sheet once, and a line in the composer brings it back', async () => {
+    const resets = Date.now() + 2 * 60 * 60 * 1000 + 5 * 60 * 1000 + 30_000;
+    const limit = { scope: 1, window: 1, sinceMs: BigInt(Date.now() - 60_000), resetsAtMs: BigInt(resets), said: '' };
+    const stopped = tree({ asleep: [], terminals: [{ id: 7n, agent: 'codex', title: 'Codex', closed: false, modes, limit }] });
+    mockConn = connection(stopped, { hostMinor: 38 });
+    mockConn.snapshot = { ...mockConn.snapshot, agents: ['codex', 'claude'], usage: [] };
+    const view = await render(<Session />);
+    await waitFor(() => expect(view.getByText('Out of usage')).toBeTruthy());
+    expect(view.getByText('Codex has reached its usage limit and resets in 2 hours 6 minutes.')).toBeTruthy();
+    // No composer while the session cannot take a message.
+    expect(view.queryByPlaceholderText(/Message/)).toBeNull();
+
+    await fireEvent.press(view.getByText('Wait for it'));
+    await waitFor(() => expect(view.queryByText('Out of usage')).toBeNull());
+    expect(view.getByText('Usage limit reached')).toBeTruthy();
+    expect(view.getByText('Resets in 2 h 6 min')).toBeTruthy();
+
+    await fireEvent.press(view.getByLabelText(/Usage limit reached/));
+    await waitFor(() => expect(view.getByText('Out of usage')).toBeTruthy());
+    await view.unmount();
+
+    // A desktop from before 1.38 sends no limit to read.
+    mockConn = connection(stopped, { hostMinor: 37 });
+    mockConn.snapshot = { ...mockConn.snapshot, agents: ['codex', 'claude'], usage: [] };
+    const older = await render(<Session />);
+    await waitFor(() => expect(older.queryByText('Usage limit reached')).toBeNull());
+    expect(older.queryByText('Out of usage')).toBeNull();
+    await older.unmount();
+  });
+
+  test('a stop that names no reset keeps the composer under its line, to try again', async () => {
+    const limit = { scope: 1, window: 0, sinceMs: BigInt(Date.now() - 60_000), resetsAtMs: 0n, said: '' };
+    const stopped = tree({ asleep: [], terminals: [{ id: 7n, agent: 'grok', title: 'Grok', closed: false, modes, limit }] });
+    mockConn = connection(stopped, { hostMinor: 38 });
+    mockConn.snapshot = { ...mockConn.snapshot, agents: ['grok'], usage: [] };
+    const view = await render(<Session />);
+    await waitFor(() => expect(view.getByText('Out of usage')).toBeTruthy());
+    await fireEvent.press(view.getByText('Wait for it'));
+    await waitFor(() => expect(view.queryByText('Out of usage')).toBeNull());
+    expect(view.getByText('Usage limit reached')).toBeTruthy();
+    expect(view.getByPlaceholderText(/Message/)).toBeTruthy();
+    await view.unmount();
+  });
+
+  test('a stop at one model\'s limit keeps the composer under its line, to try another model', async () => {
+    const limit = { scope: 2, window: 0, sinceMs: BigInt(Date.now() - 60_000), resetsAtMs: BigInt(Date.now() + 3_600_000), said: '' };
+    const stopped = tree({ asleep: [], terminals: [{ id: 7n, agent: 'claude', title: 'Claude', closed: false, modes, limit }] });
+    mockConn = connection(stopped, { hostMinor: 38 });
+    mockConn.snapshot = { ...mockConn.snapshot, agents: ['claude'], usage: [] };
+    const view = await render(<Session />);
+    await waitFor(() => expect(view.getByText('Out of usage')).toBeTruthy());
+    await fireEvent.press(view.getByText('Wait for it'));
+    await waitFor(() => expect(view.queryByText('Out of usage')).toBeNull());
+    expect(view.getByText('Usage limit reached')).toBeTruthy();
+    expect(view.getByPlaceholderText(/Message/)).toBeTruthy();
+    await view.unmount();
+  });
+
+  test('Use Claude shows what Claude will be told before anything goes, then follows Claude into its chat', async () => {
+    const limit = { scope: 1, window: 1, sinceMs: BigInt(Date.now() - 60_000), resetsAtMs: BigInt(Date.now() + 3_600_000), said: '' };
+    const stopped = tree({ asleep: [], terminals: [{ id: 7n, agent: 'codex', title: 'Codex', closed: false, modes, limit }] });
+    const previewSwitch = jest.fn(async (_terminal: bigint, agent: string, depth: number) => ({
+      terminalId: 7n,
+      text: `Codex was working on a task. Depth ${depth.toString()} for ${agent}.`,
+      turns: 3,
+      approxTokens: 1200,
+      session: 'rollout-1',
+    }));
+    const switchAgent = jest.fn(async (..._args: unknown[]) => ({ terminalId: 9n }));
+    mockConn = connection(stopped, { hostMinor: 39, previewSwitch, switchAgent, awaitTerminal: jest.fn(async () => {}) });
+    mockConn.snapshot = { ...mockConn.snapshot, agents: ['codex', 'claude', 'opencode'], usage: [] };
+    const view = await render(<Session />);
+    // On the sheet, and on the line in the composer's place under it.
+    await waitFor(() => expect(view.getAllByText('Use Claude')).toHaveLength(2));
+
+    await fireEvent.press(view.getAllByText('Use Claude')[1]!);
+    await waitFor(() => expect(view.getByText('Codex was working on a task. Depth 2 for claude.')).toBeTruthy());
+    expect(view.getByText('Continue with…')).toBeTruthy();
+    expect(view.getByText('about 1,200 tokens')).toBeTruthy();
+    expect(switchAgent).not.toHaveBeenCalled();
+    // A snapshot while it is up asks nothing again.
+    mockConn.snapshot = { ...mockConn.snapshot };
+    await view.rerender(<Session />);
+    expect(previewSwitch).toHaveBeenCalledTimes(1);
+
+    // Everything, then OpenCode instead: each asked for afresh.
+    await fireEvent.press(view.getByText('Everything'));
+    await waitFor(() => expect(view.getByText('Codex was working on a task. Depth 3 for claude.')).toBeTruthy());
+    await fireEvent.press(view.getByLabelText('OpenCode'));
+    await waitFor(() => expect(view.getByText('Codex was working on a task. Depth 3 for opencode.')).toBeTruthy());
+    await fireEvent.press(view.getByText('In a new chat beside it'));
+
+    await fireEvent.press(view.getByText('Send to OpenCode'));
+    await waitFor(() => expect(mockRouter.replace).toHaveBeenCalledWith('/session/host/9'));
+    expect(switchAgent).toHaveBeenCalledWith(7n, 'opencode', 'Codex was working on a task. Depth 3 for opencode.', true, 'rollout-1');
+    expect(previewSwitch).toHaveBeenCalledTimes(3);
+    await view.unmount();
+  });
+
+  test('a hand-over carries what was being written to the new chat, not into the brief', async () => {
+    const limit = { scope: 1, window: 0, sinceMs: BigInt(Date.now() - 60_000), resetsAtMs: 0n, said: '' };
+    const stopped = tree({
+      asleep: [],
+      terminals: [
+        { id: 7n, agent: 'codex', title: 'Codex', closed: false, modes, limit },
+        { id: 9n, agent: 'claude', title: 'Claude', closed: false, modes },
+      ],
+    });
+    const switchAgent = jest.fn(async (..._args: unknown[]) => ({ terminalId: 9n }));
+    mockConn = connection(stopped, {
+      hostMinor: 39,
+      previewSwitch: jest.fn(async () => ({ terminalId: 7n, text: 'The brief.', turns: 1, approxTokens: 3, session: 's1' })),
+      switchAgent,
+      awaitTerminal: jest.fn(async () => {}),
+    });
+    mockConn.snapshot = { ...mockConn.snapshot, agents: ['codex', 'claude'], usage: [] };
+    const view = await render(<Session />);
+    await waitFor(() => expect(view.getByText('Wait for it')).toBeTruthy());
+    await fireEvent.press(view.getByText('Wait for it'));
+    await fireEvent.changeText(view.getByPlaceholderText(/Message/), 'half a thought');
+    await fireEvent.press(view.getAllByText('Use Claude')[0]!);
+    await waitFor(() => expect(view.getByText('The brief.')).toBeTruthy());
+    await fireEvent.press(view.getByText('Send to Claude'));
+    await waitFor(() => expect(mockRouter.replace).toHaveBeenCalledWith('/session/host/9'));
+    expect(switchAgent).toHaveBeenCalledWith(7n, 'claude', 'The brief.', false, 's1');
+    await view.unmount();
+    mockParams = { host: 'host', terminal: '9' };
+    const next = await render(<Session />);
+    expect(next.getByPlaceholderText(/Message/).props.value).toBe('half a thought');
+    await next.unmount();
+  });
+
+  test('a hand-over the Mac refuses says why in the sheet, and the chat stays', async () => {
+    const limit = { scope: 1, window: 1, sinceMs: BigInt(Date.now() - 60_000), resetsAtMs: BigInt(Date.now() + 3_600_000), said: '' };
+    const stopped = tree({ asleep: [], terminals: [{ id: 7n, agent: 'codex', title: 'Codex', closed: false, modes, limit }] });
+    mockConn = connection(stopped, {
+      hostMinor: 39,
+      previewSwitch: jest.fn(async () => ({ terminalId: 7n, text: 'The brief.', turns: 1, approxTokens: 3, session: 's1' })),
+      switchAgent: jest.fn(async () => ({ why: "it hadn't started: its tab is at a shell prompt" })),
+    });
+    mockConn.snapshot = { ...mockConn.snapshot, agents: ['codex', 'claude'], usage: [] };
+    const view = await render(<Session />);
+    // From the line in the composer's place, straight to the hand-over.
+    await waitFor(() => expect(view.getByText('Wait for it')).toBeTruthy());
+    await fireEvent.press(view.getByText('Wait for it'));
+    await waitFor(() => expect(view.getByText('Usage limit reached')).toBeTruthy());
+    // The line's own button, first on the screen.
+    await fireEvent.press(view.getAllByText('Use Claude')[0]!);
+    await waitFor(() => expect(view.getByText('The brief.')).toBeTruthy());
+    await fireEvent.press(view.getByText('Send to Claude'));
+    await waitFor(() => expect(view.getByText("it hadn't started: its tab is at a shell prompt")).toBeTruthy());
+    expect(mockRouter.replace).not.toHaveBeenCalled();
     await view.unmount();
   });
 

@@ -27,6 +27,7 @@ use std::time::Duration;
 
 use crate::{KetError, Result, paths};
 
+pub mod blackout;
 pub(crate) mod client;
 pub mod identity;
 mod phones;
@@ -673,6 +674,48 @@ pub fn finish_phone_fresh(req: u64, outcome: std::result::Result<String, String>
     }
 }
 
+/// A phone's ask that a tab's task move to another agent, with the brief
+/// the phone showed — see [`take_phone_switch`] and `crate::handoff`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PhoneSwitch {
+    /// Answered with [`finish_phone_switch`].
+    pub req: u64,
+    /// The old agent's pane key.
+    pub key: String,
+    /// The agent to open.
+    pub agent: String,
+    /// The model to open it on; `None` for its own default.
+    pub model: Option<String>,
+    /// The effort to open it on; `None` for its own default.
+    pub effort: Option<String>,
+    /// The brief, typed into the new agent as its first message.
+    pub text: String,
+    /// In a new tab beside the old one, rather than in its place.
+    pub beside: bool,
+    /// The session the old tab held as the phone asked, where the host knew.
+    pub session: Option<String>,
+}
+
+/// The oldest switch a phone asked of this window.
+pub fn take_phone_switch() -> Option<PhoneSwitch> {
+    let mut switches = client::PHONE_SWITCHES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    (!switches.is_empty()).then(|| switches.remove(0))
+}
+
+/// Tells the host which tab a phone's switch opened the new agent in, by
+/// its pane key, or why none was.
+pub fn finish_phone_switch(req: u64, outcome: std::result::Result<String, String>) {
+    if let Some(conn) = client::current() {
+        let (key, error) = match outcome {
+            Ok(key) => (Some(key), None),
+            Err(why) => (None, Some(why)),
+        };
+        let _ = conn.request(&wire::Request::SwitchResult { req, key, error });
+    }
+}
+
 /// The oldest worktree a phone asked this window to merge. Later requests
 /// remain queued until the current desktop confirmation is resolved.
 pub fn take_phone_merge() -> Option<String> {
@@ -910,6 +953,15 @@ pub fn publish_agents(names: Vec<String>) {
     }
 }
 
+/// The agents this window last told the host it can start — see
+/// [`publish_agents`]. Empty until the first is published.
+pub fn published_agents() -> Vec<String> {
+    client::AGENTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+}
+
 /// Tells the host the pull requests this window's worktrees are open as,
 /// for phones — see [`wire::Request::PullRequests`]. Kept and sent again on
 /// every new connection; sent now only if they changed and a host is
@@ -989,6 +1041,20 @@ pub fn seen(pane: &str) -> bool {
     client::current().is_some_and(|conn| {
         conn.request(&wire::Request::Seen {
             pane: pane.to_owned(),
+        })
+        .is_ok()
+    })
+}
+
+/// Ends a command an agent left running in the background, which pane
+/// `pane`'s status lists with this pid and start. Returns whether a host was
+/// connected to hear it.
+pub fn stop_job(pane: &str, pid: i32, started_at_ms: u64) -> bool {
+    client::current().is_some_and(|conn| {
+        conn.request(&wire::Request::StopJob {
+            pane: pane.to_owned(),
+            pid,
+            started_at_ms,
         })
         .is_ok()
     })

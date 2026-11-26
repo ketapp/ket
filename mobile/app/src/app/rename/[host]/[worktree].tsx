@@ -1,4 +1,4 @@
-// Rename a worktree, as the desktop's Rename… does (desktop 1.33): the name
+// Rename a worktree, as the desktop's Rename does (desktop 1.33): the name
 // ket shows for it on the Mac and here, not its branch or its folder. Left
 // empty, it goes back to the branch's name.
 //

@@ -57,11 +57,14 @@ pub(in crate::host) struct Kinds {
     /// A check on a worktree's pull request failed.
     #[serde(default)]
     pub(in crate::host) checks: bool,
+    /// An agent's plan ran out mid-task, or its limit has reset.
+    #[serde(default)]
+    pub(in crate::host) limits: bool,
 }
 
 impl Kinds {
     fn any(self) -> bool {
-        self.waiting || self.finished || self.checks
+        self.waiting || self.finished || self.checks || self.limits
     }
 }
 
@@ -100,6 +103,7 @@ impl Registration {
                 Ok(proto::PushKind::Waiting) => kinds.waiting = true,
                 Ok(proto::PushKind::Finished) => kinds.finished = true,
                 Ok(proto::PushKind::Checks) => kinds.checks = true,
+                Ok(proto::PushKind::Limits) => kinds.limits = true,
                 _ => {}
             }
         }

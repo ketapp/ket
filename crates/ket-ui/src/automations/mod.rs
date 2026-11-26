@@ -24,16 +24,17 @@ pub(crate) use settings::editing;
 use std::time::SystemTime;
 
 use gpui::{
-    AnyElement, Context, FocusHandle, FontWeight, KeyDownEvent, MouseButton, SharedString, Window,
-    div, prelude::*, px, relative,
+    AnyElement, Context, Div, FocusHandle, FontWeight, KeyDownEvent, MouseButton, Pixels,
+    SharedString, Window, div, prelude::*, px, relative,
 };
 use jiff::Timestamp;
 use jiff::tz::TimeZone;
 use ket_core::automation::{Automation, Automations, Clock, Day, Runs, Task};
 use ket_core::id::ProjectId;
+use ket_core::theme::Theme;
 
 use crate::Shell;
-use crate::paint::paint;
+use crate::paint::{alpha, paint};
 use crate::ui::agent::mark;
 use crate::ui::button::{button, icon_button};
 use crate::ui::chip::{Motion, caption, image_badge, status_dot};
@@ -46,7 +47,10 @@ use crate::ui::toast::Tone;
 use crate::ui::toggle::switch;
 
 /// The dialog's width: the list, and room beside it for the runs' table.
-const DIALOG_WIDTH: gpui::Pixels = px(1000.0);
+const DIALOG_WIDTH: gpui::Pixels = px(1100.0);
+
+/// The title bar's height, over both the list and the chosen automation.
+const TITLE_BAR_H: gpui::Pixels = px(52.0);
 
 /// Its height, short of the window's own.
 const DIALOG_HEIGHT: gpui::Pixels = px(680.0);
@@ -160,17 +164,44 @@ fn day_of(at: Timestamp, tz: &TimeZone) -> String {
     }
 }
 
-/// `Every day · Claude Code`, `Once · Command`.
-fn detail(automation: &Automation) -> String {
-    let what = match &automation.task {
+/// `Every day · acme`: how often, and whose. What runs is the row's mark.
+fn detail(automation: &Automation, project: &str) -> String {
+    let when = automation.when.describe();
+    let when = when.split(" at ").next().unwrap_or(&when).to_owned();
+    format!("{when} \u{b7} {project}")
+}
+
+/// `Claude Code`, `Command`: what a start runs.
+fn what_runs(automation: &Automation) -> String {
+    match &automation.task {
         Task::Prompt { agent, .. } => agent
             .as_deref()
             .map_or_else(|| "Agent".to_owned(), crate::ui::agent::agent_label),
         Task::Command { .. } => "Command".to_owned(),
-    };
-    let when = automation.when.describe();
-    let when = when.split(" at ").next().unwrap_or(&when).to_owned();
-    format!("{when} \u{b7} {what}")
+    }
+}
+
+/// What a start runs, as a mark: the agent's, or the terminal for a command.
+fn task_mark(automation: &Automation, size: Pixels, t: &Theme) -> AnyElement {
+    match &automation.task {
+        Task::Prompt {
+            agent: Some(agent), ..
+        } => mark(agent, t).size(size).into_any_element(),
+        _ => sized_icon(Icon::Terminal, size, paint(t.text.dim)).into_any_element(),
+    }
+}
+
+/// A mark set in a sunken square, `side` across.
+fn mark_well(mark: AnyElement, side: Pixels, t: &Theme) -> Div {
+    div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .size(side)
+        .rounded(crate::ui::RADIUS_MD)
+        .bg(paint(t.sunken))
+        .child(mark)
 }
 
 impl Shell {
@@ -425,10 +456,16 @@ impl Shell {
         }
         // With nothing scheduled there is no list and nothing to choose:
         // the dialog is the one pane that says so.
+        // Otherwise a title bar over the list and the chosen automation: the
+        // ✕ is the dialog's, so it sits apart from what acts on the choice.
         let panes = if empty {
             vec![self.automations_empty(cx)]
         } else {
-            vec![self.automations_list(cx)?, self.automation_pane(window, cx)]
+            let title = self.automations_title(cx)?;
+            let list = self.automations_list(cx)?;
+            let pane = self.automation_pane(window, cx);
+            let body = div().flex().flex_1().min_h_0().child(list).child(pane);
+            vec![title, body.into_any_element()]
         };
         let dialog = self.automations.as_ref()?;
         let t = &self.theme;
@@ -438,7 +475,7 @@ impl Shell {
                     .track_focus(&dialog.focus)
                     .p(px(0.0))
                     .gap(px(0.0))
-                    .flex_row()
+                    .map(|el| if empty { el.flex_row() } else { el.flex_col() })
                     .max_w(relative(0.94))
                     .h(DIALOG_HEIGHT)
                     .max_h(relative(0.9))
@@ -459,13 +496,10 @@ impl Shell {
         )
     }
 
-    /// The list down the left, with its filter and New automation.
-    fn automations_list(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// The title bar: "Automations", how many are on and paused, and the ✕.
+    fn automations_title(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let dialog = self.automations.as_ref()?;
         let t = &self.theme;
-        let tz = TimeZone::system();
-        let now = Timestamp::now();
-        let rows = shown(&dialog.all, dialog.project.as_ref(), now, &tz);
         let on = dialog
             .all
             .automations
@@ -478,6 +512,48 @@ impl Shell {
             .iter()
             .filter(|automation| !automation.enabled)
             .count();
+        let counts = match (on, paused) {
+            (0, 0) => None,
+            (on, 0) => Some(format!("{on} on")),
+            (on, paused) => Some(format!("{on} on \u{b7} {paused} paused")),
+        };
+        Some(
+            div()
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap(px(8.0))
+                .h(TITLE_BAR_H)
+                .pl(px(20.0))
+                .pr(px(12.0))
+                .border_b_1()
+                .border_color(paint(t.rule))
+                .child(
+                    div()
+                        .text_size(crate::ui::TITLE)
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(paint(t.text.primary))
+                        .child("Automations"),
+                )
+                .children(counts.map(|counts| caption(counts, t)))
+                .child(div().flex_1())
+                .child(
+                    close("automations-close", t).on_click(cx.listener(|this, _, _, cx| {
+                        this.close_automations();
+                        cx.notify();
+                    })),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// The list down the left, with its filter and New automation.
+    fn automations_list(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let dialog = self.automations.as_ref()?;
+        let t = &self.theme;
+        let tz = TimeZone::system();
+        let now = Timestamp::now();
+        let rows = shown(&dialog.all, dialog.project.as_ref(), now, &tz);
 
         // A project filter, when more than one project has automations.
         let mut projects: Vec<ProjectId> = dialog
@@ -539,6 +615,7 @@ impl Shell {
             .min_h_0()
             .gap(px(2.0))
             .px(px(8.0))
+            .pt(px(6.0))
             .overflow_y_scroll();
         let mut group = None;
         for (at, (row_group, automation, next)) in rows.iter().enumerate() {
@@ -552,18 +629,19 @@ impl Shell {
                 );
             }
             let selected = dialog.selected.as_deref() == Some(automation.id.as_str());
-            let (time, day) = match next {
-                Some(next) => (time_of(*next, &tz), day_of(*next, &tz)),
-                None => (
-                    "\u{2014}".to_owned(),
-                    if automation.finished() {
-                        "Ran"
-                    } else {
-                        "Paused"
-                    }
-                    .to_owned(),
-                ),
+            let when = match next {
+                Some(next) => format!("{}, {}", day_of(*next, &tz), time_of(*next, &tz)),
+                None if automation.finished() => "Ran".to_owned(),
+                None => "Paused".to_owned(),
             };
+            let project = self
+                .projects
+                .iter()
+                .find(|node| node.id == automation.project)
+                .map_or_else(
+                    || automation.project.as_str().to_owned(),
+                    |node| node.name.to_string(),
+                );
             let quiet = *row_group != Group::ComingUp;
             let ink = paint(if quiet { t.text.dim } else { t.text.primary });
             let last = dialog
@@ -572,56 +650,60 @@ impl Shell {
                 .next()
                 .map(|run| runs::outcome_colour(&run.outcome, t));
             let id = automation.id.clone();
-            list = list.child(
-                block_row(("automation-row", at), selected, t)
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(10.0))
-                            .child(
-                                div()
-                                    .w(px(58.0))
-                                    .flex_none()
-                                    .flex()
-                                    .flex_col()
-                                    .gap(px(2.0))
-                                    .child(
-                                        div()
-                                            .font_weight(FontWeight::MEDIUM)
-                                            .text_color(ink)
-                                            .child(time),
-                                    )
-                                    .child(caption(day, t)),
-                            )
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .flex()
-                                    .flex_col()
-                                    .gap(px(3.0))
-                                    .child(
-                                        div()
-                                            .font_weight(FontWeight::MEDIUM)
-                                            .text_color(ink)
-                                            .truncate()
-                                            .child(automation.name.clone()),
-                                    )
-                                    .child(caption(detail(automation), t).truncate()),
-                            )
-                            .children(
-                                last.map(|colour| status_dot(colour, Motion::Still, px(7.0))),
-                            ),
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if let Some(dialog) = this.automations.as_mut() {
-                            dialog.selected = Some(id.clone());
-                            dialog.confirming_delete = false;
-                        }
-                        cx.notify();
-                    })),
-            );
+            // The mark of what runs, then three lines: the name, how often
+            // and whose, and the next start. On the dialog's float the row
+            // steps lighter, where the sidebar's steps darker than its card.
+            list =
+                list.child(
+                    block_row(("automation-row", at), selected, t)
+                        .flex_row()
+                        .items_start()
+                        .gap(px(10.0))
+                        .pl(px(12.0))
+                        .pr(px(10.0))
+                        .py(px(9.0))
+                        .when(selected, |el| el.bg(paint(t.selection)))
+                        .when(!selected, |el| {
+                            el.hover(|style| style.bg(alpha(paint(t.selection), 0.5)))
+                        })
+                        .child(mark_well(task_mark(automation, px(15.0), t), px(28.0), t))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .flex()
+                                .flex_col()
+                                .gap(px(3.0))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(8.0))
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .text_size(px(13.0))
+                                                .font_weight(FontWeight::MEDIUM)
+                                                .text_color(ink)
+                                                .truncate()
+                                                .child(automation.name.clone()),
+                                        )
+                                        .children(last.map(|colour| {
+                                            status_dot(colour, Motion::Still, px(7.0))
+                                        })),
+                                )
+                                .child(caption(detail(automation, &project), t).truncate())
+                                .child(caption(when, t).truncate()),
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if let Some(dialog) = this.automations.as_mut() {
+                                dialog.selected = Some(id.clone());
+                                dialog.confirming_delete = false;
+                            }
+                            cx.notify();
+                        })),
+                );
         }
         if rows.is_empty() {
             list = list.child(
@@ -635,11 +717,6 @@ impl Shell {
             );
         }
 
-        let counts = match (on, paused) {
-            (0, 0) => None,
-            (on, 0) => Some(format!("{on} on")),
-            (on, paused) => Some(format!("{on} on \u{b7} {paused} paused")),
-        };
         Some(
             div()
                 .flex()
@@ -649,29 +726,8 @@ impl Shell {
                 .h_full()
                 .border_r_1()
                 .border_color(paint(t.rule))
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(12.0))
-                        .px(px(16.0))
-                        .pt(px(16.0))
-                        .pb(px(10.0))
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(8.0))
-                                .child(
-                                    div()
-                                        .text_size(crate::ui::TITLE)
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(paint(t.text.primary))
-                                        .child("Automations"),
-                                )
-                                .children(counts.map(|counts| caption(counts, t))),
-                        )
-                        .children(filter),
+                .children(
+                    filter.map(|filter| div().px(px(16.0)).pt(px(12.0)).pb(px(4.0)).child(filter)),
                 )
                 .child(list)
                 .child(
@@ -699,23 +755,13 @@ impl Shell {
         let Some(dialog) = self.automations.as_ref() else {
             return div().into_any_element();
         };
-        let closer = close("automations-close", t).on_click(cx.listener(|this, _, _, cx| {
-            this.close_automations();
-            cx.notify();
-        }));
         let Some(automation) = dialog
             .selected
             .as_deref()
             .and_then(|id| dialog.all.get(id))
             .cloned()
         else {
-            return div()
-                .flex()
-                .flex_col()
-                .flex_1()
-                .p(px(16.0))
-                .child(div().flex().child(div().flex_1()).child(closer))
-                .into_any_element();
+            return div().flex_1().into_any_element();
         };
         let node = self
             .projects
@@ -728,19 +774,12 @@ impl Shell {
                 .next()
                 .map(|c| c.to_uppercase().collect())
                 .unwrap_or_default();
-            div()
-                .flex()
-                .items_center()
-                .gap(px(6.0))
-                .child(image_badge(node.image.clone(), node.color, initial, t))
-                .child(caption(node.name.clone(), t))
+            image_badge(node.image.clone(), node.color, initial, t)
         });
-        let agent_mark = match &automation.task {
-            Task::Prompt {
-                agent: Some(agent), ..
-            } => mark(agent, t).into_any_element(),
-            _ => sized_icon(Icon::Terminal, px(16.0), paint(t.text.dim)).into_any_element(),
-        };
+        let project = node.map_or_else(
+            || automation.project.as_str().to_owned(),
+            |node| node.name.to_string(),
+        );
         let id = automation.id.clone();
         let on = automation.enabled;
         let toggle = switch("automation-on", on, t).on_click(cx.listener({
@@ -762,7 +801,7 @@ impl Shell {
                 }
             }));
         let more_menu = dialog.more.as_ref().map(|menu| {
-            menu.view(
+            menu.dropdown_view(
                 t,
                 cx,
                 |shell, _, cx| {
@@ -828,37 +867,51 @@ impl Shell {
             div()
                 .flex()
                 .items_center()
-                .gap(px(10.0))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(8.0))
-                        .child(caption(if on { "On" } else { "Paused" }, t))
-                        .child(toggle),
-                )
+                .gap(px(8.0))
                 .child(run_now)
                 .child(more)
         };
 
+        // What runs, the name over whose and which agent, then what acts on
+        // it. The switch that pauses it is the strip's first figure, beside
+        // the next start it governs.
         let heading = div()
             .flex()
             .items_center()
-            .gap(px(10.0))
-            .h(px(32.0))
-            .child(agent_mark)
+            .gap(px(12.0))
+            .child(mark_well(task_mark(&automation, px(18.0), t), px(36.0), t))
             .child(
                 div()
-                    .text_size(px(16.0))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(paint(t.text.primary))
-                    .truncate()
-                    .child(automation.name.clone()),
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w_0()
+                    .gap(px(4.0))
+                    .child(
+                        div()
+                            .text_size(px(16.0))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(paint(t.text.primary))
+                            .truncate()
+                            .child(automation.name.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .text_size(px(12.0))
+                            .text_color(paint(t.text.dim))
+                            .children(badge)
+                            .child(
+                                div()
+                                    .truncate()
+                                    .child(format!("{project} \u{b7} {}", what_runs(&automation))),
+                            ),
+                    ),
             )
-            .children(badge)
-            .child(div().flex_1())
-            .child(actions)
-            .child(closer);
+            .child(actions);
+        let strip = runs::strip(self, &automation, toggle.into_any_element());
 
         let run_count = dialog.runs.of(&automation.id).count();
         let tab = dialog.tab;
@@ -900,10 +953,10 @@ impl Shell {
             .min_w_0()
             .h_full()
             .px(px(24.0))
-            .pt(px(16.0))
-            .pb(px(16.0))
-            .gap(px(16.0))
+            .py(px(18.0))
+            .gap(px(18.0))
             .child(heading)
+            .child(strip)
             .child(div().flex().child(tabs))
             .children(
                 dialog
@@ -999,20 +1052,19 @@ mod tests {
     }
 
     #[test]
-    fn a_rows_detail_is_how_often_and_what_runs() {
+    fn a_rows_detail_is_how_often_and_whose_and_the_heading_says_what_runs() {
         let weekdays = When::Weekdays {
             time: Clock::new(9, 0).unwrap(),
         };
-        assert_eq!(
-            detail(&made("a", weekdays.clone(), command())),
-            "Weekdays \u{b7} Command"
-        );
+        let script = made("a", weekdays.clone(), command());
+        assert_eq!(detail(&script, "acme"), "Weekdays \u{b7} acme");
+        assert_eq!(what_runs(&script), "Command");
         let prompt = Task::Prompt {
             text: "x".to_owned(),
             agent: Some("claude".to_owned()),
             model: None,
             effort: None,
         };
-        assert!(detail(&made("b", weekdays, prompt)).starts_with("Weekdays \u{b7} "));
+        assert!(!what_runs(&made("b", weekdays, prompt)).is_empty());
     }
 }

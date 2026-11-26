@@ -81,6 +81,11 @@ import {
   MarkUnreadSchema,
   SignalSchema,
   StartFreshSchema,
+  StopJobSchema,
+  PreviewSwitchSchema,
+  SwitchAgentSchema,
+  type SwitchDepth,
+  type SwitchPreview,
   SubscribeSchema,
   UnsubscribeSchema,
   create,
@@ -138,6 +143,10 @@ const DELETE_WAIT_MS = 150_000;
 /** How long a wake waits: the desktop resumes the agent, which reads its
  * session back first. The desktop gives up before this. */
 const WAKE_WAIT_MS = 60_000;
+/** How long handing a task to another agent waits, across reconnects: the
+ * desktop waits ten minutes for its window, which waits on the new agent's
+ * start and any question it asks first, then looks for its terminal. */
+const SWITCH_WAIT_MS = 11 * 60_000;
 
 /** How opening a pull request went: opened, or pushed to one already open —
  * or why not. */
@@ -1182,6 +1191,60 @@ export class HostConnection {
     }
   }
 
+  /** What the terminal's agent would hand to `agent` if its task moved there
+   * (1.39): the brief, word for word, to show before anything is sent. */
+  async previewSwitch(terminalId: bigint, agent: string, depth: SwitchDepth): Promise<SwitchPreview> {
+    const reply = await this.send({
+      case: 'previewSwitch',
+      value: create(PreviewSwitchSchema, { terminalId, agent, depth }),
+    });
+    if (reply.payload.case === 'switchPreview') return reply.payload.value;
+    throw new Error(reply.payload.case === 'error' ? reply.payload.value.message : 'the desktop did not say what it would send');
+  }
+
+  /** Moves the terminal's task to `agent`, `text` its first message (1.39):
+   * in a new tab `beside` the terminal, or in its place. `session` is the
+   * one its preview was read from: a terminal that has moved on since is
+   * not switched. The terminal the new agent runs in, why not, or `false`
+   * when this phone no longer holds the terminal's lease. Waits as long as
+   * the desktop does, asking again under the same key after a drop, so a
+   * slow start that succeeds is still followed. */
+  async switchAgent(
+    terminalId: bigint,
+    agent: string,
+    text: string,
+    beside: boolean,
+    session = '',
+    model = '',
+    effort = '',
+  ): Promise<{ terminalId: bigint } | { why: string } | false> {
+    const payload: Envelope['payload'] = {
+      case: 'switchAgent',
+      value: create(SwitchAgentSchema, { terminalId, agent, text, beside, session, model, effort }),
+    };
+    const idempotency = newKey();
+    const until = Date.now() + SWITCH_WAIT_MS;
+    for (;;) {
+      let reply: Envelope;
+      try {
+        reply = await this.request(payload, idempotency, Math.max(until - Date.now(), 1));
+      } catch (error) {
+        const dropped = error instanceof Error && error.message === DROPPED;
+        if (dropped && (await this.reconnected(until))) continue;
+        throw error;
+      }
+      if (reply.payload.case === 'agentSwitched') return { terminalId: reply.payload.value.terminalId };
+      if (reply.payload.case !== 'error') return { why: 'the desktop did not say whether it switched' };
+      if (reply.payload.value.code === ErrorCode.NOT_CONTROLLER) {
+        const renew = this.leases.get(terminalId);
+        if (renew) clearInterval(renew);
+        this.leases.delete(terminalId);
+        return false;
+      }
+      return { why: reply.payload.value.message };
+    }
+  }
+
   /** Resolves once a snapshot lists terminal `id`, or after `ms`: a woken
    * tab's terminal is in the next snapshot, a second away at most, and a
    * screen opened before then would say the terminal isn't there. */
@@ -1465,6 +1528,16 @@ export class HostConnection {
   markSeen(terminalId: bigint): void {
     if (this.hostMinor < 32) return;
     void this.send({ case: 'markSeen', value: create(MarkSeenSchema, { terminalId }) }, true).catch(() => {});
+  }
+
+  /** Ends a job the terminal's agent left running in the background, and
+   * everything it started (desktop 1.40). Needs no control of the terminal:
+   * the job is not the terminal. `null` once it has been signalled — its end
+   * shows in the terminal's summary — or the desktop's reason it was not. */
+  async stopJob(terminalId: bigint, pid: number, startedAtMs: bigint): Promise<string | null> {
+    if (this.hostMinor < 40) return 'Stopping it needs a newer ket on your Mac.';
+    const reply = await this.send({ case: 'stopJob', value: create(StopJobSchema, { terminalId, pid, startedAtMs }) }, true);
+    return reply.payload.case === 'error' ? reply.payload.value.message : null;
   }
 
   /** Marks a worktree unread, as the desktop's worktree menu does, or with

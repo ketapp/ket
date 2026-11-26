@@ -2,11 +2,12 @@
 // While it listens it is filled, with bars that move with your voice. See
 // lib/voice.ts for the listening.
 
-import { Pressable, StyleSheet, View } from 'react-native';
+import { StyleSheet, TouchableOpacity, View } from 'react-native';
 import Animated, { type SharedValue, useAnimatedStyle } from 'react-native-reanimated';
 
 import { t } from '../lib/theme';
 import { Mic } from './icons';
+import { PRESSED } from './ui/surface';
 
 /** The bars' heights at rest and at their loudest, middle ones tallest. */
 const BARS = [
@@ -27,13 +28,14 @@ export function MicButton({
   onPress: () => void;
 }) {
   return (
-    <Pressable
+    <TouchableOpacity
       accessibilityRole="button"
       accessibilityLabel={listening ? 'Stop dictation' : 'Dictate'}
       accessibilityState={{ selected: listening }}
       hitSlop={4}
       onPress={onPress}
-      style={({ pressed }) => [styles.mic, listening && styles.listening, pressed && !listening && { backgroundColor: t.selection }]}
+      activeOpacity={PRESSED}
+      style={[styles.mic, listening && styles.listening]}
     >
       {listening ? (
         <View style={styles.bars}>
@@ -44,7 +46,7 @@ export function MicButton({
       ) : (
         <Mic size={19} color={t.dim} weight={2} />
       )}
-    </Pressable>
+    </TouchableOpacity>
   );
 }
 

@@ -64,7 +64,7 @@ impl Shell {
             || self.confirm_clear_build.is_some()
             || self.confirm_discard.is_some()
             || self.confirm_close_session.is_some()
-            || self.cold_resume.dialog.is_some()
+            || self.asks.open()
             || self.confirm_merge_worktree.is_some()
             || self.confirm_pull_request.is_some()
             || self.confirm_merge_pull_request.is_some()

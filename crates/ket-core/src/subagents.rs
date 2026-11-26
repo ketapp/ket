@@ -380,6 +380,7 @@ mod tests {
 
     fn report(event: HookEvent, subagent: Option<&str>, at_ms: u64) -> HookReport {
         HookReport {
+            failure: None,
             agent: "claude".to_owned(),
             event,
             worktree: None,

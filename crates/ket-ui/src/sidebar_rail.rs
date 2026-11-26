@@ -24,8 +24,9 @@ use ket_core::theme::Theme;
 
 use crate::Shell;
 use crate::fonts::Prose;
-use crate::paint::{alpha, paint};
-use crate::tree::{ProjectNode, Selection, SidebarFilter, state_word};
+use crate::paint::{alpha, mix, paint};
+use crate::tree::state::{self, lead_word, row_state};
+use crate::tree::{ProjectNode, Selection, SidebarFilter};
 use crate::ui::button::icon_button;
 use crate::ui::chip::{BADGE, image_badge};
 use crate::ui::icon::{Icon, sized_icon};
@@ -249,7 +250,7 @@ impl Shell {
             cx,
         );
         let panel = self.sidebar_menu.as_ref().map(|menu| {
-            menu.view(
+            menu.dropdown_view(
                 &self.theme,
                 cx,
                 |shell, action, cx| shell.run_sidebar_action(*action, cx),
@@ -914,7 +915,9 @@ impl Shell {
         let activity = self.activity.activity(&node.id, now);
         // Its session's `/color`, as the sidebar's own rows draw it.
         let color = self.row_color(&node.id, &activity, now);
-        let detail = activity.detail();
+        let state = row_state(node, signal, self.activity.unread(&node.id), t);
+        let detail = state::after_lead(state.as_ref(), activity.detail());
+        let led = state.and_then(|state| state.lead).is_some();
         let selected = self.selection == Some(at);
         let hover = paint(t.hover);
         let dim = paint(t.text.dim);
@@ -928,6 +931,9 @@ impl Shell {
             .mt(px(2.0))
             .text_size(px(12.0))
             .text_color(dim)
+            // The state's word first, in its colour, as the sidebar's own
+            // rows lead with it.
+            .children(lead_word(state.as_ref()))
             .when(with_project, |el| {
                 el.child(
                     div()
@@ -957,7 +963,9 @@ impl Shell {
                     })
                     .child(node.label()),
             )
-            .when(with_project || !detail.is_empty(), |el| el.child(second));
+            .when(with_project || led || !detail.is_empty(), |el| {
+                el.child(second)
+            });
 
         div()
             .id(id)
@@ -978,16 +986,26 @@ impl Shell {
                     .items_center()
                     .justify_center()
                     .w(BADGE)
-                    .child(crate::session_color::row_mark(
-                        &activity,
-                        color,
-                        node.dirty,
-                        node.missing,
-                        t,
+                    // On the peek's float, so its ring is the float's fill.
+                    .child(state::with_dot(
+                        crate::session_color::row_mark(
+                            &activity,
+                            color,
+                            state::lit(state.as_ref()),
+                            node.dirty,
+                            node.missing,
+                            t,
+                        ),
+                        state.as_ref(),
+                        color.is_some(),
+                        match selected {
+                            true => mix(paint(t.elevated), paint(t.selection), 0.9),
+                            false => paint(t.elevated),
+                        },
+                        None,
                     )),
             )
             .child(lines)
-            .children(state_word(node, signal, self.activity.unread(&node.id), t))
             .on_click(cx.listener(move |this, _, _, cx| this.rail_select(at, cx)))
     }
 }

@@ -9,6 +9,7 @@ import {
   type ScrollViewInstance,
   StyleSheet,
   Text,
+  TouchableOpacity,
   View,
   type StyleProp,
   type ViewStyle,
@@ -18,7 +19,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { showBeside, useSplit } from '../../lib/layout';
 import { font, size, t } from '../../lib/theme';
-import { surface } from './surface';
+import { PRESSED, surface } from './surface';
 import { Gauge, Inbox, Sliders, Tree } from '../icons';
 import { shared } from './shared';
 
@@ -113,7 +114,7 @@ export function TabStrip<K extends string>({
         {tabs.map((tab) => {
           const on = tab.key === value;
           return (
-            <Pressable
+            <TouchableOpacity
               key={tab.key}
               accessibilityRole="tab"
               accessibilityLabel={tab.state ? `${tab.label}, ${tab.state.word}` : tab.label}
@@ -124,7 +125,8 @@ export function TabStrip<K extends string>({
                 spans.current.set(tab.key, { x: e.nativeEvent.layout.x, width: e.nativeEvent.layout.width });
                 if (on) reveal();
               }}
-              style={({ pressed }) => [styles.stripTab, on ? shared.segmentOn : pressed && { backgroundColor: t.hover }]}
+              activeOpacity={on ? 1 : PRESSED}
+              style={[styles.stripTab, on && shared.segmentOn]}
             >
               {tab.icon ? (
                 <Marked dot={tab.state?.color} ring={on ? t.selection : t.sunken}>
@@ -134,7 +136,7 @@ export function TabStrip<K extends string>({
               <Text style={[styles.stripLabel, on && { color: t.text }]} numberOfLines={1}>
                 {tab.label}
               </Text>
-            </Pressable>
+            </TouchableOpacity>
           );
         })}
       </ScrollView>

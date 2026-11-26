@@ -506,7 +506,7 @@ impl Shell {
                 cx.notify();
             }));
         let menu = dialog.start_menu.as_ref().map(|menu| {
-            menu.view(
+            menu.dropdown_view(
                 t,
                 cx,
                 |shell, mode, cx| {

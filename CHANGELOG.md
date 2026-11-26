@@ -13,8 +13,23 @@ words; no internal names, no commit hashes. ket reads this file
 
 ## Unreleased
 
+## 0.3.0 — 2026-11-26
+
 ### New
 
+- See what your agents left running in the background. A build, a test run
+  or a dev server an agent started and moved on from now hangs under its
+  worktree in the sidebar, with how long it has run and the port a server
+  is on, and the agent's tab counts them. Hover one to stop it, or to open a
+  server in the worktree's browser. Finished ones stay a few minutes with
+  how they ended. Works for every agent; Claude's also say what each is for.
+- On your phone, a chat whose agent has something running in the background
+  says so under its title. Tap it to see what is running and stop any of it.
+- Blackout hours: in Settings › Devices, set hours when ket shuts off on
+  every paired phone and tablet. During them a device shows only when ket
+  comes back: no chats, no terminals, and notifications wait for the end
+  unless you choose to keep them coming. Your agents keep working, and only
+  the Mac can let a device back in early.
 - A Claude or Codex tab shows a small ring once its conversation fills 80%
   of the model's context window, orange and then red from 90%. Hover it to
   see how many tokens are in use. Nothing shows below 80%.
@@ -34,6 +49,26 @@ words; no internal names, no commit hashes. ket reads this file
   `ket automation` does the same from a terminal, and on the phone, the
   Macs sheet's Automations lists a Mac's, to pause one, start it now or
   delete it.
+- The phone tells you when an agent's plan runs out mid-task, and again
+  when the limit has reset: "Codex has reached its usage limit and resets
+  in about 2 hours." in place of a bare "finished", then "Codex's limit has
+  reset." once it can carry on. Both follow a new switch, A plan runs out,
+  in the phone's Settings › Notifications. The reset is said where the
+  agent reports one, which Claude and Codex do.
+- A chat on the phone whose agent ran out of usage says so in a sheet over
+  it, with when the limit resets and a bar counting down, and a line in
+  place of the message box (above it, when the agent names no reset or
+  only one model ran out, so you can try again). Use Claude (or whichever
+  agent still has plan left) shows exactly what that agent will be told
+  about the task — just the task, the recent conversation, or all of it —
+  and sends it only when you say, in the same tab or a new one beside it. The chat then follows
+  the new agent. Needs ket open on the Mac, and a phone allowed to start
+  sessions.
+- On the Mac, opening a tab whose agent ran out of usage asks the same
+  question, in the same kind of dialog as a session gone cold: when the
+  limit resets, Wait for it, or Use Claude, which shows the brief, lets you
+  choose how much it carries and where it opens, and sends it only on
+  Send.
 - The phone tells you when an agent is waiting on you, finishes or fails,
   or a pull request's checks fail, even with ket closed: your Mac sends
   the notifications you chose in the phone's Settings › Notifications
@@ -79,6 +114,52 @@ words; no internal names, no commit hashes. ket reads this file
 
 ### Improved
 
+- On your phone, the Usage tab has the same header as Worktrees: your Mac's
+  name to switch Macs, the secure line, and Start. Each agent's plan is a
+  card with one row per window, a ring showing how much is used. A session
+  that ran out of usage is listed at the top, with Switch to hand its task
+  to another agent.
+- On your phone, Needs you has the same header too. Each prompt is a card
+  led by its worktree, with round Allow once, Always and Deny buttons, and
+  failed worktrees sit in one card under them. With nothing waiting, the tab
+  shows a short note in place of the animated planet.
+- On your phone, Settings works like iOS Settings: ket's name and version
+  at the top, then a row each for Paired desktops, Notifications, Security
+  and About saying how it is set, each opening its own screen with the
+  full details.
+- On your phone, an unread worktree looks as it does on the Mac: its agent's
+  logo turns pink with a pink dot on its corner, and its line starts with
+  "Unread". The separate dot at the end of the row is gone.
+- On your phone, a chat says when it began over its first message, as
+  Messages does: "Today 2:14 PM", "Yesterday", or the date. Claude,
+  Codex and Grok sessions; needs ket on the Mac updated too.
+- On your phone, an OpenCode chat no longer shows a pill that only said
+  "Build": ket can't read OpenCode's model yet, so the pill waits until it can.
+- Text is drawn with macOS's font smoothing, as other Mac apps draw it, so
+  small light text on a dark theme is crisper instead of thin and grey,
+  in the terminal most of all.
+- The sidebar's worktree and project names, and the lines under them, now
+  follow Settings' UI font size instead of staying the same size.
+- A worktree's row in the sidebar ends in a quiet merge mark while it has
+  work not yet on main: grey for uncommitted changes, fainter for commits
+  not merged yet. Commit and merge itself moved to the row's right-click
+  menu.
+- A worktree's size now sits after its name, and turns yellow past 2 GB and
+  red past 4 GB, when it shows without hovering. The subagent fold moved
+  beside the name too, and a missing or deleting worktree says so at the
+  start of its second line.
+- On the phone, a worktree's changes are easier to size up: each file shows
+  its line count beside five green and red blocks, as GitHub draws them, and
+  the whole change gets ten. Merge and Pull request under them are now the
+  same width.
+- The sidebar's worktree rows have room for longer names: the state moved
+  off the end of the row onto the agent's logo, which takes the state's
+  colour and wears a small dot that breathes while the agent works and
+  beats while it waits on you. The line under the name now leads with a
+  word in that colour where there is one to say: Needs you, Failed,
+  Rebasing, or Unread in pink for an answer you haven't read. Unread is
+  pink on the phone too.
+- Menu items that open a dialog no longer end in "…".
 - On the phone, the Worktrees screen is redrawn to hang together: each
   project's worktrees share one card under the project's name, each led by
   its agent's logo in its state's colour, green while it works and blue
@@ -86,6 +167,19 @@ words; no internal names, no commit hashes. ket reads this file
   its own icon. Every prompt waiting on you is a row of its own with an
   Answer button; hold it to allow once. How the phone reaches your Mac
   shows under its name: Secure · Wi-Fi, Tailscale or Relay.
+- On the phone, the lines a worktree adds and removes sit quietly at the end
+  of its row: small, grey and without colour, with thousands shortened, as
+  in +1.3k −312.
+- On the iPhone, code in an agent's reply sits on a rounded chip as tall as
+  its letters, with room at each end, instead of a square block the height
+  of the line. Code that wraps gets a chip on each line, and the fill stops
+  at the last letter rather than running on to the edge.
+- On the phone, holding a worktree offers Merge into its base, above Open
+  pull request, whenever it has work to land and no pull request open.
+- On the phone, whatever you press fades under your finger instead of
+  turning grey: rows, menus, sheets, buttons, chips and keys alike. A
+  project you hold stays in sight with no grey box behind it, and project
+  headings stand a little taller.
 - On the phone, Settings shows whether each paired desktop is connected: a
   green dot when it is, a red ring when it's offline. Pairing another is a
   small Pair button beside the heading, not a white button under the list.
@@ -149,6 +243,9 @@ words; no internal names, no commit hashes. ket reads this file
   drawn.
 - On the phone, a project's heading stays at the top of the list while you
   scroll through its worktrees.
+- On the phone, a backlog note's priority picker opens as a menu under its
+  button, with the current priority ticked, instead of a list that pushed
+  the notes down.
 - ket asks about a cold session by what re-caching it costs, not by its
   size: from $2 at API prices unless you pick another amount, $1 to $10,
   in Settings › Economy.
@@ -184,6 +281,25 @@ words; no internal names, no commit hashes. ket reads this file
 
 ### Fixed
 
+- A Codex task started from your phone no longer gets stuck on Codex's
+  "update available" screen: ket starts Codex with its update check off.
+- With merge confirmation turned off, Commit and merge on a worktree that
+  wasn't selected merged the selected one instead. It merges the one you
+  asked for.
+- The sidebar's filter sits on one line with the tabs beside it, and a
+  project tinted for launching its agent with its own command stops short
+  of the sidebar's edges, in line with the filter. Before, the filter sat a
+  few points low and the tint ran edge to edge. A pinned project's glow
+  lines up with the filter too, with its badge centred in it.
+- A project's colour swatches span their column, so each row ends level
+  with the hex field below. Before, they stopped short of it. The picker's
+  label, tip and messages now spell it "color".
+- Tall dropdowns keep their trigger visible so you can click it again to close them.
+- With an iPhone tab split beside a terminal, the pointer over the terminal
+  stays steady. Before, it flickered between the text cursor and the arrow.
+- In a narrow iPhone or Android tab, the device's name, version and
+  "booted" give way to the buttons beside them, the name last. Before, they
+  ran on under the buttons and the name was the first to go.
 - A long link in a terminal is underlined all the way to its last
   character. Before, the underline could stop a character short.
 - On the phone, swiping a table or a code block in a chat sideways only
@@ -217,6 +333,9 @@ words; no internal names, no commit hashes. ket reads this file
 - On the phone, Usage shows its cards the moment you open it, instead of a
   note saying no desktop is paired for a moment first. A note that there's
   nothing to show waits until that's known.
+- A Codex tab whose plan ran out mid-turn no longer reads "working" for
+  good: Codex reports nothing when a turn fails, so ket now reads the end
+  of the turn from Codex's own session file.
 - Discarding a file's changes and sending feedback close as you click, and
   a notification says how it went; feedback that doesn't go keeps its
   draft. The Merge and Open Pull Request dialogs, and Add Project's folder

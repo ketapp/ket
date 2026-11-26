@@ -144,7 +144,7 @@ impl Shell {
             trigger = trigger.trailing(tag(format!("@{}", active.login), t));
         }
         let panel = form.github_menu.as_ref().map(|menu| {
-            menu.view(
+            menu.dropdown_view(
                 t,
                 cx,
                 |shell, row, cx| {

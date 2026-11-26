@@ -62,27 +62,39 @@ type Cell = [string, number] | null;
 
 /** The planet, filling the view it is given, in `ink`. */
 export function Horizon({ ink = t.text }: { ink?: string }) {
-  const still = useReducedMotion();
-  const [tick, setTick] = useState(0);
-  const [area, setArea] = useState({ width: 0, height: 0 });
   const [focused, setFocused] = useState(false);
-  const [active, setActive] = useState(AppState.currentState !== 'background');
-
   useFocusEffect(
     useCallback(() => {
       setFocused(true);
       return () => setFocused(false);
     }, []),
   );
+  return <Glyphs ink={ink} shown={focused} planet />;
+}
+
+/** The sky alone: the planet's stars with no planet under them, filling the
+ * view it is given. For what is drawn over every screen rather than on one —
+ * the blackout cover — so it asks no screen whether it is in focus. */
+export function StarField({ ink = t.text }: { ink?: string }) {
+  return <Glyphs ink={ink} shown planet={false} />;
+}
+
+/** The field, ticking while it is `shown`. */
+function Glyphs({ ink, shown, planet }: { ink: string; shown: boolean; planet: boolean }) {
+  const still = useReducedMotion();
+  const [tick, setTick] = useState(0);
+  const [area, setArea] = useState({ width: 0, height: 0 });
+  const [active, setActive] = useState(AppState.currentState !== 'background');
+
   useEffect(() => {
     const sub = AppState.addEventListener('change', (state) => setActive(state === 'active'));
     return () => sub.remove();
   }, []);
   useEffect(() => {
-    if (still || !focused || !active) return;
+    if (still || !shown || !active) return;
     const timer = setInterval(() => setTick((n) => n + 1), 1000 / FPS);
     return () => clearInterval(timer);
-  }, [still, focused, active]);
+  }, [still, shown, active]);
 
   const onLayout = useCallback((event: LayoutChangeEvent) => {
     const { width, height } = event.nativeEvent.layout;
@@ -90,12 +102,12 @@ export function Horizon({ ink = t.text }: { ink?: string }) {
   }, []);
 
   const inks = [ink, tint(ink, 0.62), tint(ink, 0.3)];
-  const rows = area.width > 0 ? field(area.width, area.height, still ? 7 : tick / FPS) : [];
+  const rows = area.width > 0 ? field(area.width, area.height, still ? 7 : tick / FPS, planet) : [];
   return (
     <View
       accessible
       accessibilityRole="image"
-      accessibilityLabel="A planet of glyphs under a starry sky"
+      accessibilityLabel={planet ? 'A planet of glyphs under a starry sky' : 'A starry sky'}
       style={styles.field}
       onLayout={onLayout}
       pointerEvents="none"
@@ -126,8 +138,9 @@ const Row = memo(
   (before, after) => before.signature === after.signature && before.inks === after.inks,
 );
 
-/** One frame of the field, `seconds` into its motion. */
-export function field(width: number, height: number, seconds: number): Cell[][] {
+/** One frame of the field, `seconds` into its motion. Without `planet` it
+ * is sky from top to bottom: the same stars, in the same places. */
+export function field(width: number, height: number, seconds: number, planet = true): Cell[][] {
   const cols = Math.ceil(width / CELL);
   const rows = Math.ceil(height / ROW);
   const radius = Math.max(width * RADIUS, RADIUS_MIN);
@@ -145,7 +158,7 @@ export function field(width: number, height: number, seconds: number): Cell[][] 
     for (let col = 0; col < cols; col++) {
       const x = col * CELL + CELL / 2 - centreX;
       const distance = Math.hypot(x, y);
-      if (distance <= radius) {
+      if (planet && distance <= radius) {
         const nx = x / radius;
         const ny = y / radius;
         const nz = Math.sqrt(Math.max(1 - nx * nx - ny * ny, 0));
@@ -159,7 +172,7 @@ export function field(width: number, height: number, seconds: number): Cell[][] 
         if (light > 0.72) cells[col] = [pick(RIM, roll), 0];
         else if (light > 0.36) cells[col] = [pick(MID, roll), 1];
         else if (light > 0.1 || roll < 0.28) cells[col] = [pick(LOW, roll), 2];
-      } else if (distance < radius + HALO) {
+      } else if (planet && distance < radius + HALO) {
         const reach = 1 - (distance - radius) / HALO;
         if (hash(col, row, shimmer) < reach * reach * 0.55) {
           cells[col] = distance < radius + 16 ? ['=', 1] : ['.', 2];

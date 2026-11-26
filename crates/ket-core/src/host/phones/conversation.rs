@@ -377,10 +377,12 @@ fn read_conversation(
     // Only Claude records a queue: another agent's message typed mid-turn
     // shows once it is taken in.
     let queued = transcript.queued();
+    let started_at_ms = transcript.started_at_ms().unwrap_or_default();
     let read = transcript.read(after);
     match read {
         Ok(chunk) => proto::Conversation {
             queued,
+            started_at_ms,
             terminal_id,
             supported: true,
             reason: String::new(),

@@ -2,11 +2,14 @@
   "expo": {
     "name": "ket",
     "slug": "ket",
-    "version": "0.2.0",
+    "version": "0.3.0",
     "orientation": "default",
     "icon": "./assets/images/icon.png",
     "scheme": "ket",
-    "platforms": ["ios", "android"],
+    "platforms": [
+      "ios",
+      "android"
+    ],
     "userInterfaceStyle": "dark",
     "backgroundColor": "#0d0c0b",
     "ios": {
@@ -16,7 +19,9 @@
       "buildNumber": "1",
       "deploymentTarget": "17.0",
       "entitlements": {
-        "keychain-access-groups": ["$(AppIdentifierPrefix)dev.ketapp.ket"]
+        "keychain-access-groups": [
+          "$(AppIdentifierPrefix)dev.ketapp.ket"
+        ]
       },
       "config": {
         "usesNonExemptEncryption": true

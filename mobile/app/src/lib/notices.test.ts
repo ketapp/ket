@@ -42,8 +42,8 @@ jest.mock('expo-router', () => ({
 }));
 jest.mock('./connection', () => ({ connection: jest.fn() }));
 jest.mock('./store', () => ({
-  DEFAULT_NOTIFY: { on: false, waiting: true, finished: true, checks: true },
-  getNotify: jest.fn(async () => mockStored ?? { on: false, waiting: true, finished: true, checks: true }),
+  DEFAULT_NOTIFY: { on: false, waiting: true, finished: true, checks: true, limits: true },
+  getNotify: jest.fn(async () => mockStored ?? { on: false, waiting: true, finished: true, checks: true, limits: true }),
   saveNotify: jest.fn(async (config: NotifyConfig) => {
     mockStored = config;
   }),
@@ -52,6 +52,7 @@ jest.mock('./store', () => ({
 jest.mock('@ket/remote', () => ({
   Activity: { QUIET: 0, RUNNING: 1, WORKING: 2, MERGING: 3, BLOCKED: 4, FAILED: 5 },
   CheckSummary_State: { STATE_UNSPECIFIED: 0, PASSED: 1, FAILED: 2, PENDING: 3, SKIPPED: 4 },
+  SessionLimit_Scope: { SCOPE_UNSPECIFIED: 0, PLAN: 1, MODEL: 2 },
 }));
 
 const host = { id: 'host', name: 'Studio Mac' };
@@ -160,6 +161,75 @@ describe('compare', () => {
   });
 });
 
+describe('a plan running out', () => {
+  const NOW = 1_800_000_000_000;
+  const HOUR = 60 * 60 * 1000;
+  const limit = (since: number, resetsAt: number, scope = 1) => ({
+    scope,
+    window: 1,
+    sinceMs: BigInt(since),
+    resetsAtMs: BigInt(resetsAt),
+    said: 'You\u2019ve hit your usage limit.',
+  });
+  const stopped = (id: string, resetsAt: number, activity = 0) =>
+    tree(id, activity, { terminals: [{ id: 7n, agent: 'codex', closed: false, limit: limit(NOW - 1000, resetsAt) }] });
+
+  test('is said in place of finished, with when it is back, and opens the chat it stopped', () => {
+    compare(host, snapshot([tree('a', 2)]), false, NOW);
+    const { fresh } = compare(host, snapshot([stopped('a', NOW + 2 * HOUR)]), false, NOW);
+    // Both are news in one snapshot; the same id, so the later one shown stands.
+    expect(fresh.map((notice) => [notice.kind, notice.id])).toEqual([
+      ['finished', 'host/a/finished'],
+      ['limits', 'host/a/finished'],
+    ]);
+    expect(fresh[1]).toMatchObject({
+      title: 'Project · a',
+      body: 'Codex has reached its usage limit and resets in about 2 hours.',
+      path: '/session/host/7',
+    });
+    // The same stop seen again is not said again, nor a retry refused again.
+    expect(compare(host, snapshot([stopped('a', NOW + 2 * HOUR)]), false, NOW + 5000).fresh).toEqual([]);
+  });
+
+  test('already so at the first snapshot is not news', () => {
+    expect(compare(host, snapshot([stopped('a', NOW + HOUR)]), false, NOW).fresh).toEqual([]);
+    expect(compare(host, snapshot([stopped('a', NOW + HOUR)]), false, NOW + 1000).fresh).toEqual([]);
+  });
+
+  test('its limit resetting is said once for an agent, while nobody has carried on', () => {
+    const both = () => snapshot([stopped('a', NOW + HOUR), stopped('b', NOW + HOUR)]);
+    compare(host, both(), false, NOW);
+    const { fresh } = compare(host, both(), true, NOW + HOUR);
+    expect(fresh.map((notice) => notice.id)).toEqual(['host/reset/codex', 'host/reset/codex']);
+    expect(fresh[0]).toMatchObject({
+      kind: 'limits',
+      subtitle: 'Studio Mac',
+      body: 'Codex\u2019s limit has reset. It can carry on.',
+      path: '/session/host/7',
+    });
+    expect(compare(host, both(), false, NOW + HOUR + 1000).fresh).toEqual([]);
+
+    // Carried on before it reset: the mark is off, and nothing is said.
+    forgetSeen();
+    compare(host, snapshot([stopped('a', NOW + HOUR)]), false, NOW);
+    expect(compare(host, snapshot([tree('a', 2)]), false, NOW + HOUR).fresh).toEqual([]);
+  });
+
+  test('a tab put to sleep is still stopped, and opens its worktree', () => {
+    const asleep = (resetsAt: number) =>
+      tree('a b', 0, { agent: '', asleep: [{ key: 'k', agent: 'claude', limit: limit(NOW - 1000, resetsAt, 2) }] });
+    compare(host, snapshot([tree('a b', 2)]), false, NOW);
+    const { fresh } = compare(host, snapshot([asleep(0)]), false, NOW);
+    expect(fresh.at(-1)).toMatchObject({
+      kind: 'limits',
+      body: 'Claude has reached its limit for this model.',
+      path: '/worktree/host/a%20b',
+    });
+    // No reset was named, so none is ever said.
+    expect(compare(host, snapshot([asleep(0)]), false, NOW + 100 * HOUR).fresh).toEqual([]);
+  });
+});
+
 describe('a tapped notice', () => {
   const tap = (identifier: string, date: number, path: string) => ({
     notification: { date, request: { identifier, content: { data: { path } } } },
@@ -230,7 +300,7 @@ describe('the switch', () => {
   test('turning on asks the phone, and a refusal leaves it on but marked', async () => {
     expect(await turnOn()).toBe(true);
     expect(mockNotifications.requestPermissionsAsync).toHaveBeenCalled();
-    expect(mockStored).toEqual({ on: true, waiting: true, finished: true, checks: true });
+    expect(mockStored).toEqual({ on: true, waiting: true, finished: true, checks: true, limits: true });
 
     mockNotifications.getPermissionsAsync.mockResolvedValueOnce({ granted: false, canAskAgain: false });
     expect(await turnOn()).toBe(false);

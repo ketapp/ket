@@ -71,15 +71,27 @@ pub fn branch_is_fully_merged(git: &Git, branch: &str) -> bool {
 /// a genuinely merged one keeps its badge, and an untouched one keeps the
 /// wrong badge it already had.
 pub fn branch_has_landed(git: &Git, branch: &str, created_at: Option<&str>) -> bool {
+    branch_standing(git, branch, created_at).0
+}
+
+/// [`branch_has_landed`], and from the same look whether the branch holds
+/// commits its base does not have yet: `(landed, unlanded)`.
+///
+/// A branch still on the commit it was cut at is neither. Past it the two
+/// are each other's opposite, so a merge [`branch_is_fully_merged`] cannot
+/// prove reads as work still waiting, the side a "not on main yet" mark
+/// should err on.
+pub fn branch_standing(git: &Git, branch: &str, created_at: Option<&str>) -> (bool, bool) {
     if let Some(created_at) = created_at
         && git
             .commit_of(&format!("refs/heads/{branch}"))
             .is_some_and(|tip| tip == created_at)
     {
-        return false;
+        return (false, false);
     }
 
-    branch_is_fully_merged(git, branch)
+    let merged = branch_is_fully_merged(git, branch);
+    (merged, !merged)
 }
 
 /// The refs a branch might have been merged into, best guess first.

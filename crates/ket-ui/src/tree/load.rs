@@ -61,6 +61,7 @@ fn worktree_row(
         // Carried over by `Shell::reload`, so a reload does not blink every
         // badge off until the next sweep.
         merged: false,
+        unlanded: false,
         pull_request: worktree.pull_request.clone(),
     }
 }
@@ -180,6 +181,7 @@ impl Shell {
                         // The base branch is not a thing that gets merged
                         // away, and a badge on it would say nothing.
                         merged: false,
+                        unlanded: false,
                         pull_request: None,
                     })
                     .chain(
@@ -244,6 +246,7 @@ impl Shell {
             line_changes: Option<(u32, u32)>,
             in_progress: Option<ket_core::status::GitOperation>,
             merged: bool,
+            unlanded: bool,
         }
         let mut said: HashMap<WorktreeId, Said> = HashMap::new();
         let mut was: HashMap<ProjectId, (bool, bool, Vec<DiscoveredNode>)> = HashMap::new();
@@ -260,6 +263,7 @@ impl Shell {
                         // Swept on its own slow cadence: dropped here, every
                         // badge would blink off for up to a minute.
                         merged: row.merged,
+                        unlanded: row.unlanded,
                     },
                 );
             }
@@ -284,6 +288,7 @@ impl Shell {
                     row.line_changes = said.line_changes;
                     row.in_progress = said.in_progress;
                     row.merged = said.merged;
+                    row.unlanded = said.unlanded;
                 }
             }
             let Some((expanded, discovered_expanded, discovered)) = was.remove(&node.id) else {

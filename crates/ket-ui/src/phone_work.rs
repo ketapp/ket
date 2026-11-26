@@ -37,10 +37,10 @@ pub(crate) const AGENT_START: Duration = Duration::from_secs(4);
 
 /// How long a new worktree's tabs are given to open their terminals before
 /// landing gives up on finding its agent.
-const TERMINAL_OPEN: Duration = Duration::from_secs(15);
+pub(crate) const TERMINAL_OPEN: Duration = Duration::from_secs(15);
 
 /// How often landing looks again while they open.
-const LANDING_POLL: Duration = Duration::from_millis(100);
+pub(crate) const LANDING_POLL: Duration = Duration::from_millis(100);
 
 /// How long a new shell is given to draw its prompt before an automation's
 /// command is typed into it regardless.
@@ -70,6 +70,7 @@ impl Shell {
             self.answer_browser_asks(asks, cx);
         }
         self.take_phone_freshes(cx);
+        self.take_phone_switches(cx);
         // A phone pinned a worktree: the store has it, the sidebar does not.
         if ket_core::host::take_worktrees_changed() {
             self.reload(cx);
@@ -713,7 +714,7 @@ impl Shell {
 /// Codex can take longer than a fixed delay to start, and can stop on a
 /// trust or welcome screen. Wait for its actual empty composer; a prompt
 /// never goes into its launch arguments or the shell's history.
-async fn wait_for_agent_input(
+pub(crate) async fn wait_for_agent_input(
     shell: &WeakEntity<Shell>,
     terminal: crate::terminal::TerminalId,
     prompt: &str,

@@ -63,6 +63,97 @@ pub fn read(path: &Path, after: u64) -> Result<Read_> {
     read_with(path, after, turns_of)
 }
 
+/// The error the rollout's last turn ended on. Codex records it on the
+/// turn's own `task_complete`, with its name for it in `codex_error_info` —
+/// `usage_limit_exceeded` for a plan run out — and, for a dropped stream, as
+/// a bare `error` event that may follow. The turn's own account wins over
+/// that one. `None` for a turn that completed without one, or once the next
+/// turn's records have begun.
+pub(super) fn ended_on(path: &Path) -> Option<super::Ended> {
+    let bytes = super::ending(path)?;
+    // A bare `error` met on the way back, should no turn's end name one.
+    let mut loose: Option<super::Ended> = None;
+    for line in bytes.split(|&b| b == b'\n').rev() {
+        if !holds(line, b"event_msg") {
+            continue;
+        }
+        let Ok(record) = serde_json::from_slice::<serde_json::Value>(line) else {
+            continue;
+        };
+        if record.get("type").and_then(|t| t.as_str()) != Some("event_msg") {
+            continue;
+        }
+        let Some(payload) = record.get("payload") else {
+            continue;
+        };
+        let said = |message: Option<&serde_json::Value>| {
+            message
+                .and_then(|m| m.as_str())
+                .unwrap_or_default()
+                .trim()
+                .to_owned()
+        };
+        match payload.get("type").and_then(|t| t.as_str()) {
+            Some("task_complete") => {
+                let Some(error) = payload.get("error").filter(|e| e.is_object()) else {
+                    return loose;
+                };
+                return Some(super::Ended {
+                    failure: crate::limits::Failure {
+                        code: error
+                            .get("codex_error_info")
+                            .and_then(|info| info.as_str())
+                            .map(str::to_owned),
+                        message: said(error.get("message")),
+                    },
+                    at_ms: super::claude::dated(&record),
+                    closed: true,
+                });
+            }
+            Some("error") if loose.is_none() => {
+                loose = Some(super::Ended {
+                    failure: crate::limits::Failure::said(said(payload.get("message"))),
+                    at_ms: super::claude::dated(&record),
+                    closed: false,
+                });
+            }
+            // The turn at work, or the one before it: nothing has ended yet.
+            Some("task_started" | "item_started" | "item_completed" | "user_message") => {
+                return loose;
+            }
+            // Token counts, settings applied.
+            _ => {}
+        }
+    }
+    loose
+}
+
+/// The plan windows in the rollout's newest `token_count`, which carries a
+/// `rate_limits` block beside the counts.
+pub(super) fn quota(path: &Path) -> Vec<crate::rate_limits::RateWindow> {
+    let Some(bytes) = super::ending(path) else {
+        return Vec::new();
+    };
+    bytes
+        .split(|&b| b == b'\n')
+        .rev()
+        .filter(|line| holds(line, b"rate_limits"))
+        .filter_map(|line| serde_json::from_slice::<serde_json::Value>(line).ok())
+        .find_map(|record| {
+            let limits = record.pointer("/payload/rate_limits")?;
+            limits
+                .is_object()
+                .then(|| crate::rate_limits::rollout_windows(limits))
+        })
+        .unwrap_or_default()
+}
+
+/// Whether `line` has `word` in it: a look before parsing, since most of a
+/// rollout's lines are not the ones asked about.
+fn holds(line: &[u8], word: &[u8]) -> bool {
+    line.windows(word.len()).any(|found| found == word)
+}
+
 /// The turns one Codex rollout record holds.
 ///
 /// Read from the `item_completed` events, which carry each finished item
@@ -70,7 +161,7 @@ pub fn read(path: &Path, after: u64) -> Result<Read_> {
 /// the files it changed. The rollout's `response_item` records say the same
 /// things again, alongside the instructions and context Codex feeds the
 /// model as though the person had typed them.
-fn turns_of(record: &serde_json::Value, turns: &mut Vec<Turn>) {
+pub(super) fn turns_of(record: &serde_json::Value, turns: &mut Vec<Turn>) {
     if record.get("type").and_then(|t| t.as_str()) != Some("event_msg") {
         return;
     }

@@ -1,7 +1,7 @@
 // What holding a worktree offers, as the desktop's worktree menu has it: on
 // Worktrees, held on its row, and on the worktree's own screen, from its bar.
 
-import { type WorktreeSummary } from '@ket/remote';
+import { PullRequestSummary_State, type WorktreeSummary } from '@ket/remote';
 import { router } from 'expo-router';
 import { type ComponentType, createElement } from 'react';
 import { Alert } from 'react-native';
@@ -18,8 +18,8 @@ import { sentence } from '../lib/text';
 
 /** What holding a worktree offers: what the desktop's worktree menu does
  * that the phone can ask for too. Rename, Pin and Mark as unread first; then
- * its pull request's actions — or, with none open, pushing it and opening
- * one; then Delete.
+ * merging it from here, with no pull request open; then its pull request's
+ * actions — or, with none, pushing it and opening one; then Delete.
  * The repository's own checkout is neither pinned nor deleted, and has no
  * pull request of its own. Empty when there is nothing to offer. The
  * worktree's own screen offers the same from its bar. */
@@ -72,7 +72,7 @@ export function worktreeMenu(
         ? [
             {
               key: 'rename',
-              label: 'Rename…',
+              label: 'Rename',
               icon: icon(Pencil),
               // Pushed, even from the sidebar, which opens screens in
               // place of the one beside it: the sheet goes over that one,
@@ -102,21 +102,51 @@ export function worktreeMenu(
     });
   }
 
+  // Merged into its base from here, as the worktree screen's foot does: when
+  // there is something to land and no open pull request to land it through.
+  // Asked first, then it is you; a refusal is said in an alert.
+  const landable = !primary && (worktree.filesChanged > 0 || worktree.commitsAhead > 0);
+  const mergeHere: MenuItem[] =
+    landable && pr?.state !== PullRequestSummary_State.OPEN
+      ? [
+          {
+            key: 'merge-here',
+            label: `Merge into ${worktree.base}`,
+            icon: icon(Merge),
+            onPress: () =>
+              Alert.alert(`Merge ${name} into ${worktree.base}?`, 'Uncommitted changes are committed first, as Merge does on your Mac.', [
+                { text: 'Cancel', style: 'cancel' },
+                {
+                  text: 'Merge',
+                  onPress: () => {
+                    void (async () => {
+                      if (!(await confirmIdentity(`Merge ${name} into ${worktree.base}`))) return;
+                      failed("Couldn't merge")(await conn.merge(worktree.id).catch(reason));
+                    })();
+                  },
+                },
+              ]),
+          },
+        ]
+      : [];
+
   if (!pr) {
     // Not before 1.16, which opens them.
-    if (!primary && hostState.hostMinor >= 16) {
-      sections.push({
-        items: [
-          {
-            key: 'open-pr',
-            label: 'Open pull request…',
-            icon: icon(PullRequestGlyph),
-            onPress: () => open(`/pull-request/${conn.id}/${encodeURIComponent(worktree.id)}`),
-          },
-        ],
-      });
-    }
+    const openPr: MenuItem[] =
+      !primary && hostState.hostMinor >= 16
+        ? [
+            {
+              key: 'open-pr',
+              label: 'Open pull request',
+              icon: icon(PullRequestGlyph),
+              onPress: () => open(`/pull-request/${conn.id}/${encodeURIComponent(worktree.id)}`),
+            },
+          ]
+        : [];
+    const items = [...mergeHere, ...openPr];
+    if (items.length > 0) sections.push({ items });
   } else {
+    if (mergeHere.length > 0) sections.push({ items: mergeHere });
     const can = prActions(pr, hostState.hostMinor);
 
     // Handed to the agent: off to its conversation to watch it work, or word
@@ -167,7 +197,7 @@ export function worktreeMenu(
     if (can.merge)
       items.push({
         key: 'merge',
-        label: 'Merge pull request…',
+        label: 'Merge pull request',
         icon: icon(Merge),
         onPress: () =>
           askMerge(pr, (method) => {
@@ -215,7 +245,7 @@ export function worktreeMenu(
       items: [
         {
           key: 'delete',
-          label: 'Delete…',
+          label: 'Delete',
           danger: true,
           icon: icon(Trash, t.failed),
           onPress: () =>

@@ -5,7 +5,7 @@
 import type { Risk } from '@ket/remote';
 import { StyleSheet, Text, View } from 'react-native';
 
-import { font, size, t, tint } from '../lib/theme';
+import { font, t, tint } from '../lib/theme';
 
 const COLOUR: Record<string, string> = { low: t.running, medium: t.quotaWarm, high: t.failed };
 
@@ -15,7 +15,7 @@ export function RiskBadge({ risk }: { risk?: Risk }) {
   const level = risk.level.charAt(0).toUpperCase() + risk.level.slice(1);
   return (
     <View
-      style={[styles.badge, { backgroundColor: tint(colour, 0.12), borderColor: tint(colour, 0.35) }]}
+      style={[styles.badge, { backgroundColor: tint(colour, 0.12) }]}
       accessibilityLabel={`${level} risk, ${Math.round(risk.confidence * 100)} percent sure. Beta.`}
     >
       <Text style={[styles.level, { color: colour }]}>
@@ -32,11 +32,10 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 6,
     alignSelf: 'flex-start',
-    borderWidth: 1,
-    borderRadius: size.radius,
+    height: 22,
+    borderRadius: 11,
     paddingHorizontal: 8,
-    paddingVertical: 3,
   },
-  level: { fontFamily: font.chromeMedium, fontSize: size.caption },
+  level: { fontFamily: font.chromeMedium, fontSize: 11.5 },
   beta: { fontFamily: font.chrome, fontSize: 10, color: t.faint },
 });

@@ -9,13 +9,14 @@ import {
   Text,
   View,
   type StyleProp,
+  TouchableOpacity,
   type TextStyle,
   type ViewStyle,
 } from 'react-native';
 import Animated, { Easing, Keyframe, ReduceMotion } from 'react-native-reanimated';
 
 import { font, size, t, tint } from '../../lib/theme';
-import { surface } from './surface';
+import { PRESSED, surface } from './surface';
 import { Check } from '../icons';
 import { Dot } from './marks';
 import { shared } from './shared';
@@ -194,13 +195,14 @@ export function StatFilter<K extends string>({
         const on = stat.key === value;
         const zero = stat.count === 0;
         return (
-          <Pressable
+          <TouchableOpacity
             key={stat.key}
             accessibilityRole="button"
             accessibilityState={{ selected: on }}
             accessibilityLabel={`${stat.label}, ${stat.count}`}
             onPress={() => onChange(stat.key)}
-            style={({ pressed }) => [styles.stat, on && styles.statOn, pressed && !on && { backgroundColor: t.hover }]}
+            activeOpacity={on ? 1 : PRESSED}
+            style={[styles.stat, on && styles.statOn]}
           >
             <Text style={styles.statLabel} numberOfLines={1}>
               {stat.label}
@@ -209,7 +211,7 @@ export function StatFilter<K extends string>({
               {stat.color ? <Dot color={zero ? t.border : stat.color} size={7} /> : null}
               <Text style={[styles.statNum, zero && { color: t.dim }]}>{stat.count}</Text>
             </View>
-          </Pressable>
+          </TouchableOpacity>
         );
       })}
     </View>
@@ -247,7 +249,7 @@ export function Pill({
       style={({ pressed }) =>
         tone
           ? [styles.pillToned, { backgroundColor: tint(tone, pressed ? 0.28 : 0.18) }]
-          : [styles.pill, pressed && surface.chosen]
+          : [styles.pill, pressed && { opacity: PRESSED }]
       }
     >
       {icon}
@@ -255,6 +257,9 @@ export function Pill({
     </Pressable>
   );
 }
+
+/** Ink on a `warn` button. */
+export const ON_WARN = '#1b0f03';
 
 /** A button's mark landing over its words: a little pop. */
 const MARK_IN = new Keyframe({
@@ -271,16 +276,23 @@ export function Button({
   icon,
   mark,
   disabled,
+  capsule,
   style,
 }: {
   title: string;
   onPress: () => void;
-  kind?: 'primary' | 'brand' | 'secondary' | 'ghost' | 'danger';
+  /** `warn`: the call to action on a warm sheet — what to do now an agent
+   * has stopped — in the quota's colour. */
+  kind?: 'primary' | 'brand' | 'secondary' | 'ghost' | 'danger' | 'warn';
   icon?: ReactNode;
   /** Pressed, and what it did is done: its mark stands over its words, at
    * full strength, and it takes no more presses. */
   mark?: ReactNode;
   disabled?: boolean;
+  /** The system's capsule, 40 tall, for a row of answers in a card: a
+   * secondary one on the raised fill with its hairline, a danger one on its
+   * colour at 14%. */
+  capsule?: boolean;
   style?: StyleProp<ViewStyle>;
 }) {
   const marked = mark != null;
@@ -294,12 +306,16 @@ export function Button({
         kind === 'brand' && styles.brand,
         kind === 'secondary' && styles.secondary,
         kind === 'danger' && styles.danger,
+        kind === 'warn' && styles.warn,
+        capsule && styles.capsule,
+        capsule && kind === 'secondary' && surface.float,
+        capsule && kind === 'danger' && styles.capsuleDanger,
         pressed &&
           (kind === 'primary'
             ? { backgroundColor: t.accentPressed }
             : kind === 'brand'
               ? { backgroundColor: '#9aeaa4' }
-              : { backgroundColor: t.hover }),
+              : { opacity: PRESSED }),
         disabled && !marked && { opacity: 0.55 },
         style,
       ]}
@@ -312,6 +328,8 @@ export function Button({
           kind === 'brand' && styles.brandText,
           kind === 'ghost' && { color: t.dim },
           kind === 'danger' && { color: t.failed },
+          capsule && kind === 'danger' && { fontFamily: font.proseSemibold },
+          kind === 'warn' && styles.warnText,
           marked && styles.unseen,
         ]}
       >
@@ -341,15 +359,16 @@ export function IconButton({
   style?: StyleProp<ViewStyle>;
 }) {
   return (
-    <Pressable
+    <TouchableOpacity
       accessibilityRole="button"
       accessibilityLabel={label}
       onPress={onPress}
       hitSlop={4}
-      style={({ pressed }) => [styles.iconButton, well && { backgroundColor: t.sunken }, pressed && { backgroundColor: t.selection }, style]}
+      activeOpacity={PRESSED}
+      style={[styles.iconButton, well && { backgroundColor: t.sunken }, style]}
     >
       {children}
-    </Pressable>
+    </TouchableOpacity>
   );
 }
 
@@ -370,16 +389,17 @@ export function IconCluster({
       {actions.map((action, index) => (
         <Fragment key={action.label}>
           {index > 0 ? <View style={styles.clusterRule} /> : null}
-          <Pressable
+          <TouchableOpacity
             accessibilityRole="button"
             accessibilityLabel={action.badge ? `${action.label}, ${action.badge}` : action.label}
             onPress={action.onPress}
             hitSlop={{ top: 5, bottom: 5 }}
-            style={({ pressed }) => [styles.clusterCell, pressed && { backgroundColor: t.selection }]}
+            activeOpacity={PRESSED}
+            style={styles.clusterCell}
           >
             {action.icon}
             {action.badge ? <View style={styles.clusterBadge} /> : null}
-          </Pressable>
+          </TouchableOpacity>
         </Fragment>
       ))}
     </View>
@@ -448,13 +468,14 @@ export function Choice({
   disabled?: boolean;
 }) {
   return (
-    <Pressable
+    <TouchableOpacity
       accessibilityRole={many ? 'checkbox' : 'radio'}
       accessibilityLabel={label}
       accessibilityState={{ checked: on, disabled }}
       onPress={onPress}
       disabled={disabled}
-      style={({ pressed }) => [styles.choice, (on || pressed) && { backgroundColor: t.selection }, disabled && { opacity: 0.55 }]}
+      activeOpacity={PRESSED}
+      style={[styles.choice, on && { backgroundColor: t.selection }, disabled && { opacity: 0.55 }]}
     >
       <View
         style={[
@@ -469,7 +490,7 @@ export function Choice({
         <Text style={styles.choiceLabel}>{label}</Text>
         {description ? <Text style={shared.detail}>{description}</Text> : null}
       </View>
-    </Pressable>
+    </TouchableOpacity>
   );
 }
 
@@ -570,6 +591,11 @@ const styles = StyleSheet.create({
   },
   secondary: { ...surface.outline },
   danger: { borderWidth: 1, borderColor: tint(t.failed, 0.45) },
+  warn: { backgroundColor: t.quotaHot },
+  capsule: { height: 40, borderRadius: 20 },
+  capsuleDanger: { borderWidth: 0, backgroundColor: tint(t.failed, 0.14) },
+  // Ink on the quota's colour, in either theme: it is orange in both.
+  warnText: { color: ON_WARN, fontFamily: font.proseSemibold },
   buttonText: { fontFamily: font.proseMedium, fontSize: size.body, color: t.text },
   // Over the words it stands for, which keep the button its width.
   buttonMark: { ...StyleSheet.absoluteFill, alignItems: 'center', justifyContent: 'center' },

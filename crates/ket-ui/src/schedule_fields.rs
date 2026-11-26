@@ -26,7 +26,7 @@ use crate::ui::chip::caption;
 use crate::ui::field::label;
 use crate::ui::group::{button_group, segment};
 use crate::ui::icon::{Icon, icon, sized_icon};
-use crate::ui::menu::{MenuEntry, MenuItem, MenuKey, OpenMenu, dropdown};
+use crate::ui::menu::{DropdownPanel, MenuEntry, MenuItem, MenuKey, OpenMenu, dropdown};
 use crate::ui::select::select;
 
 /// How far ↑ and ↓ move the time.
@@ -635,7 +635,7 @@ impl Shell {
         let menu_width = half;
 
         let repeat_menu = fields.repeat_menu.as_ref().map(|menu| {
-            menu.view(
+            menu.dropdown_view(
                 t,
                 cx,
                 move |shell, repeat, cx| {
@@ -672,7 +672,7 @@ impl Shell {
         );
 
         let day_menu = fields.day_menu.as_ref().map(|menu| {
-            menu.view(
+            menu.dropdown_view(
                 t,
                 cx,
                 move |shell, day, cx| {
@@ -786,7 +786,7 @@ impl Shell {
                 .into(),
         };
         let place_menu = fields.place_menu.as_ref().map(|menu| {
-            menu.view(
+            menu.dropdown_view(
                 t,
                 cx,
                 move |shell, place, cx| {
@@ -826,7 +826,7 @@ impl Shell {
         );
         let base = fields.place.is_none().then(|| {
             let base_menu = fields.base_menu.as_ref().map(|menu| {
-                menu.view(
+                menu.dropdown_view(
                     t,
                     cx,
                     move |shell, base, cx| {
@@ -883,35 +883,7 @@ impl Shell {
             Ok(when) => summary(&when, &TimeZone::system()),
             Err(why) => (why, String::new()),
         };
-        let summary_box = div()
-            .flex()
-            .gap(px(10.0))
-            .items_start()
-            .px(px(12.0))
-            .py(px(10.0))
-            .rounded(crate::ui::RADIUS_MD)
-            .border_1()
-            .border_color(paint(t.border))
-            .child(sized_icon(
-                Icon::ArrowRight,
-                px(16.0),
-                paint(t.text.primary),
-            ))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(3.0))
-                    .child(
-                        div()
-                            .text_size(px(13.0))
-                            .text_color(paint(t.text.primary))
-                            .child(said),
-                    )
-                    .when(!then.is_empty(), |el| {
-                        el.child(caption(then, t).text_size(px(12.0)))
-                    }),
-            );
+        let summary_box = summary_box(said, then, t);
 
         Some(
             div()
@@ -927,13 +899,48 @@ impl Shell {
     }
 }
 
+/// A form's last lines, in a ruled box under an arrow: what the settings
+/// above it come to — when it starts next — and, dimmer, what then. Shared
+/// with Settings → Devices → Blackout, whose hours end the same way.
+pub(crate) fn summary_box(said: String, then: String, t: &Theme) -> gpui::Div {
+    div()
+        .flex()
+        .gap(px(10.0))
+        .items_start()
+        .px(px(12.0))
+        .py(px(10.0))
+        .rounded(crate::ui::RADIUS_MD)
+        .border_1()
+        .border_color(paint(t.border))
+        .child(sized_icon(
+            Icon::ArrowRight,
+            px(16.0),
+            paint(t.text.primary),
+        ))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(3.0))
+                .child(
+                    div()
+                        .text_size(px(13.0))
+                        .text_color(paint(t.text.primary))
+                        .child(said),
+                )
+                .when(!then.is_empty(), |el| {
+                    el.child(caption(then, t).text_size(px(12.0)))
+                }),
+        )
+}
+
 /// A select over its menu, keeping the keyboard on `focus`.
 fn picker(
     id: &'static str,
     value: SharedString,
     leading: Option<AnyElement>,
     focus: &FocusHandle,
-    menu: Option<AnyElement>,
+    menu: Option<DropdownPanel>,
     t: &Theme,
     window: &Window,
 ) -> gpui::Stateful<gpui::Div> {

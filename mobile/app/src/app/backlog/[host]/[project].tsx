@@ -10,7 +10,7 @@
 import { type Backlog, type BacklogNote, BacklogPriority } from '@ket/remote';
 import { useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { useCallback, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, Pressable, StyleSheet, Text, TextInput, View, type ViewInstance } from 'react-native';
+import { ActivityIndicator, Alert, Pressable, StyleSheet, Text, TextInput, TouchableOpacity, View, type ViewInstance } from 'react-native';
 import { KeyboardAwareScrollView } from 'react-native-keyboard-controller';
 
 import { FloatMenu, type MenuSection, type Place, placeOf } from '../../../components/FloatMenu';
@@ -19,7 +19,7 @@ import { Bar, Button, Card, Heading, IconButton, Prose, Screen, Segmented, Tag, 
 import type { BacklogChange } from '../../../lib/connection';
 import { useHost, useHostState } from '../../../lib/hosts';
 import { font, size, t } from '../../../lib/theme';
-import { surface } from '../../../components/ui/surface';
+import { PRESSED, surface } from '../../../components/ui/surface';
 import { sentence } from '../../../lib/text';
 
 /** How often the backlog is read again while it is on screen: a note written
@@ -213,16 +213,17 @@ export default function BacklogScreen() {
               />
               {ranked ? (
                 <View ref={priorityButton} collapsable={false}>
-                  <Pressable
+                  <TouchableOpacity
                     accessibilityRole="button"
                     accessibilityLabel={`Priority: ${PRIORITY_NAMES[capturePriority]}`}
                     accessibilityState={{ expanded: choosing !== null }}
                     onPress={() => placeOf(priorityButton.current, setChoosing)}
-                    style={({ pressed }) => [styles.capturePriority, (choosing || pressed) && styles.capturePriorityOpen]}
+                    activeOpacity={PRESSED}
+                    style={[styles.capturePriority, choosing && styles.capturePriorityOpen]}
                   >
                     <PriorityMark priority={capturePriority} size={16} />
                     <ChevronDown size={13} color={t.dim} weight={2.2} />
-                  </Pressable>
+                  </TouchableOpacity>
                 </View>
               ) : null}
               <Pressable
@@ -333,7 +334,7 @@ export default function BacklogScreen() {
 function NoteRow({ note, ranked, onPress }: { note: BacklogNote; ranked: boolean; onPress: () => void }) {
   const finished = isDone(note);
   return (
-    <Pressable onPress={onPress} style={({ pressed }) => [styles.row, pressed && { backgroundColor: t.selection }]}>
+    <TouchableOpacity onPress={onPress} activeOpacity={PRESSED} style={styles.row}>
       {ranked ? <PriorityMark priority={priorityOf(note)} faded={finished} /> : null}
       <View style={styles.grow}>
         <Text style={[styles.title, finished && { color: t.dim }]} numberOfLines={1}>
@@ -350,7 +351,7 @@ function NoteRow({ note, ranked, onPress }: { note: BacklogNote; ranked: boolean
         ) : null}
       </View>
       {note.files.length > 0 ? <Tag>{note.files.length === 1 ? '1 file' : `${note.files.length} files`}</Tag> : null}
-    </Pressable>
+    </TouchableOpacity>
   );
 }
 

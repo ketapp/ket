@@ -98,6 +98,7 @@ export interface Wanted {
   waiting: boolean;
   finished: boolean;
   checks: boolean;
+  limits: boolean;
 }
 
 function kindsOf(wanted: Wanted): PushKind[] {
@@ -106,6 +107,8 @@ function kindsOf(wanted: Wanted): PushKind[] {
   if (wanted.waiting) kinds.push(PushKind.WAITING);
   if (wanted.finished) kinds.push(PushKind.FINISHED);
   if (wanted.checks) kinds.push(PushKind.CHECKS);
+  // A desktop from before 1.38 passes over a kind it does not know.
+  if (wanted.limits) kinds.push(PushKind.LIMITS);
   return kinds;
 }
 
@@ -165,14 +168,14 @@ export async function stopPushing(conn: HostConnection | undefined): Promise<voi
  * it has opened it: the desktop's payload without its words. */
 export interface Pushed {
   host: string;
-  kind: 'waiting' | 'finished' | 'failed' | 'checks';
+  kind: 'waiting' | 'finished' | 'failed' | 'checks' | 'limit' | 'reset';
   worktree: string;
   opens: 'chat' | 'worktree' | 'pull_request';
   /** The terminal whose chat a tap opens, for `chat`. */
   terminal?: string;
 }
 
-const KINDS = new Set(['waiting', 'finished', 'failed', 'checks']);
+const KINDS = new Set(['waiting', 'finished', 'failed', 'checks', 'limit', 'reset']);
 const OPENS = new Set(['chat', 'worktree', 'pull_request']);
 
 /** A tapped or listed notification's data as a pushed notice, or null for

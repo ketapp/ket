@@ -5199,7 +5199,7 @@ dependencies = [
 
 [[package]]
 name = "ket-android"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "nix 0.31.3",
  "prost",
@@ -5213,7 +5213,7 @@ dependencies = [
 
 [[package]]
 name = "ket-chromium"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "block2",
  "cef",
@@ -5235,7 +5235,7 @@ dependencies = [
 
 [[package]]
 name = "ket-cli"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "clap",
  "jiff",
@@ -5248,7 +5248,7 @@ dependencies = [
 
 [[package]]
 name = "ket-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "agent-client-protocol",
  "alacritty_terminal",
@@ -5295,7 +5295,7 @@ dependencies = [
 
 [[package]]
 name = "ket-feedback"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "http-body-util",
  "hyper",
@@ -5310,7 +5310,7 @@ dependencies = [
 
 [[package]]
 name = "ket-relay"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "futures",
  "ket-relay-protocol",
@@ -5324,11 +5324,11 @@ dependencies = [
 
 [[package]]
 name = "ket-relay-protocol"
-version = "0.2.0"
+version = "0.3.0"
 
 [[package]]
 name = "ket-remote"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "base64 0.22.1",
  "getrandom 0.3.4",
@@ -5342,7 +5342,7 @@ dependencies = [
 
 [[package]]
 name = "ket-ui"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "base64 0.22.1",
  "block2",

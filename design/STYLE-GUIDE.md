@@ -43,6 +43,7 @@ well must never equal the card it sits in: it is a fill, not a border.
 | Waiting     | `status.attention` | `#7aa7ff` | Blocked on a person                           |
 | Failed      | `status.failed`    | `#ef6a74` | Ended badly; danger actions                   |
 | Merging     | `status.merging`   | `#b8a7e0` | A merge or rebase in flight                   |
+| Unread      | `status.unread`    | `#ff6fae` | An answer nobody has read; not for decoration |
 | Override    | `terminal.ansi.cyan` | `#3fd2e0` | A project launching an agent with its own command (`agent_override`) |
 | Added       | `diff.added`       | `#4cd08a` | `+` counts, `A` / `U`                         |
 | Removed     | `diff.removed`     | `#ef6a74` | `−` counts, `D`                               |
@@ -201,8 +202,12 @@ Four surfaces, chosen by what a thing is, not how loud it should be.
 ## Rows and read-outs
 
 - **Worktree row** — 42 tall, 6 corner, no hairline. Agent mark, branch in
-  Mono 12.5, detail in Sans 11 dim, state right-aligned in mono 11.5
-  with its dot (`running`, `waiting`, `merging`, `failed`, or dim `idle`).
+  Mono 12.5, detail in Sans 11 dim. The state is on the mark: lit in its
+  colour, with a 6px dot ringed in the row's fill on its corner (breathing
+  `running`, beating `waiting`, still `failed`; a still `unread` dot on a
+  grey mark). The detail leads with the state's word in its colour, semibold,
+  4px before the agent's words: Needs you, Failed, a git operation, Unread.
+  Nothing at the row's end but its trailing marks.
   Selected: `hover` fill plus a 3px `marker` rail inset 10 top and bottom.
 - **Project heading** — 24 tall: 16px badge (initial in Mono semibold),
   name in Sans 12.5, count in mono, chevron at the end.

@@ -200,7 +200,7 @@ impl std::fmt::Display for ContrastFailure {
 /// exhaustive of every possible token combination — nobody draws
 /// `diff.hunk_header` text on `panel` — it is the set that corresponds to how
 /// `ket-ui` actually composites tokens today.
-fn contrast_pairs(theme: &Theme) -> [(&'static str, &'static str, Color, Color, Prominence); 24] {
+fn contrast_pairs(theme: &Theme) -> [(&'static str, &'static str, Color, Color, Prominence); 25] {
     [
         (
             "text.primary",
@@ -335,6 +335,13 @@ fn contrast_pairs(theme: &Theme) -> [(&'static str, &'static str, Color, Color, 
             "status.merging",
             "surface",
             theme.status.merging,
+            theme.surface,
+            Prominence::Accent,
+        ),
+        (
+            "status.unread",
+            "surface",
+            theme.status.unread,
             theme.surface,
             Prominence::Accent,
         ),
@@ -555,6 +562,14 @@ pub struct StatusTokens {
     /// started it. Green would say "an agent is making progress here", which
     /// is exactly the wrong thing to say about a tree stopped on a conflict.
     pub merging: Color,
+    /// An agent's answer nobody has looked at yet: the word "Unread" leading
+    /// a worktree row's second line, and the dot on its mark.
+    ///
+    /// Its own hue rather than the text's: the row's other words already
+    /// carry a state's colour, and an unread row among them has to be found
+    /// by eye. Pink where the theme has one to spare; a theme that already
+    /// spends pink on `merging` uses another.
+    pub unread: Color,
 }
 
 /// Colours for a quota climbing towards its limit.
@@ -1045,6 +1060,7 @@ struct PartialStatusTokens {
     attention: Option<Color>,
     failed: Option<Color>,
     merging: Option<Color>,
+    unread: Option<Color>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -1121,6 +1137,7 @@ impl PartialTheme {
                 attention: self.status.attention.unwrap_or(base.status.attention),
                 failed: self.status.failed.unwrap_or(base.status.failed),
                 merging: self.status.merging.unwrap_or(base.status.merging),
+                unread: self.status.unread.unwrap_or(base.status.unread),
             },
             quota: QuotaTokens {
                 warm: self.quota.warm.unwrap_or(base.quota.warm),

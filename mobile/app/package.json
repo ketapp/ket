@@ -1,7 +1,7 @@
 {
   "name": "ket-mobile",
   "main": "expo-router/entry",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "dependencies": {
     "@expo-google-fonts/fira-code": "^0.4.1",
     "@expo-google-fonts/geist": "^0.4.2",

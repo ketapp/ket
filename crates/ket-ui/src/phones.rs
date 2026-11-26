@@ -45,6 +45,8 @@ use crate::ui::toast::Tone;
 use crate::ui::toggle::switch;
 use crate::ui::{CAPTION, CONTROL_H, ICON_GAP, LABEL, PAD_X, RADIUS_MD, RADIUS_SM, TITLE};
 
+mod blackout;
+
 /// Where Tailscale is downloaded, for a Mac without it.
 const TAILSCALE_DOWNLOAD: &str = "https://tailscale.com/download";
 
@@ -133,6 +135,8 @@ pub(crate) struct PhonesPane {
     /// Wakes the pane every [`TICK`] while the settings view is open.
     /// Dropping it — closing the view — stops it.
     ticker: Option<Task<()>>,
+    /// The Blackout group, once the pane has been shown — see [`blackout`].
+    blackout: Option<blackout::BlackoutPane>,
 }
 
 /// Whether this window can pair a phone, and if not, why not.
@@ -285,6 +289,7 @@ impl Shell {
         {
             return;
         }
+        self.blackout_shown(cx);
         let want_code = {
             let Some(pane) = self.phones_pane() else {
                 return;
@@ -702,11 +707,16 @@ impl Shell {
     }
 
     /// Backs out of a Revoke that is asking to be sure, or closes the Pair a
-    /// device popover. Returns whether either was open, so Escape can do this
-    /// before it closes the settings view.
+    /// device popover or a menu of the Blackout group. Returns whether any
+    /// was open, so Escape can do this before it closes the settings view.
     pub(crate) fn cancel_phone_prompt(&mut self) -> bool {
         self.phones_pane().is_some_and(|pane| {
-            pane.confirming.take().is_some() | std::mem::take(&mut pane.pairing_open)
+            pane.confirming.take().is_some()
+                | std::mem::take(&mut pane.pairing_open)
+                | pane
+                    .blackout
+                    .as_mut()
+                    .is_some_and(blackout::BlackoutPane::close_menus)
         })
     }
 
@@ -720,7 +730,7 @@ impl Shell {
     pub(crate) fn phone_settings(
         &self,
         t: &Theme,
-        window: &Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<Entry> {
         let Some(view) = self.preferences.as_ref() else {
@@ -759,6 +769,11 @@ impl Shell {
                             .children(self.reach_row(pane, window, t, cx)),
                     ),
             ));
+        }
+
+        // Hours to shut devices out need devices: after the first is paired.
+        if pane.host == Some(HostState::Serving) && !first {
+            out.extend(self.blackout_settings(pane, t, window, cx));
         }
 
         let trigger = (!first && pane.host == Some(HostState::Serving)).then(|| {
@@ -1447,7 +1462,14 @@ impl Shell {
         let settling = !device.connected
             && pane.host == Some(HostState::Serving)
             && now().saturating_sub(device.paired_at) < SETTLING;
-        let state = if device.connected {
+        // In a blackout a device is shut out, connected or not.
+        let shut = (pane.host == Some(HostState::Serving))
+            .then(|| pane.blackout.as_ref()?.shut_until())
+            .flatten();
+        let state = if let Some(until) = shut {
+            tinted_tag(format!("Shut out until {until}"), Tone::Warning.colour(t))
+                .into_any_element()
+        } else if device.connected {
             tinted_tag("Connected", paint(t.status.running)).into_any_element()
         } else if settling {
             working("Connecting…".to_owned(), CAPTION, t).into_any_element()

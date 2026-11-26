@@ -33,26 +33,8 @@ const WAIT: Duration = Duration::from_secs(10);
 /// Set in the child a test runs in.
 const SANDBOXED: &str = "KET_PHONES_TEST_SANDBOX";
 
-#[test]
-fn picks_tailnet_ipv4_from_interface_addresses() {
-    use std::net::Ipv4Addr;
-
-    let addresses = [
-        Ipv4Addr::new(192, 168, 1, 4),
-        Ipv4Addr::new(100, 63, 255, 255),
-        Ipv4Addr::new(100, 64, 0, 1),
-        Ipv4Addr::new(100, 127, 255, 254),
-    ];
-    assert_eq!(
-        tailnet_ip_from(addresses),
-        Some(Ipv4Addr::new(100, 64, 0, 1))
-    );
-    assert_eq!(
-        tailnet_ip_from([Ipv4Addr::new(100, 127, 255, 254)]),
-        Some(Ipv4Addr::new(100, 127, 255, 254))
-    );
-    assert_eq!(tailnet_ip_from([Ipv4Addr::new(100, 128, 0, 1)]), None);
-}
+mod blackout;
+mod tailnet;
 
 /// In the parent: runs test `name` again in a child whose data directory
 /// is a temporary one, checks it passed, and returns `true`. In that
@@ -128,6 +110,7 @@ fn rig() -> Rig {
         pushes: Mutex::new(HashMap::new()),
         push_settings: Mutex::new(push::Settings::from_config(&Default::default())),
         notices: Mutex::new(notices::Notices::default()),
+        blackout: Mutex::default(),
     });
     let own = Target {
         url: relay.clone(),
@@ -1558,6 +1541,7 @@ fn asked_long_ago(key: &str, worktree: &str) -> crate::agent_hooks::HookReport {
         }),
     };
     HookReport {
+        failure: None,
         agent: "claude".to_owned(),
         event: HookEvent::PermissionRequest,
         worktree: Some(worktree.to_owned()),

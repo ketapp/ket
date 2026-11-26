@@ -16,7 +16,7 @@
 // and back, its rows coming up a beat apart, and drops away faster. Every
 // duration follows Reduce Motion.
 
-import { createContext, type ReactNode, useContext, useEffect, useState } from 'react';
+import { createContext, type ReactNode, useContext, useEffect, useEffectEvent, useState } from 'react';
 import {
   type LayoutChangeEvent,
   Modal,
@@ -25,10 +25,11 @@ import {
   type StyleProp,
   StyleSheet,
   Text,
+  TouchableOpacity,
+  useWindowDimensions,
   View,
   type ViewInstance,
   type ViewStyle,
-  useWindowDimensions,
 } from 'react-native';
 import Animated, {
   Easing,
@@ -41,8 +42,9 @@ import Animated, {
 } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { useCovered } from '../lib/blackout';
 import { font, size, t, tint } from '../lib/theme';
-import { surface } from './ui/surface';
+import { PRESSED, surface } from './ui/surface';
 
 /** Where something is on the screen, as `measureInWindow` reports it. */
 export interface Place {
@@ -222,16 +224,13 @@ export function MenuList({
       ) : null}
       {section.items.map((item, i) => (
         <Stagger key={item.key} index={first[at] + i}>
-          <Pressable
+          <TouchableOpacity
             accessibilityRole="menuitem"
             accessibilityState={item.selected ? { selected: true } : undefined}
             accessibilityLabel={item.label}
             onPress={() => onChoose(item)}
-            style={({ pressed }) => [
-              styles.item,
-              item.selected && surface.chosen,
-              pressed && { backgroundColor: t.selection },
-            ]}
+            activeOpacity={PRESSED}
+            style={[styles.item, item.selected && surface.chosen]}
           >
             {item.mark}
             <View style={styles.words}>
@@ -248,7 +247,7 @@ export function MenuList({
               ) : null}
             </View>
             {item.icon}
-          </Pressable>
+          </TouchableOpacity>
         </Stagger>
       ))}
       {section.note ? <Text style={styles.note}>{section.note}</Text> : null}
@@ -275,7 +274,9 @@ interface Props {
   label: string;
   /** What opened it, on the screen — for a menu over the screen. */
   anchor?: Place | null;
-  /** For a menu over the screen: drawn where the held thing was. */
+  /** For a menu over the screen: drawn where the held thing was, on no
+   * ground of its own — a held row brings its card's colour with it, and a
+   * project's heading has none. */
   lifted?: ReactNode;
   width?: number;
   /** In place rather than over the screen: where along the top edge of what
@@ -349,6 +350,15 @@ function OverScreen({ open, onClose, anchor, sections, lifted, label, width = WI
   const insets = useSafeAreaInsets();
   // Measured afresh for each opening: the next menu may hold more, or less.
   const [sized, setSized] = useState<{ anchor: Place; height: number } | null>(null);
+  // Over the screen is over a blackout's cover too: the menu shuts as the
+  // cover goes up — see `useCovered`.
+  const covered = useCovered();
+  const taken = useEffectEvent(() => {
+    if (open) onClose();
+  });
+  useEffect(() => {
+    if (covered) taken();
+  }, [covered, open]);
   if (!anchor) return null;
   const height = sized?.anchor === anchor ? sized.height : 0;
 
@@ -366,7 +376,7 @@ function OverScreen({ open, onClose, anchor, sections, lifted, label, width = WI
   };
 
   return (
-    <Modal transparent visible={open} animationType="fade" onRequestClose={onClose} statusBarTranslucent>
+    <Modal transparent visible={open && !covered} animationType="fade" onRequestClose={onClose} statusBarTranslucent>
       <Pressable accessibilityLabel="Close menu" onPress={onClose} style={styles.scrim} />
       {lifted ? (
         <View
@@ -435,7 +445,6 @@ const styles = StyleSheet.create({
   lifted: {
     position: 'absolute',
     borderRadius: size.radiusLg,
-    backgroundColor: t.elevated,
     overflow: 'hidden',
   },
   // The desktop's menu: a 6px frame, rows with their own corners inside it,

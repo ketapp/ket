@@ -47,6 +47,45 @@ const FIRST_TURNS: usize = 200;
 /// Longest text one turn carries; the rest is cut with an ellipsis.
 const TURN_TEXT_MAX: usize = 8_000;
 
+/// How much of a session's end is read to learn how its last turn ended.
+/// The records that say so are its last few; this is room for a long tool
+/// result written just before them.
+const ENDING_READ_BYTES: u64 = 256 * 1024;
+
+/// The error a session's last turn ended on — see [`Transcript::ended_on`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ended {
+    /// What the agent recorded about it.
+    pub failure: crate::limits::Failure,
+    /// When it recorded it, where its record is dated. Grok's is not.
+    pub at_ms: Option<u64>,
+    /// Whether the agent recorded the turn itself as over. Codex also
+    /// records errors it goes on to retry, a dropped stream among them: one
+    /// of those alone is what the turn last ran into, not proof it ended.
+    pub closed: bool,
+}
+
+/// The last [`ENDING_READ_BYTES`] of `path`, from the first whole line in
+/// them. Read newest line first by whoever asks: what ended a turn is at the
+/// very end, and nothing before the first record that settles it is parsed.
+fn ending(path: &Path) -> Option<Vec<u8>> {
+    let mut file = std::fs::File::open(path).ok()?;
+    let length = file.metadata().ok()?.len();
+    let start = length.saturating_sub(ENDING_READ_BYTES);
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).ok()?;
+    if start > 0 {
+        // A read that began mid-file began mid-record.
+        let whole = bytes
+            .iter()
+            .position(|&b| b == b'\n')
+            .map_or(bytes.len(), |at| at + 1);
+        bytes.drain(..whole);
+    }
+    Some(bytes)
+}
+
 /// Who a turn is from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TurnKind {
@@ -130,6 +169,22 @@ impl Transcript {
         )
     }
 
+    /// When the session began, in Unix milliseconds: the transcript file's
+    /// creation, which the agent makes as the session starts. `None` for
+    /// OpenCode, whose sessions share one database, and where the file
+    /// system can't say.
+    pub fn started_at_ms(&self) -> Option<u64> {
+        let path = match self {
+            Self::Claude(path) | Self::Codex(path) | Self::Grok(path) => path,
+            Self::OpenCode { .. } => return None,
+        };
+        let created = std::fs::metadata(path)
+            .and_then(|meta| meta.created())
+            .ok()?;
+        let since = created.duration_since(std::time::UNIX_EPOCH).ok()?;
+        u64::try_from(since.as_millis()).ok()
+    }
+
     /// What the session has said since cursor `after` — `0` for a first
     /// read, which keeps the last [`FIRST_TURNS`] turns.
     pub fn read(&self, after: u64) -> Result<Read_> {
@@ -138,6 +193,83 @@ impl Transcript {
             Self::Codex(path) => codex::read(path, after),
             Self::Grok(path) => grok::read(path, after),
             Self::OpenCode { database, session } => opencode::read(database, session, after),
+        }
+    }
+
+    /// The person's first message in the session, read from its start: what
+    /// a first [`Self::read`], which keeps the recent end, misses once a
+    /// session runs long. `None` when nothing in its first
+    /// [`FIRST_READ_BYTES`] is one, and for OpenCode, whose messages are
+    /// read from the recent end too.
+    pub fn first_ask(&self) -> Option<Turn> {
+        let (path, parse): (&Path, fn(&serde_json::Value, &mut Vec<Turn>)) = match self {
+            Self::Claude(path) => (path, claude::turns_of),
+            Self::Codex(path) => (path, codex::turns_of),
+            Self::Grok(path) => (path, grok::turns_of),
+            Self::OpenCode { .. } => return None,
+        };
+        let file = std::fs::File::open(path).ok()?;
+        let mut turns = Vec::new();
+        for line in
+            std::io::BufRead::split(std::io::BufReader::new(file.take(FIRST_READ_BYTES)), b'\n')
+        {
+            let from = turns.len();
+            if let Ok(record) = serde_json::from_slice::<serde_json::Value>(&line.ok()?) {
+                parse(&record, &mut turns);
+            }
+            let asked = turns
+                .get(from..)
+                .into_iter()
+                .flatten()
+                .find(|turn| turn.kind == TurnKind::User && !turn.text.trim().is_empty());
+            if let Some(turn) = asked {
+                return Some(turn.clone());
+            }
+        }
+        None
+    }
+
+    /// The error the session's last turn ended on, or `None` when it ended
+    /// cleanly, was interrupted, is still going, or the session has moved on
+    /// since — a new prompt, the agent's words, a tool.
+    ///
+    /// Read from the end of what the agent keeps, so it costs the same
+    /// however long the session is. Not for OpenCode: its turn's error comes
+    /// with its hook, and its database is not opened to look for one.
+    pub fn ended_on(&self) -> Option<Ended> {
+        match self {
+            Self::Claude(path) => claude::ended_on(path),
+            Self::Codex(path) => codex::ended_on(path),
+            Self::Grok(path) => {
+                grok::ended_on(&path.with_file_name("updates.jsonl")).map(|said| Ended {
+                    failure: crate::limits::Failure::said(said),
+                    at_ms: None,
+                    closed: true,
+                })
+            }
+            Self::OpenCode { .. } => None,
+        }
+    }
+
+    /// The plan windows the session last recorded: how much of each is used
+    /// and when it resets. Only Codex writes them into the session itself —
+    /// Claude's come by its status line — so this is empty for the rest.
+    pub fn quota(&self) -> Vec<crate::rate_limits::RateWindow> {
+        match self {
+            Self::Codex(path) => codex::quota(path),
+            _ => Vec::new(),
+        }
+    }
+
+    /// How many bytes the session's file holds, for telling whether anything
+    /// has been written since a last look. `None` for OpenCode's database,
+    /// which every session shares.
+    pub fn written(&self) -> Option<u64> {
+        match self {
+            Self::Claude(path) | Self::Codex(path) | Self::Grok(path) => {
+                std::fs::metadata(path).ok().map(|meta| meta.len())
+            }
+            Self::OpenCode { .. } => None,
         }
     }
 

@@ -21,11 +21,15 @@ export const surface = StyleSheet.create({
    * well, a field, a track, a key: the hairline is an outline drawn just
    * inside it, which takes no room, so the surface stays the size it is. */
   well: { backgroundColor: t.sunken, outlineWidth: 1, outlineOffset: -1, outlineColor: t.selection },
-  /** What is chosen, or under a finger. */
+  /** What is chosen. Not what is under a finger: that fades, by `PRESSED`. */
   chosen: { backgroundColor: t.selection },
   /** An edge and no fill: a secondary button, an option, a key. */
   outline: { borderWidth: 1, borderColor: t.border },
 });
+
+/** What anything pressed fades to, as a `TouchableOpacity`'s `activeOpacity`:
+ * a press dims what is under the finger, and never fills it grey. */
+export const PRESSED = 0.6;
 
 /** A surface tinted by a signal — waiting, failed: an 8% fill and a 14% edge
  * of its colour. */

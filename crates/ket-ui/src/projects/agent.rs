@@ -103,7 +103,7 @@ impl Shell {
         .leading(mark(shown.unwrap_or(""), t))
         .open(form.agent_menu.is_some());
         let panel = form.agent_menu.as_ref().map(|menu| {
-            menu.view(
+            menu.dropdown_view(
                 t,
                 cx,
                 |shell, row, cx| {

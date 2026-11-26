@@ -3,13 +3,13 @@
 
 import { router } from 'expo-router';
 import { Children, Fragment, isValidElement, type ReactNode } from 'react';
-import { StyleSheet, Text, View, type StyleProp, type TextStyle, type ViewStyle } from 'react-native';
+import { Pressable, StyleSheet, Text, View, type StyleProp, type TextStyle, type ViewStyle } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { READABLE_WIDTH, useSplit } from '../../lib/layout';
 import { font, size, t } from '../../lib/theme';
-import { surface, tinted } from './surface';
-import { Back } from '../icons';
+import { PRESSED, surface, tinted } from './surface';
+import { Back, ChevronDown } from '../icons';
 import { IconButton } from './controls';
 import { TILE } from './marks';
 import { ROW_INSET, TILE_GAP } from './rows';
@@ -73,6 +73,93 @@ export function Bar({
         {tabs ? <View style={styles.barTabStrip}>{tabs}</View> : null}
       </View>
       {right}
+    </View>
+  );
+}
+
+/**
+ * The head of a tab, or of a screen a tab opens: a large title, a quiet line
+ * under it, and the one action across from them. `onTitle` makes the title a
+ * choice — a chevron after it, a tap opening the choice; `titleMark` stands
+ * before it. A screen opened from a tab has `onBack`: a back arrow over the
+ * title. A string `line` is drawn in the line's own type; anything else is
+ * drawn as given, in `shared.headLine` where it has words.
+ */
+export function Masthead({
+  title,
+  titleMark,
+  titleLabel,
+  onTitle,
+  line,
+  action,
+  onBack,
+}: {
+  title: string;
+  titleMark?: ReactNode;
+  /** What a screen reader calls the title when it is a choice. */
+  titleLabel?: string;
+  onTitle?: () => void;
+  line?: ReactNode;
+  action?: ReactNode;
+  onBack?: () => void;
+}) {
+  const heading = (
+    <>
+      {titleMark ? <View style={styles.mastMark}>{titleMark}</View> : null}
+      <Text style={styles.mastTitle} numberOfLines={1}>
+        {title}
+      </Text>
+      {onTitle ? <ChevronDown size={14} color={t.faint} weight={2.4} /> : null}
+    </>
+  );
+  return (
+    <View>
+      {onBack ? (
+        <View style={styles.mastBack}>
+          <IconButton label="Back" onPress={onBack} style={styles.back}>
+            <Back size={22} color={t.text} />
+          </IconButton>
+        </View>
+      ) : null}
+      <View style={[styles.mast, onBack ? styles.mastUnderBack : null]}>
+        <View style={styles.mastText}>
+          {onTitle ? (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={titleLabel}
+              onPress={onTitle}
+              hitSlop={6}
+              style={({ pressed }) => [styles.mastTitleRow, pressed && { opacity: PRESSED }]}
+            >
+              {heading}
+            </Pressable>
+          ) : (
+            <View accessibilityRole="header" style={styles.mastTitleRow}>
+              {heading}
+            </View>
+          )}
+          {typeof line === 'string' ? (
+            <Text style={shared.headLine} numberOfLines={1}>
+              {line}
+            </Text>
+          ) : (
+            line
+          )}
+        </View>
+        {action}
+      </View>
+    </View>
+  );
+}
+
+/** What the rows of the card above mean, quiet, under it; led by `icon`
+ * where one says it at a glance — the lock on "end-to-end encrypted". */
+export function CardNote({ children, icon }: { children: ReactNode; icon?: ReactNode }) {
+  if (!icon) return <Text style={styles.cardNote}>{children}</Text>;
+  return (
+    <View style={styles.cardNoteRow}>
+      <View style={styles.cardNoteIcon}>{icon}</View>
+      <Text style={[styles.cardNote, styles.cardNoteText]}>{children}</Text>
     </View>
   );
 }
@@ -154,6 +241,18 @@ export function Banner({ tone, children, style }: { tone: string; children: Reac
   return <View style={[styles.banner, tinted(tone), style]}>{children}</View>;
 }
 
+/** A screen with nothing on it yet: a quiet mark in a well, centred in the
+ * room it is given, its title and what would fill it. */
+export function Empty({ icon, title, children }: { icon: ReactNode; title: string; children: ReactNode }) {
+  return (
+    <View style={styles.empty} accessibilityLiveRegion="polite">
+      <View style={styles.emptyMark}>{icon}</View>
+      <Text style={styles.emptyTitle}>{title}</Text>
+      <Prose style={styles.emptyNote}>{children}</Prose>
+    </View>
+  );
+}
+
 /** Prose: a sentence, dim unless told otherwise. */
 export function Prose({ children, color, style }: { children: ReactNode; color?: string; style?: StyleProp<TextStyle> }) {
   return <Text style={[styles.prose, color ? { color } : null, style]}>{children}</Text>;
@@ -177,6 +276,19 @@ const styles = StyleSheet.create({
   barTitle: { fontFamily: font.proseSemibold, fontSize: size.value, color: t.text },
   barDetail: { fontFamily: font.prose, fontSize: 12, color: t.dim },
   card: { borderRadius: size.radiusCard, overflow: 'hidden' },
+  // The title and the line under it, and the action across from them, at the
+  // desk's edge.
+  mast: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 12, paddingTop: 10, paddingHorizontal: 16 },
+  mastUnderBack: { paddingTop: 0 },
+  mastBack: { height: 44, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 10 },
+  mastText: { flexShrink: 1, minWidth: 0, gap: 3 },
+  mastTitleRow: { alignSelf: 'flex-start', maxWidth: '100%', flexDirection: 'row', alignItems: 'center', gap: 7 },
+  mastMark: { marginRight: 2 },
+  mastTitle: { flexShrink: 1, fontFamily: font.proseSemibold, fontSize: 22, lineHeight: 28, letterSpacing: -0.3, color: t.text },
+  cardNote: { marginTop: 8, paddingHorizontal: 4, fontFamily: font.prose, fontSize: size.detail, lineHeight: 18, color: t.faint },
+  cardNoteRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 8, marginTop: 8, paddingHorizontal: 4 },
+  cardNoteIcon: { marginTop: 3 },
+  cardNoteText: { flex: 1, marginTop: 0, paddingHorizontal: 0 },
   ruled: { borderRadius: RULED_RADIUS, overflow: 'hidden' },
   rule: { height: 1, marginLeft: ROW_INSET + TILE + TILE_GAP, backgroundColor: t.rule },
   heading: {
@@ -197,4 +309,16 @@ const styles = StyleSheet.create({
   value: { fontFamily: font.chromeMedium, fontSize: size.value, color: t.text },
   prose: { fontFamily: font.prose, fontSize: size.label, lineHeight: 19, color: t.dim },
   banner: { borderRadius: size.radiusCard, padding: 12, gap: 10 },
+  empty: { flexGrow: 1, alignItems: 'center', justifyContent: 'center', gap: 6, paddingHorizontal: 28, paddingBottom: 40 },
+  emptyMark: {
+    width: 44,
+    height: 44,
+    marginBottom: 8,
+    borderRadius: size.radiusLg,
+    alignItems: 'center',
+    justifyContent: 'center',
+    ...surface.well,
+  },
+  emptyTitle: { fontFamily: font.proseSemibold, fontSize: size.title, color: t.text, textAlign: 'center' },
+  emptyNote: { textAlign: 'center' },
 });

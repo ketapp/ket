@@ -44,6 +44,8 @@ const DESK = {
   attention: '#7aa7ff',
   failed: '#ef6a74',
   merging: '#b8a7e0',
+  /** An agent's answer nobody has read: hot pink, a hue no state uses. */
+  unread: '#ff6fae',
   added: '#4cd08a',
   removed: '#ef6a74',
   modified: '#f5c451',
@@ -71,8 +73,14 @@ const PALETTE_KEY = 'ket.palette';
  * entries to it: readable after the first unlock, not only while unlocked. */
 const KEYCHAIN: SecureStore.SecureStoreOptions = { keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK };
 
-/** What a stored palette may set: every colour token but ket's own brand. */
-type Stored = { light: boolean } & Partial<Omit<Tokens, 'brand' | 'onBrand'>>;
+/** What a stored palette may set: every colour token but ket's own brand
+ * and unread. */
+type Stored = { light: boolean } & Partial<Omit<Tokens, 'brand' | 'onBrand' | 'unread'>>;
+
+/** Unread on a light theme: a darker pink, to read on white. The desktop's
+ * palette carries no unread colour, so the phone keeps its own: the desk's
+ * pink, or this. */
+const UNREAD_ON_LIGHT = '#c2185b';
 
 /** The palette as it was stored, word for word — what a new one is compared
  * with, so the same palette arriving again changes nothing. */
@@ -189,7 +197,13 @@ export function ramp(backdrop: string, surface: string, text: string) {
  * redrawn on the phone's ramp. */
 export const t: Tokens = (() => {
   const said = { ...DESK, ...stored };
-  return { ...said, ...ramp(said.backdrop, said.card, said.text), brand: DESK.brand, onBrand: DESK.onBrand };
+  return {
+    ...said,
+    ...ramp(said.backdrop, said.card, said.text),
+    brand: DESK.brand,
+    onBrand: DESK.onBrand,
+    unread: stored?.light ? UNREAD_ON_LIGHT : DESK.unread,
+  };
 })();
 
 /** Whether the desktop's theme is a light one: dark ink, a dark status bar. */

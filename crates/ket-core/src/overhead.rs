@@ -475,7 +475,7 @@ fn installed_as(path: &std::path::Path) -> Option<String> {
 }
 
 #[cfg(target_os = "macos")]
-mod sample {
+pub(crate) mod sample {
     use libproc::bsd_info::BSDInfo;
     use libproc::pid_rusage::{RUsageInfoV2, pidrusage};
     use std::ffi::OsStr;
@@ -671,7 +671,7 @@ mod sample {
 
     /// Where `pid` is working: the directory a shell is in, or an agent was
     /// started in.
-    pub(super) fn cwd(pid: i32) -> Option<PathBuf> {
+    pub(crate) fn cwd(pid: i32) -> Option<PathBuf> {
         let dirs = pidinfo::<Directories>(pid, 0).ok()?;
         let end = dirs
             .cwd
@@ -737,7 +737,7 @@ mod sample {
             .collect()
     }
 
-    fn children(pid: i32) -> Vec<i32> {
+    pub(crate) fn children(pid: i32) -> Vec<i32> {
         let Ok(ppid) = u32::try_from(pid) else {
             return Vec::new();
         };
@@ -864,60 +864,6 @@ mod sample {
             let _ = apart.wait();
             assert_eq!(found, Some(Standing::Apart));
             assert!(!theirs);
-        }
-
-        /// Set in the copy of this test that stands in for the helper: it
-        /// only waits to be looked at.
-        const STAND_IN: &str = "KET_OVERHEAD_STAND_IN";
-
-        #[test]
-        fn a_chromium_helper_is_kets_whichever_group_it_is_in() {
-            use std::os::unix::process::CommandExt;
-
-            if std::env::var_os(STAND_IN).is_some() {
-                std::thread::sleep(std::time::Duration::from_secs(5));
-                return;
-            }
-            // This test's own program, run as just this test, under a
-            // helper's name: what the system calls a process is the name of
-            // the file it ran. Never a copy of one of Apple's: outside the
-            // system volume its signature fails, macOS kills it, and the
-            // daemon that checks signatures crashed reading the copy as it
-            // was deleted, until nothing new could start.
-            let dir = std::env::temp_dir().join(format!("ket-overhead-{}", std::process::id()));
-            std::fs::create_dir_all(&dir).expect("a directory");
-            let binary = dir.join("ket Helper (Renderer)");
-            let program = std::env::current_exe().expect("this test's program");
-            // A link is the same, already checked file; a copy for a target
-            // directory on another volume.
-            std::fs::hard_link(&program, &binary)
-                .or_else(|_| std::fs::copy(&program, &binary).map(drop))
-                .expect("the helper's file");
-            let pid = i32::try_from(std::process::id()).expect("a pid");
-            let mut found = Vec::new();
-            for apart in [false, true] {
-                let mut command = std::process::Command::new(&binary);
-                command
-                    .arg("a_chromium_helper_is_kets_whichever_group_it_is_in")
-                    .env(STAND_IN, "1")
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null());
-                if apart {
-                    command.process_group(0);
-                }
-                let mut child = command.spawn().expect("the helper");
-                let child_pid = i32::try_from(child.id()).expect("a pid");
-                let mut budget = MOST;
-                let walked = sessions(pid, true, &mut budget)
-                    .into_iter()
-                    .find(|tree| tree.id.0 == child_pid)
-                    .map(|tree| tree.kind);
-                let _ = child.kill();
-                let _ = child.wait();
-                found.push(walked);
-            }
-            let _ = std::fs::remove_dir_all(&dir);
-            assert_eq!(found, [Some(Walked::Chromium), Some(Walked::Chromium)]);
         }
 
         #[test]

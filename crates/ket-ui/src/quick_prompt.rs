@@ -865,7 +865,7 @@ impl Shell {
         };
 
         let project_menu = dialog.project_menu.as_ref().map(|menu| {
-            menu.view(
+            menu.dropdown_view(
                 t,
                 cx,
                 |shell, project, cx| {
@@ -909,7 +909,7 @@ impl Shell {
         );
 
         let target_menu = dialog.target_menu.as_ref().map(|menu| {
-            menu.view(
+            menu.dropdown_view(
                 t,
                 cx,
                 |shell, target, cx| {
@@ -928,7 +928,7 @@ impl Shell {
             )
         });
         let snippet_menu = dialog.snippet_menu.as_ref().map(|open| {
-            open.menu.view(
+            open.menu.dropdown_view(
                 t,
                 cx,
                 |shell, pick, cx| {

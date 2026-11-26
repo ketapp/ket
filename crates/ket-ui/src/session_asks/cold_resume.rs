@@ -12,14 +12,16 @@
 //! again until it has made another request and gone cold after that one.
 //! And only of an idle agent: a prompt sent a moment ago may not have
 //! reached the transcript yet, and a turn in flight is not a cold session.
+//! Nor of one stopped at its usage limit: that is asked about instead, and
+//! a cold cache is moot while nothing will answer — see
+//! `crate::session_asks`.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
 use gpui::{
-    AnyElement, AsyncApp, Context, FontWeight, KeyDownEvent, MouseButton, WeakEntity, Window, div,
-    prelude::*, px,
+    AnyElement, AsyncApp, Context, KeyDownEvent, MouseButton, WeakEntity, Window, prelude::*,
 };
 use ket_core::activity::{Activity, Signal};
 use ket_core::cold::{Cold, LastCall};
@@ -30,8 +32,8 @@ use crate::paint::paint;
 use crate::tabs::TabKind;
 use crate::terminal::TerminalId;
 use crate::ui::button::button;
-use crate::ui::dialog::{body, card, centered, footer};
-use crate::ui::icon::{Icon, icon};
+use crate::ui::dialog::{body, card, centered, footer, header};
+use crate::ui::icon::Icon;
 use crate::ui::toast::Tone;
 
 /// How long a fresh session is given to report itself started before a phone
@@ -120,22 +122,26 @@ impl Shell {
     /// while the Mac sat unattended is not one the reader is opening.
     pub(crate) fn check_cold_resume(&mut self, window: &Window, cx: &mut Context<Self>) {
         let active = window.is_window_active();
-        if active && !self.cold_resume.active {
-            self.cold_resume.checked = None;
+        if active && !self.asks.cold.active {
+            self.asks.cold.checked = None;
         }
-        self.cold_resume.active = active;
+        self.asks.cold.active = active;
         if self.modal_open() || !active {
             return;
         }
         let Some((terminal, session)) = self.idle_claude_tab() else {
-            self.cold_resume.checked = None;
+            self.asks.cold.checked = None;
             return;
         };
-        let looked = (terminal, session.clone());
-        if self.cold_resume.checked.as_ref() == Some(&looked) {
+        if self.out_of_usage_in(terminal).is_some() {
+            self.asks.cold.checked = None;
             return;
         }
-        self.cold_resume.checked = Some(looked);
+        let looked = (terminal, session.clone());
+        if self.asks.cold.checked.as_ref() == Some(&looked) {
+            return;
+        }
+        self.asks.cold.checked = Some(looked);
 
         // The transcript and the config off the window's thread: the first
         // look for a transcript can be a shell startup, and a long one is a
@@ -159,14 +165,14 @@ impl Shell {
                 // The reader may have moved on while the transcript was read,
                 // the agent may have started a turn, or this spell may have
                 // been answered already.
-                let still_here = shell.cold_resume.checked.as_ref()
+                let still_here = shell.asks.cold.checked.as_ref()
                     == Some(&(terminal, session.clone()))
                     && shell.idle_claude_tab().as_ref() == Some(&(terminal, session.clone()));
-                let answered = shell.cold_resume.answered.get(&session) == Some(&at_ms);
+                let answered = shell.asks.cold.answered.get(&session) == Some(&at_ms);
                 if !still_here || answered || shell.modal_open() {
                     return;
                 }
-                shell.cold_resume.dialog = Some(ColdResume {
+                shell.asks.cold.dialog = Some(ColdResume {
                     terminal,
                     session,
                     at_ms,
@@ -225,20 +231,19 @@ impl Shell {
 
     /// Leaves the session as it is.
     fn cold_resume_continue(&mut self, cx: &mut Context<Self>) {
-        if let Some(dialog) = self.cold_resume.dialog.take() {
-            self.cold_resume
-                .answered
-                .insert(dialog.session, dialog.at_ms);
+        if let Some(dialog) = self.asks.cold.dialog.take() {
+            self.asks.cold.answered.insert(dialog.session, dialog.at_ms);
         }
         cx.notify();
     }
 
     /// Starts fresh from the question.
     fn cold_resume_start_fresh(&mut self, cx: &mut Context<Self>) {
-        let Some(dialog) = self.cold_resume.dialog.take() else {
+        let Some(dialog) = self.asks.cold.dialog.take() else {
             return;
         };
-        self.cold_resume
+        self.asks
+            .cold
             .answered
             .insert(dialog.session.clone(), dialog.at_ms);
         if let Err(why) =
@@ -279,16 +284,18 @@ impl Shell {
             }
             // Answered from the phone: the desktop's own question about it
             // has nothing left to ask.
-            self.cold_resume
+            self.asks
+                .cold
                 .answered
                 .insert(fresh.session, fresh.since_ms);
             if self
-                .cold_resume
+                .asks
+                .cold
                 .dialog
                 .as_ref()
                 .is_some_and(|dialog| dialog.terminal == terminal)
             {
-                self.cold_resume.dialog = None;
+                self.asks.cold.dialog = None;
             }
         }
     }
@@ -334,10 +341,10 @@ impl Shell {
         if self.asleep_terminals.contains_key(&terminal) {
             return Err("That tab is asleep — open it first".to_owned());
         }
-        if self.cold_resume.typing.contains_key(&terminal) {
+        if self.asks.cold.typing.contains_key(&terminal) {
             return Err("ket is already starting this one fresh".to_owned());
         }
-        self.cold_resume.typing.insert(terminal, Vec::new());
+        self.asks.cold.typing.insert(terminal, Vec::new());
         let session = session.to_owned();
         cx.spawn(async move |shell: WeakEntity<Shell>, cx: &mut AsyncApp| {
             // Each key after the wait before it.
@@ -364,7 +371,7 @@ impl Shell {
             }
             // What the reader typed meanwhile, now that the command is in.
             let _ = shell.update(cx, |shell, cx| {
-                let held = shell.cold_resume.typing.remove(&terminal);
+                let held = shell.asks.cold.typing.remove(&terminal);
                 if let Some(held) = held.filter(|held| !held.is_empty()) {
                     shell.type_into_terminal(terminal, held, cx);
                 }
@@ -417,7 +424,7 @@ impl Shell {
     /// Handles a key while the question is up: Enter and Escape both
     /// continue, the choice that changes nothing.
     pub(crate) fn cold_resume_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) -> bool {
-        if self.cold_resume.dialog.is_none() {
+        if self.asks.cold.dialog.is_none() {
             return false;
         }
         if matches!(event.keystroke.key.as_str(), "escape" | "enter") {
@@ -428,7 +435,7 @@ impl Shell {
 
     /// The question, or nothing when it is not up.
     pub(crate) fn cold_resume_view(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let dialog = self.cold_resume.dialog.as_ref()?;
+        let dialog = self.asks.cold.dialog.as_ref()?;
         let t = &self.theme;
 
         let fresh = button("cold-resume-fresh", "Start fresh")
@@ -442,27 +449,14 @@ impl Shell {
 
         // The frost mark leads the title, in the dim ink of a label: a cold
         // cache is a fact to weigh, not a fault, and colour is kept for state.
-        let title = div()
-            .flex()
-            .items_center()
-            .gap(px(8.0))
-            .child(icon(Icon::Snowflake, paint(t.text.dim)).size(px(16.0)))
-            .child(
-                div()
-                    .text_size(crate::ui::TITLE)
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(paint(t.text.primary))
-                    .child("This session went cold"),
-            )
-            // Closing changes nothing, as Escape does: the session continues.
-            .child(div().flex_grow())
-            .child(
-                crate::ui::dialog::close("cold-resume-close", t)
-                    .on_click(cx.listener(|this, _, _, cx| this.cold_resume_continue(cx))),
-            );
+        // Closing changes nothing, as Escape does: the session continues.
+        let title = header("cold-resume-close", "This session went cold")
+            .mark(Icon::Snowflake, paint(t.text.dim))
+            .on_close(cx.listener(|this, _, _, cx| this.cold_resume_continue(cx)))
+            .render(t);
         Some(
             centered(
-                card("cold-resume", px(340.0), t)
+                card("cold-resume", super::WIDTH, t)
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .child(title)
                     .child(body(format!("Continuing {}.", dialog.cold.summary()), t))

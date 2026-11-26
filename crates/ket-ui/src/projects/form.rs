@@ -411,7 +411,7 @@ impl ProjectForm {
             let typed = self.hex.read(cx).text();
             self.palette_open = false;
             self.hex.update(cx, |input, _| input.request_focus());
-            self.error = Some(format!("{} is not a colour — use #rrggbb", typed.trim()).into());
+            self.error = Some(format!("{} is not a color — use #rrggbb", typed.trim()).into());
             return None;
         };
         Some(Drafts {

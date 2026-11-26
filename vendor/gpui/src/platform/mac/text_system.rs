@@ -14,10 +14,11 @@ use core_foundation::{
     string::CFString,
 };
 use core_graphics::{
-    base::{CGGlyph, kCGImageAlphaPremultipliedLast},
+    base::{CGGlyph, kCGImageAlphaNoneSkipLast, kCGImageAlphaPremultipliedLast},
     color_space::CGColorSpace,
     context::{CGContext, CGTextDrawingMode},
     display::CGPoint,
+    geometry::{CGRect, CGSize},
 };
 use core_text::{
     font::CTFont,
@@ -46,9 +47,6 @@ use smallvec::SmallVec;
 use std::{borrow::Cow, char, convert::TryFrom, sync::Arc};
 
 use super::open_type::apply_features_and_fallbacks;
-
-#[allow(non_upper_case_globals)]
-const kCGImageAlphaOnly: u32 = 7;
 
 pub(crate) struct MacTextSystem(RwLock<MacTextSystemState>);
 
@@ -373,16 +371,32 @@ impl MacTextSystemState {
                     kCGImageAlphaPremultipliedLast,
                 );
             } else {
-                bytes = vec![0; bitmap_size.width.0 as usize * bitmap_size.height.0 as usize];
+                // ket: drawn white on an opaque black ground in a colour
+                // context, and read back as coverage below. macOS smooths
+                // text only in a colour context with an opaque ground, never
+                // in an alpha-only one; without its smoothing, small light
+                // text on a dark ground drew thinner and greyer than other
+                // Mac apps draw it.
+                bytes = vec![0; bitmap_size.width.0 as usize * 4 * bitmap_size.height.0 as usize];
                 cx = CGContext::create_bitmap_context(
                     Some(bytes.as_mut_ptr() as *mut _),
                     bitmap_size.width.0 as usize,
                     bitmap_size.height.0 as usize,
                     8,
-                    bitmap_size.width.0 as usize,
-                    &CGColorSpace::create_device_gray(),
-                    kCGImageAlphaOnly,
+                    bitmap_size.width.0 as usize * 4,
+                    &CGColorSpace::create_device_rgb(),
+                    kCGImageAlphaNoneSkipLast,
                 );
+                cx.set_rgb_fill_color(0.0, 0.0, 0.0, 1.0);
+                cx.fill_rect(CGRect::new(
+                    &CGPoint::new(0.0, 0.0),
+                    &CGSize::new(
+                        bitmap_size.width.0 as CGFloat,
+                        bitmap_size.height.0 as CGFloat,
+                    ),
+                ));
+                cx.set_allows_font_smoothing(true);
+                cx.set_should_smooth_fonts(true);
             }
 
             // Move the origin to bottom left and account for scaling, this
@@ -400,7 +414,8 @@ impl MacTextSystemState {
                 .subpixel_variant
                 .map(|v| v as f32 / SUBPIXEL_VARIANTS_X as f32);
             cx.set_text_drawing_mode(CGTextDrawingMode::CGTextFill);
-            cx.set_gray_fill_color(0.0, 1.0);
+            // White on the black ground, so its brightness is its coverage.
+            cx.set_gray_fill_color(if params.is_emoji { 0.0 } else { 1.0 }, 1.0);
             cx.set_allows_antialiasing(true);
             cx.set_should_antialias(true);
             cx.set_allows_font_subpixel_positioning(true);
@@ -424,6 +439,16 @@ impl MacTextSystemState {
                 for pixel in bytes.chunks_exact_mut(4) {
                     swap_rgba_pa_to_bgra(pixel);
                 }
+            } else {
+                // One coverage byte a pixel, as the atlas keeps glyphs: the
+                // smoothed glyph's brightness.
+                bytes = bytes
+                    .chunks_exact(4)
+                    .map(|pixel| {
+                        ((u16::from(pixel[0]) + u16::from(pixel[1]) + u16::from(pixel[2])) / 3)
+                            as u8
+                    })
+                    .collect();
             }
 
             Ok((bitmap_size, bytes))

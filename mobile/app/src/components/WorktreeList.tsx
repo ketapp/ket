@@ -23,33 +23,27 @@
 import { Activity, Answer_Choice, type ProjectSummary, type WorktreeSummary } from '@ket/remote';
 import { router, useFocusEffect, useGlobalSearchParams, usePathname } from 'expo-router';
 import { type ComponentType, type ReactNode, createElement, useCallback, useEffect, useRef, useState } from 'react';
-import { Alert, Pressable, ScrollView, StyleSheet, Text, View, type ViewInstance } from 'react-native';
+import { Alert, ScrollView, StyleSheet, Text, TouchableOpacity, View, type ViewInstance } from 'react-native';
 import Animated, { FadeIn, ReduceMotion } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Svg, { Defs, LinearGradient, Rect, Stop } from 'react-native-svg';
 
-import { AutomationsSheet } from './AutomationsSheet';
 import { Connecting } from './Connecting';
+import { HostHeader } from './HostHeader';
 import { ListSkeleton } from './ListSkeleton';
 import { Track } from './Track';
-import type { AddressKind } from '../lib/address-kind';
 import { FloatMenu, type MenuItem, type MenuSection, type Place, placeOf } from './FloatMenu';
-import { Seal } from './Seal';
-import { Sheet, SheetItem, SheetList, SheetNote } from './Sheet';
+import { Sheet, SheetItem, SheetList } from './Sheet';
 import { Unpaired } from './Unpaired';
 import {
   Bolt,
   Bubble,
-  Chevron,
-  ChevronDown,
-  Clock,
   Desktop,
   EyeOff,
   ListTodo,
   Merge,
   Pin,
   PinOff,
-  Plus,
   Sparkle,
   Wildcard,
 } from './icons';
@@ -57,6 +51,7 @@ import {
   AgentTile,
   Badge,
   Button,
+  Empty,
   Pill,
   ProjectHeading,
   Prose,
@@ -101,7 +96,7 @@ import {
   savePinnedProjects,
 } from '../lib/store';
 import { agentLabel, font, size, t, tint } from '../lib/theme';
-import { surface } from './ui/surface';
+import { PRESSED } from './ui/surface';
 import { worktreeMenu } from './WorktreeMenu';
 import { WorktreeRow } from './WorktreeRow';
 
@@ -110,14 +105,6 @@ const FOOT_GAP = 10;
 
 /** The screen's edge: the desk's gutter round the cards, and the header's. */
 const EDGE = 16;
-
-/** How the link to the desktop runs, after "Secure" under its name. */
-const ROUTE_WORD: Record<AddressKind, string> = {
-  local: 'Wi-Fi',
-  tailnet: 'Tailscale',
-  'ket-relay': 'Relay',
-  relay: 'Relay',
-};
 
 /** What a filter with nothing under it says. */
 const EMPTY: Record<Exclude<Filter, 'all'>, string> = {
@@ -151,14 +138,8 @@ export function WorktreeList({ sidebar = false, refresh }: { sidebar?: boolean; 
     setFilter(next);
     setStay([]);
   };
-  // The Mac switcher, a sheet, while it is up.
-  const [picking, setPicking] = useState(false);
   // The projects hidden on this phone, a sheet, while it is up.
   const [tucking, setTucking] = useState(false);
-  const [automating, setAutomating] = useState(false);
-  // Automations, asked for from the Macs sheet: it rises once that sheet's
-  // modal is gone, since iOS shows one at a time.
-  const [toAutomations, setToAutomations] = useState(false);
   const [menu, setMenu] = useState<{ worktree: WorktreeSummary; place: Place } | null>(null);
   const [projectMenu, setProjectMenu] = useState<{ project: ProjectSummary; place: Place } | null>(null);
   // Worktrees being deleted from here: out of the list from the moment
@@ -306,13 +287,6 @@ export function WorktreeList({ sidebar = false, refresh }: { sidebar?: boolean; 
   const waitingKey = (w: Waiting) =>
     `waiting/${hostId}/${w.worktree.id}/${w.question?.terminalId}/${w.question?.id ?? w.at}/${holdLabel(w)}`;
   const status = statusLine(hostState);
-  const statusWords = status.connected
-    ? status.kind
-      ? `Secure · ${ROUTE_WORD[status.kind]}`
-      : 'Secure'
-    : hostState?.status === 'offline'
-      ? 'Offline'
-      : 'Reaching';
   // Reaching for the desktop: its worktrees are not known yet, so the screen
   // shows the reaching instead of an empty list.
   const down = hostState !== null && hostState.status !== 'connected';
@@ -490,11 +464,6 @@ export function WorktreeList({ sidebar = false, refresh }: { sidebar?: boolean; 
     if (!tucked.some((project) => hidden.includes(projectKey(project)))) setTucking(false);
   };
 
-  const explainSecure = () =>
-    Alert.alert(
-      'End-to-end encrypted',
-      `Everything between this phone and ${hostState?.host.name || 'your desktop'} is end-to-end encrypted. The relay only ever sees ciphertext.${status.kind ? `\n\n${status.text}.` : ''}`,
-    );
 
   // The list's rows as the scroll view's own children, and which of them are
   // project headings: only a direct child can be pinned. Each section stands
@@ -640,15 +609,16 @@ export function WorktreeList({ sidebar = false, refresh }: { sidebar?: boolean; 
     if (!filling && tuckedAway > 0) {
       const gap = after();
       out.push(
-        <Pressable
+        <TouchableOpacity
           key="tucked"
           accessibilityRole="button"
           onPress={() => setTucking(true)}
-          style={({ pressed }) => [styles.tucked, gap, pressed && { backgroundColor: t.hover }]}
+          activeOpacity={PRESSED}
+          style={[styles.tucked, gap]}
         >
           <EyeOff size={14} color={t.faint} />
           <Text style={styles.tuckedText}>{tuckedAway} hidden on this phone</Text>
-        </Pressable>,
+        </TouchableOpacity>,
       );
     }
     return { rows: out, pinned };
@@ -656,48 +626,7 @@ export function WorktreeList({ sidebar = false, refresh }: { sidebar?: boolean; 
 
   return (
     <Screen>
-      {/* The desktop is the screen's large title; a tap opens the Mac
-          switcher. Under it, the lock on the line to it and how it runs —
-          a tap says what that means. Across from them, Start. */}
-      <View style={styles.head}>
-        <View style={styles.headText}>
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="Switch desktop"
-            onPress={() => setPicking(true)}
-            hitSlop={6}
-            style={({ pressed }) => [styles.titleRow, pressed && styles.pressed]}
-          >
-            <Text style={styles.titleText} numberOfLines={1}>
-              {hostState?.host.name ?? ''}
-            </Text>
-            <ChevronDown size={14} color={t.faint} weight={2.4} />
-          </Pressable>
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel={`${status.connected ? 'Secure: end-to-end encrypted' : statusWords}${status.kind ? `, ${status.text}` : ''}`}
-            onPress={explainSecure}
-            hitSlop={6}
-            style={({ pressed }) => [styles.status, pressed && styles.pressed]}
-          >
-            <Seal sealed={status.connected} size={11} />
-            <Text style={styles.statusText} numberOfLines={1}>
-              {statusWords}
-            </Text>
-          </Pressable>
-        </View>
-        {conn && status.connected ? (
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="Start a task"
-            onPress={() => open(`/new/${conn.id}`)}
-            style={({ pressed }) => [styles.new, pressed && { backgroundColor: '#9aeaa4' }]}
-          >
-            <Sparkle size={15} color={t.onBrand} weight={2.2} />
-            <Text style={styles.newText}>Start</Text>
-          </Pressable>
-        ) : null}
-      </View>
+      <HostHeader hosts={hosts} current={current} onChoose={choose} onStart={(c) => open(`/new/${c.id}`)} />
 
       {conn && down ? (
         <ScrollView contentContainerStyle={styles.downPage}>
@@ -730,10 +659,11 @@ export function WorktreeList({ sidebar = false, refresh }: { sidebar?: boolean; 
               {
                 key: 'unread' as Filter,
                 label: 'Unread',
+                tone: t.unread,
                 name: named('Unread', 'unread'),
                 count: tally('unread'),
                 icon: (on) => (
-                  <Bubble size={15} color={t.text} weight={1.9} dot={t.backdrop} fill={on ? tint(t.text, 0.18) : undefined} />
+                  <Bubble size={15} color={t.unread} weight={1.9} dot={t.backdrop} fill={on ? tint(t.unread, 0.18) : undefined} />
                 ),
               },
               {
@@ -772,8 +702,8 @@ export function WorktreeList({ sidebar = false, refresh }: { sidebar?: boolean; 
         label={menu ? `${menu.worktree.name} actions` : 'Worktree actions'}
         lifted={
           menu ? (
-            // On its card's colour, as it was in the list: its tile is the
-            // raised grey the lifted ground is.
+            // On its card's colour, as it was in the list: the menu draws
+            // no ground under what it lifts.
             <View style={styles.liftedRow}>
               <WorktreeRow worktree={menu.worktree} />
             </View>
@@ -831,73 +761,6 @@ export function WorktreeList({ sidebar = false, refresh }: { sidebar?: boolean; 
         </SheetList>
         <Button title={`Show all ${tucked.length}`} onPress={() => show(tucked.map(projectKey))} />
       </Sheet>
-      {/* Every paired Mac, and a way to add one — offered with a single Mac
-          too, so the switcher says it can hold more. Adding one is not wired
-          yet. */}
-      <Sheet
-        open={picking}
-        onClose={() => setPicking(false)}
-        onGone={() => {
-          if (!toAutomations) return;
-          setToAutomations(false);
-          setAutomating(true);
-        }}
-        title="Macs"
-        detail="Paired with this device"
-      >
-        <SheetList>
-          {(hosts ?? []).map(({ conn: c, hostState: h }) => (
-            <SheetItem
-              key={c.id}
-              role="radio"
-              label={h.host.name}
-              mono
-              mark={<Desktop size={18} color={t.text} />}
-              detail={statusLine(h).text}
-              dot={h.status === 'connected' ? t.running : h.status === 'offline' ? t.failed : t.faint}
-              on={c === conn}
-              onPress={() => {
-                setPicking(false);
-                choose(c);
-              }}
-            />
-          ))}
-        </SheetList>
-        {conn && hostState && hostState.hostMinor >= 36 ? (
-          <SheetList>
-            <SheetItem
-              label="Automations"
-              mark={<Clock size={18} color={t.text} />}
-              detail={`Work that starts itself on ${hostState.host.name}: pause one, or start it now.`}
-              icon={<Chevron size={12} color={t.dim} weight={2.4} />}
-              onPress={() => {
-                setToAutomations(true);
-                setPicking(false);
-              }}
-            />
-          </SheetList>
-        ) : null}
-        <SheetList>
-          <SheetItem
-            label="Add another Mac"
-            mark={
-              <View style={styles.addMark}>
-                <Plus size={10} color={t.text} weight={3} />
-              </View>
-            }
-            detail="Pair ket on a second Mac, then switch between their agents here."
-            icon={<Chevron size={12} color={t.dim} weight={2.4} />}
-            onPress={() => {}}
-          />
-        </SheetList>
-        <SheetNote>On that Mac: Settings › Devices › Pair a device, then scan its code here.</SheetNote>
-      </Sheet>
-      <AutomationsSheet
-        open={automating}
-        onClose={() => setAutomating(false)}
-        conn={conn ?? null}
-        hostName={hostState?.host.name ?? 'your Mac'}
-      />
     </Screen>
   );
 }
@@ -926,60 +789,17 @@ function FootFade({ height }: { height: number }) {
  * quiet mark in a well, centred in the sheet, and what would fill it. */
 function NothingRunning({ host }: { host: string }) {
   return (
-    <View style={styles.empty} accessibilityLiveRegion="polite">
-      <View style={styles.emptyMark}>
-        <Desktop size={20} color={t.faint} />
-      </View>
-      <Text style={styles.emptyTitle}>Nothing running</Text>
-      <Prose style={styles.emptyNote}>Agents and terminals you start on {host || 'your Mac'} show up here.</Prose>
-    </View>
+    <Empty icon={<Desktop size={20} color={t.faint} />} title="Nothing running">
+      Agents and terminals you start on {host || 'your Mac'} show up here.
+    </Empty>
   );
 }
 
 const styles = StyleSheet.create({
-  // The title and the line under it, and Start across from them.
-  head: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: 12,
-    paddingTop: 10,
-    paddingHorizontal: EDGE,
-  },
-  headText: { flexShrink: 1, minWidth: 0, gap: 3 },
-  titleRow: { alignSelf: 'flex-start', maxWidth: '100%', flexDirection: 'row', alignItems: 'center', gap: 7 },
-  titleText: { flexShrink: 1, fontFamily: font.proseSemibold, fontSize: 22, lineHeight: 28, letterSpacing: -0.3, color: t.text },
-  status: { alignSelf: 'flex-start', flexDirection: 'row', alignItems: 'center', gap: 5 },
-  statusText: { fontFamily: font.chrome, fontSize: size.label, lineHeight: 18, color: t.faint },
-  pressed: { opacity: 0.6 },
   tabs: { marginTop: 14 },
-  // The empty slot a Mac would fill: a dashed square with a plus in it.
-  addMark: {
-    width: 18,
-    height: 18,
-    borderRadius: 4,
-    borderWidth: 1,
-    borderStyle: 'dashed',
-    borderColor: t.faint,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
   downPage: { flexGrow: 1, padding: size.gutter, paddingTop: 4 },
-  // The one way to start work from here, so it wears ket's green — the
-  // colour Send fills with when there is something to send.
-  new: {
-    height: 40,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    paddingLeft: 13,
-    paddingRight: 16,
-    borderRadius: 20,
-    backgroundColor: t.brand,
-  },
   // A row read since it was opened from under Unread.
   read: { opacity: 0.55 },
-  newText: { fontFamily: font.proseSemibold, fontSize: size.label, color: t.onBrand },
   // Under the tab bar, it pads the foot — see `under`.
   list: { paddingHorizontal: EDGE, paddingTop: 16 },
   // A section under the one above it: a project, what waits on you.
@@ -1005,18 +825,6 @@ const styles = StyleSheet.create({
   menuCount: { fontFamily: font.chrome, fontSize: 12, color: t.faint },
   // Nothing on the desktop: the list grows to the screen, to centre the note.
   listEmpty: { flexGrow: 1 },
-  empty: { flexGrow: 1, alignItems: 'center', justifyContent: 'center', gap: 6, paddingHorizontal: 28, paddingBottom: 40 },
-  emptyMark: {
-    width: 44,
-    height: 44,
-    marginBottom: 8,
-    borderRadius: size.radiusLg,
-    alignItems: 'center',
-    justifyContent: 'center',
-    ...surface.well,
-  },
-  emptyTitle: { fontFamily: font.proseSemibold, fontSize: size.title, color: t.text, textAlign: 'center' },
-  emptyNote: { textAlign: 'center' },
   note: { padding: 8 },
   // A project's card with nothing in it, in from the edge its rows start at.
   idle: { fontSize: size.label, paddingHorizontal: 14, paddingVertical: 12 },

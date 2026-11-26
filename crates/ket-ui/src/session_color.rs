@@ -147,10 +147,12 @@ fn tiled(which: Icon, color: SessionColor, t: &Theme) -> Div {
 }
 
 /// A worktree row's mark: its agent's on a tile of the session's colour,
-/// else the state light every row has.
+/// else the mark every row has, lit in `lit` while its row has a state to
+/// show. A tile keeps its own ink; the dot on its corner says the state.
 pub(crate) fn row_mark(
     activity: &Activity,
     color: Option<SessionColor>,
+    lit: Option<gpui::Rgba>,
     dirty: bool,
     missing: bool,
     t: &Theme,
@@ -163,6 +165,6 @@ pub(crate) fn row_mark(
             | Activity::Recorded { agent, .. }
             | Activity::Ended { agent, .. },
         ) => tiled(provider(agent, t).0, color, t).into_any_element(),
-        _ => crate::tree::row_mark(activity, dirty, missing, t),
+        _ => crate::tree::state::row_mark(activity, lit, dirty, missing, t),
     }
 }

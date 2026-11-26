@@ -1,6 +1,6 @@
-//! The chosen automation's runs: a strip of figures — when it starts next,
-//! how it repeats, what the last week came to — over a table of every run,
-//! newest first.
+//! The chosen automation's figures — whether it is on, when it starts next,
+//! how it repeats, what the last week came to — and the Runs tab's table of
+//! every run, newest first.
 
 use gpui::{AnyElement, Context, IntoElement, ParentElement, Rgba, Styled, div, prelude::*, px};
 use jiff::Timestamp;
@@ -85,12 +85,9 @@ fn reason(outcome: &Outcome) -> Option<&str> {
     }
 }
 
-/// The Runs tab for `automation`.
-pub(super) fn runs_tab(
-    shell: &Shell,
-    automation: &Automation,
-    cx: &mut Context<Shell>,
-) -> AnyElement {
+/// The strip of figures over the tabs, led by `toggle`, the switch that
+/// pauses the automation, so it sits beside the next start it governs.
+pub(super) fn strip(shell: &Shell, automation: &Automation, toggle: AnyElement) -> AnyElement {
     let t = &shell.theme;
     let tz = TimeZone::system();
     let Some(dialog) = shell.automations.as_ref() else {
@@ -135,13 +132,26 @@ pub(super) fn runs_tab(
             .when(!first, |el| el.border_l_1().border_color(paint(t.rule)))
             .child(content)
     };
-    let strip = div()
+    let schedule = div()
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .child(toggle)
+        .child(if automation.enabled { "On" } else { "Paused" });
+    div()
         .flex()
         .flex_none()
         .rounded(crate::ui::RADIUS_MD)
         .border_1()
         .border_color(paint(t.border))
-        .child(cell(figure("Next start", next, t).into_any_element(), true))
+        .child(cell(
+            figure("Schedule", schedule, t).into_any_element(),
+            true,
+        ))
+        .child(cell(
+            figure("Next start", next, t).into_any_element(),
+            false,
+        ))
         .child(cell(
             figure("Repeats", automation.when.describe(), t).into_any_element(),
             false,
@@ -149,7 +159,22 @@ pub(super) fn runs_tab(
         .child(cell(
             figure("Last 7 days", week_said, t).into_any_element(),
             false,
-        ));
+        ))
+        .into_any_element()
+}
+
+/// The Runs tab for `automation`.
+pub(super) fn runs_tab(
+    shell: &Shell,
+    automation: &Automation,
+    cx: &mut Context<Shell>,
+) -> AnyElement {
+    let t = &shell.theme;
+    let tz = TimeZone::system();
+    let Some(dialog) = shell.automations.as_ref() else {
+        return div().into_any_element();
+    };
+    let runs: Vec<&Run> = dialog.runs.of(&automation.id).collect();
 
     let mut table = div()
         .id("automation-runs")
@@ -244,15 +269,7 @@ pub(super) fn runs_tab(
         );
     }
 
-    div()
-        .flex()
-        .flex_col()
-        .flex_1()
-        .min_h_0()
-        .gap(px(16.0))
-        .child(strip)
-        .child(table)
-        .into_any_element()
+    table.into_any_element()
 }
 
 fn time_of_ms(ms: u64, tz: &TimeZone) -> String {

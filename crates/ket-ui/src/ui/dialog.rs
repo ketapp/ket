@@ -7,13 +7,13 @@
 //! puts them inside, which is why the scrim was drawn twice.
 
 use gpui::{
-    AnyElement, App, ClickEvent, Div, ElementId, FontWeight, Pixels, SharedString, Stateful,
+    AnyElement, App, ClickEvent, Div, ElementId, FontWeight, Pixels, Rgba, SharedString, Stateful,
     Window, div, prelude::*, px,
 };
 use ket_core::theme::Theme;
 
 use super::button::icon_button;
-use super::icon::Icon;
+use super::icon::{Icon, icon};
 use super::{CARD_PAD, RADIUS_LG, TITLE};
 use crate::fonts::Prose;
 use crate::paint::paint;
@@ -97,6 +97,7 @@ type OnClose = Box<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
 pub(crate) struct Header {
     id: ElementId,
     title: SharedString,
+    mark: Option<(Icon, Rgba)>,
     after: Option<AnyElement>,
     aside: Option<AnyElement>,
     on_close: Option<OnClose>,
@@ -109,6 +110,7 @@ pub(crate) fn header(id: impl Into<ElementId>, title: impl Into<SharedString>) -
     Header {
         id: id.into(),
         title: title.into(),
+        mark: None,
         after: None,
         aside: None,
         on_close: None,
@@ -117,6 +119,15 @@ pub(crate) fn header(id: impl Into<ElementId>, title: impl Into<SharedString>) -
 }
 
 impl Header {
+    /// A mark leading the title, in `colour`: what kind of thing the dialog
+    /// is asking about, for a question asked unbidden as a session is
+    /// opened — see `crate::session_asks`. The dim ink of a label for a fact
+    /// to weigh, a state's colour for a state.
+    pub(crate) fn mark(mut self, which: Icon, colour: Rgba) -> Self {
+        self.mark = Some((which, colour));
+        self
+    }
+
     /// Something set straight after the title rather than out at the far
     /// end — the project a worktree is being created in, so the title reads
     /// as one sentence. It takes the title's size and weight.
@@ -160,6 +171,10 @@ impl Header {
             .flex()
             .items_center()
             .gap(px(8.0))
+            .children(
+                self.mark
+                    .map(|(which, colour)| icon(which, colour).size(px(16.0)).flex_none()),
+            )
             .child(title(self.title, t).min_w_0().children(self.after))
             .child(div().flex_grow())
             .children(self.aside)

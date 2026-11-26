@@ -130,12 +130,57 @@ export function Dot({ color, size: side = 7, hollow }: { color: string; size?: n
 export const TILE = 24;
 
 /**
- * Who works in a row, and how it is going, said once: the agent's logo in a
- * quiet grey on a raised tile, and its state as a dot on the tile's corner —
- * none while it is quiet. With no agent, a terminal's prompt stands in. A
- * session's `/color` (protocol 1.31) fills the tile, as `sessionColor`
- * gives it. `ring` is the colour round the dot: what the tile stands on.
- * `faded` is an asleep tab's: kept, not running.
+ * A row's mark: what it is, on a raised tile, and how it is going as a dot
+ * on the tile's corner — none while it is quiet. `ring` is the colour round
+ * the dot: what the tile stands on. `fill` stands in for the raised fill, as
+ * a session's colour does; `faded` is something kept but not running.
+ */
+export function Tile({
+  children,
+  tone,
+  ring = t.card,
+  fill,
+  faded,
+  label,
+  size: side = TILE,
+}: {
+  children: ReactNode;
+  /** The state's colour, for the dot. */
+  tone?: string;
+  ring?: string;
+  fill?: string;
+  faded?: boolean;
+  /** What a screen reader calls it: the thing and its state. */
+  label?: string;
+  /** Its side: a row's 24, or a project badge's 20 where it heads a card. */
+  size?: number;
+}) {
+  return (
+    <View
+      accessible={label !== undefined}
+      accessibilityLabel={label}
+      style={[
+        styles.tile,
+        { width: side, height: side, borderRadius: Math.round(side * 0.29), backgroundColor: fill ?? t.elevated },
+        faded && styles.tileFaded,
+      ]}
+    >
+      {children}
+      {tone ? <View style={[styles.tileDot, { backgroundColor: tone, borderColor: ring }]} /> : null}
+    </View>
+  );
+}
+
+/** An icon's size on a tile `side` across: 14 on a row's 24. */
+export function tileGlyph(side: number = TILE): number {
+  return Math.round(side * 0.58);
+}
+
+/**
+ * Who works in a row, and how it is going, said once: the agent's logo on a
+ * {@link Tile}, in its state's colour, and the state as the tile's dot. With
+ * no agent, a terminal's prompt stands in. A session's `/color` (protocol
+ * 1.31) fills the tile, as `sessionColor` gives it.
  */
 export function AgentTile({
   agent,
@@ -144,6 +189,7 @@ export function AgentTile({
   ring = t.card,
   faded,
   label,
+  size: side = TILE,
 }: {
   agent: string;
   session?: string;
@@ -153,19 +199,50 @@ export function AgentTile({
   faded?: boolean;
   /** What a screen reader calls it: the agent and its state. */
   label?: string;
+  /** Its side: a row's 24, or a project badge's 20 where it heads a card. */
+  size?: number;
 }) {
   const worn = sessionColor(session);
+  const glyph = tileGlyph(side);
   // The logo lights in its state's colour; on a session's colour, it keeps
   // that tile's ink, and the dot says the state.
   const ink = worn?.ink ?? tone ?? t.dim;
   return (
-    <View
-      accessible={label !== undefined}
-      accessibilityLabel={label}
-      style={[styles.tile, { backgroundColor: worn?.tile ?? t.elevated }, faded && styles.tileFaded]}
-    >
-      {agent ? <AgentGlyph agent={agent} size={14} color={ink} /> : <TerminalGlyph size={15} color={ink} weight={2} />}
-      {tone ? <View style={[styles.tileDot, { backgroundColor: tone, borderColor: ring }]} /> : null}
+    <Tile tone={tone} ring={ring} fill={worn?.tile} faded={faded} label={label} size={side}>
+      {agent ? <AgentGlyph agent={agent} size={glyph} color={ink} /> : <TerminalGlyph size={glyph + 1} color={ink} weight={2} />}
+    </Tile>
+  );
+}
+
+/**
+ * How much of a plan's window is used, as a ring a tile's size: a track of
+ * the raised fill, and an arc in `color` from the top round to `share` (0
+ * to 1). It stands in a row's mark slot, where an agent's tile would.
+ */
+export function Ring({ share, color, label, size: side = TILE }: { share: number; color: string; label?: string; size?: number }) {
+  const stroke = side / 8;
+  const r = side / 2 - stroke / 2 - 1;
+  const round = 2 * Math.PI * r;
+  const arc = (Number.isFinite(share) ? Math.min(1, Math.max(0, share)) : 0) * round;
+  const mid = side / 2;
+  return (
+    <View accessible={label !== undefined} accessibilityLabel={label}>
+      <Svg width={side} height={side}>
+        <Circle cx={mid} cy={mid} r={r} fill="none" stroke={t.elevated} strokeWidth={stroke} />
+        {arc > 0 ? (
+          <Circle
+            cx={mid}
+            cy={mid}
+            r={r}
+            fill="none"
+            stroke={color}
+            strokeWidth={stroke}
+            strokeLinecap="round"
+            strokeDasharray={[arc, round]}
+            transform={`rotate(-90 ${mid} ${mid})`}
+          />
+        ) : null}
+      </Svg>
     </View>
   );
 }
@@ -182,7 +259,7 @@ export function Chip({ icon, children, label }: { icon?: ReactNode; children: Re
 }
 
 const styles = StyleSheet.create({
-  tile: { width: TILE, height: TILE, borderRadius: size.radius, alignItems: 'center', justifyContent: 'center' },
+  tile: { alignItems: 'center', justifyContent: 'center' },
   tileFaded: { opacity: 0.5 },
   // 10 across with a 2 pt ring of the ground, 3 out past the tile's corner.
   tileDot: { position: 'absolute', right: -5, bottom: -5, width: 14, height: 14, borderRadius: 7, borderWidth: 2 },

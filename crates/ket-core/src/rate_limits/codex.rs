@@ -248,6 +248,34 @@ fn interpret_codex_line(line: &str) -> Option<ProviderSnapshot> {
     })
 }
 
+/// The windows in a rollout's `rate_limits` block: the same two as
+/// `account/rateLimits/read` answers with, spelled the rollout's way —
+/// `used_percent`, `window_minutes`, `resets_at` in unix seconds. Codex
+/// writes one beside every token count, so a session's own file says how its
+/// plan stood as of its last request, with nothing asked of anyone.
+pub fn rollout_windows(rate_limits: &serde_json::Value) -> Vec<RateWindow> {
+    [("primary", "Primary"), ("secondary", "Secondary")]
+        .into_iter()
+        .filter_map(|(key, fallback)| {
+            let value = rate_limits.get(key).filter(|value| value.is_object())?;
+            let used_percent = value.get("used_percent")?.as_f64()?;
+            let minutes = value
+                .get("window_minutes")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|m| u32::try_from(m).ok());
+            Some(RateWindow {
+                name: window_label(minutes, fallback),
+                used_percent: used_percent.clamp(0.0, 100.0) as f32,
+                resets_at_ms: value
+                    .get("resets_at")
+                    .and_then(serde_json::Value::as_u64)
+                    .map(|secs| secs.saturating_mul(1000)),
+                window_minutes: minutes,
+            })
+        })
+        .collect()
+}
+
 /// Builds one [`RateWindow`] from a `RateLimitWindow` object (`primary` or
 /// `secondary`), or `None` if it is `null` or missing `usedPercent`.
 fn codex_window(value: &serde_json::Value, fallback: &str) -> Option<RateWindow> {

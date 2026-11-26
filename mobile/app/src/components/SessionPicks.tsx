@@ -4,7 +4,7 @@
 
 import type { AgentModes, AgentSettings } from '@ket/remote';
 import { useEffect, useRef, useState } from 'react';
-import { Pressable, StyleSheet, Text, View, type ViewInstance } from 'react-native';
+import { StyleSheet, Text, TouchableOpacity, View, type ViewInstance } from 'react-native';
 
 import type { Tone } from './ChatBar';
 import { FloatMenu, type Place, placeOf } from './FloatMenu';
@@ -12,7 +12,7 @@ import { Bolt, Check, Pause, Pencil, Shield, Sliders } from './icons';
 import { ModelSheet } from './ModelSheet';
 import type { HostConnection } from '../lib/connection';
 import { font, t } from '../lib/theme';
-import { surface } from './ui/surface';
+import { PRESSED, surface } from './ui/surface';
 
 /** Picks the desktop has made and its snapshot hasn't reported yet: each
  * the value picked, and what the snapshot said when it was picked. */
@@ -173,7 +173,7 @@ export function SessionPill({ picks, connected, busy }: { picks: SessionPicks; c
   if (!modes && !settings) return null;
   return (
     <View ref={pill} collapsable={false}>
-      <Pressable
+      <TouchableOpacity
         accessibilityRole="button"
         accessibilityLabel={
           settings
@@ -187,13 +187,14 @@ export function SessionPill({ picks, connected, busy }: { picks: SessionPicks; c
           if (settings) picks.openSheet();
           else placeOf(pill.current, picks.openMenu);
         }}
-        style={({ pressed }) => [styles.pill, pressed && { backgroundColor: t.selection }]}
+        activeOpacity={PRESSED}
+        style={styles.pill}
       >
         <ModeGlyph id={switching ? '' : (modes?.current ?? '')} />
         <Text style={[styles.pillText, settings && { maxWidth: 150 }]} numberOfLines={1}>
           {picks.pillLabel}
         </Text>
-      </Pressable>
+      </TouchableOpacity>
     </View>
   );
 }

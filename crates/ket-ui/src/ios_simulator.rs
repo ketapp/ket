@@ -1598,6 +1598,9 @@ mod private {
         *const c_void,
     );
 
+    /// The pane, the window's height, the phone's size and the view's frame.
+    type Placed = (Bounds<Pixels>, f64, NSSize, NSRect);
+
     pub(super) struct NativeSimulator {
         display: Retained<AnyObject>,
         /// A HID client of ket's own for the device, made on first use —
@@ -1609,6 +1612,9 @@ mod private {
         /// Whether the Mac's keyboard is connected to the phone. CoreSimulator
         /// has no getter; Simulator.app keeps its own flag, default on.
         hardware_keyboard: Cell<bool>,
+        /// What `set_bounds` last fitted the view to, so an unchanged pane is
+        /// left alone — see there.
+        placed: Cell<Option<Placed>>,
         device: Retained<AnyObject>,
         _screen: Retained<AnyObject>,
         bridge: SwiftBridge,
@@ -1738,6 +1744,7 @@ mod private {
                 hid: RefCell::new(None),
                 workspace: Cell::new(None),
                 hardware_keyboard: Cell::new(true),
+                placed: Cell::new(None),
                 device,
                 _screen: screen_object,
                 bridge,
@@ -2007,6 +2014,14 @@ mod private {
                 return;
             };
             let height = parent.bounds().size.height;
+            let intrinsic: NSSize = unsafe { msg_send![&self.display, intrinsicContentSize] };
+            // Nothing when nothing moved. This runs on every redraw, and a
+            // scale or frame set on each made AppKit put the arrow pointer
+            // back: over a terminal split beside the phone, the I-beam
+            // flickered for as long as the terminal kept drawing.
+            if self.placed.get() == Some((bounds, height, intrinsic, view.frame())) {
+                return;
+            }
             let pane_x = f32::from(bounds.origin.x) as f64;
             let pane_width = f32::from(bounds.size.width) as f64;
             let pane_height = f32::from(bounds.size.height) as f64;
@@ -2017,7 +2032,6 @@ mod private {
             // previous size and AppKit then cuts it off. Recover the unscaled
             // device size from the current intrinsic size, choose an
             // aspect-preserving fit, and center that native view in the pane.
-            let intrinsic: NSSize = unsafe { msg_send![&self.display, intrinsicContentSize] };
             let current_scale = unsafe { self.bridge.render_scale(&self.display) };
             let valid = current_scale.is_finite()
                 && current_scale > 0.0
@@ -2042,6 +2056,10 @@ mod private {
                 NSPoint::new(x, height - top - (pane_height + fitted_height) / 2.0),
                 NSSize::new(width, fitted_height),
             ));
+            // Read back after the writes: the new scale changes the size.
+            let intrinsic: NSSize = unsafe { msg_send![&self.display, intrinsicContentSize] };
+            self.placed
+                .set(Some((bounds, height, intrinsic, view.frame())));
         }
     }
 

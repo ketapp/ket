@@ -65,7 +65,7 @@ use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::sync::RwLock;
 
-use gpui::{Pixels, SharedString, Styled, TextSystem, font, px};
+use gpui::{Pixels, Rems, SharedString, Styled, TextSystem, font, px, rems};
 
 /// The faces compiled into the binary.
 ///
@@ -317,6 +317,14 @@ pub(crate) fn code() -> SharedString {
         .unwrap_or_else(|e| e.into_inner())
         .clone()
         .unwrap_or_else(|| MONOSPACE[MONOSPACE.len() - 1].into())
+}
+
+/// `size`, a sidebar row's text size at the default interface size, as a
+/// length that follows Settings' UI font size: in rems, which the window
+/// takes from that setting, so a worktree's name and lines grow and shrink
+/// with the rest of the interface and are `size` exactly at the default.
+pub(crate) fn row_text(size: Pixels) -> Rems {
+    rems(f32::from(size) / f32::from(ket_core::config::DEFAULT_UI_FONT_SIZE))
 }
 
 pub(crate) fn prose() -> SharedString {

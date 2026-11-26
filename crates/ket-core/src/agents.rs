@@ -820,12 +820,15 @@ mod tests {
         let catalogue = Catalogue::detect(&config(), &Fake(vec!["codex"]));
         let codex = catalogue.get("codex").unwrap();
 
-        assert_eq!(codex.spec.launch_line(&[]), "codex --no-daemon");
+        assert_eq!(
+            codex.spec.launch_line(&[]),
+            "codex --no-daemon -c check_for_update_on_startup=false"
+        );
         assert_eq!(
             codex
                 .spec
                 .launch_line(&["resume".to_owned(), "s-1".to_owned()]),
-            "codex --no-daemon resume s-1"
+            "codex --no-daemon -c check_for_update_on_startup=false resume s-1"
         );
         assert!(!codex.is_overridden());
     }

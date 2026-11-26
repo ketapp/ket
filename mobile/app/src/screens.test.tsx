@@ -5,6 +5,9 @@ import { useEffect as mockUseEffect } from 'react';
 import { Alert, Linking } from 'react-native';
 import Needs from './app/(tabs)/needs';
 import Settings from './app/(tabs)/settings';
+import PairedDesktops from './app/settings/desktops';
+import NotificationSettings from './app/settings/notifications';
+import SecuritySettings from './app/settings/security';
 import Usage from './app/usage';
 import Worktrees from './app/(tabs)/index';
 import { WorktreeList } from './components/WorktreeList';
@@ -117,7 +120,7 @@ jest.mock('./lib/store', () => ({
 const mockNotify = jest.fn(async () => true);
 const mockQuiet = jest.fn(async () => {});
 const mockChoose = jest.fn(async (_kind: string, _on: boolean) => {});
-let mockNotices = { config: { on: false, waiting: true, finished: true, checks: true }, refused: false };
+let mockNotices = { config: { on: false, waiting: true, finished: true, checks: true, limits: true }, refused: false };
 jest.mock('./lib/notices', () => ({
   choose: (kind: string, on: boolean) => mockChoose(kind, on),
   openPhoneSettings: jest.fn(),
@@ -438,7 +441,7 @@ describe('top-level screens', () => {
     await waitFor(() => expect(alert).toHaveBeenLastCalledWith("Couldn't update the branch", 'Nothing to update.'));
 
     await holdAt('busy');
-    await fireEvent.press(view.getByText('Merge pull request…'));
+    await fireEvent.press(view.getByText('Merge pull request'));
     const [, , buttons] = alert.mock.calls.at(-1)! as [string, string, { text: string; onPress?: () => void }[]];
     buttons.find((b) => b.text === 'Squash')!.onPress!();
     await waitFor(() => expect(conn.mergePullRequest).toHaveBeenCalledWith('busy', 2));
@@ -447,10 +450,10 @@ describe('top-level screens', () => {
     // With none open, a worktree offers to open one; a repository's own
     // checkout, the base one would merge into, offers nothing.
     await holdAt('fresh');
-    await fireEvent.press(view.getByText('Open pull request…'));
+    await fireEvent.press(view.getByText('Open pull request'));
     expect(mockRouter.navigate).toHaveBeenLastCalledWith('/pull-request/host/fresh');
     await holdAt('main');
-    expect(view.queryByText('Open pull request…')).toBeNull();
+    expect(view.queryByText('Open pull request')).toBeNull();
 
     // The filters, with their counts, then the tab bar: Worktrees, Usage,
     // Needs you, Settings.
@@ -490,11 +493,11 @@ describe('top-level screens', () => {
     // The repository's own checkout has neither, nor anything else to hold.
     await hold('main');
     expect(view.queryByText('Pin')).toBeNull();
-    expect(view.queryByText('Delete…')).toBeNull();
+    expect(view.queryByText('Delete')).toBeNull();
 
     // Delete asks first. Cancelled, or not you, nothing goes.
     await hold('fresh');
-    await fireEvent.press(view.getByText('Delete…'));
+    await fireEvent.press(view.getByText('Delete'));
     expect(alert).toHaveBeenLastCalledWith('Delete fresh?', expect.stringContaining('Unmerged commits keep their branch'), expect.any(Array));
     expect(buttons().find((button) => button.text === 'Cancel')?.style).toBe('cancel');
     mockConfirmIdentity.mockResolvedValueOnce(false);
@@ -507,7 +510,7 @@ describe('top-level screens', () => {
     let answer!: (result: { why: string; losesWork: boolean }) => void;
     conn.deleteWorktree.mockImplementationOnce(() => new Promise((resolve) => (answer = resolve)));
     await hold('fresh');
-    await fireEvent.press(view.getByText('Delete…'));
+    await fireEvent.press(view.getByText('Delete'));
     press('Delete');
     await waitFor(() => expect(view.queryByText('fresh')).toBeNull());
     answer({ why: 'the desktop is busy', losesWork: false });
@@ -517,7 +520,7 @@ describe('top-level screens', () => {
     // Git refuses it for the work it would lose, which is said, with Delete
     // anyway; the row stays out while that is asked, and Cancel brings it back.
     await hold('fresh');
-    await fireEvent.press(view.getByText('Delete…'));
+    await fireEvent.press(view.getByText('Delete'));
     press('Delete');
     await waitFor(() => expect(conn.deleteWorktree).toHaveBeenLastCalledWith('fresh', false));
     await waitFor(() =>
@@ -530,7 +533,7 @@ describe('top-level screens', () => {
     // Delete anyway keeps the branch's unmerged commits, and the row stays
     // gone before the desktop's next snapshot says so.
     await hold('fresh');
-    await fireEvent.press(view.getByText('Delete…'));
+    await fireEvent.press(view.getByText('Delete'));
     press('Delete');
     await waitFor(() =>
       expect(alert).toHaveBeenLastCalledWith('Delete fresh anyway?', 'It has uncommitted changes.', expect.any(Array), expect.any(Object)),
@@ -556,18 +559,18 @@ describe('top-level screens', () => {
     const hold = async (id: string) => fireEvent(view.getByText(id), 'longPress');
 
     await hold('fresh');
-    await fireEvent.press(view.getByText('Rename…'));
+    await fireEvent.press(view.getByText('Rename'));
     expect(mockRouter.push).toHaveBeenLastCalledWith('/rename/host/fresh');
     // The repository's own checkout has no name of its own to change.
     await hold('main');
-    expect(view.queryByText('Rename…')).toBeNull();
+    expect(view.queryByText('Rename')).toBeNull();
     await view.unmount();
 
     // A desktop from before 1.33 can't take one.
     mockConns = [Object.assign(connection(trees()), { hostMinor: 32 })];
     const older = await render(<Worktrees />);
     await fireEvent(older.getByText('fresh'), 'longPress');
-    expect(older.queryByText('Rename…')).toBeNull();
+    expect(older.queryByText('Rename')).toBeNull();
     expect(older.getByText('Pin')).toBeTruthy();
     await older.unmount();
 
@@ -580,7 +583,7 @@ describe('top-level screens', () => {
       </SplitContext.Provider>,
     );
     await fireEvent(sidebar.getByText('fresh'), 'longPress');
-    await fireEvent.press(sidebar.getByText('Rename…'));
+    await fireEvent.press(sidebar.getByText('Rename'));
     expect(mockRouter.push).toHaveBeenLastCalledWith('/rename/host/fresh');
     expect(mockRouter.replace).not.toHaveBeenCalled();
     expect(mockRouter.dismissAll).not.toHaveBeenCalled();
@@ -692,7 +695,7 @@ describe('top-level screens', () => {
 
   test('Needs shows empty, waiting, and failed states', async () => {
     const empty = await render(<Needs />);
-    expect(empty.getByText('Nothing needs you.')).toBeTruthy();
+    expect(empty.getByText('Nothing needs you')).toBeTruthy();
     await empty.unmount();
 
     mockConns = [
@@ -704,8 +707,8 @@ describe('top-level screens', () => {
       ]),
     ];
     const view = await render(<Needs />);
-    expect(view.getByText('Waiting on you')).toBeTruthy();
-    expect(view.getByText('Failed')).toBeTruthy();
+    expect(view.getByRole('header', { name: 'Waiting on you' })).toBeTruthy();
+    expect(view.getByRole('header', { name: 'Failed' })).toBeTruthy();
     await fireEvent.press(view.getAllByText('waiting')[0]);
     expect(mockRouter.navigate).toHaveBeenCalledWith('/session/host/9');
     await fireEvent.press(view.getAllByText('failed')[0]);
@@ -750,30 +753,68 @@ describe('top-level screens', () => {
     await view.unmount();
   });
 
-  test('Settings controls pairing, notices, security, and devices', async () => {
+  test('Settings says how each part is set and opens a screen for it', async () => {
     mockConns = [connection([project([tree('waiting', 4)])])];
     const view = await render(<Settings />);
-    await waitFor(() => expect(view.getByText('Require Face ID')).toBeTruthy());
-    expect(view.getByText('Version')).toBeTruthy();
+    await waitFor(() => expect(view.getByText('Face ID · locks after 1 min')).toBeTruthy());
+    expect(view.getByText('Studio Mac')).toBeTruthy();
+    expect(view.getByText('Off')).toBeTruthy();
+    await fireEvent.press(view.getByText('Paired desktops'));
+    await fireEvent.press(view.getByText('Notifications'));
+    await fireEvent.press(view.getByText('Security'));
+    await fireEvent.press(view.getByText('About'));
+    await fireEvent.press(view.getByText('Pair'));
+    expect(mockRouter.push.mock.calls).toEqual([
+      ['/settings/desktops'],
+      ['/settings/notifications'],
+      ['/settings/security'],
+      ['/settings/about'],
+      ['/pair'],
+    ]);
+    await view.unmount();
+  });
+
+  test('Settings › Paired desktops opens each desktop and pairs another', async () => {
+    mockConns = [connection([])];
+    const view = await render(<PairedDesktops />);
+    expect(view.getByText('1 connected')).toBeTruthy();
     await fireEvent.press(view.getByText('Studio Mac'));
-    await fireEvent.press(view.getByLabelText('Pair a desktop'));
+    await fireEvent.press(view.getByText('Pair'));
+    await fireEvent.press(view.getByLabelText('Back'));
+    expect(mockRouter.push.mock.calls).toEqual([['/devices/host'], ['/pair']]);
+    expect(mockRouter.back).toHaveBeenCalled();
+    await view.unmount();
+  });
+
+  test('Settings › Security changes the PIN once it is you', async () => {
+    const view = await render(<SecuritySettings />);
+    await waitFor(() => expect(view.getByText('Require Face ID')).toBeTruthy());
+    expect(view.getByText('1 min')).toBeTruthy();
     await fireEvent.press(view.getByText('Change PIN'));
-    expect(mockRouter.push.mock.calls).toEqual(expect.arrayContaining([['/devices/host'], ['/pair'], ['/pin']]));
+    await waitFor(() => expect(mockRouter.push).toHaveBeenCalledWith('/pin'));
+    expect(mockConfirmIdentity).toHaveBeenCalledWith('Change your PIN');
+    await view.unmount();
+  });
+
+  test('Settings › Notifications turns notices on, and each kind', async () => {
     // Off: only the one switch shows. On, it asks the phone.
+    const view = await render(<NotificationSettings />);
     expect(view.queryByText('A task finishes')).toBeNull();
     await fireEvent.press(view.getByLabelText('Notify me'));
     expect(mockNotify).toHaveBeenCalled();
     await view.unmount();
 
     // On but refused by the phone: the way to its Settings, and the kinds.
-    mockNotices = { config: { on: true, waiting: true, finished: false, checks: true }, refused: true };
-    const on = await render(<Settings />);
+    mockNotices = { config: { on: true, waiting: true, finished: false, checks: true, limits: false }, refused: true };
+    const on = await render(<NotificationSettings />);
     await waitFor(() => expect(on.getByText("Open this phone's Settings")).toBeTruthy());
     await fireEvent.press(on.getByLabelText('A task finishes'));
     expect(mockChoose).toHaveBeenCalledWith('finished', true);
+    await fireEvent.press(on.getByLabelText('A plan runs out'));
+    expect(mockChoose).toHaveBeenCalledWith('limits', true);
     await fireEvent.press(on.getByLabelText('Notify me'));
     expect(mockQuiet).toHaveBeenCalled();
-    mockNotices = { config: { on: false, waiting: true, finished: true, checks: true }, refused: false };
+    mockNotices = { config: { on: false, waiting: true, finished: true, checks: true, limits: true }, refused: false };
     await on.unmount();
   });
 
@@ -794,7 +835,7 @@ describe('top-level screens', () => {
     expect(view.getByText('No windows reported')).toBeTruthy();
     expect(view.getByText('Unavailable — signed out')).toBeTruthy();
     expect(view.getByText('No usage reporting')).toBeTruthy();
-    expect(view.getByText('1 session running here')).toBeTruthy();
+    expect(view.getByText('1 running')).toBeTruthy();
     await view.unmount();
   });
 
@@ -1013,7 +1054,7 @@ describe('work screens', () => {
       await fireEvent.press(view.getByLabelText('More'));
       await fireEvent.press(await view.findByText(item));
     };
-    await more('Merge pull request…');
+    await more('Merge pull request');
     await waitFor(() => expect(mockConfirmIdentity).toHaveBeenCalled());
     await waitFor(() => expect(conn.mergePullRequest).toHaveBeenCalledWith('pr', 2));
     await more('Update branch');
@@ -1069,7 +1110,8 @@ describe('work screens', () => {
     await waitFor(() => expect(view.getByText('lib.rs')).toBeTruthy());
     expect(view.getByText('crates/ket-remote/src')).toBeTruthy();
     // The lines are the listed files', not the worktree's uncommitted ones.
-    expect(view.getByText(/1 commit ahead of main/)).toHaveTextContent('+1 −1 · 1 commit ahead of main');
+    expect(view.getAllByLabelText('1 lines added, 1 removed').length).toBeGreaterThan(0);
+    expect(view.getByText('1 commit ahead of main')).toBeTruthy();
     // Gone from the page: the figure cards.
     expect(view.queryByText('Sessions')).toBeNull();
     await fireEvent.press(view.getByText('Merge into main'));
@@ -1086,7 +1128,7 @@ describe('work screens', () => {
     expect(await view.findByText('Pin')).toBeTruthy();
     // Opening one from the foot, the menu leaves out; the tabs and a new
     // one are the card's.
-    expect(view.queryByText('Open pull request…')).toBeNull();
+    expect(view.queryByText('Open pull request')).toBeNull();
     expect(view.queryByText('Open the terminal')).toBeNull();
     expect(view.getAllByText('New session or shell')).toHaveLength(1);
     alert.mockRestore();

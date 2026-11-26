@@ -9,9 +9,10 @@ use ket_core::theme::Color;
 
 use crate::Shell;
 use crate::fonts::Prose;
-use crate::paint::paint;
+use crate::paint::{mix, paint};
 use crate::projects::rail_colour;
-use crate::tree::{Selection, state_word};
+use crate::tree::Selection;
+use crate::tree::state::{self, lead_word, row_state};
 use crate::ui::chip::BADGE;
 use crate::ui::row::block_row_with_rail;
 use crate::ui::{CAPTION, ICON_GAP, LABEL};
@@ -96,18 +97,27 @@ impl Shell {
                 let activity = self.activity.activity(&node.id, now);
                 // Its session's `/color`, as the grouped tree draws it.
                 let color = self.row_color(&node.id, &activity, now);
-                let meta = self.worktree_meta(node, project, worktree, None, window, cx);
+                let meta = self.worktree_meta(node, project, worktree, window, cx);
+                // Its size, after the name, as the grouped tree has it.
+                let size = self.size_tag(node, row_id, cx);
+                let checkout =
+                    state::checkout_lead(node.missing, self.deleting(&node.id), &self.theme);
                 let unread = self.activity.unread(&node.id);
-                let state = state_word(node, entry.signal, unread, &self.theme);
+                let state = row_state(node, entry.signal, unread, &self.theme);
                 let t = &self.theme;
                 let rail = rail_colour(entry.project_color, t);
+                let group = crate::tree::worktree_row_group(project, worktree);
+                // The ring round the mark's dot is the row's own fill.
+                let ground = paint(if selected { t.hover } else { t.panel });
+                let hover_ground =
+                    (!selected).then(|| (group.clone(), mix(paint(t.panel), paint(t.hover), 0.55)));
                 block_row_with_rail(("activity-worktree", row_id), selected, rail, t)
                     .py(ROW_PAD_Y)
-                    .group(crate::tree::worktree_row_group(project, worktree))
+                    .group(group)
                     .flex_row()
                     .items_center()
                     .gap(ICON_GAP)
-                    .text_size(LABEL)
+                    .text_size(crate::fonts::row_text(LABEL))
                     .child(
                         div()
                             .flex()
@@ -117,12 +127,19 @@ impl Shell {
                             // As wide as a project's badge, as the grouped
                             // tree's is: room for the mark's well.
                             .w(BADGE)
-                            .child(crate::session_color::row_mark(
-                                &activity,
-                                color,
-                                node.dirty,
-                                node.missing,
-                                t,
+                            .child(state::with_dot(
+                                crate::session_color::row_mark(
+                                    &activity,
+                                    color,
+                                    state::lit(state.as_ref()),
+                                    node.dirty,
+                                    node.missing,
+                                    t,
+                                ),
+                                state.as_ref(),
+                                color.is_some(),
+                                ground,
+                                hover_ground,
                             )),
                     )
                     .child(
@@ -133,24 +150,35 @@ impl Shell {
                             .min_w_0()
                             .child(
                                 div()
-                                    .truncate()
-                                    // Unread in bold, as the grouped tree draws it.
-                                    .when(unread, |el| el.font_weight(FontWeight::BOLD))
-                                    .when_some(color, |el, color| {
-                                        el.text_color(paint(crate::session_color::label(color, t)))
-                                    })
-                                    .child(entry.branch),
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(4.0))
+                                    .min_w_0()
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .truncate()
+                                            // Unread in bold, as the grouped tree draws it.
+                                            .when(unread, |el| el.font_weight(FontWeight::BOLD))
+                                            .when_some(color, |el, color| {
+                                                el.text_color(paint(crate::session_color::label(
+                                                    color, t,
+                                                )))
+                                            })
+                                            .child(entry.branch),
+                                    )
+                                    .children(size),
                             )
                             // Which project, in its own colour: a list sorted
                             // across repositories is scanned by whose a row is.
-                            // Nothing after it: this list is for finding a
-                            // worktree, and the state word at the row's end
-                            // already says whether it needs anyone.
+                            // Led by the state's word where it has one, as the
+                            // grouped tree's second line is; nothing else: this
+                            // list is for finding a worktree.
                             .child(
                                 div()
                                     .prose()
                                     .mt(px(1.0))
-                                    .text_size(CAPTION)
+                                    .text_size(crate::fonts::row_text(CAPTION))
                                     .truncate()
                                     .text_color(paint(t.text.dim))
                                     .child(
@@ -158,6 +186,9 @@ impl Shell {
                                             .flex()
                                             .items_center()
                                             .gap(px(6.0))
+                                            .children(
+                                                checkout.or_else(|| lead_word(state.as_ref())),
+                                            )
                                             .child(
                                                 div()
                                                     .flex_none()
@@ -169,7 +200,6 @@ impl Shell {
                                     ),
                             ),
                     )
-                    .children(state)
                     .child(meta)
                     .on_mouse_down(
                         MouseButton::Right,

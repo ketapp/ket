@@ -110,7 +110,7 @@ impl Tip {
             Self::IconSetAside => "The image is shown instead. Remove it and this icon comes back.",
             Self::Image => "A favicon or logo to show on the badge instead of the icon.",
             Self::RemoveImage => "Remove the image",
-            Self::Colour => "The badge's colour, and the rail on a worktree you select.",
+            Self::Colour => "The badge's color, and the rail on a worktree you select.",
             Self::Base => "The branch each new worktree is cut from.",
             Self::HideDiscovered => {
                 "Leaves out worktrees made outside ket, by git or another tool."

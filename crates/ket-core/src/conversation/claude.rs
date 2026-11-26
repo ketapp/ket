@@ -34,6 +34,62 @@ pub fn transcript(session: &str) -> Option<PathBuf> {
         .find(|path| path.is_file())
 }
 
+/// The API error the transcript's last turn ended on: the record Claude Code
+/// writes in the agent's place when the API refuses or fails, marked
+/// `isApiErrorMessage` and named in `error` — `rate_limit`, `server_error`,
+/// `authentication_failed`. `None` once anything of the conversation follows
+/// it, or when the last thing said was the agent's own.
+pub(super) fn ended_on(path: &Path) -> Option<super::Ended> {
+    let bytes = super::ending(path)?;
+    for line in bytes.split(|&b| b == b'\n').rev() {
+        let Ok(record) = serde_json::from_slice::<serde_json::Value>(line) else {
+            continue;
+        };
+        let flag = |key: &str| record.get(key).and_then(serde_json::Value::as_bool) == Some(true);
+        if flag("isSidechain") || flag("isMeta") {
+            continue;
+        }
+        match record.get("type").and_then(|t| t.as_str()) {
+            Some("assistant") => {
+                if !flag("isApiErrorMessage") {
+                    return None;
+                }
+                let message = record
+                    .pointer("/message/content")
+                    .and_then(|c| c.as_array())
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|block| block.get("text").and_then(|t| t.as_str()))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                return Some(super::Ended {
+                    failure: crate::limits::Failure {
+                        code: record
+                            .get("error")
+                            .and_then(|e| e.as_str())
+                            .map(str::to_owned),
+                        message: message.trim().to_owned(),
+                    },
+                    at_ms: dated(&record),
+                    closed: true,
+                });
+            }
+            Some("user") => return None,
+            // Bookkeeping: a turn's duration, a file snapshot, a title.
+            _ => {}
+        }
+    }
+    None
+}
+
+/// When `record` was written, from its `timestamp`.
+pub(super) fn dated(record: &serde_json::Value) -> Option<u64> {
+    record
+        .get("timestamp")
+        .and_then(|t| t.as_str())
+        .and_then(crate::rate_limits::parse_rfc3339_ms)
+}
+
 /// Reads Claude transcript `path` from byte `after` — `0` for a first read,
 /// which looks at the recent end only and keeps the last [`super::FIRST_TURNS`]
 /// turns. Stops at the last whole line, so a record still being written is
@@ -97,7 +153,7 @@ pub fn queued(path: &Path) -> Result<Vec<String>> {
 }
 
 /// The turns one transcript record holds, if it holds any.
-fn turns_of(record: &serde_json::Value, turns: &mut Vec<Turn>) {
+pub(super) fn turns_of(record: &serde_json::Value, turns: &mut Vec<Turn>) {
     let kind = match record.get("type").and_then(|t| t.as_str()) {
         Some("user") => TurnKind::User,
         Some("assistant") => TurnKind::Assistant,

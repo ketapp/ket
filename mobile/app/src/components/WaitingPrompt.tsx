@@ -1,19 +1,19 @@
 import { Answer_Choice, type Question } from '@ket/remote';
 import { type ReactNode, useState } from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { Pressable, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 
-import { AgentMark, Check, Chevron, Close, TerminalWindow } from './icons';
+import { Check, Close, TerminalWindow } from './icons';
 import { RiskBadge } from './Risk';
-import { Button, Dot, MARK_GAP, MARK_SLOT } from './ui';
+import { AgentTile, Button, Row, RuledCard } from './ui';
 import { type Located, agentOf, colorOf, detail, promptKind } from '../lib/activity';
 import type { HostConnection, PromptAnswer } from '../lib/connection';
 import { useHostState } from '../lib/hosts';
 import { confirmIdentity } from '../lib/lock';
 import { agentLabel, font, sessionColor, size, t } from '../lib/theme';
-import { surface } from './ui/surface';
+import { PRESSED, surface } from './ui/surface';
 
-/** One prompt waiting on you, as a card: whose it is at the head, which
- * opens the chat, then what it asks with its answers. The desktop takes an
+/** One prompt waiting on you, as a ruled card: whose it is in the row at
+ * its head, which opens the chat, then what it asks with its answers. The desktop takes an
  * answer only while that terminal still shows that very prompt, and says
  * why when not. What can't be answered here sends you to the chat or the
  * terminal: a plan to change, several questions, a pick of many. */
@@ -81,6 +81,7 @@ export function WaitingPrompt({
             {unanswerable ? null : (
               <Button
                 kind="primary"
+                capsule
                 title="Approve"
                 disabled={approved}
                 mark={approved ? <Check size={20} color={t.onAccent} weight={2.4} /> : undefined}
@@ -91,7 +92,7 @@ export function WaitingPrompt({
                 style={styles.grow}
               />
             )}
-            <Button title="Read the plan" onPress={openChat} style={styles.grow} />
+            <Button capsule title="Read the plan" onPress={openChat} style={styles.grow} />
           </View>
         </>
       );
@@ -130,9 +131,9 @@ export function WaitingPrompt({
               ))}
             </View>
           ) : unanswerable ? (
-            <Button title="Answer in the terminal" icon={<TerminalWindow size={16} color={t.text} />} onPress={openTerminal} />
+            <Button capsule title="Answer in the terminal" icon={<TerminalWindow size={16} color={t.text} />} onPress={openTerminal} />
           ) : (
-            <Button kind="primary" title="Answer in the chat" onPress={openChat} />
+            <Button kind="primary" capsule title="Answer in the chat" onPress={openChat} />
           )}
           {oneTap && question.tool === 'AskUserQuestion' ? (
             // A dialog read off the agent's screen, or Codex's form, takes one
@@ -153,8 +154,10 @@ export function WaitingPrompt({
       );
     return (
       <>
-        <Asks>{question.tool === 'Bash' ? 'Wants to run' : `Wants to use ${question.tool}`}</Asks>
-        <RiskBadge risk={question.risk} />
+        <View style={styles.asksLine}>
+          <Asks>{question.tool === 'Bash' ? 'Wants to run' : `Wants to use ${question.tool}`}</Asks>
+          <RiskBadge risk={question.risk} />
+        </View>
         {question.subject ? (
           <View style={styles.well}>
             <Text style={styles.code} numberOfLines={8}>
@@ -163,19 +166,21 @@ export function WaitingPrompt({
           </View>
         ) : null}
         {unanswerable ? (
-          <Button title="Answer in the terminal" icon={<TerminalWindow size={16} color={t.text} />} onPress={openTerminal} />
+          <Button capsule title="Answer in the terminal" icon={<TerminalWindow size={16} color={t.text} />} onPress={openTerminal} />
         ) : (
           <View style={styles.buttons}>
             <Button
               kind="primary"
+              capsule
               title="Allow once"
               mark={markOf(Answer_Choice.ALLOW_ONCE, t.onAccent)}
               disabled={done}
               onPress={() => void answer(Answer_Choice.ALLOW_ONCE)}
-              style={styles.grow}
+              style={styles.first}
             />
             {question.always ? (
               <Button
+                capsule
                 title="Always"
                 mark={markOf(Answer_Choice.ALLOW_ALWAYS, t.text)}
                 disabled={done}
@@ -185,6 +190,7 @@ export function WaitingPrompt({
             ) : null}
             <Button
               kind="danger"
+              capsule
               title="Deny"
               mark={markOf(Answer_Choice.DENY, t.failed)}
               disabled={done}
@@ -198,39 +204,30 @@ export function WaitingPrompt({
   })();
 
   return (
-    <View style={styles.prompt}>
-      <Pressable
+    <RuledCard>
+      <Row
+        ruled
+        chevron
+        mark={<AgentTile agent={agent} session={colorOf(worktree)} tone={t.attention} label={`${agent ? agentLabel(agent) : 'Agent'}, waiting on you`} />}
+        title={worktree.name}
+        titleColor={sessionColor(colorOf(worktree))?.label}
+        detail={[many ? hostState.host.name : null, project.name, agent ? agentLabel(agent) : null].filter(Boolean).join(' · ')}
         onPress={openChat}
-        accessibilityRole="button"
-        accessibilityLabel={`${worktree.name}, open the chat`}
-        style={({ pressed }) => [styles.head, pressed && { backgroundColor: t.selection }]}
-      >
-        <View style={styles.mark}>{agent ? <AgentMark agent={agent} size={16} session={colorOf(worktree)} well /> : null}</View>
-        <View style={styles.headText}>
-          <Text style={[styles.name, { color: sessionColor(colorOf(worktree))?.label ?? t.text }]} numberOfLines={1}>
-            {worktree.name}
-          </Text>
-          <Text style={styles.detail} numberOfLines={1}>
-            {[many ? hostState.host.name : null, project.name, agent ? agentLabel(agent) : null].filter(Boolean).join(' · ')}
-          </Text>
-        </View>
-        <Chevron size={14} color={t.faint} weight={2} />
-      </Pressable>
-      {body}
-      {why ? <Text style={styles.why}>{why}</Text> : null}
-    </View>
+      />
+      <View style={styles.body}>
+        {body}
+        {why ? <Text style={styles.why}>{why}</Text> : null}
+      </View>
+    </RuledCard>
   );
 }
 
 /** What the prompt is, in the waiting colour: "Wants to run", "Asks". */
 function Asks({ children }: { children: ReactNode }) {
   return (
-    <View style={styles.asks}>
-      <Dot color={t.attention} size={6} />
-      <Text style={styles.asksText} numberOfLines={2}>
-        {children}
-      </Text>
-    </View>
+    <Text style={styles.asks} numberOfLines={2}>
+      {children}
+    </Text>
   );
 }
 
@@ -250,70 +247,51 @@ function Option({
   onPress: () => void;
 }) {
   return (
-    <Pressable
+    <TouchableOpacity
       onPress={onPress}
       disabled={disabled}
       accessibilityRole="button"
       accessibilityLabel={label}
       accessibilityState={{ disabled, selected: picked }}
-      style={({ pressed }) => [
-        styles.option,
-        (pressed || picked) && { backgroundColor: t.hover },
-        disabled && !picked && { opacity: 0.55 },
-      ]}
+      activeOpacity={PRESSED}
+      style={[styles.option, picked && { backgroundColor: t.selection }, disabled && !picked && { opacity: 0.55 }]}
     >
       <View style={styles.optionText}>
         <Text style={styles.optionLabel}>{label}</Text>
         {description ? <Text style={styles.detail}>{description}</Text> : null}
       </View>
       {picked ? <Check size={18} color={t.text} weight={2.4} /> : null}
-    </Pressable>
+    </TouchableOpacity>
   );
 }
 
 const styles = StyleSheet.create({
-  prompt: {
-    ...surface.panel,
-    borderRadius: size.radiusCard,
-    paddingTop: 6,
-    paddingHorizontal: size.pad,
-    paddingBottom: size.pad,
-    gap: 10,
-  },
-  head: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: MARK_GAP,
-    minHeight: 52,
-    marginHorizontal: -4,
-    paddingHorizontal: 4,
-    borderRadius: size.radiusRow,
-  },
-  mark: { width: MARK_SLOT, alignItems: 'center' },
-  headText: { flex: 1, minWidth: 0, gap: 3 },
-  name: { fontFamily: font.chrome, fontSize: size.name, color: t.text },
+  // Under the head's rule: what it asks, and its answers.
+  body: { paddingTop: 12, paddingHorizontal: 14, paddingBottom: 14, gap: 10 },
   detail: { fontFamily: font.prose, fontSize: size.detail, color: t.dim },
-  asks: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  asksText: { flex: 1, fontFamily: font.proseMedium, fontSize: size.label, color: t.attention },
-  well: { ...surface.well, borderRadius: size.radius, paddingVertical: 10, paddingHorizontal: 12 },
+  asksLine: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
+  asks: { flexShrink: 1, fontFamily: font.proseSemibold, fontSize: size.label, color: t.attention },
+  well: { ...surface.well, borderRadius: size.radiusLg, paddingVertical: 11, paddingHorizontal: 12 },
   code: { fontFamily: font.code, fontSize: 12.5, lineHeight: 18, color: t.text },
   lead: { fontFamily: font.prose, fontSize: size.label, lineHeight: 19, color: t.dim },
   question: { fontFamily: font.proseSemibold, fontSize: size.title, lineHeight: 21, color: t.text },
   buttons: { flexDirection: 'row', gap: 8 },
   grow: { flex: 1 },
-  options: { gap: 8 },
+  // Allow once, a little wider than the answers beside it.
+  first: { flex: 1.3 },
+  options: { gap: 6 },
   option: {
-    minHeight: size.control,
+    minHeight: 52,
     flexDirection: 'row',
     alignItems: 'center',
     gap: 10,
-    paddingVertical: 10,
+    paddingVertical: 8,
     paddingHorizontal: 14,
-    borderRadius: size.radius,
-    ...surface.outline,
+    borderRadius: size.radiusLg,
+    backgroundColor: t.elevated,
   },
   optionText: { flex: 1, minWidth: 0, gap: 2 },
-  optionLabel: { fontFamily: font.proseMedium, fontSize: size.body, color: t.text },
+  optionLabel: { fontFamily: font.proseMedium, fontSize: size.body, lineHeight: 18, color: t.text },
   more: { fontFamily: font.prose, fontSize: size.label, color: t.dim, textAlign: 'center' },
   why: { fontFamily: font.prose, fontSize: size.label, lineHeight: 19, color: t.failed },
 });

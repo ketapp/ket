@@ -156,16 +156,96 @@ const HEADER_HEIGHT: Pixels = px(24.0);
 /// How close to the window edge an anchored menu may sit.
 const WINDOW_MARGIN: Pixels = px(8.0);
 
-/// The tallest an *inline* dropdown's rows may grow before they scroll.
-///
-/// Short of seven plain rows, or a little under six tall ones. A dropdown
-/// hangs below the control that opened it and grows in one direction only, so
-/// a long one has to stop somewhere; this is where, and the sliver of the next
-/// row it leaves is the cue that there is more below.
-///
-/// Context menus and submenus fit their full panels to the window, so they
-/// do not use this cap.
+/// The usual cap on a dropdown's rows, before fitting the panel to the
+/// space available beside its trigger.
 const MAX_ROWS_HEIGHT: Pixels = px(280.0);
+
+/// A menu panel waiting for the layout bounds of its dropdown trigger.
+pub(crate) struct DropdownPanel {
+    surface: Stateful<gpui::Div>,
+    origin: SharedString,
+    offset: Point<Pixels>,
+}
+
+impl DropdownPanel {
+    fn overlay(self) -> AnyElement {
+        let Self {
+            surface,
+            origin,
+            offset,
+        } = self;
+
+        // A negative vertical offset places the compact sidebar menu beside
+        // the rail button, where moving it up keeps it clear of the button.
+        if offset.y < Pixels::ZERO {
+            let panel = animate_panel(surface, &origin, ENTRANCE_RISE);
+            return deferred(position_relative(panel, offset))
+                .with_priority(1)
+                .into_any_element();
+        }
+
+        canvas(
+            move |trigger, window, cx| {
+                let viewport = window.viewport_size();
+                let space = DropdownSpace::new(trigger, viewport.height, offset.y);
+                let max_height = space.max_height();
+                if max_height <= Pixels::ZERO {
+                    return;
+                }
+
+                // Measure with the larger side's height limit. A short menu
+                // can still fit below, and a long one scrolls on the side
+                // that has room for more rows.
+                // Fade in place so the fit stays stable during the entrance.
+                let mut panel = animate_panel(surface.max_h(max_height), &origin, Pixels::ZERO);
+                let size = panel.layout_as_root(AvailableSpace::min_size(), window, cx);
+                if size.height > max_height {
+                    return;
+                }
+                let left = (trigger.left() + offset.x)
+                    .min(viewport.width - WINDOW_MARGIN - size.width)
+                    .max(WINDOW_MARGIN);
+                window.defer_draw(panel, point(left, space.top(size.height)), 1);
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .inset_0()
+        .into_any_element()
+    }
+}
+
+struct DropdownSpace {
+    above: Pixels,
+    below: Pixels,
+    upper_edge: Pixels,
+    lower_edge: Pixels,
+}
+
+impl DropdownSpace {
+    fn new(trigger: Bounds<Pixels>, viewport_height: Pixels, below_gap: Pixels) -> Self {
+        let upper_edge = trigger.top() - MENU_GAP;
+        let lower_edge = trigger.bottom() + below_gap;
+        Self {
+            above: upper_edge - WINDOW_MARGIN,
+            below: viewport_height - WINDOW_MARGIN - lower_edge,
+            upper_edge,
+            lower_edge,
+        }
+    }
+
+    fn top(&self, height: Pixels) -> Pixels {
+        if height <= self.below {
+            self.lower_edge
+        } else {
+            self.upper_edge - height
+        }
+    }
+
+    fn max_height(&self) -> Pixels {
+        self.above.max(self.below).floor()
+    }
+}
 
 /// Draws a dropdown's real trigger and, when open, its panel above the rest
 /// of the current surface.
@@ -176,13 +256,13 @@ const MAX_ROWS_HEIGHT: Pixels = px(280.0);
 pub(crate) fn dropdown(
     id: impl Into<ElementId>,
     trigger: impl IntoElement,
-    panel: Option<AnyElement>,
+    panel: Option<DropdownPanel>,
 ) -> Stateful<gpui::Div> {
     div()
         .id(id)
         .relative()
         .child(trigger)
-        .children(panel.map(|panel| deferred(panel).with_priority(1)))
+        .children(panel.map(DropdownPanel::overlay))
 }
 
 /// One pickable row of a menu.
@@ -380,21 +460,11 @@ pub(crate) struct OpenMenu<T> {
     header: Option<SharedString>,
     /// Where to put the panel, when it belongs at the pointer.
     ///
-    /// `None` hangs it below whatever relative container the opener deferred
-    /// it from — the `+` button's menu. `Some` anchors it at a window
-    /// position and snaps it back inside the edges, which is what a
-    /// right-click menu needs.
+    /// Dropdowns use their trigger bounds. A right-click menu uses a window
+    /// position and fits its panel around that point.
     at: Option<Point<Pixels>>,
-    /// How far below the opener an inline dropdown hangs — the gap alone, not
-    /// the opener's height.
-    ///
-    /// `AnchoredPositionMode::Local` resolves to `natural origin + offset`,
-    /// and the panel's natural origin is already *under* the trigger: both
-    /// `dropdown` and the tab strip's `+` defer it as the second child of a
-    /// block container, so it lays out after the trigger before anything here
-    /// applies. An offset carrying the trigger's height on top of that counts
-    /// the trigger twice, which is what put every menu in the shell roughly a
-    /// button's height too low.
+    /// The horizontal alignment and vertical gap from the trigger.
+    /// A negative vertical offset positions a menu beside its trigger.
     offset: Point<Pixels>,
     /// The menu's rows in order, separators included.
     entries: Vec<MenuEntry<T>>,
@@ -642,8 +712,7 @@ impl<T: Clone + 'static> OpenMenu<T> {
         MenuKey::Ignored
     }
 
-    /// The panel: search row, then the surviving sections, positioned below
-    /// whatever relative container the opener deferred it from.
+    /// The floating panel: search row, then the surviving sections.
     ///
     /// `on_run` is the seam where the menu hands a picked action back — the
     /// one thing the menu cannot do itself, because it never knew what the
@@ -660,7 +729,36 @@ impl<T: Clone + 'static> OpenMenu<T> {
         on_run: impl Fn(&mut Shell, &T, &mut Context<Shell>) + Clone + 'static,
         on_dismiss: impl Fn(&mut Shell, &mut Context<Shell>) + Clone + 'static,
     ) -> AnyElement {
-        self.position_panel(self.panel(theme, cx, on_run, on_dismiss, |_, _, _| {}, |_| None))
+        self.position_panel(self.panel(
+            theme,
+            cx,
+            on_run,
+            on_dismiss,
+            |_, _, _| {},
+            PanelLayout::Floating,
+        ))
+    }
+
+    /// Builds the panel for a trigger rendered by [`dropdown`].
+    pub(crate) fn dropdown_view(
+        &self,
+        theme: &Theme,
+        cx: &mut Context<Shell>,
+        on_run: impl Fn(&mut Shell, &T, &mut Context<Shell>) + Clone + 'static,
+        on_dismiss: impl Fn(&mut Shell, &mut Context<Shell>) + Clone + 'static,
+    ) -> DropdownPanel {
+        DropdownPanel {
+            surface: self.panel(
+                theme,
+                cx,
+                on_run,
+                on_dismiss,
+                |_, _, _| {},
+                PanelLayout::Dropdown,
+            ),
+            origin: self.origin.clone(),
+            offset: self.offset,
+        }
     }
 
     /// Renders a context menu and its open submenu against the rendered row.
@@ -677,13 +775,19 @@ impl<T: Clone + 'static> OpenMenu<T> {
         T: PartialEq,
     {
         let row_bounds = RowBounds::default();
-        let parent =
-            self.position_panel(self.panel(theme, cx, on_run, on_dismiss, on_hover, |row| {
+        let parent = self.position_panel(self.panel(
+            theme,
+            cx,
+            on_run,
+            on_dismiss,
+            on_hover,
+            PanelLayout::WithSubmenu(&|row| {
                 submenu
                     .as_ref()
                     .filter(|(action, _)| action == row)
                     .map(|_| row_bounds.clone())
-            }));
+            }),
+        ));
         // Both stay out of the shell's flex layout. Prepaint the parent first
         // so the submenu can read its row after GPUI has fitted it to the window.
         div()
@@ -702,7 +806,15 @@ impl<T: Clone + 'static> OpenMenu<T> {
         on_dismiss: impl Fn(&mut Shell, &mut Context<Shell>) + Clone + 'static,
         on_hover: impl Fn(&mut Shell, &T, &mut Context<Shell>) + Clone + 'static,
     ) -> AnyElement {
-        self.panel(theme, cx, on_run, on_dismiss, on_hover, |_| None)
+        let panel = self.panel(
+            theme,
+            cx,
+            on_run,
+            on_dismiss,
+            on_hover,
+            PanelLayout::Floating,
+        );
+        animate_panel(panel, &self.origin, ENTRANCE_RISE)
     }
 
     /// `on_hover` fires when the pointer enters an enabled row.
@@ -713,8 +825,8 @@ impl<T: Clone + 'static> OpenMenu<T> {
         on_run: impl Fn(&mut Shell, &T, &mut Context<Shell>) + Clone + 'static,
         on_dismiss: impl Fn(&mut Shell, &mut Context<Shell>) + Clone + 'static,
         on_hover: impl Fn(&mut Shell, &T, &mut Context<Shell>) + Clone + 'static,
-        submenu_anchor: impl Fn(&T) -> Option<RowBounds>,
-    ) -> AnyElement {
+        layout: PanelLayout<'_, T>,
+    ) -> Stateful<gpui::Div> {
         let t = theme;
         let selected = self.selected;
         let show_selection = self.show_selection;
@@ -909,7 +1021,7 @@ impl<T: Clone + 'static> OpenMenu<T> {
                         .px(ROW_PAD_X)
                         .rounded(ROW_RADIUS)
                         .text_size(LABEL_SIZE)
-                        .when_some(submenu_anchor(&item.action), |el, bounds| {
+                        .when_some(layout.submenu_bounds(&item.action), |el, bounds| {
                             // The probe fills the row without affecting its layout.
                             el.child(
                                 canvas(move |row, _, _| bounds.set(Some(row)), |_, _, _, _| {})
@@ -1082,14 +1194,14 @@ impl<T: Clone + 'static> OpenMenu<T> {
                     .flex()
                     .flex_col()
                     .min_h_0()
-                    // Only where the menu has one direction to grow in. See
-                    // `MAX_ROWS_HEIGHT`, and the placement at the end of this
-                    // function.
                     .when(self.at.is_none() && !self.uncapped, |el| {
                         el.max_h(MAX_ROWS_HEIGHT)
-                            .overflow_y_scroll()
-                            .track_scroll(&self.scroll)
                     })
+                    .when(
+                        matches!(layout, PanelLayout::Dropdown)
+                            || (self.at.is_none() && !self.uncapped),
+                        |el| el.overflow_y_scroll().track_scroll(&self.scroll),
+                    )
                     .children(rows),
             )
             .on_mouse_down(
@@ -1100,22 +1212,10 @@ impl<T: Clone + 'static> OpenMenu<T> {
                     cx.notify();
                 }),
             )
-            // The entrance. A menu's panel is only built while it is open, so
-            // it mounts fresh every time and gets a new clock for the fade
-            // without anything here having to reset one — the same property
-            // `ui::tooltip` leans on. Quint ease-out so almost all of the
-            // travel is over in the first few frames: the panel should be
-            // *there* by the time the eye arrives, with the tail of the
-            // animation doing nothing but settling.
-            .with_animation(
-                SharedString::from(format!("menu-entrance-{}", self.origin)),
-                Animation::new(ENTRANCE).with_easing(ease_out_quint()),
-                move |el, delta| el.opacity(delta).mt(ENTRANCE_RISE * (1.0 - delta)),
-            )
-            .into_any_element()
     }
 
-    fn position_panel(&self, panel: AnyElement) -> AnyElement {
+    fn position_panel(&self, panel: Stateful<gpui::Div>) -> AnyElement {
+        let panel = animate_panel(panel, &self.origin, ENTRANCE_RISE);
         match self.at {
             // At the pointer, and above it when there is no room below.
             //
@@ -1132,22 +1232,47 @@ impl<T: Clone + 'static> OpenMenu<T> {
                 .anchor(Corner::TopLeft)
                 .child(panel)
                 .into_any_element(),
-            // Below its opener inside the relative container it deferred
-            // from — but still snapped to the window, so a field near the
-            // bottom of a tall panel does not open a menu that runs off the
-            // screen with no way to reach the rows past the edge.
-            None => anchored()
-                .position_mode(AnchoredPositionMode::Local)
-                .position(self.offset)
-                .anchor(Corner::TopLeft)
-                .snap_to_window_with_margin(WINDOW_MARGIN)
-                .child(panel)
-                .into_any_element(),
+            None => position_relative(panel, self.offset),
         }
     }
 }
 
 type RowBounds = Rc<Cell<Option<Bounds<Pixels>>>>;
+
+enum PanelLayout<'a, T> {
+    Floating,
+    Dropdown,
+    WithSubmenu(&'a dyn Fn(&T) -> Option<RowBounds>),
+}
+
+impl<T> PanelLayout<'_, T> {
+    fn submenu_bounds(&self, action: &T) -> Option<RowBounds> {
+        match self {
+            Self::WithSubmenu(bounds) => bounds(action),
+            _ => None,
+        }
+    }
+}
+
+fn animate_panel(surface: Stateful<gpui::Div>, origin: &str, rise: Pixels) -> AnyElement {
+    surface
+        .with_animation(
+            SharedString::from(format!("menu-entrance-{origin}")),
+            Animation::new(ENTRANCE).with_easing(ease_out_quint()),
+            move |el, delta| el.opacity(delta).mt(rise * (1.0 - delta)),
+        )
+        .into_any_element()
+}
+
+fn position_relative(panel: AnyElement, offset: Point<Pixels>) -> AnyElement {
+    anchored()
+        .position_mode(AnchoredPositionMode::Local)
+        .position(offset)
+        .anchor(Corner::TopLeft)
+        .snap_to_window_with_margin(WINDOW_MARGIN)
+        .child(panel)
+        .into_any_element()
+}
 
 fn at_submenu_row(mut panel: AnyElement, row_bounds: RowBounds) -> AnyElement {
     canvas(
@@ -1307,6 +1432,59 @@ impl Shell {
 mod tests {
     use super::*;
     use gpui::{Keystroke, Modifiers, size};
+
+    #[test]
+    fn dropdown_prefers_below_when_it_fits() {
+        let trigger = Bounds::new(point(px(20.0), px(350.0)), size(px(236.0), px(36.0)));
+        let space = DropdownSpace::new(trigger, px(600.0), MENU_GAP);
+
+        assert_eq!(space.top(px(100.0)), trigger.bottom() + MENU_GAP);
+    }
+
+    #[test]
+    fn dropdown_flips_above_a_trigger_near_the_bottom() {
+        let trigger = Bounds::new(point(px(20.0), px(350.0)), size(px(236.0), px(36.0)));
+        let space = DropdownSpace::new(trigger, px(600.0), MENU_GAP);
+        let panel_height = px(320.0);
+
+        assert_eq!(
+            space.top(panel_height) + panel_height,
+            trigger.top() - MENU_GAP
+        );
+    }
+
+    #[test]
+    fn dropdown_custom_gap_applies_below_only() {
+        let trigger = Bounds::new(point(px(20.0), px(350.0)), size(px(236.0), px(36.0)));
+        let space = DropdownSpace::new(trigger, px(600.0), px(32.0));
+        let tall_panel = px(320.0);
+
+        assert_eq!(space.top(px(100.0)), trigger.bottom() + px(32.0));
+        assert_eq!(space.top(tall_panel) + tall_panel, trigger.top() - MENU_GAP);
+    }
+
+    #[test]
+    fn tall_dropdown_fits_the_roomier_side_of_a_short_window() {
+        let upper_trigger = Bounds::new(point(px(20.0), px(160.0)), size(px(236.0), px(36.0)));
+        let lower_trigger = Bounds::new(point(px(20.0), px(240.0)), size(px(236.0), px(36.0)));
+        let viewport_height = px(400.0);
+        let below = DropdownSpace::new(upper_trigger, viewport_height, MENU_GAP);
+        let above = DropdownSpace::new(lower_trigger, viewport_height, MENU_GAP);
+
+        assert_eq!(
+            below.top(below.max_height()),
+            upper_trigger.bottom() + MENU_GAP
+        );
+        assert_eq!(
+            below.top(below.max_height()) + below.max_height(),
+            viewport_height - WINDOW_MARGIN
+        );
+        assert_eq!(above.top(above.max_height()), WINDOW_MARGIN);
+        assert_eq!(
+            above.top(above.max_height()) + above.max_height(),
+            lower_trigger.top() - MENU_GAP
+        );
+    }
 
     #[test]
     fn submenu_aligns_with_the_rendered_row_when_there_is_room() {

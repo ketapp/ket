@@ -1040,7 +1040,7 @@ fn a_wake_the_window_refuses_says_why() {
 
 /// The next reply that is not a terminal's output: a window watching a
 /// terminal is sent its screen between replies.
-fn next_json_reply(reader: &mut impl Read) -> Reply {
+pub(in crate::host::server) fn next_json_reply(reader: &mut impl Read) -> Reply {
     loop {
         if let Frame::Json(body) = next_frame(reader) {
             return serde_json::from_slice(&body).expect("a reply");
@@ -1050,7 +1050,13 @@ fn next_json_reply(reader: &mut impl Read) -> Reply {
 
 /// Opens a terminal under `key` from the window on `out`, which then
 /// shows it, and returns its id.
-fn opened(host: &Arc<Host>, out: &Arc<Out>, reader: &mut UnixStream, req: u64, key: &str) -> u64 {
+pub(in crate::host::server) fn opened(
+    host: &Arc<Host>,
+    out: &Arc<Out>,
+    reader: &mut UnixStream,
+    req: u64,
+    key: &str,
+) -> u64 {
     assert!(handle(
         host,
         1,

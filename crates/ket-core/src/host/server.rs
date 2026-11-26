@@ -24,11 +24,16 @@ use crate::Result;
 use crate::agent_hooks::{self, HookReport, Listener, StatusLine};
 use crate::agent_status::{CancelSource, StatusStore};
 use crate::terminal::{LocalTerminal, OutputCursor, Since, StopOutcome, TerminalSize};
-#[cfg(test)]
-use housekeeping::pass_on_hooks;
-use housekeeping::{forward_hooks, housekeeping, send_hooks};
+use housekeeping::{forward_hooks, housekeeping, pass_on_hooks, send_hooks};
 
 mod housekeeping;
+mod jobs;
+mod limits;
+mod peer;
+mod switch;
+
+use peer::same_program;
+pub(super) use switch::Switch;
 
 /// How often housekeeping runs: foregrounds, reaping, idleness.
 const TICK: Duration = Duration::from_secs(1);
@@ -330,6 +335,12 @@ pub(super) struct Host {
     /// host fetches none itself: a window already does, and a second fetcher
     /// would double the processes that costs.
     usage: Mutex<Vec<crate::rate_limits::ProviderSnapshot>>,
+    /// Which sessions a plan limit has stopped — see [`limits`].
+    limits: limits::Limits,
+    /// The background jobs a window or a phone stopped — see [`jobs`].
+    jobs: jobs::Jobs,
+    /// Phones' switches waiting on a window — see [`switch`].
+    switches: switch::Switches,
     /// The agents a window can start, as one last reported them, for phones.
     /// The host detects none itself: which are enabled is the window's
     /// settings, and detecting them shells out.
@@ -1611,6 +1622,9 @@ impl Host {
             fresh_waiting: Mutex::new(BTreeMap::new()),
             next_fresh: AtomicU64::new(1),
             usage: Mutex::new(Vec::new()),
+            limits: limits::Limits::default(),
+            jobs: jobs::Jobs::default(),
+            switches: switch::Switches::default(),
             agents: Mutex::new(Vec::new()),
             theme: Mutex::new(None),
             pull_requests: Mutex::new(Vec::new()),
@@ -1781,6 +1795,9 @@ pub(super) fn run() -> Result<()> {
         fresh_waiting: Mutex::new(BTreeMap::new()),
         next_fresh: AtomicU64::new(1),
         usage: Mutex::new(Vec::new()),
+        limits: limits::Limits::load(),
+        jobs: jobs::Jobs::default(),
+        switches: switch::Switches::default(),
         agents: Mutex::new(Vec::new()),
         theme: Mutex::new(None),
         pull_requests: Mutex::new(Vec::new()),
@@ -1812,6 +1829,22 @@ pub(super) fn run() -> Result<()> {
         std::thread::Builder::new()
             .name("ket-host-hooks".into())
             .spawn(move || forward_hooks(&host, &hook_listener))
+            .map_err(host_error)?;
+    }
+
+    {
+        let host = host.clone();
+        std::thread::Builder::new()
+            .name("ket-host-limits".into())
+            .spawn(move || limits::run(&host))
+            .map_err(host_error)?;
+    }
+
+    {
+        let host = host.clone();
+        std::thread::Builder::new()
+            .name("ket-host-jobs".into())
+            .spawn(move || jobs::run(&host))
             .map_err(host_error)?;
     }
 
@@ -1966,54 +1999,6 @@ fn serve_connection(host: &Arc<Host>, stream: UnixStream) {
     host.clients.fetch_sub(1, Ordering::AcqRel);
 }
 
-/// Handles one request. `false` ends the connection.
-/// Whether the process on the other end of `stream` is running this very
-/// executable: a ket window, which is where a person approves a pairing and
-/// turns phones on and off.
-///
-/// The socket's mode keeps other users out; this is what keeps out other
-/// programs the same user runs. The peer's process id comes from the socket
-/// (`LOCAL_PEERPID`) and its executable's path from the kernel, not from
-/// anything the peer says about itself. A program that can take over a ket
-/// window — inject code into an unhardened build — is past this; that is the
-/// operating system's to stop.
-#[cfg(target_os = "macos")]
-fn same_program(stream: &UnixStream) -> bool {
-    use nix::sys::socket::{getsockopt, sockopt::LocalPeerPid};
-    let Ok(pid) = getsockopt(stream, LocalPeerPid) else {
-        return false;
-    };
-    let Ok(peer) = libproc::proc_pid::pidpath(pid) else {
-        return false;
-    };
-    let canonical = |path: &std::path::Path| path.canonicalize().ok();
-    let mine = std::env::current_exe().ok().and_then(|exe| canonical(&exe));
-    mine.is_some() && canonical(std::path::Path::new(&peer)) == mine
-}
-
-/// Linux exposes the peer PID and UID on Unix sockets. Resolve that PID through
-/// `/proc` and compare the executable, failing closed if either check fails.
-#[cfg(target_os = "linux")]
-fn same_program(stream: &UnixStream) -> bool {
-    use nix::sys::socket::{getsockopt, sockopt::PeerCredentials};
-
-    let Ok(credentials) = getsockopt(stream, PeerCredentials) else {
-        return false;
-    };
-    let Ok(peer) = std::fs::read_link(format!("/proc/{}/exe", credentials.pid())) else {
-        return false;
-    };
-    let canonical = |path: &std::path::Path| path.canonicalize().ok();
-    let mine = std::env::current_exe().ok().and_then(|exe| canonical(&exe));
-    mine.is_some() && canonical(&peer) == mine
-}
-
-/// Platforms without a native peer executable identity fail closed.
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
-fn same_program(_stream: &UnixStream) -> bool {
-    false
-}
-
 /// Answers, and refuses, a request only a ket window may make, from a
 /// connection that is not one — approving a pairing above all: without this
 /// any program the user runs could let its own phone in. `false` for
@@ -2038,6 +2023,7 @@ fn refuse_outsider(out: &Arc<Out>, request: &Request) -> bool {
     true
 }
 
+/// Handles one request. `false` ends the connection.
 fn handle(host: &Arc<Host>, conn: u64, out: &Arc<Out>, request: Request) -> bool {
     match request {
         Request::Hello { build, .. } => {
@@ -2250,6 +2236,10 @@ fn handle(host: &Arc<Host>, conn: u64, out: &Arc<Out>, request: Request) -> bool
             }
             true
         }
+        Request::SwitchResult { req, key, error } => {
+            host.finish_switch(req, key, error);
+            true
+        }
         Request::FreshResult { req, key, error } => {
             let answer = key.ok_or_else(|| {
                 error.unwrap_or_else(|| "ket on your Mac didn't start fresh".to_owned())
@@ -2339,6 +2329,14 @@ fn handle(host: &Arc<Host>, conn: u64, out: &Arc<Out>, request: Request) -> bool
             if changed {
                 host.broadcast_status();
             }
+            true
+        }
+        Request::StopJob {
+            pane,
+            pid,
+            started_at_ms,
+        } => {
+            host.stop_job(&pane, pid, started_at_ms);
             true
         }
         Request::Seen { pane } => {

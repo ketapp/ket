@@ -360,6 +360,11 @@ pub(crate) enum Icon {
     Laptop,
     /// Long lines folded onto the next: a request tab's wrap toggle.
     WrapText,
+    /// A command still running, left in the background by an agent: the
+    /// node of its row under the worktree. An open ring, as a spinner's.
+    LoaderCircle,
+    /// Something served on a port: a background job that is a dev server.
+    Globe,
     /// One of a project's glyphs ([`super::glyph`]), drawn as any icon is:
     /// in a badge in its ink, and in the picker as an
     /// [`icon_button`](super::button::icon_button).
@@ -486,6 +491,8 @@ impl Icon {
             Icon::Network => "icons/network.svg",
             Icon::Laptop => "icons/laptop.svg",
             Icon::WrapText => "icons/wrap-text.svg",
+            Icon::LoaderCircle => "icons/loader-circle.svg",
+            Icon::Globe => "icons/globe.svg",
             Icon::Glyph(glyph) => glyph.asset(),
         }
     }
@@ -524,7 +531,7 @@ pub(crate) fn sized_icon(which: Icon, size: Pixels, colour: Rgba) -> Svg {
 pub(crate) struct Assets;
 
 /// The bytes for every path [`Icon::asset`] can return.
-const FILES: [(&str, &[u8]); 124] = [
+const FILES: [(&str, &[u8]); 126] = [
     (
         "icons/chevron-down.svg",
         include_bytes!("../../assets/icons/chevron-down.svg"),
@@ -989,6 +996,14 @@ const FILES: [(&str, &[u8]); 124] = [
         "icons/wrap-text.svg",
         include_bytes!("../../assets/icons/wrap-text.svg"),
     ),
+    (
+        "icons/loader-circle.svg",
+        include_bytes!("../../assets/icons/loader-circle.svg"),
+    ),
+    (
+        "icons/globe.svg",
+        include_bytes!("../../assets/icons/globe.svg"),
+    ),
     // A model family's logo, drawn in its own colours by `img` — see
     // `crate::local_models`.
     (
@@ -1205,6 +1220,8 @@ mod tests {
             Icon::Network,
             Icon::Laptop,
             Icon::WrapText,
+            Icon::LoaderCircle,
+            Icon::Globe,
         ];
         // Logos are images, not icons: only `icons/` files have an `Icon`.
         assert_eq!(

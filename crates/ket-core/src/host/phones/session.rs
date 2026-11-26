@@ -182,7 +182,10 @@ fn session(host: &Arc<Host>, phones: &Phones, mut pipe: RelayPipe) -> Result<()>
 
     // Resume where the phone was, if this is the same run of the host and
     // what it missed is still kept; otherwise it starts over from a snapshot.
-    let missed: Option<Vec<Vec<u8>>> = (hello.resume_epoch == epoch())
+    // Never in a blackout: what it missed is terminal output and snapshots
+    // from before one began, and a phone shut out is sent none of that. It
+    // starts over from the snapshot that says only the blackout.
+    let missed: Option<Vec<Vec<u8>>> = (hello.resume_epoch == epoch() && !phones.shut())
         .then(|| {
             let devices = lock(&phones.devices);
             let device = devices.get(&phone.device)?;
@@ -233,8 +236,19 @@ fn session(host: &Arc<Host>, phones: &Phones, mut pipe: RelayPipe) -> Result<()>
                     phone.send(reply)?;
                 }
             }
+            // What was queued for the phone before a blackout began — a
+            // terminal's output, a full snapshot — is ahead of the `Closed`
+            // that ends this session, and is not sent: see `blackout`.
+            Ok(Event::Send(_)) if phones.was_shut() => {}
             Ok(Event::Send(envelope)) => phone.send(*envelope)?,
             Ok(Event::Snapshot(snapshot)) => {
+                let says_blackout = snapshot
+                    .blackout
+                    .as_ref()
+                    .is_some_and(|blackout| blackout.until_ms != 0);
+                if phones.was_shut() && !says_blackout {
+                    continue;
+                }
                 let encoded = snapshot.encode_to_vec();
                 if encoded != shown {
                     shown = encoded;

@@ -6,7 +6,7 @@
 import { type AgentView, BackgroundSession_State, type BackgroundSession, type HostSnapshot } from '@ket/remote';
 import { router, useIsFocused } from 'expo-router';
 import { useEffect, useState } from 'react';
-import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Pressable, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { everyWorktree } from '../lib/activity';
@@ -14,7 +14,7 @@ import type { HostConnection } from '../lib/connection';
 import { useHost, useHostState } from '../lib/hosts';
 import { reasonOf } from '../lib/text';
 import { font, size, t } from '../lib/theme';
-import { surface } from './ui/surface';
+import { PRESSED, surface } from './ui/surface';
 import { ChevronDown, Send, TerminalWindow } from './icons';
 import { KeyboardLift } from './KeyboardLift';
 import { Bar, Button, Card, Dot, IconCluster, Prose, Row, Screen, field, oneLine } from './ui';
@@ -216,14 +216,15 @@ export function AgentViewList({
                   />
                 ))}
                 {folded ? (
-                  <Pressable
+                  <TouchableOpacity
                     accessibilityRole="button"
                     onPress={() => setAllDone(true)}
-                    style={({ pressed }) => [styles.more, pressed && { backgroundColor: t.selection }]}
+                    activeOpacity={PRESSED}
+                    style={styles.more}
                   >
                     <Text style={styles.moreText}>Show {group.sessions.length - DONE_SHOWN} more</Text>
                     <ChevronDown size={14} color={t.accent} weight={2.2} />
-                  </Pressable>
+                  </TouchableOpacity>
                 ) : null}
               </Card>
             );

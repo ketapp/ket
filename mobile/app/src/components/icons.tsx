@@ -112,6 +112,14 @@ export const Sparkle = (p: IconProps) => (
   </Stroke>
 );
 
+/** Notifications: a bell. */
+export const Bell = (p: IconProps) => (
+  <Stroke {...p}>
+    <Path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9" />
+    <Path d="M10.3 21a1.94 1.94 0 0 0 3.4 0" />
+  </Stroke>
+);
+
 export const Plus = (p: IconProps) => (
   <Stroke {...p}>
     <Path d="M12 5v14M5 12h14" />
@@ -496,6 +504,22 @@ export const Check = (p: IconProps) => (
   </Stroke>
 );
 
+/** A command still running in the background: an open ring, as a spinner's. */
+export const Loader = (p: IconProps) => (
+  <Stroke {...p}>
+    <Path d="M21 12a9 9 0 1 1-6.219-8.56" />
+  </Stroke>
+);
+
+/** Something served on a port: a dev server, left running in the background. */
+export const Globe = (p: IconProps) => (
+  <Stroke {...p}>
+    <Circle cx={12} cy={12} r={10} />
+    <Path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20" />
+    <Path d="M2 12h20" />
+  </Stroke>
+);
+
 /** Stop what is running: a filled square. */
 export const Stop = ({ size = 18, color = t.dim }: IconProps) => (
   <Svg width={size} height={size} viewBox="0 0 24 24">
@@ -551,6 +575,13 @@ export const Aside = (p: IconProps) => (
   <Stroke {...p}>
     <Path d="M12 10.5v7" />
     <Path d="M12 6.5h.01" />
+  </Stroke>
+);
+
+/** Blackout hours: a crescent moon. */
+export const Moon = (p: IconProps) => (
+  <Stroke {...p}>
+    <Path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z" />
   </Stroke>
 );
 

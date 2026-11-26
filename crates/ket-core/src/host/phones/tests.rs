@@ -2225,8 +2225,12 @@ fn expensive_requests_are_rate_limited_per_phone() {
         })
     };
     // A burst of sixty units at three each is twenty reads.
+    // The budget still drains while a read takes under 0.6 s, the time
+    // five units a second take to return a read's three; 200 reads leave
+    // room for the slowest runner.
+    let started = std::time::Instant::now();
     let mut refused = None;
-    for n in 1..=40 {
+    for n in 1..=200 {
         let reply = ask(&mut session, n, read());
         if error_code(&reply) == Some(proto::ErrorCode::Backpressure) {
             refused = Some(n);
@@ -2234,7 +2238,15 @@ fn expensive_requests_are_rate_limited_per_phone() {
         }
     }
     let refused = refused.expect("the budget ran out");
-    assert!((20..=22).contains(&refused), "refused at {refused}");
+    // Five units come back each second the reads take, so a slow machine
+    // gets a read or two more per second; the second added covers the
+    // budget's clock starting at pairing, before the first read.
+    let took = started.elapsed();
+    let latest = 21 + 5 * (took.as_secs() + 1) / 3;
+    assert!(
+        (20..=latest).contains(&refused),
+        "refused at {refused} after {took:?}"
+    );
     // Cheap requests are not budgeted.
     let devices = ask(
         &mut session,

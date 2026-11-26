@@ -41,7 +41,8 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       # Browser tabs without Chromium, on WebKit, still build.
       - run: cargo clippy -p ket-ui --no-default-features --all-targets --locked -- -D warnings
-      - run: cargo test --workspace --locked
+      # Every crate's tests, even after one fails, so one run shows them all.
+      - run: cargo test --workspace --locked --no-fail-fast
 
   mobile:
     runs-on: ubuntu-24.04

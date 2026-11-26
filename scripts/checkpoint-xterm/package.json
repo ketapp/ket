@@ -7,6 +7,6 @@
     "compare": "node compare.mjs"
   },
   "dependencies": {
-    "@xterm/headless": "^5.5.0"
+    "@xterm/headless": "^6.0.0"
   }
 }

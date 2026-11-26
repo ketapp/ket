@@ -834,11 +834,14 @@ mod tests {
     }
 
     #[test]
-    fn a_codex_without_a_daemon_flag_starts_on_the_bare_line() {
+    fn a_codex_without_a_daemon_flag_loses_only_that_flag() {
         let catalogue = Catalogue::detect(&config(), &Outdated(vec!["codex"]));
         let codex = catalogue.get("codex").unwrap();
 
-        assert_eq!(codex.spec.launch_line(&[]), "codex");
+        assert_eq!(
+            codex.spec.launch_line(&[]),
+            "codex -c check_for_update_on_startup=false"
+        );
         assert!(!codex.is_overridden());
     }
 
